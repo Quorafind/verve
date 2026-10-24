@@ -30,6 +30,7 @@ mod url;
 mod wasm;
 mod web;
 mod worker;
+mod zlib;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};

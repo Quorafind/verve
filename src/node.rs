@@ -1294,6 +1294,7 @@ pub(crate) const MODULES: &[(&str, crate::ModuleMaker)] = &[
     ("module", crate::modules::module_module),
     ("process", crate::process::module),
     ("crypto", crate::crypto::module),
+    ("zlib", crate::zlib::module),
 ];
 
 /// The `EventEmitter` class, made once for the realm.
