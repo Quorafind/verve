@@ -45,6 +45,13 @@ iana-time-zone = "0.1"
 # WebAssembly, run by an interpreter written in Rust.
 wasmi = "0.35"
 
+# Permissioned TCP/UDP: one portable readiness reactor, with kernel socket options.
+mio = { version = "=1.2.2", features = ["net", "os-poll"] }
+# TCP keepalive and datagram options, without a connection-per-thread runtime.
+socket2 = { version = "=0.6.5", features = ["all"] }
+# System-configured DNS record queries, confined to the fixed resolver pool.
+hickory-resolver = { version = "=0.24.4", features = ["system-config"] }
+
 [dev-dependencies]
 serde_json = "1"
 # WebAssembly tests write their modules as text.

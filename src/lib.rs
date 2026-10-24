@@ -33,6 +33,7 @@ mod messaging;
 mod modules;
 mod native;
 mod navigator;
+mod network;
 mod node;
 mod node_url;
 mod os;
@@ -53,6 +54,8 @@ mod wasm;
 mod web;
 mod worker;
 mod zlib;
+
+pub use network::{ListenPermission, NetworkRule, Permissions};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -137,6 +140,7 @@ struct Shared {
     /// What each `URL.createObjectURL` address stands for: the blob's bytes.
     blobs: RefCell<HashMap<String, Vec<u8>>>,
     /// The workers this realm started.
+    network: RefCell<network::State>,
     workers: RefCell<Vec<worker::WorkerSlot>>,
     /// In a worker's own realm: its messages, coming and going.
     port: RefCell<Option<worker::Port>>,
@@ -202,6 +206,28 @@ impl Default for RuntimeX {
 }
 
 impl RuntimeX {
+    /// Replace realm-local capabilities. Existing sockets are closed on a policy change;
+    /// workers remain independently default-denied. Child process execution stays disabled.
+    pub fn set_permissions(&mut self, permissions: Permissions) {
+        let state = shared(&self.context);
+        let mut net = state.network.borrow_mut();
+        if net.permissions != permissions {
+            net.reactor = None;
+            net.targets.clear();
+            net.dns.pending.clear();
+            net.permissions = permissions;
+        }
+    }
+
+    pub fn permissions(&self) -> Permissions {
+        shared(&self.context).network.borrow().permissions.clone()
+    }
+
+    /// Deliver already queued I/O, without waiting for the reactor or resolver pool.
+    pub fn run_network_until(&mut self, deadline: Option<std::time::Instant>) -> usize {
+        network::poll(&mut self.context, deadline)
+    }
+
     /// A runtime on the system's monotonic clock.
     pub fn new() -> Self {
         let start = web_time::Instant::now();
@@ -241,6 +267,7 @@ impl RuntimeX {
             console_depth: std::cell::Cell::new(0),
             echo: std::env::var_os("RUNTIME_X_ECHO").is_some(),
             blobs: RefCell::new(HashMap::new()),
+            network: RefCell::new(network::State::default()),
             workers: RefCell::new(Vec::new()),
             port: RefCell::new(None),
             idb: RefCell::new(indexeddb::IdbState::default()),
@@ -351,7 +378,8 @@ impl RuntimeX {
     /// One beat of the workers this realm started: their messages delivered both ways, their
     /// timers run. Answers whether anything happened.
     pub fn run_workers(&mut self) -> bool {
-        let busy = worker::run_workers(&mut self.context, None);
+        let busy = network::poll(&mut self.context, None) > 0;
+        let busy = worker::run_workers(&mut self.context, None) || busy;
         self.run_microtasks();
         busy
     }
@@ -359,7 +387,8 @@ impl RuntimeX {
     /// [`RuntimeX::run_workers`], stopping at `deadline` once something has been heard: what is
     /// left is heard on a later call.
     pub fn run_workers_until(&mut self, deadline: std::time::Instant) -> bool {
-        let busy = worker::run_workers(&mut self.context, Some(deadline));
+        let busy = network::poll(&mut self.context, Some(deadline)) > 0;
+        let busy = worker::run_workers(&mut self.context, Some(deadline)) || busy;
         self.run_microtasks();
         busy
     }
@@ -392,6 +421,11 @@ impl RuntimeX {
             .reduce(f64::min);
         // A worker's, on this realm's clock.
         let worker = worker::next_due(&self.context).map(|wait| self.now() + wait);
+        let own = if network::active(&self.context) {
+            Some(own.map_or(self.now() + 1., |due| due.min(self.now() + 1.)))
+        } else {
+            own
+        };
         match (own, worker) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -409,6 +443,7 @@ impl RuntimeX {
     /// [`RuntimeX::run_due`], stopping at `deadline` once one has fired: the rest stay due, and
     /// fire on a later call — as a browser spreads a burst of tasks over its frames.
     pub fn run_due_until(&mut self, deadline: Option<std::time::Instant>) -> usize {
+        network::poll(&mut self.context, deadline);
         let now = self.now();
         let state = shared(&self.context);
         let mut due: Vec<(Millis, u32)> = state

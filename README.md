@@ -85,9 +85,17 @@ A JavaScript runtime for live plugins, in Rust.
   `punycode`, `constants`, `timers` and `timers/promises`, `async_hooks` (`AsyncLocalStorage`),
   `diagnostics_channel`, `perf_hooks`, `vm`, `v8`, `worker_threads`, `readline`, `tty`,
   `console`, `module`.
-- `net`, `tls`, `dns`, `http`, `https`, `http2`, `dgram`, `cluster`, `child_process` and
-  `node:sqlite` load with their classes and constants, and refuse to connect, listen, start
-  programs or open databases, as Node does when the system says no: plugins use `requestUrl`.
+- `net`: permissioned TCP clients and servers (IPv4/IPv6), real `stream.Duplex` sockets,
+  high-water-mark write backpressure, read suspension, keepalive, no-delay and inactivity
+  timeouts. One lazy mio reactor and a fixed two-worker DNS pool deliver I/O on host beats.
+  `dns.lookup` and promises use system getaddrinfo; `resolve4`, `resolve6`, `resolveTxt` and
+  `resolveSrv` use the system resolver configuration. Other granted record queries fail ENOSYS.
+- `RuntimeX::set_permissions(Permissions)` defaults to denial: outbound host/port rules,
+  independent listening (`Deny`, `Loopback`, `Any`) and DNS. Replacing a policy closes existing
+  resources; workers start denied. The reserved `child_process` bit does not enable execution.
+- `tls`, `http`, `https`, `http2`, `dgram`, `cluster`, `child_process` and `node:sqlite` load
+  with their classes and constants. Process execution, cluster and IPC sockets remain denied.
+  Without network capabilities, the original network refusal errors are preserved.
 
 ## Using it
 
