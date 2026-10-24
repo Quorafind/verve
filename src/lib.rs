@@ -17,6 +17,7 @@
 //!
 //! [Boa]: https://boajs.dev
 
+mod crypto;
 mod encoding;
 mod indexeddb;
 mod intl;
@@ -29,6 +30,7 @@ mod url;
 mod wasm;
 mod web;
 mod worker;
+mod zlib;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -659,6 +661,7 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     encoding::install(context)?;
     url::install(context)?;
     web::install(context)?;
+    crypto::install(context)?;
     worker::install(context)?;
     indexeddb::install(context)?;
     wasm::install(context)?;

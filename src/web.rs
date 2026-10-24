@@ -1,4 +1,4 @@
-//! The web platform's small globals that plugin bundles take for granted: `crypto`,
+//! The web platform's small globals that plugin bundles take for granted:
 //! `structuredClone`, `performance`, `AbortController` and `AbortSignal`, `Blob` and `File`.
 
 use boa_engine::{
@@ -127,97 +127,6 @@ fn class(
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
     )?;
     Ok((class, prototype))
-}
-
-// ─── crypto ─────────────────────────────────────────────────────────────────────────────────
-
-fn random_bytes(count: usize) -> Vec<u8> {
-    let mut bytes = vec![0u8; count];
-    let _ = getrandom::fill(&mut bytes);
-    bytes
-}
-
-fn random_uuid() -> String {
-    let mut b = random_bytes(16);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
-}
-
-fn crypto(context: &mut Context) -> JsResult<JsObject> {
-    let crypto = object(context);
-    let get_random_values = function(context, "getRandomValues", 1, |_, args, cx| {
-        // Fills the typed array it is given, byte by byte, and answers it.
-        let array = arg(args, 0);
-        let Some(object) = array.as_object() else {
-            return Err(type_error("getRandomValues: not a typed array"));
-        };
-        let length = object.get(js_string!("byteLength"), cx)?.to_number(cx)? as usize;
-        if length > 65536 {
-            return Err(JsNativeError::range()
-                .with_message("getRandomValues: more than 65536 bytes asked for")
-                .into());
-        }
-        let buffer = object.get(js_string!("buffer"), cx)?;
-        let offset = object.get(js_string!("byteOffset"), cx)?.to_number(cx)? as usize;
-        let view = JsUint8Array::from_object(
-            cx.intrinsics()
-                .constructors()
-                .typed_uint8_array()
-                .constructor()
-                .construct(&[buffer, offset.into(), length.into()], None, cx)?,
-        )?;
-        for (at, byte) in random_bytes(length).into_iter().enumerate() {
-            view.set(at, byte, true, cx)?;
-        }
-        Ok(array)
-    });
-    crypto.set(
-        js_string!("getRandomValues"),
-        get_random_values,
-        false,
-        context,
-    )?;
-    let uuid = function(context, "randomUUID", 0, |_, _, _| {
-        Ok(js_text(&random_uuid()))
-    });
-    crypto.set(js_string!("randomUUID"), uuid, false, context)?;
-    let subtle = object(context);
-    let digest = function(context, "digest", 2, |_, args, cx| {
-        use sha2::Digest;
-        let algorithm = arg(args, 0);
-        let name = match algorithm.as_object() {
-            Some(o) => text_of(&o.get(js_string!("name"), cx)?, cx)?,
-            None => text_of(&algorithm, cx)?,
-        }
-        .to_ascii_uppercase();
-        let data = crate::encoding::bytes_of(&arg(args, 1), cx)?
-            .ok_or_else(|| type_error("digest: the data is not an ArrayBuffer or a view of one"))?;
-        let hash: Vec<u8> = match name.as_str() {
-            "SHA-1" => sha1::Sha1::digest(&data).to_vec(),
-            "SHA-256" => sha2::Sha256::digest(&data).to_vec(),
-            "SHA-384" => sha2::Sha384::digest(&data).to_vec(),
-            "SHA-512" => sha2::Sha512::digest(&data).to_vec(),
-            other => {
-                let error = JsNativeError::error()
-                    .with_message(format!("digest: {other} is not supported"));
-                return Ok(JsPromise::reject(JsError::from(error), cx)?.into());
-            }
-        };
-        let buffer = JsUint8Array::from_iter(hash, cx)?.buffer(cx)?;
-        Ok(JsPromise::resolve(buffer, cx)?.into())
-    });
-    subtle.set(js_string!("digest"), digest, false, context)?;
-    crypto.set(js_string!("subtle"), subtle, false, context)?;
-    Ok(crypto)
 }
 
 // ─── structuredClone ────────────────────────────────────────────────────────────────────────
@@ -604,13 +513,6 @@ const BLOB_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 // ─── Installing them ────────────────────────────────────────────────────────────────────────
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let crypto = crypto(context)?;
-    context.register_global_property(
-        js_string!("crypto"),
-        crypto,
-        Attribute::WRITABLE | Attribute::CONFIGURABLE,
-    )?;
-
     let clone = function(context, "structuredClone", 1, |_, args, cx| {
         let mut seen = Vec::new();
         clone_value(&arg(args, 0), &mut seen, cx)
