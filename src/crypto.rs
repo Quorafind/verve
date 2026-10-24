@@ -2299,15 +2299,16 @@ const CRYPTO_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
         let callback = arg(args, 2);
         let kind = text_of(&arg(args, 0), cx)?;
         let length = number_member(&arg(args, 1), "length", cx)?.unwrap_or(0.) as usize;
-        let outcome = if matches!(kind.as_str(), "hmac" | "aes") && length > 0 && length.is_multiple_of(8) {
-            make_secret(random_bytes(length / 8), cx)
-        } else {
-            Err(coded_error(
-                cx,
-                "generateKey: only 'hmac' and 'aes' keys of a whole number of bytes",
-                "ERR_INVALID_ARG_VALUE",
-            ))
-        };
+        let outcome =
+            if matches!(kind.as_str(), "hmac" | "aes") && length > 0 && length.is_multiple_of(8) {
+                make_secret(random_bytes(length / 8), cx)
+            } else {
+                Err(coded_error(
+                    cx,
+                    "generateKey: only 'hmac' and 'aes' keys of a whole number of bytes",
+                    "ERR_INVALID_ARG_VALUE",
+                ))
+            };
         answer_later(&callback, outcome, cx)
     }),
     ("createPublicKey", 1, unsupported),
