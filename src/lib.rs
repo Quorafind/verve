@@ -17,6 +17,8 @@
 //!
 //! [Boa]: https://boajs.dev
 
+mod assert;
+mod buffer;
 mod crypto;
 mod encoding;
 mod events;
@@ -32,6 +34,7 @@ mod stream;
 mod streams;
 mod string_decoder;
 mod url;
+mod util;
 mod wasm;
 mod web;
 mod worker;
@@ -689,10 +692,21 @@ pub(crate) fn microtask(context: &mut Context, callback: JsValue, args: Vec<JsVa
     );
 }
 
+/// A console line, written as Node's console writes it (`util.format`): `%s` and the rest
+/// filled in, objects as `util.inspect` shows them. A value whose own inspect function throws
+/// is written plainly rather than lose the line.
 fn log(level: Level, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let text = args.iter().map(print).collect::<Vec<_>>().join(" ");
-    let depth = shared(context).console_depth.get();
-    console_line(context, level, format!("{}{text}", "  ".repeat(depth)));
+    let text = match util::console_text(args, context) {
+        Ok(text) => text,
+        Err(_) => args.iter().map(print).collect::<Vec<_>>().join(" "),
+    };
+    let indent = "  ".repeat(shared(context).console_depth.get());
+    let text = if indent.is_empty() {
+        text
+    } else {
+        text.replace('\n', &format!("\n{indent}"))
+    };
+    console_line(context, level, format!("{indent}{text}"));
     Ok(JsValue::undefined())
 }
 
