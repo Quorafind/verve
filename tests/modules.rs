@@ -275,3 +275,63 @@ fn a_lazy_global_constructs_again_and_again() {
     );
     assert_eq!(result, ["true", "true", "true", "function", "replaced"]);
 }
+
+/// The host requires from native code, and hands scripts a `window.require` of no module's —
+/// built-ins by either name, its own (`electron`) among them, files by absolute path.
+#[test]
+fn the_host_requires_natively_and_gives_scripts_a_window_require() {
+    let dir = folder(
+        "native-require",
+        &[("lib/x.js", "module.exports = 'x file';")],
+    );
+    let mut rt = RuntimeX::new();
+    let electron = rt.eval("({ remote: 'stub' })").unwrap();
+    rt.define_builtin("electron", electron);
+    let fs = rt.require("node:original-fs").unwrap();
+    let again = rt.require("fs").unwrap();
+    assert!(fs == again);
+    assert!(
+        rt.require("nope")
+            .unwrap_err()
+            .contains("Cannot find module 'nope'")
+    );
+    let require = rt.global_require();
+    rt.context()
+        .register_global_property(
+            boa_engine::js_string!("windowRequire"),
+            require,
+            boa_engine::property::Attribute::all(),
+        )
+        .unwrap();
+    let file = dir.join("lib").join("x.js");
+    let result = run_in(
+        &mut rt,
+        &dir,
+        &format!(
+            r#"
+            exports.result = [
+                windowRequire('electron').remote,
+                windowRequire('node:fs') === require('fs'),
+                windowRequire({file:?}),
+                typeof windowRequire.resolve,
+                typeof require('node:sqlite').DatabaseSync,
+                (() => {{ try {{ new (require('node:sqlite').DatabaseSync)(':memory:'); return 'made' }} catch (e) {{ return e.code }} }})(),
+                (() => {{ try {{ require('sqlite'); return 'found' }} catch (e) {{ return e.code }} }})(),
+            ];
+        "#,
+            file = file.to_string_lossy()
+        ),
+    );
+    assert_eq!(
+        result,
+        [
+            "stub",
+            "true",
+            "x file",
+            "function",
+            "function",
+            "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM",
+            "MODULE_NOT_FOUND"
+        ]
+    );
+}

@@ -45,12 +45,18 @@ pub(crate) fn bare_name(name: &str) -> &str {
     }
 }
 
+/// Whether Node's table answers `name`: every module of it does to its bare name, but those
+/// Node only has under `node:` (`node:sqlite`, `node:test`) do not — a bare `sqlite` is a package.
+fn node_table_answers(name: &str) -> bool {
+    name.starts_with("node:") || !crate::node::PREFIX_ONLY.contains(&bare_name(name))
+}
+
 /// Whether `name` is a built-in module, without making it.
 fn is_builtin(context: &Context, name: &str) -> bool {
     let bare = bare_name(name);
     let state = crate::shared(context);
     state.builtins.borrow().contains_key(bare)
-        || crate::node::MODULES.iter().any(|(n, _)| *n == bare)
+        || (node_table_answers(name) && crate::node::MODULES.iter().any(|(n, _)| *n == bare))
         || state
             .families
             .borrow()
@@ -64,8 +70,24 @@ pub(crate) fn builtin(context: &mut Context, name: &str) -> JsResult<Option<JsVa
     if let Some(exports) = crate::shared(context).builtins.borrow().get(bare) {
         return Ok(Some(exports.clone()));
     }
+    // One Node has only under `node:` is kept under that name, so that making it does not make
+    // a bare `require('sqlite')` find it.
+    let key = if crate::node::PREFIX_ONLY.contains(&bare) {
+        format!("node:{bare}")
+    } else {
+        bare.to_owned()
+    };
+    if let Some(exports) = crate::shared(context)
+        .builtins
+        .borrow()
+        .get(&key)
+        .filter(|_| node_table_answers(name))
+    {
+        return Ok(Some(exports.clone()));
+    }
     let maker = crate::node::MODULES
         .iter()
+        .filter(|_| node_table_answers(name))
         .find(|(n, _)| *n == bare)
         .map(|(_, make)| *make)
         .or_else(|| {
@@ -81,7 +103,7 @@ pub(crate) fn builtin(context: &mut Context, name: &str) -> JsResult<Option<JsVa
     crate::shared(context)
         .builtins
         .borrow_mut()
-        .insert(bare.to_owned(), exports.clone());
+        .insert(key, exports.clone());
     Ok(Some(exports))
 }
 

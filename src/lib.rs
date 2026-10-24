@@ -252,6 +252,25 @@ impl RuntimeX {
             .insert(name.to_owned(), exports);
     }
 
+    /// What `require(specifier)` answers, asked from native code: a built-in — the host's own
+    /// (`obsidian`, `electron`), or Node's, with or without `node:` — or a file by its absolute
+    /// path. A relative name is resolved against `process.cwd()`.
+    pub fn require(&mut self, specifier: &str) -> Result<JsValue, String> {
+        let result = require(&mut self.context, specifier);
+        self.run_microtasks();
+        result.map_err(|error| describe(&mut self.context, &error))
+    }
+
+    /// A `require` function of no module's — what Electron's renderer has as `window.require`,
+    /// which desktop plugins call (`window.require('fs')`): built-ins by either name, files by
+    /// absolute path, relative names against `process.cwd()`; with `resolve` and `cache`. The
+    /// host puts it on `window` itself, if it has one.
+    pub fn global_require(&mut self) -> JsValue {
+        let cwd = PathBuf::from(shared(&self.context).cwd.borrow().clone());
+        modules::require_function(&mut self.context, &cwd, None)
+            .expect("a require function is made")
+    }
+
     /// Runs `source` as the CommonJS module at `filename`, answering its `module.exports`.
     /// Its own `require` resolves relative names against the folder it is in.
     pub fn load_module(&mut self, filename: &Path, source: &str) -> Result<JsValue, String> {
@@ -433,6 +452,12 @@ pub(crate) fn shared(context: &Context) -> Rc<Shared> {
         .get_data::<Rc<Shared>>()
         .cloned()
         .expect("runtime-x installed its state")
+}
+
+/// What `require(specifier)` answers, from a host's native function; see [`RuntimeX::require`].
+pub fn require(context: &mut Context, specifier: &str) -> JsResult<JsValue> {
+    let cwd = PathBuf::from(shared(context).cwd.borrow().clone());
+    modules::require(context, &cwd, specifier, None)
 }
 
 /// Clears the timer `id`, from a host's native function (`registerInterval`'s cleanup).
