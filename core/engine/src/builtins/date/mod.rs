@@ -1580,7 +1580,8 @@ impl Date {
         }
         #[cfg(not(feature = "intl"))]
         {
-            Self::to_string(this, args, context)
+            let _ = args;
+            Self::to_en_us_string(this, true, false, context)
         }
     }
 
@@ -1604,7 +1605,8 @@ impl Date {
         }
         #[cfg(not(feature = "intl"))]
         {
-            Self::to_string(this, args, context)
+            let _ = args;
+            Self::to_en_us_string(this, true, true, context)
         }
     }
 
@@ -1629,8 +1631,62 @@ impl Date {
         }
         #[cfg(not(feature = "intl"))]
         {
-            Self::to_string(this, args, context)
+            let _ = args;
+            Self::to_en_us_string(this, false, true, context)
         }
+    }
+
+    /// The `toLocale…String` methods without `Intl`: the date and/or the time in local time as
+    /// V8 formats them for `en-US` by default — `1/15/2020`, `8:05:09 PM`,
+    /// `1/15/2020, 8:05:09 PM` — rather than in the `toString` format.
+    #[cfg(not(feature = "intl"))]
+    fn to_en_us_string(
+        this: &JsValue,
+        date: bool,
+        time: bool,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        use std::fmt::Write;
+
+        let tv = this
+            .as_object()
+            .and_then(|obj| obj.downcast_ref::<Date>().as_deref().copied())
+            .ok_or_else(|| JsNativeError::typ().with_message("'this' is not a Date"))?
+            .0;
+        if tv.is_nan() {
+            return Ok(js_string!("Invalid Date").into());
+        }
+        let t = local_time(tv, context.host_hooks().as_ref());
+
+        let mut out = String::new();
+        if date {
+            let _ = write!(
+                out,
+                "{}/{}/{}",
+                month_from_time(t) + 1,
+                date_from_time(t),
+                year_from_time(t)
+            );
+        }
+        if time {
+            if date {
+                out.push_str(", ");
+            }
+            let hour = hour_from_time(t);
+            let hour12 = if hour.is_multiple_of(12) {
+                12
+            } else {
+                hour % 12
+            };
+            let _ = write!(
+                out,
+                "{hour12}:{:02}:{:02} {}",
+                min_from_time(t),
+                sec_from_time(t),
+                if hour < 12 { "AM" } else { "PM" }
+            );
+        }
+        Ok(js_string!(out).into())
     }
 
     /// [`Date.prototype.toString()`][spec].

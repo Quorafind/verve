@@ -102,6 +102,13 @@ always agree with one another.
   in V8. Before, all of them were `Invalid Date` — moment falls back to `new Date(string)` for
   them, and notes are full of such dates. An unknown word still makes a string not a date.
 
+- `boa_engine`, `builtins/date`, `builtins/number`: without the `intl` feature (Su builds
+  without it), `Date.prototype.toLocaleString`/`toLocaleDateString`/`toLocaleTimeString` format
+  as V8 does for `en-US` by default — `1/15/2020, 8:05:09 PM` — instead of returning `toString`'s
+  `Wed Jan 15 2020 20:05:09 GMT+0800`; and `Number.prototype.toLocaleString` groups thousands and
+  keeps at most three fraction digits (`1,234.568`) instead of returning `toString`'s. The
+  locales and options are ignored, as before.
+
 - `boa_gc`, `lib.rs`: a collection no longer frees what it found dead before it returns. The
   dead nodes leave the heap, and their memory is returned a few at a time by later allocations
   (`BoaGc::unfreed`, `FREE_PER_ALLOCATION`), the rest before the next collection — and all of

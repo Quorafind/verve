@@ -1049,3 +1049,23 @@ fn date_parse_legacy_formats() {
     ]);
 }
 
+/// Without `Intl`, the `toLocale…String` methods format as V8 does for `en-US`.
+#[cfg(not(feature = "intl"))]
+#[test]
+fn date_to_locale_string_without_intl() {
+    run_test_actions([
+        TestAction::run("const d = new Date(2020, 0, 15, 20, 5, 9);"),
+        TestAction::assert_eq("d.toLocaleDateString()", js_str!("1/15/2020")),
+        TestAction::assert_eq("d.toLocaleTimeString('en-US')", js_str!("8:05:09 PM")),
+        TestAction::assert_eq("d.toLocaleString()", js_str!("1/15/2020, 8:05:09 PM")),
+        TestAction::assert_eq(
+            "new Date(2020, 11, 1, 0, 0, 0).toLocaleTimeString()",
+            js_str!("12:00:00 AM"),
+        ),
+        TestAction::assert_eq(
+            "new Date(2020, 11, 1, 12, 30, 0).toLocaleTimeString()",
+            js_str!("12:30:00 PM"),
+        ),
+        TestAction::assert_eq("new Date(NaN).toLocaleString()", js_str!("Invalid Date")),
+    ]);
+}

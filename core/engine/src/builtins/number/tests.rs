@@ -685,3 +685,23 @@ fn to_precision_edge_cases() {
         TestAction::assert_eq("(9).toPrecision(1)", js_str!("9")),
     ]);
 }
+
+/// Without `Intl`, `toLocaleString` formats as V8 does for `en-US`.
+#[cfg(not(feature = "intl"))]
+#[test]
+fn to_locale_string_without_intl() {
+    run_test_actions([
+        TestAction::assert_eq("(1234.5678).toLocaleString()", js_str!("1,234.568")),
+        TestAction::assert_eq("(1234567).toLocaleString('en-US')", js_str!("1,234,567")),
+        TestAction::assert_eq("(-1234.5).toLocaleString()", js_str!("-1,234.5")),
+        TestAction::assert_eq("(0.1 + 0.2).toLocaleString()", js_str!("0.3")),
+        TestAction::assert_eq("(999).toLocaleString()", js_str!("999")),
+        TestAction::assert_eq("(0).toLocaleString()", js_str!("0")),
+        TestAction::assert_eq("(NaN).toLocaleString()", js_str!("NaN")),
+        TestAction::assert_eq("(-Infinity).toLocaleString()", js_str!("-Infinity")),
+        TestAction::assert_eq(
+            "(1e21).toLocaleString()",
+            js_str!("1,000,000,000,000,000,000,000"),
+        ),
+    ]);
+}

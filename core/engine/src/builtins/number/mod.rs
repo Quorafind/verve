@@ -335,8 +335,39 @@ impl Number {
 
         #[cfg(not(feature = "intl"))]
         {
-            Ok(JsValue::new(js_string!(x)))
+            Ok(JsValue::new(js_string!(Self::to_en_us_string(x))))
         }
+    }
+
+    /// A number as V8 formats it for `en-US` by default, for `toLocaleString` without `Intl`:
+    /// grouped in thousands, with at most three fraction digits (`1,234.568`).
+    #[cfg(not(feature = "intl"))]
+    fn to_en_us_string(x: f64) -> String {
+        if x.is_nan() {
+            return "NaN".to_owned();
+        }
+        if x.is_infinite() {
+            return if x < 0.0 { "-Infinity" } else { "Infinity" }.to_owned();
+        }
+        let fixed = format!("{x:.3}");
+        let fixed = fixed.trim_end_matches('0').trim_end_matches('.');
+        let (sign, digits) = fixed
+            .strip_prefix('-')
+            .map_or(("", fixed), |digits| ("-", digits));
+        let (integer, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+        let mut out = String::with_capacity(fixed.len() + integer.len() / 3);
+        out.push_str(sign);
+        for (i, digit) in integer.chars().enumerate() {
+            if i > 0 && (integer.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(digit);
+        }
+        if !fraction.is_empty() {
+            out.push('.');
+            out.push_str(fraction);
+        }
+        out
     }
 
     /// `flt_str_to_exp` - used in `to_precision`
