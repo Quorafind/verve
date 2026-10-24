@@ -429,17 +429,25 @@ unsafe impl boa_gc::Trace for MakerBox {
 /// A global made the first time it is read — or written, which simply puts the new value in its
 /// place. Every realm (each worker's too) starts with all of them, and makes only the ones its
 /// scripts touch.
+///
+/// The global stays an accessor, its value kept in a cell the getter and setter share: turning
+/// it into a data property once made would be the plain way, but Boa's lookup of a global by
+/// name, cached by an earlier read, then calls the next `new Name()` without its `new.target`.
 pub(crate) fn lazy_global(context: &mut Context, name: &str, make: GlobalMaker) -> JsResult<()> {
     let key = JsString::from(name);
+    let cell = JsObject::with_null_proto();
     let getter = FunctionObjectBuilder::new(
         context.realm(),
         NativeFunction::from_copy_closure_with_captures(
-            |_, _, (key, make): &(JsString, MakerBox), context| {
+            |_, _, (cell, make): &(JsObject, MakerBox), context| {
+                if cell.has_own_property(js_string!("value"), context)? {
+                    return cell.get(js_string!("value"), context);
+                }
                 let value = (make.0)(context)?;
-                settle_global(context, key, value.clone())?;
+                cell.set(js_string!("value"), value.clone(), false, context)?;
                 Ok(value)
             },
-            (key.clone(), MakerBox(make)),
+            (cell.clone(), MakerBox(make)),
         ),
     )
     .name(JsString::from(format!("get {name}")))
@@ -447,11 +455,11 @@ pub(crate) fn lazy_global(context: &mut Context, name: &str, make: GlobalMaker) 
     let setter = FunctionObjectBuilder::new(
         context.realm(),
         NativeFunction::from_copy_closure_with_captures(
-            |_, args, key: &JsString, context| {
-                settle_global(context, key, arg(args, 0))?;
+            |_, args, cell: &JsObject, context| {
+                cell.set(js_string!("value"), arg(args, 0), false, context)?;
                 Ok(JsValue::undefined())
             },
-            key.clone(),
+            cell,
         ),
     )
     .name(JsString::from(format!("set {name}")))
@@ -462,19 +470,6 @@ pub(crate) fn lazy_global(context: &mut Context, name: &str, make: GlobalMaker) 
         PropertyDescriptor::builder()
             .get(getter)
             .set(setter)
-            .enumerable(false)
-            .configurable(true),
-        context,
-    )?;
-    Ok(())
-}
-
-fn settle_global(context: &mut Context, key: &JsString, value: JsValue) -> JsResult<()> {
-    context.global_object().define_property_or_throw(
-        key.clone(),
-        PropertyDescriptor::builder()
-            .value(value)
-            .writable(true)
             .enumerable(false)
             .configurable(true),
         context,

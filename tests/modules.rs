@@ -254,3 +254,24 @@ fn node_classes_extend_three_ways() {
         ["2truetrue", "2truetrue", "2truefalse", "object", "true"]
     );
 }
+
+/// A global made on first use, read again where the first read was — a constructor called in a
+/// loop — is still a constructor: Boa's cached lookup of a global otherwise loses `new.target`
+/// once the global changes from an accessor to a value.
+#[test]
+fn a_lazy_global_constructs_again_and_again() {
+    let dir = folder("lazy", &[]);
+    let mut rt = RuntimeX::new();
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        const made = [];
+        for (const i of [1, 2, 3]) made.push(new TextDecoderStream() instanceof TextDecoderStream);
+        const before = globalThis.ReadableStream;
+        globalThis.ReadableStream = 'replaced';
+        exports.result = made.concat([typeof before, ReadableStream]);
+    "#,
+    );
+    assert_eq!(result, ["true", "true", "true", "function", "replaced"]);
+}
