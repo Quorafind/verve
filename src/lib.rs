@@ -68,6 +68,18 @@ use boa_engine::{
     property::Attribute,
 };
 
+thread_local! {
+    /// The stack size of this thread, when whoever made it said; see [`set_thread_stack`].
+    static THREAD_STACK: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Says how big this thread's stack is, so a runtime made on it lets scripts use about half of
+/// it before deep recursion stops with a `RangeError`. Call it first thing on a thread made with
+/// `std::thread::Builder::stack_size`; workers and isolates do it themselves.
+pub fn set_thread_stack(bytes: usize) {
+    THREAD_STACK.with(|stack| stack.set(Some(bytes)));
+}
+
 /// What makes a module of a family the host defined; see [`RuntimeX::define_builtin_family`].
 pub type ModuleMaker = fn(&mut Context, &str) -> JsResult<JsValue>;
 
@@ -203,6 +215,13 @@ impl RuntimeX {
             .job_executor(microtasks)
             .build()
             .expect("a Boa context builds");
+        // Deep recursion through natives stops with a RangeError before the thread's stack
+        // runs out: half of it, on a thread whose size is known (see `set_thread_stack`).
+        if let Some(stack) = THREAD_STACK.with(Cell::get) {
+            context
+                .runtime_limits_mut()
+                .set_native_stack_limit(stack / 2);
+        }
         context.insert_data(Rc::new(Shared {
             clock: Box::new(clock),
             next_timer: Cell::new(1),
@@ -229,6 +248,15 @@ impl RuntimeX {
         }));
         install_globals(&mut context).expect("the globals install");
         Self { context }
+    }
+
+    /// How much native stack a script may use before deep recursion becomes a `RangeError` —
+    /// about half the stack of the thread it runs on. A runtime made on a thread of
+    /// runtime-x's own (a worker, an isolate), or after [`set_thread_stack`], has it already.
+    pub fn set_native_stack_limit(&mut self, bytes: usize) {
+        self.context
+            .runtime_limits_mut()
+            .set_native_stack_limit(bytes);
     }
 
     /// The realm itself, for a host defining natives of its own in it.

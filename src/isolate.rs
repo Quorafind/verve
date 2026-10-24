@@ -165,10 +165,14 @@ impl<G: Guest> Isolate<G> {
         });
         let thread_shared = Arc::clone(&shared);
         let idle = options.idle;
+        let stack = options.stack_size;
         std::thread::Builder::new()
             .name(options.name)
-            .stack_size(options.stack_size)
-            .spawn(move || run(make, jobs, &thread_shared, idle))?;
+            .stack_size(stack)
+            .spawn(move || {
+                crate::set_thread_stack(stack);
+                run(make, jobs, &thread_shared, idle)
+            })?;
         Ok(Self {
             inbox,
             shared,

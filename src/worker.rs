@@ -635,7 +635,10 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     std::thread::Builder::new()
         .name(thread_name)
         .stack_size(WORKER_STACK)
-        .spawn(move || worker_thread(name, script, inbox, out, thread_progress))
+        .spawn(move || {
+            crate::set_thread_stack(WORKER_STACK);
+            worker_thread(name, script, inbox, out, thread_progress)
+        })
         .map_err(|error| type_error(format!("Worker: no thread to run it on ({error})")))?;
     let object = JsObject::with_object_proto(context.intrinsics());
     if let Some(constructor) = this.as_object() {
