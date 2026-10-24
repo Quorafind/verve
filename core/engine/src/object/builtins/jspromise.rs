@@ -1216,7 +1216,6 @@ impl JsPromise {
         }
     }
 
-    #[cfg(feature = "experimental")]
     pub(crate) fn await_native(
         &self,
         continuation: crate::native_function::NativeCoroutine,

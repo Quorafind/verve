@@ -346,7 +346,6 @@ impl IntrinsicObject for ArrayBuffer {
             .name(js_string!("get maxByteLength"))
             .build();
 
-        #[cfg(feature = "experimental")]
         let get_detached = BuiltInBuilder::callable(realm, Self::get_detached)
             .name(js_string!("get detached"))
             .build();
@@ -385,7 +384,6 @@ impl IntrinsicObject for ArrayBuffer {
                 Attribute::READONLY | Attribute::NON_ENUMERABLE | Attribute::CONFIGURABLE,
             );
 
-        #[cfg(feature = "experimental")]
         let builder = builder
             .accessor(
                 js_string!("detached"),
@@ -572,7 +570,6 @@ impl ArrayBuffer {
     /// [`get ArrayBuffer.prototype.detached`][spec].
     ///
     /// [spec]: https://tc39.es/proposal-arraybuffer-transfer/#sec-get-arraybuffer.prototype.detached
-    #[cfg(feature = "experimental")]
     fn get_detached(
         this: &JsValue,
         _args: &[JsValue],
@@ -750,7 +747,6 @@ impl ArrayBuffer {
     ///
     /// [transfer]: https://tc39.es/proposal-arraybuffer-transfer/#sec-arraybuffer.prototype.transfer
     /// [transferFL]: https://tc39.es/proposal-arraybuffer-transfer/#sec-arraybuffer.prototype.transfertofixedlength
-    #[cfg(feature = "experimental")]
     fn transfer<const TO_FIXED_LENGTH: bool>(
         this: &JsValue,
         args: &[JsValue],

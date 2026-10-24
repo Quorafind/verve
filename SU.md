@@ -88,6 +88,12 @@ always agree with one another.
   The tests that pinned the old uncatchable error (`recursion_in_async_gen…`,
   `recursion_in_setter…`) now expect the `RangeError`.
 
+- `boa_engine`: `Array.fromAsync`, `ArrayBuffer.prototype.transfer`/`transferToFixedLength`/
+  `detached`, `Error.isError` and `Atomics.pause` are there without the `experimental` feature —
+  finished proposals V8 ships, which Su (built without `experimental`) lacked. The proposals V8
+  does not ship (`Promise.allKeyed`, `Iterator.prototype.includes`, `import.defer`) stay behind
+  it.
+
 - `boa_gc`, `lib.rs`: a collection no longer frees what it found dead before it returns. The
   dead nodes leave the heap, and their memory is returned a few at a time by later allocations
   (`BoaGc::unfreed`, `FREE_PER_ALLOCATION`), the rest before the next collection — and all of

@@ -60,7 +60,6 @@ impl IntrinsicObject for Atomics {
             .static_method(Atomics::notify, js_string!("notify"), 3)
             .static_method(Atomics::bit_xor, js_string!("xor"), 3);
 
-        #[cfg(feature = "experimental")]
         let builder = builder.static_method(Atomics::pause, js_string!("pause"), 0);
 
         builder.build();
@@ -572,7 +571,6 @@ impl Atomics {
     /// [`Atomics.pause ( [ iterationNumber ] )`][spec]
     ///
     /// [spec]: https://tc39.es/proposal-atomics-microwait/#Atomics.pause
-    #[cfg(feature = "experimental")]
     fn pause(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         use super::Number;
 

@@ -1066,3 +1066,26 @@ fn array_prototype_find_edge_cases() {
         "#}),
     ]);
 }
+
+/// Finished proposals V8 ships, which Boa kept behind the `experimental` feature.
+#[test]
+fn shipped_proposals_are_available() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            let fromAsync;
+            Array.fromAsync([1, Promise.resolve(2), 3]).then((v) => { fromAsync = v; });
+
+            const buffer = new ArrayBuffer(8);
+            const moved = buffer.transfer(16);
+            const fixed = moved.transferToFixedLength();
+        "#}),
+        TestAction::inspect_context(|context| {
+            context.run_jobs().unwrap();
+        }),
+        TestAction::assert("Array.isArray(fromAsync) && fromAsync.join() === '1,2,3'"),
+        TestAction::assert("buffer.detached && !fixed.detached && moved.detached"),
+        TestAction::assert_eq("fixed.byteLength", 16),
+        TestAction::assert("Error.isError(new TypeError()) && !Error.isError({})"),
+        TestAction::assert_eq("typeof Atomics.pause", js_str!("function")),
+    ]);
+}

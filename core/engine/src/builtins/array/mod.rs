@@ -40,7 +40,6 @@ mod array_iterator;
 use crate::value::JsVariant;
 pub(crate) use array_iterator::ArrayIterator;
 
-#[cfg(feature = "experimental")]
 mod from_async;
 
 #[cfg(test)]
@@ -179,7 +178,6 @@ impl IntrinsicObject for Array {
                 Attribute::READONLY | Attribute::NON_ENUMERABLE | Attribute::CONFIGURABLE,
             );
 
-        #[cfg(feature = "experimental")]
         let builder = builder.static_method(Self::from_async, js_string!("fromAsync"), 1);
 
         builder.build();
