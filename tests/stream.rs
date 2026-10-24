@@ -12,9 +12,14 @@ fn run(body: &str) -> Vec<String> {
     let exports = rt
         .load_module(&dir.join("main.js"), body)
         .unwrap_or_else(|e| panic!("{e}"));
-    for _ in 0..10 {
+    // Until every timer has fired (a slow sink calls back from one), a few seconds at most.
+    for _ in 0..5000 {
         rt.run_microtasks();
         rt.run_due();
+        if rt.timer_count() == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let json = rt
         .eval("(e) => JSON.stringify(typeof e.later === 'function' ? e.later() : e.result)")
@@ -403,4 +408,44 @@ fn hash_like_writables_as_browserify_packages_make_them() {
         exports.later = () => [heard, String(s instanceof stream.Writable), String(s.writableFinished)];
     "#);
     assert_eq!(result, ["abcd", "true", "true"]);
+}
+
+#[test]
+fn backpressure_partial_reads_and_unshift() {
+    let result = run(r#"
+        const { Readable, Writable } = require('stream');
+        const log = [];
+        // A fast source and a slow sink: the source waits for `drain`, nothing is lost.
+        let sent = 0;
+        const source = new Readable({
+            highWaterMark: 4,
+            read() { sent++; this.push(sent <= 20 ? 'abcd' : null) },
+        });
+        let received = '', pauses = 0;
+        const sink = new Writable({
+            highWaterMark: 8,
+            write(chunk, enc, cb) { received += chunk; setTimeout(cb, 1) },
+        });
+        source.on('pause', () => pauses++);
+        sink.on('finish', () => log.push('sink ' + received.length + ' paused ' + (pauses > 0)));
+        source.pipe(sink);
+        // `read(n)` takes part of a chunk; `unshift` puts bytes back in front.
+        const r = new Readable({ read() {} });
+        r.push('hello world');
+        r.push(null);
+        r.once('readable', () => {
+            const head = r.read(5).toString();
+            r.unshift(Buffer.from('HELLO'));
+            const all = r.read().toString();
+            log.push('parts ' + head + '|' + all);
+        });
+        exports.later = () => log;
+    "#);
+    let mut sorted = result.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        ["parts hello|HELLO world", "sink 80 paused true"],
+        "{result:?}"
+    );
 }
