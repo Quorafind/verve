@@ -71,7 +71,37 @@ pub(crate) fn stream_class(name: &str, cx: &mut Context) -> JsResult<JsObject> {
 }
 pub(crate) fn init_socket(target: &JsObject, args: &[JsValue], cx: &mut Context) -> JsResult<()> {
     let duplex = stream_class("Duplex", cx)?;
-    crate::call(cx, &duplex.into(), &target.clone().into(), args)?;
+    let original = arg(args, 0);
+    let options = object(cx);
+    for name in [
+        "highWaterMark",
+        "readableHighWaterMark",
+        "writableHighWaterMark",
+        "objectMode",
+        "readableObjectMode",
+        "writableObjectMode",
+        "emitClose",
+        "autoDestroy",
+        "signal",
+    ] {
+        let value = get(&original, name, cx)?;
+        if !value.is_undefined() {
+            options.set(JsString::from(name), value, false, cx)?;
+        }
+    }
+    // Duplex defaults to half-open; net.Socket deliberately defaults the other way.
+    options.set(
+        js_string!("allowHalfOpen"),
+        get(&original, "allowHalfOpen", cx)?.to_boolean(),
+        false,
+        cx,
+    )?;
+    crate::call(
+        cx,
+        &duplex.into(),
+        &target.clone().into(),
+        &[options.into()],
+    )?;
     for (key, value) in [("connecting", false), ("pending", true)] {
         target.set(JsString::from(key), value, false, cx)?;
     }
@@ -535,6 +565,7 @@ pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context)
             }
         }
         Event::Timeout => emit(&this, "timeout", &[], cx)?,
+        Event::Datagram(..) | Event::DatagramSent(..) | Event::DatagramConnected(..) => {}
         Event::Error(code, message) => {
             let error = coded_error_value(cx, &format!("{code}: {message}"), &code);
             if get(&this, "_readableState", cx)?.is_object() {

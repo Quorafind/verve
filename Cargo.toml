@@ -64,6 +64,9 @@ x509-parser = "=0.18.0"
 # Incremental HTTP/1 head parsing without a blocking HTTP client or async runtime.
 httparse = "=1.10.1"
 
+# RFC 6455 client framing/validation over existing native Duplex sockets, without TLS duplication.
+tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake"] }
+
 [dev-dependencies]
 serde_json = "1"
 # WebAssembly tests write their modules as text.

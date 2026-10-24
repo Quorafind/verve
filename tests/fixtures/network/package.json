@@ -1,0 +1,12 @@
+{
+  "name": "runtime-x-network-fixtures",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned, offline-installable Node compatibility fixtures; no lifecycle scripts",
+  "dependencies": {
+    "ws": "8.18.3",
+    "axios": "1.12.2",
+    "node-fetch": "2.7.0",
+    "express": "4.21.2"
+  }
+}

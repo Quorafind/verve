@@ -15,17 +15,43 @@ fn granted() -> Permissions {
     }
 }
 fn run(script: &str, permissions: Permissions) -> String {
+    run_at(
+        script,
+        permissions,
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/network-entry.cjs"),
+    )
+}
+fn run_at(script: &str, permissions: Permissions, entry: std::path::PathBuf) -> String {
+    let script = script.to_owned();
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            runtime_x::set_thread_stack(16 * 1024 * 1024);
+            run_inner(&script, permissions, &entry)
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+fn run_inner(script: &str, permissions: Permissions, entry: &std::path::Path) -> String {
     let mut rt = RuntimeX::new();
     rt.set_permissions(permissions);
-    rt.load_module(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/network-entry.cjs"),
-        script,
-    )
-    .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    rt.load_module(entry, script).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         rt.run_network_until(Some(Instant::now() + Duration::from_millis(5)));
         rt.run_due();
+        let transport = rt.network_diagnostics();
+        assert!(
+            transport.reactor_threads <= 1 && transport.dns_threads <= 2,
+            "connections created extra network threads: {transport:?}"
+        );
+        // Read credit bounds native delivery independently of total bytes transferred. Allow
+        // a single in-flight chunk after the last socket closes before this snapshot.
+        assert!(
+            transport.queued_read_bytes <= (transport.open_sockets + 1) * 64 * 1024,
+            "unbounded network read queue: {transport:?}"
+        );
         if rt
             .eval("globalThis.result !== undefined")
             .unwrap()
@@ -178,16 +204,80 @@ fn http_agent_reuses_consumed_keepalive_socket() {
 }
 
 #[test]
+fn udp_send_receive_slice_and_connected_peer() {
+    assert_eq!(
+        run(
+            r#"
+        const dgram=require('dgram'),server=dgram.createSocket('udp4');
+        server.on('message',(b,peer)=>server.send(b,peer.port,peer.address));
+        server.bind(0,'127.0.0.1',()=>{
+            const client=dgram.createSocket('udp4');
+            client.connect(server.address().port,'127.0.0.1',()=>client.send(Buffer.from('xhello!'),1,5));
+            client.on('message',(b,peer)=>{globalThis.result=[b.toString(),peer.family,peer.size,client.remoteAddress().address];client.close();server.close()});
+        });
+    "#,
+            granted()
+        ),
+        r#"["hello","IPv4",5,"127.0.0.1"]"#
+    );
+}
+#[test]
+fn udp_denial_does_not_start_listening() {
+    assert_eq!(
+        run(
+            r#"
+        const s=require('dgram').createSocket('udp4');
+        s.on('error',e=>globalThis.result=e.code);s.bind(0,'127.0.0.1');
+    "#,
+            Permissions::default()
+        ),
+        r#""EACCES""#
+    );
+}
+#[test]
+fn http_close_all_connections_closes_active_transport() {
+    assert_eq!(
+        run(
+            r#"
+        const http=require('http');const server=http.createServer((req,res)=>{res.write('open');setImmediate(()=>server.closeAllConnections())});
+        server.listen(0,'127.0.0.1',()=>{
+            const req=http.get({host:'127.0.0.1',port:server.address().port,agent:false},res=>{
+                res.on('error',()=>{});res.resume();res.on('close',()=>{globalThis.result=true;server.close()});
+            });req.on('error',()=>{globalThis.result=true;server.close()});
+        });
+    "#,
+            granted()
+        ),
+        "true"
+    );
+}
+#[test]
+#[ignore = "prepare offline npm fixture and set RUNTIME_X_NETWORK_NPM; central integration"]
+fn real_ws_axios_node_fetch_and_express_packages() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("RUNTIME_X_NETWORK_NPM")
+            .expect("Run tests/fixtures/network/prepare.cjs with an absolute scratch destination"),
+    );
+    let entry = root.join("npm-smoke.cjs");
+    let script = std::fs::read_to_string(&entry).unwrap();
+    // Node 22.21.1, using the exact same source and the vendored lockfile, not fake packages.
+    assert_eq!(
+        run_at(&script, granted(), entry),
+        r#"["npm-ws","1,2,3",1000,200,42,200,42,302]"#
+    );
+}
+
+#[test]
 #[ignore = "100 MB acceptance; run during central integration"]
 fn loopback_100mb_obeys_backpressure() {
     assert_eq!(
         run(
             r#"
-        const net=require('net');let received=0,drains=0,written=0;const size=100*1024*1024;
+        const net=require('net');let received=0,drains=0,written=0,peak=0;const size=100*1024*1024;
         const server=net.createServer(s=>{s.on('data',b=>received+=b.length);s.on('end',()=>s.end())});
         server.listen(0,'127.0.0.1',()=>{const s=net.connect(server.address().port,'127.0.0.1');
-            const chunk=Buffer.alloc(64*1024);function pump(){while(written<size){written+=chunk.length;if(!s.write(chunk)){drains++;return}}s.end()}
-            s.on('drain',pump);s.on('connect',pump);s.resume();s.on('close',()=>server.close(()=>globalThis.result=[received===size,drains>0,s.writableLength===0]));
+            const chunk=Buffer.alloc(64*1024);function pump(){while(written<size){written+=chunk.length;const ready=s.write(chunk);peak=Math.max(peak,s.writableLength);if(!ready){drains++;return}}s.end()}
+            s.on('drain',pump);s.on('connect',pump);s.resume();s.on('close',()=>server.close(()=>globalThis.result=[received===size,drains>0,s.writableLength===0&&peak<=64*1024]));
         });
     "#,
             granted()

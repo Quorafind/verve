@@ -48,7 +48,8 @@ A JavaScript runtime for live plugins, in Rust.
   generate keys (raw, JWK); PBKDF2/HKDF derivation; AES-GCM/CBC/CTR encryption; HMAC sign and
   verify; AES-KW wrapping. No public-key algorithms.
 - `MessageChannel`/`MessagePort` and `BroadcastChannel` within the realm, delivered as tasks on
-  the host's clock; `WebSocket`, whose connection fails as an unreachable server's does;
+  the host's clock; permissioned `WebSocket` (`ws`/`wss`, text/binary, subprotocols and close
+  handshakes) on the TCP/TLS reactor, retaining the original failure events when denied;
   `Worker` (a realm on a thread of its own); `indexedDB` (kept on disk as JSON); `WebAssembly`
   (run by [wasmi](https://github.com/wasmi-labs/wasmi)); `navigator`, as Electron's Chromium has
   it.
@@ -103,7 +104,10 @@ A JavaScript runtime for live plugins, in Rust.
   pooling, chunked bodies and trailers, `rawHeaders`/`headersDistinct`, Node's duplicate-header
   merging, upgrades, and explicit all/idle connection closure. Redirects are returned, never
   automatically followed. Host-provided `fetch` is unchanged.
-- `http2`, `dgram`, `cluster`, `child_process` and `node:sqlite` load
+- `dgram`: IPv4/IPv6 UDP sockets, explicit bind and implicit outbound bindings, connected
+  peers, Buffer/string/sliced sends, message metadata, multicast and socket options. Listening
+  needs its own capability; an outbound-only binding accepts replies only from contacted peers.
+- `http2`, `cluster`, `child_process` and `node:sqlite` load
   with their classes and constants. Process execution, cluster and IPC sockets remain denied.
   Without network capabilities, the original network refusal errors are preserved.
 
@@ -137,6 +141,20 @@ answering without being waited for, stopped from outside, and failing alone.
 `cargo test --test corpus -- --ignored` loads real community plugins from the corpus beside the
 repository (`../obsidian-corpus/plugins`, or `RUNTIME_X_CORPUS`), the host's own modules stood
 in for.
+
+`tests/network.rs` has frozen Node 22 observations, loopback TCP/TLS/HTTP/UDP tests, and
+explicitly ignored 100 MB backpressure and 1000-connection acceptance cases. Real npm fixtures
+pin `ws` 8.18.3, `axios` 1.12.2, `node-fetch` 2.7.0 and `express` 4.21.2 with their transitive
+tarballs. Prepare them outside the checkout with `node tests/fixtures/network/prepare.cjs
+<absolute-scratch-directory>`, set `RUNTIME_X_NETWORK_NPM` to that directory, then include the
+ignored network tests during integration. Preparation is offline and disables lifecycle scripts;
+normal tests need neither Node nor npm.
+
+Networking pins mio, socket2, Hickory, rustls (ring), native certificate/PEM readers, x509-parser,
+httparse and tungstenite with their purposes recorded in `Cargo.toml`. HTTP/2 is not implemented.
+DNS uses two fixed workers, never a thread per connection; dropping a realm cancels queued work
+without joining a system lookup that is already in progress. Binary-size/build-time impact and
+Rust integration results must be measured by the integration build, not inferred from the pins.
 
 Run the runtime on a thread with room for its stack, as workers and isolates do (16 MB or
 more): Boa's interpreter recurses deeply, and a dev build overflows Windows' 1 MB main thread

@@ -55,7 +55,7 @@ mod web;
 mod worker;
 mod zlib;
 
-pub use network::{ListenPermission, NetworkRule, Permissions};
+pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, Permissions};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -221,6 +221,11 @@ impl RuntimeX {
 
     pub fn permissions(&self) -> Permissions {
         shared(&self.context).network.borrow().permissions.clone()
+    }
+
+    /// Read counters without waiting for any network thread.
+    pub fn network_diagnostics(&self) -> NetworkDiagnostics {
+        network::diagnostics(&self.context)
     }
 
     /// Deliver already queued I/O, without waiting for the reactor or resolver pool.

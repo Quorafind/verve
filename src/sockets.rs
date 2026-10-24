@@ -1400,6 +1400,7 @@ pub(crate) fn dgram_module(context: &mut Context, _: &str) -> JsResult<JsValue> 
         Ok(socket.into())
     });
     module.set(js_string!("createSocket"), create, false, context)?;
+    crate::network::udp::install(&module, context)?;
     Ok(module.into())
 }
 

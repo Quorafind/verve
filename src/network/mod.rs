@@ -6,6 +6,8 @@ pub(crate) mod http;
 pub(crate) mod reactor;
 pub(crate) mod tcp;
 pub(crate) mod tls;
+pub(crate) mod udp;
+pub(crate) mod websocket;
 
 use crate::native::{get, invoke};
 use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
@@ -55,6 +57,15 @@ impl Permissions {
     }
 }
 
+/// Nonblocking transport counters, intended for host observability and acceptance tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetworkDiagnostics {
+    pub reactor_threads: usize,
+    pub dns_threads: usize,
+    pub open_sockets: usize,
+    pub queued_read_bytes: usize,
+}
+
 #[derive(Default)]
 pub(crate) struct State {
     pub permissions: Permissions,
@@ -93,6 +104,22 @@ pub(crate) fn send(cx: &Context, cmd: Command) {
     }
 }
 
+pub(crate) fn diagnostics(cx: &Context) -> NetworkDiagnostics {
+    use std::sync::atomic::Ordering::Relaxed;
+    let shared = crate::shared(cx);
+    let state = shared.network.borrow();
+    let Some(reactor) = &state.reactor else {
+        return NetworkDiagnostics::default();
+    };
+    let c = &reactor.counters;
+    NetworkDiagnostics {
+        reactor_threads: c.reactor_threads.load(Relaxed),
+        dns_threads: c.dns_threads.load(Relaxed),
+        open_sockets: c.open_sockets.load(Relaxed),
+        queued_read_bytes: c.queued_read_bytes.load(Relaxed),
+    }
+}
+
 pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> usize {
     let mut count = 0;
     // Bound a beat even when JS and I/O keep producing work.
@@ -105,7 +132,17 @@ pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> us
             .borrow_mut()
             .reactor
             .as_mut()
-            .and_then(|r| r.events.try_recv().ok());
+            .and_then(|r| {
+                let event = r.events.try_recv().ok()?;
+                let n = match &event.1 {
+                    Event::Data(bytes) | Event::Datagram(bytes, _) => bytes.len(),
+                    _ => 0,
+                };
+                r.counters
+                    .queued_read_bytes
+                    .fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
+                Some(event)
+            });
         let Some((id, event)) = event else {
             break;
         };
@@ -123,7 +160,15 @@ pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> us
             .and_then(|w| invoke(&w.into(), "deref", &[], cx).ok())
             .and_then(|v| v.as_object());
         if let Some(target) = target {
-            if let Err(e) = tcp::deliver(id, &target, event, cx) {
+            let delivered = if get(&target.clone().into(), "__udp", cx)
+                .map(|v| v.to_boolean())
+                .unwrap_or(false)
+            {
+                udp::deliver(id, &target, event, cx)
+            } else {
+                tcp::deliver(id, &target, event, cx)
+            };
+            if let Err(e) = delivered {
                 crate::report(cx, &e);
             }
         } else {
