@@ -43,6 +43,28 @@ always agree with one another.
   'x')`, not `cannot convert 'null' or 'undefined' to object` (`nullish_base_error` in
   `vm/opcode`). The bytecode snapshots in `tests/insta-bytecode` changed only in their source maps.
 
+- `boa_engine`, `builtins/error/stack.rs`: V8's stack trace API, which packages bundled from npm
+  use (`depd` in express and body-parser, `source-map-support`, custom error classes):
+  - `error.stack` is V8's format: `${error}` (name and message, read when the stack is read),
+    then a `    at f (file:line:col)` line per frame, newest first — `    at file:line:col` for
+    top-level code, `(native)` for a built-in. Before, it was the frames alone, so the first line
+    was a frame, and a native error carried a line for the Rust location it was made at.
+  - `Error.captureStackTrace(target, constructorOpt)` gives `target` an own `stack` accessor with
+    the current stack, without `constructorOpt`'s newest call and what is above it (without
+    every frame if it is not on the stack). The function is found by its code
+    (`ShadowStack::capture`, `SourceInfo::ptr_eq`). The stack is formatted on first read, as in
+    V8, so a message set after the capture is in it; the setter replaces it with a value.
+  - `Error.stackTraceLimit` (10, writable): how many frames an error or a capture keeps, up to
+    `RuntimeLimits::backtrace_limit`; none when it is not a number. Only the frames in `stack`
+    — the backtrace a `JsError` carries to the embedder still follows `backtrace_limit`.
+  - `Error.prepareStackTrace(error, callSites)`, when set, makes the `stack` instead, with
+    `CallSite` objects (`getFunctionName`, `getFileName`, `getLineNumber`, `getColumnNumber`,
+    `isNative`, `toString`, …; `getThis`/`getFunction` are `undefined`, `getTypeName` and
+    `getMethodName` `null`, `isToplevel` always true). A `stack` read inside it is formatted
+    plainly rather than calling it again.
+  - `bytecompiler/class.rs`: a class method with a literal name has that name in its code, so its
+    frames show it (`at method (…)`) rather than looking like top-level code.
+
 - `boa_gc`, `lib.rs`: a collection no longer frees what it found dead before it returns. The
   dead nodes leave the heap, and their memory is returned a few at a time by later allocations
   (`BoaGc::unfreed`, `FREE_PER_ALLOCATION`), the rest before the next collection — and all of

@@ -51,6 +51,11 @@ impl SourceInfo {
     pub(crate) fn text_spanned(&self) -> &SpannedSourceText {
         &self.inner.text_spanned
     }
+
+    /// Whether both are the source info of the same code.
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
 }
 
 #[derive(Debug, Default, Clone)]

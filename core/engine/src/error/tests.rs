@@ -199,7 +199,7 @@ fn eval_backtrace(code: &[u8]) -> (String, Vec<ShadowEntry>) {
 
 /// The callee of a method call (`undefined.f()`) and an item of an optional chain carry their own
 /// position. Before, an error there was reported at the start of the enclosing function — in a
-/// CommonJS wrapper, the start of the whole bundle.
+/// `CommonJS` wrapper, the start of the whole bundle.
 #[test]
 fn method_call_on_undefined_reports_its_position() {
     let path = Path::new("test.js");

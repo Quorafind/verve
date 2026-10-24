@@ -1,4 +1,4 @@
-use super::{BindingAccessOpcode, ByteCompiler, Literal, Register, ToJsString};
+use super::{BindingAccessOpcode, ByteCompiler, FunctionSpec, Literal, Register, ToJsString};
 use crate::{
     js_string,
     vm::{CodeBlock, CodeBlockFlags, opcode::BindingOpcode},
@@ -222,7 +222,10 @@ impl ByteCompiler<'_> {
                 ClassElement::MethodDefinition(m) => match m.name() {
                     ClassElementName::PropertyName(PropertyName::Literal(name)) => {
                         let index = self.get_or_insert_name(name.sym());
-                        let method = self.method(m.into());
+                        // Named in its code too, so a stack trace shows the method's name.
+                        let mut spec = FunctionSpec::from(m);
+                        spec.name = Some(*name);
+                        let method = self.method(spec);
 
                         let object_register = if m.is_static() {
                             &class_register

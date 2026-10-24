@@ -226,6 +226,24 @@ impl ShadowStack {
         Backtrace { stack }
     }
 
+    /// The stack below the native function that is running, as `Error.captureStackTrace` sees
+    /// it: at most `n` frames, and with `skip_until`, without the newest frame of that code and
+    /// those above it — or without any frame if that code is not on the stack (as V8).
+    pub(crate) fn capture(&self, n: usize, skip_until: Option<&SourceInfo>) -> Backtrace {
+        // NOTE: We push the function that is currently executing, so skip the last one.
+        let mut frames = &self.stack[..self.stack.len().saturating_sub(1)];
+        if let Some(skip_until) = skip_until {
+            let found = frames.iter().rposition(|entry| {
+                matches!(entry, ShadowEntry::Bytecode { source_info, .. } if source_info.ptr_eq(skip_until))
+            });
+            frames = &frames[..found.unwrap_or(0)];
+        }
+        let start = frames.len().saturating_sub(n);
+        Backtrace {
+            stack: frames[start..].iter().cloned().collect(),
+        }
+    }
+
     #[cfg(feature = "native-backtrace")]
     pub(crate) fn patch_last_native(&mut self, new_source_info: NativeSourceInfo) {
         let Some(ShadowEntry::Native { source_info, .. }) = self.stack.last_mut() else {

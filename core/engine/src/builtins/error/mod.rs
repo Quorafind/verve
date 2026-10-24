@@ -10,8 +10,6 @@
 //! [spec]: https://tc39.es/ecma262/#sec-error-objects
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error
 
-use std::fmt::Write;
-
 use crate::{
     Context, JsArgs, JsData, JsResult, JsString, JsValue,
     builtins::BuiltInObject,
@@ -34,6 +32,7 @@ pub(crate) mod aggregate;
 pub(crate) mod eval;
 pub(crate) mod range;
 pub(crate) mod reference;
+mod stack;
 pub(crate) mod syntax;
 pub(crate) mod r#type;
 pub(crate) mod uri;
@@ -169,7 +168,7 @@ impl Error {
 
     /// Get the position from the last called function.
     pub(crate) fn with_caller_position(tag: ErrorKind, context: &Context) -> Self {
-        let limit = context.runtime_limits().backtrace_limit();
+        let limit = stack::stack_trace_limit(context);
         let backtrace = context.vm.shadow_stack.caller_position(limit);
         Self {
             tag,
@@ -201,6 +200,16 @@ impl IntrinsicObject for Error {
                 Some(get_stack),
                 Some(set_stack),
                 accessor_attribute,
+            )
+            .static_method(
+                stack::capture_stack_trace,
+                js_string!("captureStackTrace"),
+                2,
+            )
+            .static_property(
+                js_string!("stackTraceLimit"),
+                stack::DEFAULT_STACK_TRACE_LIMIT,
+                Attribute::all(),
             );
 
         #[cfg(feature = "experimental")]
@@ -221,7 +230,7 @@ impl BuiltInObject for Error {
 impl BuiltInConstructor for Error {
     const CONSTRUCTOR_ARGUMENTS: usize = 1;
     const PROTOTYPE_STORAGE_SLOTS: usize = 5;
-    const CONSTRUCTOR_STORAGE_SLOTS: usize = 1;
+    const CONSTRUCTOR_STORAGE_SLOTS: usize = 3;
 
     const STANDARD_CONSTRUCTOR: fn(&StandardConstructors) -> &StandardConstructor =
         StandardConstructors::error;
@@ -300,8 +309,7 @@ impl Error {
     ///  - [Proposal][spec]
     ///
     /// [spec]: https://tc39.es/proposal-error-stacks/
-    #[allow(clippy::unnecessary_wraps)]
-    fn get_stack(this: &JsValue, _: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    fn get_stack(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         // 1. Let E be the this value.
         // 2. If E is not an Object, return undefined.
         let Some(e) = this.as_object() else {
@@ -310,25 +318,18 @@ impl Error {
 
         // 3. Let errorData be the value of the [[ErrorData]] internal slot of E.
         // 4. If errorData is undefined, return undefined.
-        let Some(error_data) = e.downcast_ref::<Error>() else {
-            return Ok(JsValue::undefined());
+        let backtrace = {
+            let Some(error_data) = e.downcast_ref::<Error>() else {
+                return Ok(JsValue::undefined());
+            };
+            error_data.stack.0.backtrace().cloned().unwrap_or_default()
         };
 
         // 5. Let stackString be an implementation-defined String value representing the call stack.
         // 6. Return stackString.
-        if let Some(backtrace) = error_data.stack.0.backtrace() {
-            let stack_string = backtrace
-                .iter()
-                .rev()
-                .fold(String::new(), |mut output, entry| {
-                    let _ = writeln!(&mut output, "    at {}", entry.display(true));
-                    output
-                });
-            return Ok(js_string!(stack_string).into());
-        }
-
-        // 7. If no stack trace is available, return undefined.
-        Ok(JsValue::undefined())
+        // NOTE: In V8's format, which code bundled from npm parses: `${error}` and a
+        //       `    at …` line per frame, or what `Error.prepareStackTrace` makes of them.
+        stack::format_stack(&e, &backtrace, context)
     }
 
     /// `set Error.prototype.stack`
