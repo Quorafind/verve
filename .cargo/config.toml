@@ -1,0 +1,5 @@
+# Tests run the runtime on threads with the stack the README asks for: Boa's interpreter recurses
+# deeply, and Rust's default 2 MB test thread leaves a dev build no margin (util's deep equality
+# on nested Maps needs a little over 2 MB).
+[env]
+RUST_MIN_STACK = "16777216"
