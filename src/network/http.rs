@@ -776,11 +776,18 @@ fn on_data(socket: &JsValue, data: Vec<u8>, cx: &mut Context) -> JsResult<()> {
                     put(&message, "connection", socket.clone(), cx)?;
                 }
                 if head.upgrade {
+                    if request.is_object() {
+                        let agent = get(&request, "agent", cx)?;
+                        let key = text_of(&get(&request, "__httpOrigin", cx)?, cx)?;
+                        pool_remove(&agent, "sockets", &key, socket, cx)?;
+                    }
+                    put(socket, "__httpUpgraded", true, cx)?;
                     let bytes = {
                         let native = native
                             .downcast_ref::<Data>()
                             .ok_or_else(|| crate::native::type_error("HTTP parser"))?;
-                        std::mem::take(&mut native.parser.borrow_mut().buffer)
+                        let mut parser = native.parser.borrow_mut();
+                        std::mem::take(&mut parser.buffer)
                     };
                     let bytes = crate::encoding::make_buffer(cx, bytes)?;
                     let handler = get(socket, "__httpDataHandler", cx)?;
@@ -918,6 +925,7 @@ fn attach(socket: &JsValue, response: bool, server: JsValue, cx: &mut Context) -
         |_, args, socket: &JsValue, cx| {
             let request = get(socket, "__httpRequest", cx)?;
             if request.is_object() {
+                put(&request, "__httpErrored", true, cx)?;
                 emit(&request, "error", &[arg(args, 0)], cx)?;
             }
             Ok(JsValue::undefined())
@@ -925,6 +933,46 @@ fn attach(socket: &JsValue, response: bool, server: JsValue, cx: &mut Context) -
         socket.clone(),
     );
     invoke(socket, "on", &[js_text("error"), errors.into()], cx)?;
+    let closed = closure(
+        cx,
+        "",
+        0,
+        |_, _, socket: &JsValue, cx| {
+            let agent = get(socket, "__httpAgent", cx)?;
+            let key = text_of(&get(socket, "__httpPoolKey", cx)?, cx)?;
+            for map in ["sockets", "freeSockets"] {
+                pool_remove(&agent, map, &key, socket, cx)?;
+            }
+            let message = get(socket, "__httpMessage", cx)?;
+            if message.is_object()
+                && !get(&message, "complete", cx)?.to_boolean()
+                && !get(&message, "destroyed", cx)?.to_boolean()
+            {
+                put(&message, "aborted", true, cx)?;
+                emit(&message, "aborted", &[], cx)?;
+                let error = coded_error_value(cx, "aborted", "ECONNRESET");
+                invoke(&message, "destroy", &[error], cx)?;
+            }
+            let request = get(socket, "__httpRequest", cx)?;
+            if request.is_object()
+                && !get(socket, "__httpUpgraded", cx)?.to_boolean()
+                && !get(&request, "__httpReleased", cx)?.to_boolean()
+            {
+                put(&request, "__httpReleased", true, cx)?;
+                if get(&request, "res", cx)?.is_undefined()
+                    && !get(&request, "destroyed", cx)?.to_boolean()
+                    && !get(&request, "__httpErrored", cx)?.to_boolean()
+                {
+                    let error = coded_error_value(cx, "socket hang up", "ECONNRESET");
+                    emit(&request, "error", &[error], cx)?;
+                }
+                emit(&request, "close", &[], cx)?;
+            }
+            Ok(JsValue::undefined())
+        },
+        socket.clone(),
+    );
+    invoke(socket, "on", &[js_text("close"), closed.into()], cx)?;
     Ok(())
 }
 fn agent_init(target: &JsObject, args: &[JsValue], cx: &mut Context) -> JsResult<()> {
@@ -961,13 +1009,77 @@ fn agent_init(target: &JsObject, args: &[JsValue], cx: &mut Context) -> JsResult
     Ok(())
 }
 fn origin(options: &JsValue, cx: &mut Context) -> JsResult<String> {
+    use sha2::Digest;
+    let mut digest = sha2::Sha256::new();
+    for name in [
+        "ca",
+        "cert",
+        "key",
+        "ciphers",
+        "minVersion",
+        "maxVersion",
+        "ALPNProtocols",
+        "family",
+        "localAddress",
+        "localPort",
+    ] {
+        let value = get(options, name, cx)?;
+        let values = if value.as_object().is_some_and(|o| o.is_array()) {
+            list_of(&value, cx)?
+        } else {
+            vec![value]
+        };
+        digest.update(name.as_bytes());
+        for value in values {
+            let bytes = crate::encoding::bytes_of(&value, cx)?
+                .unwrap_or_else(|| crate::print(&value).into_bytes());
+            digest.update((bytes.len() as u64).to_be_bytes());
+            digest.update(bytes);
+        }
+    }
+    // Custom identity/transport callbacks and opaque contexts must not share a connection with
+    // a different policy. Conservatively use a fresh key rather than stringify a function.
+    let mut nonce = 0;
+    for name in ["checkServerIdentity", "secureContext", "createConnection"] {
+        if get(options, name, cx)?.is_object() {
+            let shared = crate::shared(cx);
+            let mut net = shared.network.borrow_mut();
+            net.next += 1;
+            nonce = net.next;
+            break;
+        }
+    }
     Ok(format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{:x}:{nonce}",
+        crate::print(&get(options, "protocol", cx)?),
         crate::print(&get(options, "hostname", cx)?),
         crate::print(&get(options, "port", cx)?),
         crate::print(&get(options, "servername", cx)?),
-        crate::print(&get(options, "rejectUnauthorized", cx)?)
+        crate::print(&get(options, "rejectUnauthorized", cx)?),
+        digest.finalize()
     ))
+}
+fn pool_remove(
+    agent: &JsValue,
+    collection: &str,
+    key: &str,
+    socket: &JsValue,
+    cx: &mut Context,
+) -> JsResult<()> {
+    let map = get(agent, collection, cx)?;
+    let list = get(&map, key, cx)?;
+    if list.is_object() {
+        let index = invoke(&list, "indexOf", &[socket.clone()], cx)?;
+        if index.as_number().is_some_and(|i| i >= 0.) {
+            invoke(&list, "splice", &[index, 1.into()], cx)?;
+        }
+        if get(&list, "length", cx)?.as_number() == Some(0.) {
+            if let Some(map) = map.as_object() {
+                map.delete_property_or_throw(JsString::from(key), cx)?;
+            }
+        }
+    }
+    Ok(())
 }
 fn release(request: &JsValue, socket: &JsValue, cx: &mut Context) -> JsResult<()> {
     if get(request, "__httpReleased", cx)?.to_boolean() {
@@ -978,6 +1090,8 @@ fn release(request: &JsValue, socket: &JsValue, cx: &mut Context) -> JsResult<()
     let incoming = get(&message, "headers", cx)?;
     let connection = get(&incoming, "connection", cx)?;
     let agent = get(request, "agent", cx)?;
+    let key = text_of(&get(request, "__httpOrigin", cx)?, cx)?;
+    pool_remove(&agent, "sockets", &key, socket, cx)?;
     let keep = get(&agent, "keepAlive", cx)?.to_boolean()
         && !crate::print(&connection).eq_ignore_ascii_case("close")
         && get(request, "finished", cx)?.to_boolean();
@@ -1022,13 +1136,17 @@ fn normalize(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValu
         let url = url::Url::parse(&href).map_err(|_| crate::native::type_error("Invalid URL"))?;
         options.set(
             js_string!("protocol"),
-            js_text(url.scheme().to_owned().as_str()),
+            js_text(&format!("{}:", url.scheme())),
             false,
             cx,
         )?;
         options.set(
             js_string!("hostname"),
-            js_text(url.host_str().unwrap_or("localhost")),
+            js_text(
+                url.host_str()
+                    .unwrap_or("localhost")
+                    .trim_matches(['[', ']']),
+            ),
             false,
             cx,
         )?;
@@ -1073,14 +1191,58 @@ fn normalize(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValu
     if options.get(js_string!("path"), cx)?.is_undefined() {
         options.set(js_string!("path"), js_text("/"), false, cx)?;
     }
+    let protocol = options.get(js_string!("protocol"), cx)?;
+    if !protocol.is_undefined() && crate::print(&protocol) != if https { "https:" } else { "http:" }
+    {
+        return Err(crate::native::coded_error(
+            cx,
+            "Protocol not supported by this transport",
+            "ERR_INVALID_PROTOCOL",
+        ));
+    }
+    if protocol.is_undefined() {
+        options.set(
+            js_string!("protocol"),
+            js_text(if https { "https:" } else { "http:" }),
+            false,
+            cx,
+        )?;
+    }
     let host = options.get(js_string!("hostname"), cx)?;
+    let host = js_text(text_of(&host, cx)?.trim_matches(['[', ']']));
+    options.set(js_string!("hostname"), host.clone(), false, cx)?;
     options.set(js_string!("host"), host, false, cx)?;
     Ok(options.into())
 }
 fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue> {
     let options = normalize(args, https, cx)?;
+    let module = crate::modules::node_module(cx, if https { "https" } else { "http" })?;
+    let configured = get(&options, "agent", cx)?;
+    let agent = if configured.is_undefined() {
+        get(&module, "globalAgent", cx)?
+    } else {
+        configured
+    };
+    if let Some(defaults) = get(&agent, "options", cx)?.as_object() {
+        for key in defaults.own_property_keys(cx)? {
+            if let Some(options) = options.as_object() {
+                if options.get(key.clone(), cx)?.is_undefined() {
+                    let value = defaults.get(key.clone(), cx)?;
+                    options.set(key, value, false, cx)?;
+                }
+            }
+        }
+    }
     let host = text_of(&get(&options, "hostname", cx)?, cx)?;
-    let port = get(&options, "port", cx)?.to_number(cx)? as u16;
+    let number = get(&options, "port", cx)?.to_number(cx)?;
+    if !number.is_finite() || number.fract() != 0. || !(0. ..=65535.).contains(&number) {
+        return Err(crate::native::coded_error(
+            cx,
+            "Port should be >= 0 and < 65536.",
+            "ERR_SOCKET_BAD_PORT",
+        ));
+    }
+    let port = number as u16;
     if !crate::shared(cx)
         .network
         .borrow()
@@ -1089,7 +1251,6 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
     {
         return crate::sockets::denied_http(cx);
     }
-    let module = crate::modules::node_module(cx, if https { "https" } else { "http" })?;
     let ctor = get(&module, "ClientRequest", cx)?
         .as_object()
         .ok_or_else(|| crate::native::type_error("ClientRequest"))?;
@@ -1108,12 +1269,6 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
         },
         cx,
     )?;
-    let agent = get(&options, "agent", cx)?;
-    let agent = if agent.is_undefined() {
-        get(&module, "globalAgent", cx)?
-    } else {
-        agent
-    };
     put(&req, "agent", agent.clone(), cx)?;
     let keep = get(&agent, "keepAlive", cx)?.to_boolean();
     put(&req, "__httpKeepAlive", keep, cx)?;
@@ -1139,21 +1294,51 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
         reused
     } else {
         put(&req, "reusedSocket", false, cx)?;
+        // HTTP's request path is not net.Socket's IPC path. Only socketPath is a transport path;
+        // leaving `/resource` here would incorrectly route every HTTP request into the IPC refusal.
+        let connection_options = object(cx);
+        if let Some(options) = options.as_object() {
+            for property in options.own_property_keys(cx)? {
+                if property.to_string() != "path" {
+                    let value = options.get(property.clone(), cx)?;
+                    connection_options.set(property, value, false, cx)?;
+                }
+            }
+        }
+        let socket_path = get(&options, "socketPath", cx)?;
+        if !socket_path.is_undefined() {
+            connection_options.set(js_string!("path"), socket_path, false, cx)?;
+        }
+        let connection_options: JsValue = connection_options.into();
         let create = get(&options, "createConnection", cx)?;
         if create.is_callable() {
-            crate::call(cx, &create, &JsValue::undefined(), &[options.clone()])?
+            crate::call(cx, &create, &JsValue::undefined(), &[connection_options])?
         } else {
             let transport = crate::modules::node_module(cx, if https { "tls" } else { "net" })?;
-            invoke(&transport, "connect", &[options.clone()], cx)?
+            invoke(&transport, "connect", &[connection_options], cx)?
         }
     };
     put(&req, "socket", socket.clone(), cx)?;
+    put(&socket, "__httpAgent", agent.clone(), cx)?;
+    put(&socket, "__httpPoolKey", js_text(&key), cx)?;
+    if agent.is_object() {
+        let sockets = get(&agent, "sockets", cx)?;
+        let list = get(&sockets, &key, cx)?;
+        let list = if list.is_object() {
+            list
+        } else {
+            array(cx, Vec::new())
+        };
+        invoke(&list, "push", &[socket.clone()], cx)?;
+        put(&sockets, &key, list, cx)?;
+    }
     put(&req, "connection", socket.clone(), cx)?;
     put(&socket, "__httpRequest", req.clone(), cx)?;
     attach(&socket, true, JsValue::undefined(), cx)?;
     let native = parser(&socket, cx)?;
+    let head_request = crate::print(&get(&req, "method", cx)?) == "HEAD";
     if let Some(p) = native.downcast_ref::<Data>() {
-        p.parser.borrow_mut().head_request = crate::print(&get(&req, "method", cx)?) == "HEAD";
+        p.parser.borrow_mut().head_request = head_request;
     }
     let h = get(&options, "headers", cx)?;
     if let Some(h) = h.as_object() {
@@ -1199,6 +1384,103 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
     );
     crate::microtask(cx, fire.into(), Vec::new());
     Ok(req)
+}
+
+fn init_server(target: &JsObject, args: &[JsValue], cx: &mut Context) -> JsResult<()> {
+    let server: JsValue = target.clone().into();
+    let secure = get(&server, "__httpSecure", cx)?.to_boolean();
+    let transport = crate::modules::node_module(cx, if secure { "tls" } else { "net" })?;
+    let ctor = get(&transport, "Server", cx)?;
+    let options = if arg(args, 0).is_callable() {
+        object(cx).into()
+    } else {
+        arg(args, 0)
+    };
+    crate::call(cx, &ctor, &server, &[options])?;
+    for (name, value) in [
+        ("timeout", 0),
+        ("requestTimeout", 300_000),
+        ("headersTimeout", 60_000),
+        ("keepAliveTimeout", 5_000),
+        ("maxHeadersCount", 2_000),
+    ] {
+        put(&server, name, value, cx)?;
+    }
+    let accept = closure(
+        cx,
+        "",
+        1,
+        |_, args, server: &JsValue, cx| {
+            let socket = arg(args, 0);
+            attach(&socket, false, server.clone(), cx)?;
+            let timeout = get(server, "timeout", cx)?;
+            invoke(&socket, "setTimeout", &[timeout], cx)?;
+            Ok(JsValue::undefined())
+        },
+        server.clone(),
+    );
+    invoke(
+        &server,
+        "on",
+        &[
+            js_text(if secure {
+                "secureConnection"
+            } else {
+                "connection"
+            }),
+            accept.into(),
+        ],
+        cx,
+    )?;
+    if let Some(cb) = args.iter().rev().find(|v| v.is_callable()) {
+        invoke(&server, "on", &[js_text("request"), cb.clone()], cx)?;
+    }
+    let close_all = function(cx, "closeAllConnections", 0, |this, _, cx| {
+        for socket in list_of(&get(this, "__networkConnections", cx)?, cx)? {
+            // Node deliberately leaves upgraded transports to their protocol owner.
+            if !get(&socket, "__httpUpgraded", cx)?.to_boolean() {
+                invoke(&socket, "destroy", &[], cx)?;
+            }
+        }
+        Ok(JsValue::undefined())
+    });
+    put(&server, "closeAllConnections", close_all, cx)?;
+    let close_idle = function(cx, "closeIdleConnections", 0, |this, _, cx| {
+        for socket in list_of(&get(this, "__networkConnections", cx)?, cx)? {
+            let response = get(&socket, "__httpResponse", cx)?;
+            if !get(&socket, "__httpUpgraded", cx)?.to_boolean()
+                && (response.is_undefined() || get(&response, "finished", cx)?.to_boolean())
+            {
+                invoke(&socket, "destroy", &[], cx)?;
+            }
+        }
+        Ok(JsValue::undefined())
+    });
+    put(&server, "closeIdleConnections", close_idle, cx)?;
+    let original = get(&server, "close", cx)?;
+    let close = closure(
+        cx,
+        "close",
+        1,
+        |this, args, original: &JsValue, cx| {
+            invoke(this, "closeIdleConnections", &[], cx)?;
+            crate::call(cx, original, this, args)
+        },
+        original,
+    );
+    put(&server, "close", close, cx)?;
+    let timeout = function(cx, "setTimeout", 2, |this, args, cx| {
+        put(this, "timeout", arg(args, 0), cx)?;
+        if arg(args, 1).is_callable() {
+            invoke(this, "on", &[js_text("timeout"), arg(args, 1)], cx)?;
+        }
+        for socket in list_of(&get(this, "__networkConnections", cx)?, cx)? {
+            invoke(&socket, "setTimeout", &[arg(args, 0)], cx)?;
+        }
+        Ok(this.clone())
+    });
+    put(&server, "setTimeout", timeout, cx)?;
+    Ok(())
 }
 
 pub(crate) fn install(module: &JsObject, https: bool, cx: &mut Context) -> JsResult<()> {
@@ -1298,76 +1580,27 @@ pub(crate) fn install(module: &JsObject, https: bool, cx: &mut Context) -> JsRes
         );
         module.set(JsString::from(name), f, false, cx)?;
     }
+    let transport = crate::modules::node_module(cx, if https { "tls" } else { "net" })?;
+    let parent = get(&transport, "Server", cx)?
+        .as_object()
+        .ok_or_else(|| crate::native::type_error("Server"))?;
+    let (server, proto) = class(
+        cx,
+        ClassSpec {
+            name: "Server",
+            parent: Some(&parent),
+            init: init_server,
+            ..ClassSpec::default()
+        },
+    )?;
+    hidden(&proto, js_string!("__httpSecure"), https, cx)?;
+    module.set(js_string!("Server"), server.clone(), false, cx)?;
     let create = closure(
         cx,
         "createServer",
         2,
-        |_, args, https: &bool, cx| {
-            let transport = crate::modules::node_module(cx, if *https { "tls" } else { "net" })?;
-            let options = if arg(args, 0).is_callable() {
-                object(cx).into()
-            } else {
-                arg(args, 0)
-            };
-            let server = invoke(&transport, "createServer", &[options], cx)?;
-            let accept = closure(
-                cx,
-                "",
-                1,
-                |_, args, server: &JsValue, cx| {
-                    attach(&arg(args, 0), false, server.clone(), cx)?;
-                    Ok(JsValue::undefined())
-                },
-                server.clone(),
-            );
-            invoke(
-                &server,
-                "on",
-                &[
-                    js_text(if *https {
-                        "secureConnection"
-                    } else {
-                        "connection"
-                    }),
-                    accept.into(),
-                ],
-                cx,
-            )?;
-            if let Some(cb) = args.iter().rev().find(|v| v.is_callable()) {
-                invoke(&server, "on", &[js_text("request"), cb.clone()], cx)?;
-            }
-            let close_all = function(cx, "closeAllConnections", 0, |this, _, cx| {
-                for socket in list_of(&get(this, "__networkConnections", cx)?, cx)? {
-                    invoke(&socket, "destroy", &[], cx)?;
-                }
-                Ok(JsValue::undefined())
-            });
-            put(&server, "closeAllConnections", close_all, cx)?;
-            let close_idle = function(cx, "closeIdleConnections", 0, |this, _, cx| {
-                for socket in list_of(&get(this, "__networkConnections", cx)?, cx)? {
-                    let response = get(&socket, "__httpResponse", cx)?;
-                    if response.is_undefined() || get(&response, "finished", cx)?.to_boolean() {
-                        invoke(&socket, "destroy", &[], cx)?;
-                    }
-                }
-                Ok(JsValue::undefined())
-            });
-            put(&server, "closeIdleConnections", close_idle, cx)?;
-            let original = get(&server, "close", cx)?;
-            let close = closure(
-                cx,
-                "close",
-                1,
-                |this, args, original: &JsValue, cx| {
-                    invoke(this, "closeIdleConnections", &[], cx)?;
-                    crate::call(cx, original, this, args)
-                },
-                original,
-            );
-            put(&server, "close", close, cx)?;
-            Ok(server)
-        },
-        https,
+        |_, args, server: &JsObject, cx| Ok(server.construct(args, None, cx)?.into()),
+        server,
     );
     module.set(js_string!("createServer"), create, false, cx)?;
     Ok(())

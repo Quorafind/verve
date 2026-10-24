@@ -5,13 +5,13 @@ use super::{
     tcp,
 };
 use crate::native::{
-    ClassSpec, arg, array, class, closure, coded_error_value, function, get, hidden, invoke,
-    js_text, list_of, object, text_of,
+    ClassSpec, arg, class, closure, function, get, hidden, invoke, js_text, list_of, object,
+    text_of,
 };
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 use std::{
     io::{self, Cursor},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 #[derive(Clone, Debug, Default)]
@@ -27,6 +27,8 @@ pub(crate) struct Options {
     pub ciphers: String,
     pub contexts: Vec<(String, Options)>,
     pub request_cert: bool,
+    pub custom_identity: bool,
+    pub verification: Arc<Mutex<Option<String>>>,
 }
 pub(crate) fn options(value: &JsValue, host: &str, cx: &mut Context) -> JsResult<Options> {
     let secure = get(value, "secureContext", cx)?;
@@ -101,6 +103,8 @@ pub(crate) fn options(value: &JsValue, host: &str, cx: &mut Context) -> JsResult
         ciphers: text(field("ciphers", cx)?),
         contexts: Vec::new(),
         request_cert: field("requestCert", cx)?.to_boolean(),
+        custom_identity: field("checkServerIdentity", cx)?.is_callable(),
+        verification: Arc::default(),
     })
 }
 fn invalid(message: impl ToString) -> io::Error {
@@ -128,14 +132,60 @@ fn roots(options: &Options) -> io::Result<rustls::RootCertStore> {
     }
     Ok(roots)
 }
+fn cipher_names(name: &str) -> (&str, &str) {
+    match name {
+        "TLS13_AES_128_GCM_SHA256" => ("TLS_AES_128_GCM_SHA256", "TLS_AES_128_GCM_SHA256"),
+        "TLS13_AES_256_GCM_SHA384" => ("TLS_AES_256_GCM_SHA384", "TLS_AES_256_GCM_SHA384"),
+        "TLS13_CHACHA20_POLY1305_SHA256" => (
+            "TLS_CHACHA20_POLY1305_SHA256",
+            "TLS_CHACHA20_POLY1305_SHA256",
+        ),
+        "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256" => (
+            "ECDHE-RSA-AES128-GCM-SHA256",
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        ),
+        "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384" => (
+            "ECDHE-RSA-AES256-GCM-SHA384",
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        ),
+        "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256" => (
+            "ECDHE-RSA-CHACHA20-POLY1305",
+            "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+        ),
+        "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" => (
+            "ECDHE-ECDSA-AES128-GCM-SHA256",
+            "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        ),
+        "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384" => (
+            "ECDHE-ECDSA-AES256-GCM-SHA384",
+            "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        ),
+        "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256" => (
+            "ECDHE-ECDSA-CHACHA20-POLY1305",
+            "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+        ),
+        _ => (name, name),
+    }
+}
 fn provider(options: &Options) -> Arc<rustls::crypto::CryptoProvider> {
     let mut provider = rustls::crypto::ring::default_provider();
     if !options.ciphers.is_empty() {
         let names = options.ciphers.to_ascii_uppercase();
-        provider.cipher_suites.retain(|s| {
-            names
-                .split(':')
-                .any(|name| name == format!("{:?}", s.suite()) || name == "DEFAULT")
+        provider.cipher_suites.retain(|suite| {
+            let rustls_name = format!("{:?}", suite.suite());
+            let (openssl, standard) = cipher_names(&rustls_name);
+            let excluded = names.split(':').any(|name| {
+                name.strip_prefix('!')
+                    .is_some_and(|name| name == openssl || name == standard || name == rustls_name)
+            });
+            !excluded
+                && names.split(':').any(|name| {
+                    name == rustls_name
+                        || name == openssl
+                        || name == standard
+                        || name == "DEFAULT"
+                        || name == "HIGH"
+                })
         });
     }
     Arc::new(provider)
@@ -165,19 +215,76 @@ fn versions(options: &Options) -> io::Result<Vec<&'static rustls::SupportedProto
     Ok(v)
 }
 #[derive(Debug)]
-struct Unverified {
-    provider: Arc<rustls::crypto::CryptoProvider>,
+struct Verification {
+    inner: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    reject: bool,
+    custom_identity: bool,
+    error: Arc<Mutex<Option<String>>>,
 }
-impl rustls::client::danger::ServerCertVerifier for Unverified {
+pub(crate) fn certificate_code(error: &rustls::Error) -> &'static str {
+    let text = format!("{error:?}");
+    if text.contains("NotValidForName") {
+        "ERR_TLS_CERT_ALTNAME_INVALID"
+    } else if text.contains("Expired") {
+        "CERT_HAS_EXPIRED"
+    } else if text.contains("NotValidYet") {
+        "CERT_NOT_YET_VALID"
+    } else if text.contains("UnknownIssuer") {
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+    } else if matches!(error, rustls::Error::InvalidCertificate(_)) {
+        "ERR_TLS_CERT_INVALID"
+    } else {
+        "ERR_SSL_PROTOCOL_ERROR"
+    }
+}
+fn verification_code(
+    error: &rustls::Error,
+    cert: &rustls::pki_types::CertificateDer<'_>,
+) -> &'static str {
+    if format!("{error:?}").contains("UnknownIssuer") {
+        use x509_parser::prelude::FromDer;
+        if let Ok((_, certificate)) =
+            x509_parser::certificate::X509Certificate::from_der(cert.as_ref())
+        {
+            if certificate.subject() == certificate.issuer() {
+                return "DEPTH_ZERO_SELF_SIGNED_CERT";
+            }
+        }
+    }
+    certificate_code(error)
+}
+impl rustls::client::danger::ServerCertVerifier for Verification {
     fn verify_server_cert(
         &self,
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &[rustls::pki_types::CertificateDer<'_>],
-        _: &rustls::pki_types::ServerName<'_>,
-        _: &[u8],
-        _: rustls::pki_types::UnixTime,
+        certificate: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        name: &rustls::pki_types::ServerName<'_>,
+        ocsp: &[u8],
+        now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+        match self
+            .inner
+            .verify_server_cert(certificate, intermediates, name, ocsp, now)
+        {
+            Ok(verified) => Ok(verified),
+            // Webpki checks the chain before the name. Node's custom hook replaces only the
+            // name check, and runs on the realm before any application bytes are released.
+            Err(error)
+                if self.custom_identity && format!("{error:?}").contains("NotValidForName") =>
+            {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+            Err(error) => {
+                if let Ok(mut saved) = self.error.lock() {
+                    *saved = Some(verification_code(&error, certificate).into());
+                }
+                if self.reject {
+                    Err(error)
+                } else {
+                    Ok(rustls::client::danger::ServerCertVerified::assertion())
+                }
+            }
+        }
     }
     fn verify_tls12_signature(
         &self,
@@ -185,12 +292,7 @@ impl rustls::client::danger::ServerCertVerifier for Unverified {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        self.inner.verify_tls12_signature(message, cert, dss)
     }
     fn verify_tls13_signature(
         &self,
@@ -198,17 +300,10 @@ impl rustls::client::danger::ServerCertVerifier for Unverified {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        self.inner.verify_tls13_signature(message, cert, dss)
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider
-            .signature_verification_algorithms
-            .supported_schemes()
+        self.inner.supported_verify_schemes()
     }
 }
 pub(crate) fn client(options: &Options) -> io::Result<rustls::Connection> {
@@ -216,13 +311,20 @@ pub(crate) fn client(options: &Options) -> io::Result<rustls::Connection> {
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&versions(options)?)
         .map_err(invalid)?;
-    let builder = if options.reject {
-        builder.with_root_certificates(roots(options)?)
-    } else {
-        builder
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(Unverified { provider }))
-    };
+    let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots(options)?),
+        provider,
+    )
+    .build()
+    .map_err(invalid)?;
+    let builder = builder
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Verification {
+            inner,
+            reject: options.reject,
+            custom_identity: options.custom_identity,
+            error: options.verification.clone(),
+        }));
     let mut config = if options.cert.is_empty() {
         builder.with_no_client_auth()
     } else {
@@ -236,19 +338,104 @@ pub(crate) fn client(options: &Options) -> io::Result<rustls::Connection> {
         .map_err(invalid)?
         .into())
 }
+#[derive(Debug)]
+struct ClientVerification {
+    inner: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+    reject: bool,
+    error: Arc<Mutex<Option<String>>>,
+}
+impl rustls::server::danger::ClientCertVerifier for ClientVerification {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+    fn client_auth_mandatory(&self) -> bool {
+        self.reject
+    }
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+    fn verify_client_cert(
+        &self,
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        chain: &[rustls::pki_types::CertificateDer<'_>],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        match self.inner.verify_client_cert(cert, chain, now) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if let Ok(mut saved) = self.error.lock() {
+                    *saved = Some(certificate_code(&error).into());
+                }
+                if self.reject {
+                    Err(error)
+                } else {
+                    Ok(rustls::server::danger::ClientCertVerified::assertion())
+                }
+            }
+        }
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+#[derive(Debug)]
+struct NamedCertificates {
+    default: Arc<rustls::sign::CertifiedKey>,
+    names: Vec<(String, Arc<rustls::sign::CertifiedKey>)>,
+}
+impl rustls::server::ResolvesServerCert for NamedCertificates {
+    fn resolve(
+        &self,
+        hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let name = hello.server_name().unwrap_or("").to_ascii_lowercase();
+        for (pattern, certificate) in self.names.iter().rev() {
+            let pattern = pattern.to_ascii_lowercase();
+            let wildcard = pattern.strip_prefix("*.").is_some_and(|suffix| {
+                name.strip_suffix(&format!(".{suffix}"))
+                    .is_some_and(|prefix| !prefix.is_empty() && !prefix.contains('.'))
+            });
+            if pattern == name || wildcard {
+                return Some(certificate.clone());
+            }
+        }
+        Some(self.default.clone())
+    }
+}
 pub(crate) fn server(options: &Options) -> io::Result<rustls::Connection> {
     let provider = provider(options);
     let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&versions(options)?)
         .map_err(invalid)?;
     let builder = if options.request_cert {
-        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots(options)?));
-        let verifier = if options.reject {
-            verifier
-        } else {
-            verifier.allow_unauthenticated()
-        };
-        builder.with_client_cert_verifier(verifier.build().map_err(invalid)?)
+        let inner = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots(options)?),
+            provider.clone(),
+        )
+        .allow_unauthenticated()
+        .build()
+        .map_err(invalid)?;
+        builder.with_client_cert_verifier(Arc::new(ClientVerification {
+            inner,
+            reject: options.reject,
+            error: options.verification.clone(),
+        }))
     } else {
         builder.with_no_client_auth()
     };
@@ -257,7 +444,6 @@ pub(crate) fn server(options: &Options) -> io::Result<rustls::Connection> {
             .with_single_cert(certificates(&options.cert)?, key(&options.key)?)
             .map_err(invalid)?
     } else {
-        let mut resolver = rustls::server::ResolvesServerCertUsingSni::new();
         let signer = |option: &Options| -> io::Result<rustls::sign::CertifiedKey> {
             Ok(rustls::sign::CertifiedKey::new(
                 certificates(&option.cert)?,
@@ -267,11 +453,14 @@ pub(crate) fn server(options: &Options) -> io::Result<rustls::Connection> {
                     .map_err(invalid)?,
             ))
         };
-        resolver
-            .add(&options.host, signer(options)?)
-            .map_err(invalid)?;
+        let mut resolver = NamedCertificates {
+            default: Arc::new(signer(options)?),
+            names: Vec::new(),
+        };
         for (name, context) in &options.contexts {
-            resolver.add(name, signer(context)?).map_err(invalid)?;
+            resolver
+                .names
+                .push((name.clone(), Arc::new(signer(context)?)));
         }
         builder.with_cert_resolver(Arc::new(resolver))
     };
@@ -283,12 +472,13 @@ pub(crate) fn server(options: &Options) -> io::Result<rustls::Connection> {
 
 fn init(target: &JsObject, args: &[JsValue], cx: &mut Context) -> JsResult<()> {
     tcp::init_socket(target, args, cx)?;
+    hidden(target, js_string!("__tlsOptions"), arg(args, 0), cx)?;
     target.set(js_string!("encrypted"), true, false, cx)?;
     target.set(js_string!("authorized"), false, false, cx)?;
     Ok(())
 }
 fn connect(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
-    let Some((host, _, _)) = tcp::endpoint(args, false, cx)? else {
+    let Some((_, _, _)) = tcp::endpoint(args, false, cx)? else {
         return Err(crate::native::coded_error(
             cx,
             "IPC TLS sockets are unavailable",
@@ -317,14 +507,99 @@ fn connect(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue>
     hidden(&socket, js_string!("__tlsOptions"), input.clone(), cx)?;
     let connect_args: Vec<_> = args.iter().filter(|v| !v.is_callable()).cloned().collect();
     tcp::connect(&value, &connect_args, cx)?;
-    let id = super::id(&value, cx)?;
-    if id != 0 {
-        let config = options(&input, &host, cx)?;
-        super::send(cx, Command::TlsClient(id, config));
-    }
     Ok(value)
 }
+fn check_identity(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
+    let host = text_of(&arg(args, 0), cx)?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let cert = arg(args, 1);
+    let alt = get(&cert, "subjectaltname", cx)?;
+    let mut matched = false;
+    let name_matches = |name: &str| {
+        let name = name.trim_end_matches('.').to_ascii_lowercase();
+        name == host
+            || name.strip_prefix("*.").is_some_and(|suffix| {
+                host.strip_suffix(&format!(".{suffix}"))
+                    .is_some_and(|prefix| !prefix.is_empty() && !prefix.contains('.'))
+            })
+    };
+    let raw = crate::encoding::bytes_of(&get(&cert, "raw", cx)?, cx)?;
+    if let Some(raw) = raw {
+        use x509_parser::{extensions::GeneralName, prelude::FromDer};
+        if let Ok((_, certificate)) = x509_parser::certificate::X509Certificate::from_der(&raw) {
+            if let Ok(Some(san)) = certificate.subject_alternative_name() {
+                for name in &san.value.general_names {
+                    match name {
+                        GeneralName::DNSName(name) if host.parse::<std::net::IpAddr>().is_err() => {
+                            matched |= name_matches(name)
+                        }
+                        GeneralName::IPAddress(bytes) => {
+                            let address = if bytes.len() == 4 {
+                                <[u8; 4]>::try_from(*bytes).ok().map(std::net::IpAddr::from)
+                            } else {
+                                <[u8; 16]>::try_from(*bytes)
+                                    .ok()
+                                    .map(std::net::IpAddr::from)
+                            };
+                            if let (Some(address), Ok(host)) =
+                                (address, host.parse::<std::net::IpAddr>())
+                            {
+                                matched |= address == host;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            } else if host.parse::<std::net::IpAddr>().is_err() {
+                for cn in certificate.subject().iter_common_name() {
+                    if let Ok(cn) = cn.as_str() {
+                        matched |= name_matches(cn);
+                    }
+                }
+            }
+        }
+    } else if !alt.is_undefined() {
+        for name in text_of(&alt, cx)?.split(", ") {
+            if let Some(name) = name.strip_prefix("DNS:") {
+                if host.parse::<std::net::IpAddr>().is_err() {
+                    matched |= name_matches(name);
+                }
+            } else if let Some(address) = name.strip_prefix("IP Address:") {
+                if let (Ok(host), Ok(address)) = (
+                    host.parse::<std::net::IpAddr>(),
+                    address.parse::<std::net::IpAddr>(),
+                ) {
+                    matched |= host == address;
+                }
+            }
+        }
+    } else if host.parse::<std::net::IpAddr>().is_err() {
+        let cn = get(&get(&cert, "subject", cx)?, "CN", cx)?;
+        if cn.is_string() {
+            matched = name_matches(&text_of(&cn, cx)?);
+        } else if cn.is_object() {
+            for name in list_of(&cn, cx)? {
+                matched |= name_matches(&text_of(&name, cx)?);
+            }
+        }
+    }
+    if matched {
+        return Ok(JsValue::undefined());
+    }
+    let error = crate::native::coded_error_value(
+        cx,
+        &format!("Hostname/IP does not match certificate's altnames: {host}"),
+        "ERR_TLS_CERT_ALTNAME_INVALID",
+    );
+    tcp::put(&error, "host", js_text(&host), cx)?;
+    tcp::put(&error, "cert", cert, cx)?;
+    Ok(error)
+}
+
 pub(crate) fn install(module: &JsObject, cx: &mut Context) -> JsResult<()> {
+    let check = function(cx, "checkServerIdentity", 2, check_identity);
+    module.set(js_string!("checkServerIdentity"), check, false, cx)?;
     let net = crate::modules::node_module(cx, "net")?;
     let parent = get(&net, "Socket", cx)?
         .as_object()
@@ -448,6 +723,23 @@ pub(crate) fn accepted(
     }
     tcp::put(socket, "encrypted", true, cx)?;
     tcp::put(socket, "__tlsServer", true, cx)?;
+    let failed = closure(
+        cx,
+        "",
+        1,
+        |_, args, (server, socket): &(JsValue, JsValue), cx| {
+            tcp::emit(
+                server,
+                "tlsClientError",
+                &[arg(args, 0), socket.clone()],
+                cx,
+            )?;
+            Ok(JsValue::undefined())
+        },
+        (server.clone(), socket.clone()),
+    );
+    tcp::put(socket, "__tlsHandshakeError", failed.clone(), cx)?;
+    invoke(socket, "on", &[js_text("error"), failed.into()], cx)?;
     let mut config = options(&input, "localhost", cx)?;
     let contexts = get(server, "__tlsContexts", cx)?;
     if let Some(contexts) = contexts.as_object() {
@@ -466,6 +758,9 @@ pub(crate) fn peer_certificate(bytes: &[u8], cx: &mut Context) -> JsResult<JsObj
     use sha2::Digest;
     use x509_parser::prelude::FromDer;
     let peer = object(cx);
+    if bytes.is_empty() {
+        return Ok(peer);
+    }
     let raw = crate::encoding::make_buffer(cx, bytes.to_vec())?;
     peer.set(js_string!("raw"), raw, false, cx)?;
     let hex = |bytes: &[u8]| {
@@ -573,15 +868,34 @@ pub(crate) fn peer_certificate(bytes: &[u8], cx: &mut Context) -> JsResult<JsObj
     Ok(peer)
 }
 
-pub(crate) fn secured(
-    target: &JsValue,
-    protocol: String,
-    alpn: Vec<u8>,
-    cipher: String,
-    cert: Vec<u8>,
-    cx: &mut Context,
-) -> JsResult<()> {
-    tcp::put(target, "authorized", true, cx)?;
+#[derive(Debug)]
+pub(crate) struct SessionInfo {
+    pub protocol: String,
+    pub alpn: Vec<u8>,
+    pub cipher: String,
+    pub cert: Vec<u8>,
+    pub authorized: bool,
+    pub authorization_error: Option<String>,
+}
+pub(crate) fn secured(target: &JsValue, info: SessionInfo, cx: &mut Context) -> JsResult<()> {
+    let SessionInfo {
+        protocol,
+        alpn,
+        cipher,
+        cert,
+        authorized,
+        authorization_error,
+    } = info;
+    tcp::put(target, "authorized", authorized, cx)?;
+    tcp::put(
+        target,
+        "authorizationError",
+        authorization_error
+            .as_deref()
+            .map(js_text)
+            .unwrap_or_else(JsValue::undefined),
+        cx,
+    )?;
     tcp::put(
         target,
         "alpnProtocol",
@@ -594,22 +908,38 @@ pub(crate) fn secured(
     )?;
     tcp::put(target, "__tlsProtocol", js_text(&protocol), cx)?;
     let c = object(cx);
-    c.set(js_string!("name"), js_text(&cipher), false, cx)?;
-    c.set(js_string!("standardName"), js_text(&cipher), false, cx)?;
+    let (name, standard) = cipher_names(&cipher);
+    c.set(js_string!("name"), js_text(name), false, cx)?;
+    c.set(js_string!("standardName"), js_text(standard), false, cx)?;
     c.set(js_string!("version"), js_text(&protocol), false, cx)?;
     tcp::put(target, "__tlsCipher", c, cx)?;
     let peer = peer_certificate(&cert, cx)?;
     tcp::put(target, "__tlsCertificate", peer.clone(), cx)?;
     let check = get(target, "__tlsIdentity", cx)?;
-    if check.is_callable() {
-        let host = get(target, "__networkHost", cx)?;
-        let result = crate::call(cx, &check, &JsValue::undefined(), &[host, peer.into()])?;
+    if check.is_callable() && authorization_error.is_none() {
+        let host = get(target, "__tlsIdentityHost", cx)?;
+        let result = match crate::call(cx, &check, &JsValue::undefined(), &[host, peer.into()]) {
+            Ok(result) => result,
+            Err(error) => error.into_opaque(cx)?,
+        };
         if result.is_object() {
-            invoke(target, "destroy", &[result], cx)?;
-            return Ok(());
+            tcp::put(target, "authorized", false, cx)?;
+            let options = get(target, "__tlsOptions", cx)?;
+            if !get(&options, "rejectUnauthorized", cx)?.strict_equals(&false.into()) {
+                invoke(target, "destroy", &[result], cx)?;
+                return Ok(());
+            }
+            tcp::put(target, "authorizationError", get(&result, "code", cx)?, cx)?;
         }
     }
+    super::send(cx, Command::TlsAuthorize(super::id(target, cx)?));
+    tcp::emit(target, "secure", &[], cx)?;
     if get(target, "__tlsServer", cx)?.to_boolean() {
+        let failed = get(target, "__tlsHandshakeError", cx)?;
+        if failed.is_callable() {
+            invoke(target, "removeListener", &[js_text("error"), failed], cx)?;
+        }
+        tcp::put(target, "__tlsHandshakeError", JsValue::undefined(), cx)?;
         let server = get(target, "server", cx)?;
         tcp::emit(&server, "secureConnection", &[target.clone()], cx)?;
     } else {

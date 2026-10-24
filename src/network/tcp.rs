@@ -5,8 +5,8 @@ use super::{
     reactor::{Command, Event},
 };
 use crate::native::{
-    ClassSpec, arg, array, class, closure, coded_error_value, function, get, hidden, invoke,
-    js_text, object, text_of,
+    ClassSpec, arg, array, class, closure, coded_error_value, get, hidden, invoke, js_text, object,
+    text_of,
 };
 use boa_engine::{
     Context, JsData, JsObject, JsResult, JsString, JsValue, js_string,
@@ -30,13 +30,13 @@ impl boa_gc::Finalize for Handle {
 
 pub(crate) fn attach(target: &JsObject, cx: &mut Context) -> JsResult<Id> {
     let id = super::register(target, cx)?;
-    if let Some(sender) = crate::shared(cx)
+    let sender = crate::shared(cx)
         .network
         .borrow()
         .reactor
         .as_ref()
-        .map(|r| r.sender.clone())
-    {
+        .map(|r| r.sender.clone());
+    if let Some(sender) = sender {
         let handle = JsObject::from_proto_and_data(None, Handle { id, sender });
         hidden(target, js_string!("__networkHandle"), handle, cx)?;
     }
@@ -193,9 +193,22 @@ pub(crate) fn connect(this: &JsValue, args: &[JsValue], cx: &mut Context) -> JsR
     let target = this
         .as_object()
         .ok_or_else(|| crate::native::type_error("Socket"))?;
+    let tls = if get(this, "encrypted", cx)?.to_boolean() {
+        Some(super::tls::options(
+            &get(this, "__tlsOptions", cx)?,
+            &host,
+            cx,
+        )?)
+    } else {
+        None
+    };
     let id = attach(&target, cx)?;
     put(this, "connecting", true, cx)?;
     put(this, "__networkHost", js_text(&host), cx)?;
+    if let Some(config) = tls {
+        put(this, "__tlsIdentityHost", js_text(&config.host), cx)?;
+        super::send(cx, Command::TlsClient(id, config));
+    }
     super::send(cx, Command::Connect(id, host, port, family));
     let timeout = get(this, "timeout", cx)?.as_number().unwrap_or(0.) as u64;
     if timeout != 0 {
@@ -225,9 +238,11 @@ pub(crate) const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("_final", 1, |this, args, cx| {
         let id = super::id(this, cx)?;
-        super::send(cx, Command::End(id));
         let cb = arg(args, 0);
-        if cb.is_callable() {
+        if id != 0 {
+            put(this, "__networkFinalCallback", cb, cx)?;
+            super::send(cx, Command::End(id));
+        } else if cb.is_callable() {
             crate::call(cx, &cb, &JsValue::undefined(), &[])?;
         }
         Ok(JsValue::undefined())
@@ -317,6 +332,18 @@ pub(crate) fn init_server(target: &JsObject, args: &[JsValue], cx: &mut Context)
     }
     Ok(())
 }
+fn finish_server_close(server: &JsValue, cx: &mut Context) -> JsResult<()> {
+    let connections = get(server, "__networkConnections", cx)?;
+    if get(server, "__networkClosing", cx)?.to_boolean()
+        && get(server, "__networkListenerClosed", cx)?.to_boolean()
+        && !get(server, "__networkCloseEmitted", cx)?.to_boolean()
+        && get(&connections, "length", cx)?.as_number() == Some(0.)
+    {
+        put(server, "__networkCloseEmitted", true, cx)?;
+        emit(server, "close", &[], cx)?;
+    }
+    Ok(())
+}
 pub(crate) const SERVER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("listen", 3, |this, args, cx| {
         let Some((host, port, _)) = endpoint(args, true, cx)? else {
@@ -348,8 +375,42 @@ pub(crate) const SERVER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
             invoke(this, "once", &[js_text("listening"), cb.clone()], cx)?;
         }
         if let (Some(target), Some(ip)) = (this.as_object(), ip) {
+            let options = arg(args, 0);
+            let backlog = if options.is_object() {
+                get(&options, "backlog", cx)?
+            } else {
+                arg(args, 2)
+            };
+            let backlog = if backlog.is_number() {
+                backlog.to_number(cx)?
+            } else {
+                511.
+            };
+            if !backlog.is_finite()
+                || backlog.fract() != 0.
+                || backlog < 0.
+                || backlog > i32::MAX as f64
+            {
+                return Err(crate::native::coded_error(
+                    cx,
+                    "Invalid listen backlog",
+                    "ERR_OUT_OF_RANGE",
+                ));
+            }
+            let ipv6_only = get(&options, "ipv6Only", cx)?.to_boolean();
+            put(this, "__networkClosing", false, cx)?;
+            put(this, "__networkListenerClosed", false, cx)?;
+            put(this, "__networkCloseEmitted", false, cx)?;
             let id = attach(&target, cx)?;
-            super::send(cx, Command::Listen(id, SocketAddr::new(ip, port)));
+            super::send(
+                cx,
+                Command::Listen(
+                    id,
+                    SocketAddr::new(ip, port),
+                    if backlog == 0. { 511 } else { backlog as i32 },
+                    ipv6_only,
+                ),
+            );
         }
         Ok(this.clone())
     }),
@@ -459,9 +520,7 @@ pub(crate) fn endpoints(
 pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context) -> JsResult<()> {
     let this: JsValue = target.clone().into();
     match event {
-        Event::Secure(protocol, alpn, cipher, cert) => {
-            super::tls::secured(&this, protocol, alpn, cipher, cert, cx)?
-        }
+        Event::Secure(info) => super::tls::secured(&this, info, cx)?,
         Event::Dns(result) => super::dns::deliver(id, result, cx)?,
         Event::Connected(local, peer) => {
             endpoints(&this, local, peer, cx)?;
@@ -515,11 +574,7 @@ pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context)
                     let connections = get(server, "__networkConnections", cx)?;
                     let index = invoke(&connections, "indexOf", &[socket.clone()], cx)?;
                     invoke(&connections, "splice", &[index, 1.into()], cx)?;
-                    if get(server, "__networkClosing", cx)?.to_boolean()
-                        && get(&connections, "length", cx)?.as_number() == Some(0.)
-                    {
-                        emit(server, "close", &[], cx)?;
-                    }
+                    finish_server_close(server, cx)?;
                     Ok(JsValue::undefined())
                 },
                 (this.clone(), socket_value.clone()),
@@ -550,27 +605,47 @@ pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context)
                 crate::call(cx, &callback, &JsValue::undefined(), &[])?;
             }
         }
+        Event::Finished => {
+            let callback = get(&this, "__networkFinalCallback", cx)?;
+            put(&this, "__networkFinalCallback", JsValue::undefined(), cx)?;
+            if callback.is_callable() {
+                crate::call(cx, &callback, &JsValue::undefined(), &[])?;
+            }
+        }
         Event::End => {
             invoke(&this, "push", &[JsValue::null()], cx)?;
+            // net.Socket observes an empty EOF even without a data listener. Generic Readable
+            // waits for read(); explicitly observe zero bytes without consuming paused buffers.
+            if get(&this, "readableLength", cx)?.as_number() == Some(0.) {
+                invoke(&this, "read", &[0.into()], cx)?;
+            }
         }
         Event::Closed => {
             crate::shared(cx).network.borrow_mut().targets.remove(&id);
-            if get(&this, "__networkClosing", cx)?.to_boolean() {
-                let list = get(&this, "__networkConnections", cx)?;
-                if get(&list, "length", cx)?.as_number() == Some(0.) {
-                    emit(&this, "close", &[], cx)?;
-                }
+            let list = get(&this, "__networkConnections", cx)?;
+            if list.is_object() {
+                put(&this, "listening", false, cx)?;
+                put(&this, "__networkClosing", true, cx)?;
+                put(&this, "__networkListenerClosed", true, cx)?;
+                put(&this, "__networkAddress", JsValue::undefined(), cx)?;
+                finish_server_close(&this, cx)?;
             } else if !get(&this, "destroyed", cx)?.to_boolean() {
                 invoke(&this, "destroy", &[], cx)?;
             }
         }
         Event::Timeout => emit(&this, "timeout", &[], cx)?,
-        Event::Datagram(..) | Event::DatagramSent(..) | Event::DatagramConnected(..) => {}
+        Event::Datagram(..)
+        | Event::DatagramSent(..)
+        | Event::DatagramConnected(..)
+        | Event::DatagramBuffers(..) => {}
         Event::Error(code, message) => {
             let error = coded_error_value(cx, &format!("{code}: {message}"), &code);
             if get(&this, "_readableState", cx)?.is_object() {
                 invoke(&this, "destroy", &[error], cx)?;
             } else {
+                if !get(&this, "listening", cx)?.to_boolean() {
+                    crate::shared(cx).network.borrow_mut().targets.remove(&id);
+                }
                 emit(&this, "error", &[error], cx)?;
             }
         }

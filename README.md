@@ -98,15 +98,20 @@ A JavaScript runtime for live plugins, in Rust.
   PEM `ca`/`cert`/`key`, `secureContext`, SNI and named server contexts, ALPN, TLS 1.2/1.3
   bounds, cipher selection, client-certificate requests, `rejectUnauthorized`, the JavaScript
   identity hook, and peer certificate metadata. Trust-store loading and handshakes stay off
-  the realm thread. Legacy TLS versions and OpenSSL engine/session options are not available.
+  the realm thread. PEM private keys must be unencrypted; PFX, key passphrases, legacy TLS
+  versions and OpenSSL engine/session options are not available. Cipher lists accept the
+  rustls/IANA names and the supported suites' OpenSSL aliases, not arbitrary OpenSSL expressions.
 - `http`/`https`: streaming HTTP/1.1 clients and servers over those sockets, Writable
   `ClientRequest`/`ServerResponse`, Readable `IncomingMessage`, consumed-response keepalive
   pooling, chunked bodies and trailers, `rawHeaders`/`headersDistinct`, Node's duplicate-header
   merging, upgrades, and explicit all/idle connection closure. Redirects are returned, never
-  automatically followed. Host-provided `fetch` is unchanged.
+  automatically followed. Idle pool limits are enforced; active `maxSockets`/`maxTotalSockets`
+  request scheduling is not implemented. Host-provided `fetch` is unchanged.
 - `dgram`: IPv4/IPv6 UDP sockets, explicit bind and implicit outbound bindings, connected
   peers, Buffer/string/sliced sends, message metadata, multicast and socket options. Listening
   needs its own capability; an outbound-only binding accepts replies only from contacted peers.
+  Buffer-size getters expose kernel snapshots delivered on host beats; option setters are
+  applied by the reactor, not synchronously by the realm.
 - `http2`, `cluster`, `child_process` and `node:sqlite` load
   with their classes and constants. Process execution, cluster and IPC sockets remain denied.
   Without network capabilities, the original network refusal errors are preserved.
@@ -142,8 +147,12 @@ answering without being waited for, stopped from outside, and failing alone.
 repository (`../obsidian-corpus/plugins`, or `RUNTIME_X_CORPUS`), the host's own modules stood
 in for.
 
-`tests/network.rs` has frozen Node 22 observations, loopback TCP/TLS/HTTP/UDP tests, and
-explicitly ignored 100 MB backpressure and 1000-connection acceptance cases. Real npm fixtures
+`tests/network.rs` has frozen Node 22.21.1 observations for the Node 22.20 API target,
+loopback TCP/TLS/HTTP/HTTPS/UDP and deterministic DNS record tests, optional live Node
+cross-peer checks (`RUNTIME_X_NETWORK_NODE` selects the executable), and explicitly ignored
+100 MB backpressure and 1000-live-connection acceptance cases. The latter bounds pending
+handshakes to avoid OS SYN-burst limits while retaining all 1000 established connections.
+Real npm fixtures
 pin `ws` 8.18.3, `axios` 1.12.2, `node-fetch` 2.7.0 and `express` 4.21.2 with their transitive
 tarballs. Prepare them outside the checkout with `node tests/fixtures/network/prepare.cjs
 <absolute-scratch-directory>`, set `RUNTIME_X_NETWORK_NPM` to that directory, then include the

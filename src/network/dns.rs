@@ -1,9 +1,6 @@
 //! System getaddrinfo and DNS records run on the reactor's fixed resolver pool, never on the
 //! JavaScript thread. Unsupported record types fail with ENOSYS rather than fabricated data.
-use super::{
-    Id,
-    reactor::{Command, Event},
-};
+use super::{Id, reactor::Command};
 use crate::native::{
     arg, array, closure, coded_error_value, get, invoke, js_text, object, text_of,
 };
@@ -19,6 +16,7 @@ pub(crate) struct Query {
     pub kind: String,
     pub family: u8,
     pub servers: Vec<SocketAddr>,
+    pub ttl: bool,
 }
 #[derive(Debug)]
 pub(crate) enum Answer {
@@ -39,7 +37,7 @@ pub(crate) struct Pending {
     promise: bool,
     host: String,
     kind: String,
-    ttl: bool,
+    order: String,
 }
 
 pub(crate) fn resolve(query: Query) -> Result<Answer, String> {
@@ -70,6 +68,9 @@ pub(crate) fn resolve(query: Query) -> Result<Answer, String> {
         }
         return Ok(Answer::Lookup(addresses));
     }
+    if !["resolve4", "resolve6", "resolveTxt", "resolveSrv"].contains(&query.kind.as_str()) {
+        return Err("ENOSYS".into());
+    }
     use hickory_resolver::{
         Resolver,
         config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts},
@@ -85,6 +86,27 @@ pub(crate) fn resolve(query: Query) -> Result<Answer, String> {
     }
     .map_err(|_| "ESERVFAIL".to_owned())?;
     let failed = |_| "ENOTFOUND".to_owned();
+    if query.ttl && ["resolve4", "resolve6"].contains(&query.kind.as_str()) {
+        use hickory_resolver::proto::rr::{RData, RecordType};
+        let kind = if query.kind == "resolve4" {
+            RecordType::A
+        } else {
+            RecordType::AAAA
+        };
+        let lookup = resolver.lookup(query.host, kind).map_err(failed)?;
+        let records = lookup
+            .record_iter()
+            .filter_map(|record| {
+                let address = match record.data()? {
+                    RData::A(ip) => ip.to_string(),
+                    RData::AAAA(ip) => ip.to_string(),
+                    _ => return None,
+                };
+                Some(serde_json::json!({"address":address,"ttl":record.ttl()}))
+            })
+            .collect::<Vec<_>>();
+        return Ok(Answer::Records(serde_json::json!(records)));
+    }
     let value = match query.kind.as_str() {
         "resolve4" => serde_json::json!(resolver.ipv4_lookup(query.host).map_err(failed)?.iter().map(|ip| ip.to_string()).collect::<Vec<_>>()),
         "resolve6" => serde_json::json!(resolver.ipv6_lookup(query.host).map_err(failed)?.iter().map(|ip| ip.to_string()).collect::<Vec<_>>()),
@@ -98,24 +120,29 @@ pub(crate) fn resolve(query: Query) -> Result<Answer, String> {
 fn start(args: &[JsValue], kind: &str, promise: bool, cx: &mut Context) -> JsResult<JsValue> {
     let host = text_of(&arg(args, 0), cx)?;
     let options = arg(args, 1);
-    let family = if options.is_number() {
-        options.to_number(cx)? as u8
+    let granted = crate::shared(cx).network.borrow().permissions.dns;
+    if !granted {
+        return crate::sockets::denied_dns(args, kind, promise, cx);
+    }
+    // Only lookup takes a family. In lookupService the numeric argument is a port;
+    // unsupported record APIs must reach their asynchronous ENOSYS result instead.
+    let family = if kind != "lookup" {
+        0.
+    } else if options.is_number() {
+        options.to_number(cx)?
     } else {
-        get(&options, "family", cx)?.as_number().unwrap_or(0.) as u8
+        get(&options, "family", cx)?.as_number().unwrap_or(0.)
     };
-    if ![0, 4, 6].contains(&family) {
+    if ![0., 4., 6.].contains(&family) {
         return Err(crate::native::coded_error(
             cx,
             "The property 'options.family' must be one of: 0, 4, 6. Received invalid family",
             "ERR_INVALID_ARG_VALUE",
         ));
     }
+    let family = family as u8;
     let all = get(&options, "all", cx)?.to_boolean();
     let ttl = get(&options, "ttl", cx)?.to_boolean();
-    let granted = crate::shared(cx).network.borrow().permissions.dns;
-    if !granted {
-        return crate::sockets::denied_dns(args, kind, promise, cx);
-    }
     let (result, callback, reject) = if promise {
         let (p, r) = JsPromise::new_pending(cx);
         (p.into(), r.resolve.into(), r.reject.into())
@@ -136,6 +163,21 @@ fn start(args: &[JsValue], kind: &str, promise: bool, cx: &mut Context) -> JsRes
     let id = super::register(&marker, cx)?;
     let servers = crate::shared(cx).network.borrow().dns.servers.clone();
     crate::shared(cx).network.borrow_mut().targets.remove(&id);
+    let requested_order = get(&options, "order", cx)?;
+    let order = if !requested_order.is_undefined() {
+        text_of(&requested_order, cx)?
+    } else if get(&options, "verbatim", cx)?.strict_equals(&false.into()) {
+        "ipv4first".into()
+    } else {
+        crate::shared(cx).network.borrow().dns.order.clone()
+    };
+    if !["", "verbatim", "ipv4first", "ipv6first"].contains(&order.as_str()) {
+        return Err(crate::native::coded_error(
+            cx,
+            "Invalid DNS result order",
+            "ERR_INVALID_ARG_VALUE",
+        ));
+    }
     crate::shared(cx).network.borrow_mut().dns.pending.insert(
         id,
         Pending {
@@ -145,7 +187,7 @@ fn start(args: &[JsValue], kind: &str, promise: bool, cx: &mut Context) -> JsRes
             promise,
             host: host.clone(),
             kind: kind.into(),
-            ttl,
+            order,
         },
     );
     super::send(
@@ -157,6 +199,7 @@ fn start(args: &[JsValue], kind: &str, promise: bool, cx: &mut Context) -> JsRes
                 kind: kind.into(),
                 family,
                 servers,
+                ttl,
             },
         ),
     );
@@ -193,7 +236,9 @@ pub(crate) fn install(module: &JsObject, promises: bool, cx: &mut Context) -> Js
                         "AAAA" => "resolve6",
                         "TXT" => "resolveTxt",
                         "SRV" => "resolveSrv",
-                        _ => "resolve4",
+                        "A" | "undefined" => "resolve4",
+                        _ if arg(args, 1).is_callable() => "resolve4",
+                        _ => "unsupported",
                     }
                     .into();
                 }
@@ -238,6 +283,37 @@ pub(crate) fn install(module: &JsObject, promises: bool, cx: &mut Context) -> Js
         Ok(array(cx, values))
     });
     module.set(js_string!("getServers"), get_servers, false, cx)?;
+    let set_order = crate::native::function(cx, "setDefaultResultOrder", 1, |_, args, cx| {
+        let order = text_of(&arg(args, 0), cx)?;
+        if !["verbatim", "ipv4first", "ipv6first"].contains(&order.as_str()) {
+            return Err(crate::native::coded_error(
+                cx,
+                "Invalid DNS result order",
+                "ERR_INVALID_ARG_VALUE",
+            ));
+        }
+        crate::shared(cx).network.borrow_mut().dns.order = order;
+        Ok(JsValue::undefined())
+    });
+    module.set(js_string!("setDefaultResultOrder"), set_order, false, cx)?;
+    let get_order = crate::native::function(cx, "getDefaultResultOrder", 0, |_, _, cx| {
+        let order = crate::shared(cx).network.borrow().dns.order.clone();
+        Ok(js_text(if order.is_empty() { "verbatim" } else { &order }))
+    });
+    module.set(js_string!("getDefaultResultOrder"), get_order, false, cx)?;
+    if let Some(resolver) = get(&module.clone().into(), "Resolver", cx)?.as_object() {
+        if let Some(proto) = resolver.get(js_string!("prototype"), cx)?.as_object() {
+            for key in module.own_property_keys(cx)? {
+                let name = key.to_string();
+                if name.starts_with("resolve")
+                    || ["reverse", "setServers", "getServers"].contains(&name.as_str())
+                {
+                    let value = module.get(key.clone(), cx)?;
+                    proto.set(key, value, false, cx)?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -255,7 +331,7 @@ pub(crate) fn deliver(id: Id, result: Result<Answer, String>, cx: &mut Context) 
     let outcome = match result {
         Ok(Answer::Connect(_)) => return Ok(()),
         Ok(Answer::Lookup(mut addresses)) => {
-            let order = crate::shared(cx).network.borrow().dns.order.clone();
+            let order = p.order.as_str();
             if order == "ipv4first" {
                 addresses.sort_by_key(|a| a.1);
             }
@@ -281,12 +357,7 @@ pub(crate) fn deliver(id: Id, result: Result<Answer, String>, cx: &mut Context) 
         Ok(Answer::Records(value)) => {
             let json = cx.global_object().get(js_string!("JSON"), cx)?;
             let value = invoke(&json, "parse", &[js_text(&value.to_string())], cx)?;
-            if p.ttl && (p.kind == "resolve4" || p.kind == "resolve6") {
-                // TTL is supplied by record lookups below, not synthesized by getaddrinfo.
-                Ok(value)
-            } else {
-                Ok(value)
-            }
+            Ok(value)
         }
         Err(code) => {
             let syscall = if p.kind == "lookup" {
@@ -323,7 +394,4 @@ pub(crate) fn deliver(id: Id, result: Result<Answer, String>, cx: &mut Context) 
         }
     }
     Ok(())
-}
-pub(crate) fn poll(_: &mut Context, _: Option<std::time::Instant>) -> usize {
-    0
 }

@@ -20,7 +20,7 @@ use std::{
 pub(crate) type Id = u64;
 pub(crate) enum Command {
     Connect(Id, String, u16, u8),
-    Listen(Id, SocketAddr),
+    Listen(Id, SocketAddr, i32, bool),
     Accept(Id),
     Adopt(Id, Id),
     Read(Id, bool),
@@ -34,6 +34,7 @@ pub(crate) enum Command {
     DnsResult(Id, Result<super::dns::Answer, String>),
     TlsClient(Id, super::tls::Options),
     TlsServer(Id, super::tls::Options),
+    TlsAuthorize(Id),
     UdpBind(Id, SocketAddr, bool),
     UdpSend(Id, Id, String, u16, Vec<u8>),
     UdpConnect(Id, Id, String, u16),
@@ -47,14 +48,16 @@ pub(crate) enum Event {
     Accepted(Id, SocketAddr, SocketAddr),
     Data(Vec<u8>),
     Written(usize),
+    Finished,
     End,
     Closed,
     Timeout,
-    Secure(String, Vec<u8>, String, Vec<u8>),
+    Secure(super::tls::SessionInfo),
     Dns(Result<super::dns::Answer, String>),
     Datagram(Vec<u8>, SocketAddr),
     DatagramSent(Id, Result<usize, String>),
     DatagramConnected(SocketAddr, SocketAddr),
+    DatagramBuffers(usize, usize),
     Error(String, String),
 }
 
@@ -117,7 +120,7 @@ pub(crate) struct Reactor {
     pub counters: Arc<Counters>,
 }
 impl Reactor {
-    pub fn new() -> io::Result<Self> {
+    pub fn new(permissions: super::Permissions) -> io::Result<Self> {
         let poll = Poll::new()?;
         let wake = Arc::new(Waker::new(poll.registry(), Token(0))?);
         let (tx, commands) = mpsc::channel();
@@ -162,7 +165,7 @@ impl Reactor {
             .spawn(move || {
                 let counters = out.counters.clone();
                 let _count = ThreadCount::new(&counters.reactor_threads);
-                run(poll, commands, out, dns_tx);
+                run(poll, commands, out, dns_tx, permissions);
             })?;
         Ok(Self {
             events,
@@ -195,7 +198,11 @@ struct Connection {
     tls: Option<rustls::Connection>,
     secured: bool,
     tls_written: Option<usize>,
+    finishing: bool,
     failed: bool,
+    tls_permitted: bool,
+    tls_server: bool,
+    tls_verification: Arc<Mutex<Option<String>>>,
 }
 impl Connection {
     fn new(socket: TcpStream, connecting: bool) -> Self {
@@ -213,7 +220,11 @@ impl Connection {
             tls: None,
             secured: false,
             tls_written: None,
+            finishing: false,
             failed: false,
+            tls_permitted: false,
+            tls_server: false,
+            tls_verification: Arc::default(),
         }
     }
     fn interest(&self) -> Option<Interest> {
@@ -221,9 +232,10 @@ impl Connection {
             return None;
         }
         match (
-            (self.credit && !self.ended) || self.tls.as_ref().is_some_and(|t| t.is_handshaking()),
+            (self.credit && !self.ended && (self.tls.is_none() || self.tls_permitted))
+                || self.tls.as_ref().is_some_and(|t| t.is_handshaking()),
             self.connecting
-                || !self.writes.is_empty()
+                || (!self.writes.is_empty() && (self.tls.is_none() || self.tls_permitted))
                 || self.tls.as_ref().is_some_and(|t| t.wants_write()),
         ) {
             (true, true) => Some(Interest::READABLE | Interest::WRITABLE),
@@ -283,13 +295,46 @@ fn code(error: &io::Error) -> &'static str {
     }
 }
 fn error(out: &Output, id: Id, e: io::Error) {
-    let _ = out.send((id, Event::Error(code(&e).into(), e.to_string())));
+    let message = e.to_string();
+    let tls_code = message
+        .split_once(": ")
+        .map(|(code, _)| code)
+        .filter(|code| {
+            code.starts_with("ERR_TLS_")
+                || code.starts_with("ERR_SSL_")
+                || code.starts_with("CERT_")
+                || code.starts_with("UNABLE_TO_")
+                || code.starts_with("DEPTH_ZERO_")
+                || code.starts_with("SELF_SIGNED_")
+        });
+    let _ = out.send((
+        id,
+        Event::Error(tls_code.unwrap_or_else(|| code(&e)).into(), message),
+    ));
+}
+fn bind_listener(address: SocketAddr, backlog: i32, ipv6_only: bool) -> io::Result<TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(address),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    #[cfg(not(windows))]
+    socket.set_reuse_address(true)?;
+    if address.is_ipv6() {
+        socket.set_only_v6(ipv6_only)?;
+    }
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    socket.listen(backlog)?;
+    let socket: std::net::TcpListener = socket.into();
+    Ok(TcpListener::from_std(socket))
 }
 fn run(
     mut poll: Poll,
     commands: mpsc::Receiver<Command>,
     out: Output,
     dns: mpsc::SyncSender<(Id, super::dns::Query)>,
+    permissions: super::Permissions,
 ) {
     let mut sockets: HashMap<Id, Connection> = HashMap::new();
     let mut tls_options = HashMap::new();
@@ -297,10 +342,13 @@ fn run(
     let mut udp_jobs: HashMap<Id, UdpJob> = HashMap::new();
     let mut listeners: HashMap<Id, Listener> = HashMap::new();
     let mut pending = HashMap::new();
-    let mut accepted: HashMap<Id, TcpStream> = HashMap::new();
+    let mut accepted: HashMap<Id, (Id, TcpStream)> = HashMap::new();
     let mut accept_id = 1_u64 << 52;
     let mut events = Events::with_capacity(1024);
     loop {
+        if out.counters.stopped.load(Ordering::Acquire) {
+            return;
+        }
         out.counters.open_sockets.store(
             sockets.len() + datagrams.len() + listeners.len() + accepted.len(),
             Ordering::Relaxed,
@@ -312,32 +360,56 @@ fn run(
                 Err(mpsc::TryRecvError::Disconnected) => return,
             };
             match command {
+                Command::TlsAuthorize(id) => {
+                    if let Some(socket) = sockets.get_mut(&id) {
+                        socket.tls_permitted = true;
+                    }
+                }
                 Command::TlsClient(id, options) => {
                     tls_options.insert(id, (options, false));
                 }
                 Command::TlsServer(id, options) => {
                     tls_options.insert(id, (options, true));
                 }
-                Command::UdpBind(id, address, inbound) => match UdpSocket::bind(address) {
-                    Ok(socket) => {
-                        if let Ok(local) = socket.local_addr() {
-                            let _ = out.send((id, Event::Listening(local)));
-                        }
-                        datagrams.insert(
-                            id,
-                            Datagram {
-                                socket,
-                                registered: false,
-                                credit: true,
-                                inbound,
-                                peers: std::collections::HashSet::new(),
-                                writes: VecDeque::new(),
-                            },
-                        );
+                Command::UdpBind(id, address, inbound) => {
+                    if inbound && !permissions.allows_listen(address.ip()) {
+                        let _ =
+                            out.send((id, Event::Error("EACCES".into(), "listen EACCES".into())));
+                        continue;
                     }
-                    Err(e) => error(&out, id, e),
-                },
+                    match UdpSocket::bind(address) {
+                        Ok(socket) => {
+                            udp_buffers(&out, id, &socket);
+                            if let Ok(local) = socket.local_addr() {
+                                let _ = out.send((id, Event::Listening(local)));
+                            }
+                            datagrams.insert(
+                                id,
+                                Datagram {
+                                    socket,
+                                    registered: false,
+                                    credit: true,
+                                    inbound,
+                                    peers: std::collections::HashSet::new(),
+                                    writes: VecDeque::new(),
+                                },
+                            );
+                        }
+                        Err(e) => error(&out, id, e),
+                    }
+                }
                 Command::UdpSend(id, request, host, port, bytes) => {
+                    // A connected peer is an OS-owned address, not the mutable JS metadata.
+                    if let Some(peer) = datagrams.get(&id).and_then(|d| d.socket.peer_addr().ok()) {
+                        if let Some(d) = datagrams.get_mut(&id) {
+                            d.writes.push_back((request, peer, bytes));
+                        }
+                        continue;
+                    }
+                    if !permissions.allows_outbound(&host, port) {
+                        let _ = out.send((id, Event::DatagramSent(request, Err("EACCES".into()))));
+                        continue;
+                    }
                     if let Ok(ip) = host.parse::<IpAddr>() {
                         if let Some(d) = datagrams.get_mut(&id) {
                             let address = SocketAddr::new(ip, port);
@@ -365,6 +437,7 @@ fn run(
                                     kind: format!("connect:{port}"),
                                     family,
                                     servers: Vec::new(),
+                                    ttl: false,
                                 },
                             ))
                             .is_err()
@@ -376,6 +449,11 @@ fn run(
                     }
                 }
                 Command::UdpConnect(id, request, host, port) => {
+                    if !permissions.allows_outbound(&host, port) {
+                        let _ =
+                            out.send((id, Event::Error("EACCES".into(), "connect EACCES".into())));
+                        continue;
+                    }
                     udp_jobs.insert(
                         request,
                         UdpJob {
@@ -396,6 +474,7 @@ fn run(
                                 kind: format!("connect:{port}"),
                                 family,
                                 servers: Vec::new(),
+                                ttl: false,
                             },
                         ))
                         .is_err()
@@ -409,13 +488,19 @@ fn run(
                 }
                 Command::UdpOption(id, name, value, extra) => {
                     if let Some(d) = datagrams.get_mut(&id) {
-                        if let Err(e) = udp_option(&d.socket, &name, &value, &extra) {
-                            error(&out, id, e);
+                        match udp_option(&d.socket, &name, &value, &extra) {
+                            Ok(()) => udp_buffers(&out, id, &d.socket),
+                            Err(e) => error(&out, id, e),
                         }
                     }
                 }
                 Command::Stop => return,
                 Command::Connect(id, host, port, family) => {
+                    if !permissions.allows_outbound(&host, port) {
+                        let _ =
+                            out.send((id, Event::Error("EACCES".into(), "connect EACCES".into())));
+                        continue;
+                    }
                     pending.insert(id, (false, VecDeque::new(), false, 0));
                     if let Ok(ip) = host.parse::<IpAddr>() {
                         let result = vec![SocketAddr::new(ip, port)];
@@ -428,6 +513,7 @@ fn run(
                                 kind: format!("connect:{port}"),
                                 family,
                                 servers: Vec::new(),
+                                ttl: false,
                             },
                         ))
                         .is_err()
@@ -440,6 +526,10 @@ fn run(
                     }
                 }
                 Command::Dns(id, query) => {
+                    if !permissions.dns {
+                        let _ = out.send((id, Event::Dns(Err("EACCES".into()))));
+                        continue;
+                    }
                     if dns.try_send((id, query)).is_err() {
                         let _ = out.send((id, Event::Dns(Err("EAI_AGAIN".into()))));
                     }
@@ -497,8 +587,13 @@ fn run(
                         let _ = out.send((id, Event::Dns(result)));
                     }
                 }
-                Command::Listen(id, address) => {
-                    match TcpListener::bind(address).and_then(|mut socket| {
+                Command::Listen(id, address, backlog, ipv6_only) => {
+                    if !permissions.allows_listen(address.ip()) {
+                        let _ =
+                            out.send((id, Event::Error("EACCES".into(), "listen EACCES".into())));
+                        continue;
+                    }
+                    match bind_listener(address, backlog, ipv6_only).and_then(|mut socket| {
                         let address = socket.local_addr()?;
                         poll.registry().register(
                             &mut socket,
@@ -533,7 +628,7 @@ fn run(
                     }
                 }
                 Command::Adopt(ticket, id) => {
-                    if let Some(socket) = accepted.remove(&ticket) {
+                    if let Some((_, socket)) = accepted.remove(&ticket) {
                         sockets.insert(id, Connection::new(socket, false));
                     }
                 }
@@ -610,6 +705,7 @@ fn run(
                     tls_options.remove(&id);
                     pending.remove(&id);
                     accepted.remove(&id);
+                    accepted.retain(|_, (listener, _)| *listener != id);
                     let _ = out.send((id, Event::Closed));
                 }
             }
@@ -661,6 +757,8 @@ fn run(
         }
         for (&id, c) in sockets.iter_mut() {
             if let Some((options, server)) = tls_options.remove(&id) {
+                c.tls_server = server;
+                c.tls_verification = options.verification.clone();
                 let result = if server {
                     super::tls::server(&options)
                 } else {
@@ -681,11 +779,18 @@ fn run(
                 let _ = c.register(&poll, id);
                 continue;
             }
-            if c.end && c.writes.is_empty() && c.tls_written.is_none() && !c.connecting {
+            if c.end
+                && c.writes.is_empty()
+                && c.tls_written.is_none()
+                && !c.connecting
+                && (c.tls.is_none() || c.tls_permitted)
+            {
                 if let Some(tls) = c.tls.as_mut() {
                     tls.send_close_notify();
+                    c.finishing = true;
                 } else {
                     let _ = c.socket.shutdown(Shutdown::Write);
+                    let _ = out.send((id, Event::Finished));
                 }
                 c.end = false;
             }
@@ -736,7 +841,7 @@ fn run(
                     Ok((socket, peer)) => {
                         if let Ok(local) = socket.local_addr() {
                             accept_id += 1;
-                            accepted.insert(accept_id, socket);
+                            accepted.insert(accept_id, (id, socket));
                             let _ = out.send((id, Event::Accepted(accept_id, local, peer)));
                             let _ = poll.registry().deregister(&mut l.socket);
                             l.registered = false;
@@ -761,15 +866,20 @@ fn run(
                             c.registered = false;
                             match TcpStream::connect(address) {
                                 Ok(socket) => c.socket = socket,
-                                Err(e) => error(&out, id, e),
+                                Err(e) => {
+                                    c.failed = true;
+                                    error(&out, id, e);
+                                }
                             }
                         } else {
                             c.connecting = false;
+                            c.failed = true;
                             error(&out, id, e);
                         }
                         continue;
                     }
                     Err(e) => {
+                        c.failed = true;
                         error(&out, id, e);
                         continue;
                     }
@@ -805,9 +915,15 @@ fn run(
                             }
                         }
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                        Err(e) => error(&out, id, e),
+                        Err(e) => {
+                            c.failed = true;
+                            error(&out, id, e);
+                        }
                     }
                 }
+            }
+            if c.failed {
+                continue;
             }
             if ready.is_readable() && c.credit && !c.ended {
                 let mut data = vec![0; 65536];
@@ -824,10 +940,19 @@ fn run(
                         let _ = out.send((id, Event::Data(data)));
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(e) => error(&out, id, e),
+                    Err(e) => {
+                        c.failed = true;
+                        error(&out, id, e);
+                    }
                 }
             }
         }
+    }
+}
+fn udp_buffers(out: &Output, id: Id, socket: &UdpSocket) {
+    let socket = socket2::SockRef::from(socket);
+    if let (Ok(recv), Ok(send)) = (socket.recv_buffer_size(), socket.send_buffer_size()) {
+        let _ = out.send((id, Event::DatagramBuffers(recv, send)));
     }
 }
 fn udp_option(socket: &UdpSocket, name: &str, value: &str, extra: &str) -> io::Result<()> {
@@ -914,14 +1039,30 @@ fn tls_step(c: &mut Connection, id: Id, readable: bool, out: &Output) -> io::Res
     let Some(tls) = c.tls.as_mut() else {
         return Ok(());
     };
-    if readable && (c.credit || tls.is_handshaking()) && !c.ended {
+    if readable && ((c.credit && c.tls_permitted) || tls.is_handshaking()) && !c.ended {
         match tls.read_tls(&mut c.socket) {
             Ok(0) => {
+                if tls.is_handshaking() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "TLS peer closed during handshake",
+                    ));
+                }
                 c.ended = true;
-                let _ = out.send((id, Event::End));
+                // Drain any buffered plaintext before publishing EOF below.
             }
             Ok(_) => {
-                let state = tls.process_new_packets().map_err(io::Error::other)?;
+                let state = tls.process_new_packets().map_err(|error| {
+                    let saved = c
+                        .tls_verification
+                        .lock()
+                        .ok()
+                        .and_then(|saved| saved.clone());
+                    let code = saved
+                        .as_deref()
+                        .unwrap_or_else(|| super::tls::certificate_code(&error));
+                    io::Error::other(format!("{code}: {error}"))
+                })?;
                 if state.peer_has_closed() {
                     c.ended = true;
                 }
@@ -948,9 +1089,25 @@ fn tls_step(c: &mut Connection, id: Id, readable: bool, out: &Output) -> io::Res
             .and_then(|v| v.first())
             .map(|v| v.as_ref().to_vec())
             .unwrap_or_default();
-        let _ = out.send((id, Event::Secure(protocol, alpn, cipher, cert)));
+        let verification = c
+            .tls_verification
+            .lock()
+            .ok()
+            .and_then(|error| error.clone());
+        let authorized = verification.is_none() && (!c.tls_server || !cert.is_empty());
+        let _ = out.send((
+            id,
+            Event::Secure(super::tls::SessionInfo {
+                protocol,
+                alpn,
+                cipher,
+                cert,
+                authorized,
+                authorization_error: verification,
+            }),
+        ));
     }
-    if c.secured && c.tls_written.is_none() {
+    if c.secured && c.tls_permitted && c.tls_written.is_none() {
         if let Some((bytes, offset)) = c.writes.front_mut() {
             match tls.writer().write(&bytes[*offset..]) {
                 Ok(n) => {
@@ -978,8 +1135,12 @@ fn tls_step(c: &mut Connection, id: Id, readable: bool, out: &Output) -> io::Res
         if let Some(n) = c.tls_written.take() {
             let _ = out.send((id, Event::Written(n)));
         }
+        if c.finishing {
+            c.finishing = false;
+            let _ = out.send((id, Event::Finished));
+        }
     }
-    if c.credit && c.secured {
+    if c.credit && c.secured && c.tls_permitted {
         let mut bytes = vec![0; 65536];
         match tls.reader().read(&mut bytes) {
             Ok(0) => {

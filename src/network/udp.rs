@@ -5,8 +5,8 @@ use super::{
     tcp::{self, emit, put},
 };
 use crate::native::{
-    ClassSpec, arg, array, class, closure, coded_error_value, function, get, hidden, invoke,
-    js_text, list_of, object, text_of,
+    ClassSpec, arg, class, closure, coded_error_value, function, get, hidden, invoke, js_text,
+    list_of, object, text_of,
 };
 use boa_engine::{
     Context, JsObject, JsResult, JsString, JsValue, js_string,
@@ -115,32 +115,35 @@ fn send(this: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue>
         crate::encoding::bytes_of(&input, cx)?.unwrap_or_else(|| crate::print(&input).into_bytes())
     };
     let connected = get(this, "__udpPeer", cx)?;
+    let offset_form = arg(args, 1).is_number()
+        && arg(args, 2).is_number()
+        && (connected.is_object() || arg(args, 3).is_number());
+    if offset_form {
+        let offset = arg(args, 1).to_number(cx)?;
+        let length = arg(args, 2).to_number(cx)?;
+        if !offset.is_finite()
+            || !length.is_finite()
+            || offset.fract() != 0.
+            || length.fract() != 0.
+            || offset < 0.
+            || length < 0.
+            || offset + length > bytes.len() as f64
+        {
+            return Err(crate::native::coded_error(
+                cx,
+                "Offset or length is outside the bounds of the Buffer",
+                "ERR_BUFFER_OUT_OF_BOUNDS",
+            ));
+        }
+        bytes = bytes[offset as usize..(offset + length) as usize].to_vec();
+    }
     let (port, host) = if connected.is_object() {
         (
             get(&connected, "port", cx)?.to_number(cx)? as u16,
             text_of(&get(&connected, "address", cx)?, cx)?,
         )
     } else {
-        let offset_form =
-            arg(args, 1).is_number() && arg(args, 2).is_number() && arg(args, 3).is_number();
         let (port, address) = if offset_form {
-            let offset = arg(args, 1).to_number(cx)?;
-            let length = arg(args, 2).to_number(cx)?;
-            if !offset.is_finite()
-                || !length.is_finite()
-                || offset.fract() != 0.
-                || length.fract() != 0.
-                || offset < 0.
-                || length < 0.
-                || offset + length > bytes.len() as f64
-            {
-                return Err(crate::native::coded_error(
-                    cx,
-                    "Offset or length is outside the bounds of the Buffer",
-                    "ERR_BUFFER_OUT_OF_BOUNDS",
-                ));
-            }
-            bytes = bytes[offset as usize..(offset + length) as usize].to_vec();
             (arg(args, 3), arg(args, 4))
         } else {
             (arg(args, 1), arg(args, 2))
@@ -165,12 +168,9 @@ fn send(this: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue>
         };
         (number as u16, host)
     };
-    let allowed = crate::shared(cx)
-        .network
-        .borrow()
-        .permissions
-        .allows_outbound(&host, port)
-        || connected.is_object();
+    let policy = crate::shared(cx).network.borrow().permissions.clone();
+    let allowed = policy.allows_outbound(&host, port)
+        || (connected.is_object() && !policy.outbound.is_empty());
     if !allowed {
         return denied(this, "send", args, cx);
     }
@@ -194,7 +194,7 @@ fn send(this: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue>
 }
 fn connect(this: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
     let port = arg(args, 0).to_number(cx)?;
-    if port <= 0. || port > 65535. || port.fract() != 0. {
+    if !port.is_finite() || port <= 0. || port > 65535. || port.fract() != 0. {
         return Err(crate::native::coded_error(
             cx,
             "Port should be > 0 and < 65536.",
@@ -402,7 +402,17 @@ pub(crate) fn install(module: &JsObject, cx: &mut Context) -> JsResult<()> {
             0,
             |this, _, key: &String, cx| {
                 let v = get(this, key, cx)?;
-                Ok(if v.is_undefined() { 65536.into() } else { v })
+                if v.is_undefined() {
+                    if super::id(this, cx)? == 0 {
+                        return Ok(65536.into());
+                    }
+                    return Err(crate::native::coded_error(
+                        cx,
+                        "Datagram socket is not bound",
+                        "ERR_SOCKET_BUFFER_SIZE",
+                    ));
+                }
+                Ok(v)
             },
             key.to_owned(),
         );
@@ -421,6 +431,10 @@ pub(crate) fn install(module: &JsObject, cx: &mut Context) -> JsResult<()> {
 pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context) -> JsResult<()> {
     let this: JsValue = target.clone().into();
     match event {
+        Event::DatagramBuffers(recv, send) => {
+            put(&this, "__udpRecvBuffer", recv as f64, cx)?;
+            put(&this, "__udpSendBuffer", send as f64, cx)?;
+        }
         Event::Listening(local) => {
             let address = tcp::address(local, cx)?;
             put(&this, "__networkAddress", address, cx)?;

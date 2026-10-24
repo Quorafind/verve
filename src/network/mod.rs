@@ -74,6 +74,7 @@ pub(crate) struct State {
     // WeakRef objects, not the sockets themselves. Dropping the realm closes the reactor.
     pub targets: HashMap<Id, JsObject>,
     pub dns: dns::State,
+    pub revoked: std::collections::VecDeque<(Id, Event)>,
 }
 
 pub(crate) fn id(target: &JsValue, cx: &mut Context) -> JsResult<Id> {
@@ -89,11 +90,15 @@ pub(crate) fn register(target: &JsObject, cx: &mut Context) -> JsResult<Id> {
     let shared = crate::shared(cx);
     let mut state = shared.network.borrow_mut();
     if state.reactor.is_none() {
-        state.reactor = Some(Reactor::new().map_err(|e| crate::native::type_error(e.to_string()))?);
+        state.reactor = Some(
+            Reactor::new(state.permissions.clone())
+                .map_err(|e| crate::native::type_error(e.to_string()))?,
+        );
     }
     state.next += 1;
     let id = state.next;
     state.targets.insert(id, weak);
+    drop(state);
     crate::native::hidden(target, js_string!("__networkId"), (id as f64).into(), cx)?;
     Ok(id)
 }
@@ -127,22 +132,25 @@ pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> us
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }
-        let event = crate::shared(cx)
-            .network
-            .borrow_mut()
-            .reactor
-            .as_mut()
-            .and_then(|r| {
-                let event = r.events.try_recv().ok()?;
-                let n = match &event.1 {
-                    Event::Data(bytes) | Event::Datagram(bytes, _) => bytes.len(),
-                    _ => 0,
-                };
-                r.counters
-                    .queued_read_bytes
-                    .fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
+        let event = {
+            let shared = crate::shared(cx);
+            let mut state = shared.network.borrow_mut();
+            if let Some(event) = state.revoked.pop_front() {
                 Some(event)
-            });
+            } else {
+                state.reactor.as_mut().and_then(|r| {
+                    let event = r.events.try_recv().ok()?;
+                    let n = match &event.1 {
+                        Event::Data(bytes) | Event::Datagram(bytes, _) => bytes.len(),
+                        _ => 0,
+                    };
+                    r.counters
+                        .queued_read_bytes
+                        .fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
+                    Some(event)
+                })
+            }
+        };
         let Some((id, event)) = event else {
             break;
         };
@@ -180,11 +188,11 @@ pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> us
         count += 1;
         let _ = cx.run_jobs();
     }
-    count + dns::poll(cx, deadline)
+    count
 }
 
 pub(crate) fn active(cx: &Context) -> bool {
     let shared = crate::shared(cx);
     let state = shared.network.borrow();
-    !state.targets.is_empty() || !state.dns.pending.is_empty()
+    !state.targets.is_empty() || !state.dns.pending.is_empty() || !state.revoked.is_empty()
 }

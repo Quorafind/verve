@@ -218,6 +218,14 @@ pub(crate) fn connect(
         .trim_end_matches(']');
     let https = url.scheme() == "wss";
     let port = url.port().unwrap_or(if https { 443 } else { 80 });
+    if !crate::shared(cx)
+        .network
+        .borrow()
+        .permissions
+        .allows_outbound(host, port)
+    {
+        return Ok(false);
+    }
     let mut offered = Vec::new();
     if protocols.is_string() {
         offered.push(text_of(protocols, cx)?);
@@ -240,14 +248,6 @@ pub(crate) fn connect(
                 "SyntaxError",
             ));
         }
-    }
-    if !crate::shared(cx)
-        .network
-        .borrow()
-        .permissions
-        .allows_outbound(host, port)
-    {
-        return Ok(false);
     }
     let key = tungstenite::handshake::client::generate_key();
     let expected = tungstenite::handshake::derive_accept_key(key.as_bytes());
@@ -299,6 +299,9 @@ pub(crate) fn connect(
             };
             if accept != *expected
                 || !text_of(&get(&h, "upgrade", cx)?, cx)?.eq_ignore_ascii_case("websocket")
+                || !text_of(&get(&h, "connection", cx)?, cx)?
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
                 || (!selected.is_empty() && !offered.contains(&selected))
                 || (!offered.is_empty() && selected.is_empty())
                 || !get(&h, "sec-websocket-extensions", cx)?.is_undefined()

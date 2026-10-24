@@ -213,8 +213,18 @@ impl RuntimeX {
         let mut net = state.network.borrow_mut();
         if net.permissions != permissions {
             net.reactor = None;
-            net.targets.clear();
-            net.dns.pending.clear();
+            let sockets = net.targets.keys().copied().collect::<Vec<_>>();
+            let queries = net.dns.pending.keys().copied().collect::<Vec<_>>();
+            net.revoked.extend(
+                sockets
+                    .into_iter()
+                    .map(|id| (id, network::reactor::Event::Closed)),
+            );
+            net.revoked.extend(
+                queries
+                    .into_iter()
+                    .map(|id| (id, network::reactor::Event::Dns(Err("EACCES".into())))),
+            );
             net.permissions = permissions;
         }
     }
