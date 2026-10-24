@@ -19,6 +19,7 @@
 
 mod crypto;
 mod encoding;
+mod fetch;
 mod indexeddb;
 mod intl;
 pub mod isolate;
@@ -26,6 +27,7 @@ mod modules;
 mod native;
 mod node;
 mod process;
+mod streams;
 mod url;
 mod wasm;
 mod web;
@@ -662,6 +664,8 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     url::install(context)?;
     web::install(context)?;
     crypto::install(context)?;
+    streams::install(context)?;
+    fetch::install(context)?;
     worker::install(context)?;
     indexeddb::install(context)?;
     wasm::install(context)?;
