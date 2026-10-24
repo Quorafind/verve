@@ -17,6 +17,7 @@
 //!
 //! [Boa]: https://boajs.dev
 
+mod crypto;
 mod encoding;
 mod indexeddb;
 mod intl;
@@ -659,6 +660,7 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     encoding::install(context)?;
     url::install(context)?;
     web::install(context)?;
+    crypto::install(context)?;
     worker::install(context)?;
     indexeddb::install(context)?;
     wasm::install(context)?;
