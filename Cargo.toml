@@ -25,6 +25,10 @@ sha2 = "0.10"
 # IndexedDB's databases, kept on disk as JSON.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `Intl.Segmenter`: grapheme clusters, words and sentences, by Unicode's rules (UAX #29).
+unicode-segmentation = "1.12"
+# The zone the system's clock is set to, by its IANA name: `Intl`'s default `timeZone`.
+iana-time-zone = "0.1"
 # WebAssembly, run by an interpreter written in Rust.
 wasmi = "0.35"
 
