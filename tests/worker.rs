@@ -120,3 +120,35 @@ fn a_busy_worker_does_not_hold_its_page() {
     );
     assert_eq!(js(&mut rt, "heard[0]"), "300 true");
 }
+
+/// A worker's own script is work its page waits on: what it posts as it starts is heard, though
+/// the page has sent it nothing — and a worker whose script failed is waited on no longer.
+#[test]
+fn a_worker_is_heard_from_its_script_alone() {
+    let mut rt = RuntimeX::new();
+    js(
+        &mut rt,
+        r#"
+        globalThis.heard = [];
+        const url = URL.createObjectURL(new Blob(['postMessage("up")']));
+        globalThis.worker = new Worker(url);
+        worker.onmessage = (e) => heard.push(e.data);
+        URL.revokeObjectURL(url);
+        const broken = URL.createObjectURL(new Blob(['this is not javascript']));
+        globalThis.brokenWorker = new Worker(broken);
+    "#,
+    );
+    for _ in 0..50 {
+        rt.wait_for_workers(std::time::Duration::from_millis(100));
+        rt.run_workers();
+        if js(&mut rt, "heard.length") != "0" {
+            break;
+        }
+    }
+    assert_eq!(js(&mut rt, "heard.join()"), "up");
+    // The broken worker's script is done with, failed: nothing of it is waited for.
+    let started = std::time::Instant::now();
+    rt.wait_for_workers(std::time::Duration::from_secs(5));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    js(&mut rt, "worker.terminate(); brokenWorker.terminate()");
+}

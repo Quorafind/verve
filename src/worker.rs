@@ -455,12 +455,33 @@ pub(crate) enum FromWorker {
 }
 
 /// What a page and its worker's thread both see.
-#[derive(Default)]
 pub(crate) struct Progress {
-    /// Messages sent to the worker that it has not finished with yet.
+    /// Work the worker has not finished with yet: its own script, counted from the moment it is
+    /// made, and every message sent to it.
     pending: AtomicUsize,
     /// When the worker's next timer is due, in milliseconds since the Unix epoch; 0 for none.
     next_timer: AtomicU64,
+}
+
+impl Progress {
+    /// A worker's progress as it is made: its script still to run.
+    fn starting() -> Self {
+        Self {
+            pending: AtomicUsize::new(1),
+            next_timer: AtomicU64::new(0),
+        }
+    }
+}
+
+/// The worker's script, counted in [`Progress::pending`] until it has run and what it sent is on
+/// its way — or the worker ends before then. A page waiting on a worker that has not been sent
+/// anything yet still hears what its script posts.
+struct Startup<'a>(&'a Progress);
+
+impl Drop for Startup<'_> {
+    fn drop(&mut self) {
+        self.0.pending.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 fn epoch_ms() -> f64 {
@@ -483,6 +504,7 @@ fn worker_thread(
     out: Sender<FromWorker>,
     progress: Arc<Progress>,
 ) {
+    let startup = Startup(&progress);
     let mut runtime = match worker_runtime(&name) {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -526,6 +548,7 @@ fn worker_thread(
     if !flush(&mut runtime, &out, &progress) {
         return;
     }
+    drop(startup);
     loop {
         // Asleep until a message comes or a timer is due — a worker with workers of its own
         // looks in on them now and then.
@@ -662,7 +685,7 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     };
     let (to, inbox) = mpsc::channel();
     let (out, from) = mpsc::channel();
-    let progress = Arc::new(Progress::default());
+    let progress = Arc::new(Progress::starting());
     let thread_progress = Arc::clone(&progress);
     let thread_name = if name.is_empty() {
         "worker".to_owned()
