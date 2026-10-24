@@ -1,5 +1,5 @@
 //! The web platform's small globals that plugin bundles take for granted: `crypto`,
-//! `structuredClone`, `performance`, `AbortController` and `AbortSignal`, `Blob` and `File`.
+//! `structuredClone`, `performance`, `Blob` and `File`.
 
 use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
@@ -7,7 +7,9 @@ use boa_engine::{
     native_function::NativeFunctionPointer,
     object::{
         FunctionObjectBuilder,
-        builtins::{JsArray, JsDate, JsMap, JsPromise, JsSet, JsUint8Array},
+        builtins::{
+            JsArray, JsArrayBuffer, JsDate, JsMap, JsPromise, JsRegExp, JsSet, JsUint8Array,
+        },
     },
     property::{Attribute, PropertyDescriptor},
 };
@@ -222,8 +224,106 @@ fn crypto(context: &mut Context) -> JsResult<JsObject> {
 
 // ─── structuredClone ────────────────────────────────────────────────────────────────────────
 
-/// A deep copy, as `structuredClone` makes it: plain objects, arrays, dates, maps, sets,
-/// typed arrays and errors, cycles kept as cycles; functions and symbols refused.
+/// `structuredClone(value, { transfer })`, and what `postMessage` copies a message with.
+/// `transfer` is the transfer list, or `undefined`: its `ArrayBuffer`s are copied and then
+/// detached, as moved; a `MessagePort` in it crosses as itself.
+pub(crate) fn structured_clone(
+    value: &JsValue,
+    transfer: &JsValue,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let list = if transfer.is_null_or_undefined() {
+        Vec::new()
+    } else {
+        crate::dom_events::iterate(transfer, context)?
+    };
+    let mut seen: Vec<(JsObject, JsObject)> = Vec::new();
+    let mut moved: Vec<JsObject> = Vec::new();
+    for (at, item) in list.iter().enumerate() {
+        let object = item.as_object();
+        if let Some(buffer) = object
+            .as_ref()
+            .filter(|o| JsArrayBuffer::from_object((*o).clone()).is_ok())
+        {
+            if moved.iter().any(|b| JsObject::equals(b, buffer)) {
+                return Err(clone_error_at(
+                    context,
+                    &format!("ArrayBuffer at index {at} is a duplicate of an earlier ArrayBuffer."),
+                ));
+            }
+            moved.push(buffer.clone());
+        } else if let Some(port) = object.filter(crate::dom_events::is_port) {
+            seen.push((port.clone(), port));
+        } else {
+            return Err(clone_error_at(
+                context,
+                &format!("Value at index {at} does not have a transferable type."),
+            ));
+        }
+    }
+    let copy = clone_value(value, &mut seen, context)?;
+    for buffer in moved {
+        if let Ok(buffer) = JsArrayBuffer::from_object(buffer) {
+            let _ = buffer.detach(&JsValue::undefined());
+        }
+    }
+    Ok(copy)
+}
+
+fn clone_error_at(context: &mut Context, message: &str) -> JsError {
+    crate::dom_events::dom_exception_error(
+        context,
+        &format!("Failed to execute 'structuredClone' on 'Window': {message}"),
+        "DataCloneError",
+    )
+}
+
+/// What could not be cloned, as the error names it: `function f() {} could not be cloned.`
+fn clone_error(context: &mut Context, value: &JsValue) -> JsError {
+    let mut shown = crate::print(value);
+    if shown.chars().count() > 60 {
+        shown = shown.chars().take(57).collect::<String>() + "...";
+    }
+    clone_error_at(context, &format!("{shown} could not be cloned."))
+}
+
+/// `Object.prototype.toString.call(value)`: `[object Uint8Array]`, `[object Number]`.
+fn tag_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
+    let to_string = context
+        .intrinsics()
+        .constructors()
+        .object()
+        .prototype()
+        .get(js_string!("toString"), context)?;
+    text_of(&crate::call(context, &to_string, value, &[])?, context)
+}
+
+/// The typed array class named `name`.
+fn typed_array_class(name: &str, context: &Context) -> Option<JsObject> {
+    let constructors = context.intrinsics().constructors();
+    let class = match name {
+        "Int8Array" => constructors.typed_int8_array(),
+        "Uint8Array" => constructors.typed_uint8_array(),
+        "Uint8ClampedArray" => constructors.typed_uint8clamped_array(),
+        "Int16Array" => constructors.typed_int16_array(),
+        "Uint16Array" => constructors.typed_uint16_array(),
+        "Int32Array" => constructors.typed_int32_array(),
+        "Uint32Array" => constructors.typed_uint32_array(),
+        "Float32Array" => constructors.typed_float32_array(),
+        "Float64Array" => constructors.typed_float64_array(),
+        "BigInt64Array" => constructors.typed_bigint64_array(),
+        "BigUint64Array" => constructors.typed_biguint64_array(),
+        _ => return None,
+    };
+    Some(class.constructor())
+}
+
+/// A deep copy, as `structuredClone` makes it: plain objects and arrays (sparse ones too),
+/// dates, regular expressions, maps, sets, the wrappers of booleans, numbers, strings and
+/// bigints, `ArrayBuffer`s, typed arrays of every kind and `DataView`s (views of one buffer
+/// staying views of one copy), errors of each kind with their message, stack and cause,
+/// `DOMException`s, blobs and files — cycles kept as cycles. Functions, symbols, promises, weak
+/// collections and the runtime's event targets and events cannot be cloned: a `DataCloneError`.
 fn clone_value(
     value: &JsValue,
     seen: &mut Vec<(JsObject, JsObject)>,
@@ -231,7 +331,7 @@ fn clone_value(
 ) -> JsResult<JsValue> {
     let Some(source) = value.as_object() else {
         if value.is_symbol() {
-            return Err(clone_error("a Symbol"));
+            return Err(clone_error(context, value));
         }
         return Ok(value.clone());
     };
@@ -241,69 +341,139 @@ fn clone_value(
     {
         return Ok(copy.clone().into());
     }
-    if source.is_callable() {
-        return Err(clone_error("a function"));
+    if source.is_callable() || crate::dom_events::is_platform_object(&source) {
+        return Err(clone_error(context, value));
     }
     if let Ok(date) = JsDate::from_object(source.clone()) {
         let copy = JsDate::new(context);
         copy.set_time(date.get_time(context)?, context)?;
+        seen.push((source.clone(), copy.clone().into()));
         return Ok(copy.into());
     }
-    if let Some(bytes) = crate::encoding::bytes_of(value, context)? {
-        let is_buffer =
-            boa_engine::object::builtins::JsArrayBuffer::from_object(source.clone()).is_ok();
-        let copy = JsUint8Array::from_iter(bytes, context)?;
-        return if is_buffer {
-            copy.buffer(context)
-        } else {
-            Ok(copy.into())
+    if let Ok(regexp) = JsRegExp::from_object(source.clone()) {
+        let pattern = JsString::from(regexp.source(context)?.as_str());
+        let flags = JsString::from(regexp.flags(context)?.as_str());
+        let copy = JsRegExp::new(pattern, flags, context)?;
+        seen.push((source.clone(), copy.clone().into()));
+        return Ok(copy.into());
+    }
+    if let Ok(buffer) = JsArrayBuffer::from_object(source.clone()) {
+        let bytes = buffer.to_vec().unwrap_or_default();
+        let copy = JsUint8Array::from_iter(bytes, context)?.buffer(context)?;
+        let copy = copy.as_object().ok_or_else(|| type_error("not a buffer"))?;
+        seen.push((source.clone(), copy.clone()));
+        return Ok(copy.into());
+    }
+    if JsPromise::from_object(source.clone()).is_ok() {
+        return Err(clone_error(context, value));
+    }
+    let exception = source
+        .downcast_ref::<crate::dom_events::DomExceptionData>()
+        .map(|e| (e.message.clone(), e.name.clone()));
+    if let Some((message, name)) = exception {
+        let copy = crate::dom_events::dom_exception(context, &message, &name);
+        if let Some(copy) = copy.as_object() {
+            seen.push((source.clone(), copy.clone()));
+        }
+        return Ok(copy);
+    }
+    let tag = tag_of(value, context)?;
+    let kind = tag
+        .trim_start_matches("[object ")
+        .trim_end_matches(']')
+        .to_owned();
+    // A view: a typed array or a `DataView`, on a copy of its buffer.
+    let is_view = typed_array_class(&kind, context).is_some() || kind == "DataView";
+    if is_view && source.has_property(js_string!("buffer"), context)? {
+        let buffer = clone_value(&source.get(js_string!("buffer"), context)?, seen, context)?;
+        let offset = source.get(js_string!("byteOffset"), context)?;
+        let (class, length) = match typed_array_class(&kind, context) {
+            Some(class) => (class, source.get(js_string!("length"), context)?),
+            None => (
+                context
+                    .intrinsics()
+                    .constructors()
+                    .data_view()
+                    .constructor(),
+                source.get(js_string!("byteLength"), context)?,
+            ),
         };
+        let copy = class.construct(&[buffer, offset, length], None, context)?;
+        seen.push((source.clone(), copy.clone()));
+        return Ok(copy.into());
+    }
+    match kind.as_str() {
+        "WeakMap"
+        | "WeakSet"
+        | "WeakRef"
+        | "FinalizationRegistry"
+        | "Generator"
+        | "AsyncGenerator"
+        | "Symbol" => {
+            return Err(clone_error(context, value));
+        }
+        // A wrapper: its primitive, wrapped again — if it really is one (a `toStringTag` can
+        // claim anything).
+        "Boolean" | "Number" | "String" | "BigInt" => {
+            let constructors = context.intrinsics().constructors();
+            let prototype = match kind.as_str() {
+                "Boolean" => constructors.boolean().prototype(),
+                "Number" => constructors.number().prototype(),
+                "String" => constructors.string().prototype(),
+                _ => constructors.bigint().prototype(),
+            };
+            let value_of = prototype.get(js_string!("valueOf"), context)?;
+            if let Ok(primitive) = crate::call(context, &value_of, value, &[]) {
+                let copy = primitive.to_object(context)?;
+                seen.push((source.clone(), copy.clone()));
+                return Ok(copy.into());
+            }
+        }
+        _ => {}
     }
     if let Ok(map) = JsMap::from_object(source.clone()) {
         let copy = JsMap::new(context);
         seen.push((source.clone(), copy.clone().into()));
-        let entries = map.entries(context)?;
-        let list = JsArray::from_iter(std::iter::empty(), context);
-        let from = context
-            .intrinsics()
-            .constructors()
-            .array()
-            .constructor()
-            .get(js_string!("from"), context)?;
-        let all = crate::call(context, &from, &JsValue::undefined(), &[entries.into()])?;
-        let _ = list;
-        if let Some(all) = all.as_object() {
-            let all = JsArray::from_object(all.clone())?;
-            for at in 0..all.length(context)? {
-                let pair = all.get(at, context)?;
-                let pair = JsArray::from_object(
-                    pair.as_object().ok_or_else(|| clone_error("a map entry"))?,
-                )?;
-                let key = clone_value(&pair.get(0, context)?, seen, context)?;
-                let item = clone_value(&pair.get(1, context)?, seen, context)?;
-                copy.set(key, item, context)?;
-            }
+        let entries = crate::dom_events::iterate(&map.entries(context)?.into(), context)?;
+        for pair in entries {
+            let pair = pair.as_object().ok_or_else(|| type_error("a map entry"))?;
+            let key = clone_value(&pair.get(0, context)?, seen, context)?;
+            let item = clone_value(&pair.get(1, context)?, seen, context)?;
+            copy.set(key, item, context)?;
         }
         return Ok(copy.into());
     }
     if let Ok(set) = JsSet::from_object(source.clone()) {
         let copy = JsSet::new(context);
         seen.push((source.clone(), copy.clone().into()));
-        let values = set.values(context)?;
-        let from = context
-            .intrinsics()
-            .constructors()
-            .array()
-            .constructor()
-            .get(js_string!("from"), context)?;
-        let all = crate::call(context, &from, &JsValue::undefined(), &[values.into()])?;
-        if let Some(all) = all.as_object() {
-            let all = JsArray::from_object(all.clone())?;
-            for at in 0..all.length(context)? {
-                let item = clone_value(&all.get(at, context)?, seen, context)?;
-                copy.add(item, context)?;
+        let values = crate::dom_events::iterate(&set.values(context)?.into(), context)?;
+        for item in values {
+            let item = clone_value(&item, seen, context)?;
+            copy.add(item, context)?;
+        }
+        return Ok(copy.into());
+    }
+    if source.is::<boa_engine::builtins::error::Error>() {
+        return clone_error_object(&source, seen, context);
+    }
+    // A blob, or a file: its bytes, type, and a file's name and date.
+    if source.has_own_property(js_string!("__bytes"), context)? {
+        let bytes = blob_bytes(value, context)?;
+        let kind = text_of(&source.get(js_string!("type"), context)?, context)?;
+        let is_file = source.has_own_property(js_string!("lastModified"), context)?;
+        let class = context.global_object().get(
+            JsString::from(if is_file { "File" } else { "Blob" }),
+            context,
+        )?;
+        let copy = made_by(&class, context)?;
+        dress_blob(&copy, bytes, &kind, context)?;
+        if is_file {
+            for key in ["name", "lastModified"] {
+                let item = source.get(JsString::from(key), context)?;
+                copy.set(JsString::from(key), item, false, context)?;
             }
         }
+        seen.push((source.clone(), copy.clone()));
         return Ok(copy.into());
     }
     let copy = if source.is_array() {
@@ -312,147 +482,101 @@ fn clone_value(
         object(context)
     };
     seen.push((source.clone(), copy.clone()));
-    // Its own enumerable string keys, as `Object.keys` lists them.
+    if source.is_array() {
+        // Its length, so a sparse array stays as long, holes and all.
+        let length = source.get(js_string!("length"), context)?;
+        copy.set(js_string!("length"), length, false, context)?;
+    }
+    copy_own(&source, &copy, seen, context)?;
+    Ok(copy.into())
+}
+
+/// Copies `source`'s own enumerable string keys, as `Object.keys` lists them, onto `copy`.
+fn copy_own(
+    source: &JsObject,
+    copy: &JsObject,
+    seen: &mut Vec<(JsObject, JsObject)>,
+    context: &mut Context,
+) -> JsResult<()> {
     let keys_fn = context
         .intrinsics()
         .constructors()
         .object()
         .constructor()
         .get(js_string!("keys"), context)?;
-    let keys = crate::call(context, &keys_fn, &JsValue::undefined(), &[value.clone()])?;
-    if let Some(keys) = keys.as_object() {
-        let keys = JsArray::from_object(keys)?;
-        for at in 0..keys.length(context)? {
-            let key = keys.get(at, context)?.to_property_key(context)?;
-            let item = source.get(key.clone(), context)?;
-            let item = clone_value(&item, seen, context)?;
-            copy.set(key, item, false, context)?;
-        }
-    }
-    // An error keeps its name and message.
-    if source.is::<boa_engine::builtins::error::Error>() {
-        for key in ["name", "message"] {
-            let item = source.get(JsString::from(key), context)?;
-            copy.set(JsString::from(key), item, false, context)?;
-        }
-    }
-    Ok(copy.into())
-}
-
-fn clone_error(what: &str) -> JsError {
-    JsNativeError::typ()
-        .with_message(format!("DataCloneError: {what} could not be cloned"))
-        .into()
-}
-
-// ─── AbortController and AbortSignal ────────────────────────────────────────────────────────
-
-fn new_signal(context: &mut Context) -> JsResult<JsObject> {
-    let class = context
-        .global_object()
-        .get(js_string!("AbortSignal"), context)?;
-    let prototype = class
-        .as_object()
-        .map(|c| c.get(js_string!("prototype"), context))
-        .transpose()?;
-    let signal = object(context);
-    if let Some(prototype) = prototype.and_then(|p| p.as_object()) {
-        signal.set_prototype(Some(prototype));
-    }
-    signal.set(js_string!("aborted"), false, false, context)?;
-    signal.set(js_string!("reason"), JsValue::undefined(), false, context)?;
-    signal.set(js_string!("onabort"), JsValue::null(), false, context)?;
-    let listeners = JsArray::new(context)?;
-    signal.set(js_string!("__listeners"), listeners, false, context)?;
-    Ok(signal)
-}
-
-/// Aborts `signal` with `reason` (an `AbortError` when none is given): `aborted`, `reason`,
-/// its `onabort` and its `abort` listeners.
-fn abort(signal: &JsObject, reason: JsValue, context: &mut Context) -> JsResult<()> {
-    if signal.get(js_string!("aborted"), context)?.to_boolean() {
-        return Ok(());
-    }
-    let reason = if reason.is_undefined() {
-        let error = JsNativeError::error()
-            .with_message("This operation was aborted")
-            .into_opaque(context);
-        error.set(js_string!("name"), js_string!("AbortError"), false, context)?;
-        error.into()
-    } else {
-        reason
-    };
-    signal.set(js_string!("aborted"), true, false, context)?;
-    signal.set(js_string!("reason"), reason, false, context)?;
-    let event = object(context);
-    event.set(js_string!("type"), js_string!("abort"), false, context)?;
-    event.set(js_string!("target"), signal.clone(), false, context)?;
-    let handler = signal.get(js_string!("onabort"), context)?;
-    if handler.is_callable() {
-        crate::call(
-            context,
-            &handler,
-            &signal.clone().into(),
-            &[event.clone().into()],
-        )?;
-    }
-    let listeners = signal.get(js_string!("__listeners"), context)?;
-    if let Some(listeners) = listeners.as_object() {
-        let listeners = JsArray::from_object(listeners.clone())?;
-        for at in 0..listeners.length(context)? {
-            let listener = listeners.get(at, context)?;
-            crate::call(
-                context,
-                &listener,
-                &signal.clone().into(),
-                &[event.clone().into()],
-            )?;
-        }
+    let keys = crate::call(
+        context,
+        &keys_fn,
+        &JsValue::undefined(),
+        &[source.clone().into()],
+    )?;
+    for key in crate::native::list_of(&keys, context)? {
+        let key = key.to_property_key(context)?;
+        let item = source.get(key.clone(), context)?;
+        let item = clone_value(&item, seen, context)?;
+        copy.set(key, item, false, context)?;
     }
     Ok(())
 }
 
-const SIGNAL_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
-    ("addEventListener", 2, |this, args, cx| {
-        let kind = text_of(&arg(args, 0), cx)?;
-        let listener = arg(args, 1);
-        if kind == "abort"
-            && listener.is_callable()
-            && let Some(signal) = this.as_object()
-            && let Some(list) = signal.get(js_string!("__listeners"), cx)?.as_object()
-        {
-            JsArray::from_object(list.clone())?.push(listener, cx)?;
-        }
-        Ok(JsValue::undefined())
-    }),
-    ("removeEventListener", 2, |this, args, cx| {
-        let listener = arg(args, 1);
-        if let Some(signal) = this.as_object()
-            && let Some(list) = signal.get(js_string!("__listeners"), cx)?.as_object()
-        {
-            let list = JsArray::from_object(list.clone())?;
-            let mut kept = Vec::new();
-            for at in 0..list.length(cx)? {
-                let item = list.get(at, cx)?;
-                if item != listener {
-                    kept.push(item);
-                }
-            }
-            let fresh = JsArray::from_iter(kept, cx);
-            signal.set(js_string!("__listeners"), fresh, false, cx)?;
-        }
-        Ok(JsValue::undefined())
-    }),
-    ("throwIfAborted", 0, |this, _, cx| {
-        let Some(signal) = this.as_object() else {
-            return Ok(JsValue::undefined());
-        };
-        if signal.get(js_string!("aborted"), cx)?.to_boolean() {
-            return Err(JsError::from_opaque(signal.get(js_string!("reason"), cx)?));
-        }
-        Ok(JsValue::undefined())
-    }),
-];
+/// An error, of its own kind when that is one of JavaScript's: its message, its stack, its
+/// cause.
+fn clone_error_object(
+    source: &JsObject,
+    seen: &mut Vec<(JsObject, JsObject)>,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = source.get(js_string!("name"), context)?;
+    let name = if name.is_string() {
+        text_of(&name, context)?
+    } else {
+        String::new()
+    };
+    let constructors = context.intrinsics().constructors();
+    let class = match name.as_str() {
+        "EvalError" => constructors.eval_error(),
+        "RangeError" => constructors.range_error(),
+        "ReferenceError" => constructors.reference_error(),
+        "SyntaxError" => constructors.syntax_error(),
+        "TypeError" => constructors.type_error(),
+        "URIError" => constructors.uri_error(),
+        _ => constructors.error(),
+    }
+    .constructor();
+    let message = source.get(js_string!("message"), context)?;
+    let args = if message.is_undefined() {
+        Vec::new()
+    } else {
+        vec![js_text(&text_of(&message, context)?)]
+    };
+    let copy = class.construct(&args, None, context)?;
+    seen.push((source.clone(), copy.clone()));
+    let stack = source.get(js_string!("stack"), context)?;
+    if stack.is_string() {
+        copy.define_property_or_throw(
+            js_string!("stack"),
+            PropertyDescriptor::builder()
+                .value(stack)
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )?;
+    }
+    if source.has_own_property(js_string!("cause"), context)? {
+        let cause = clone_value(&source.get(js_string!("cause"), context)?, seen, context)?;
+        copy.define_property_or_throw(
+            js_string!("cause"),
+            PropertyDescriptor::builder()
+                .value(cause)
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )?;
+    }
+    Ok(copy.into())
+}
 
 // ─── Blob and File ──────────────────────────────────────────────────────────────────────────
 
@@ -612,8 +736,16 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     )?;
 
     let clone = function(context, "structuredClone", 1, |_, args, cx| {
-        let mut seen = Vec::new();
-        clone_value(&arg(args, 0), &mut seen, cx)
+        if args.is_empty() {
+            return Err(type_error(
+                "Failed to execute 'structuredClone' on 'Window': 1 argument required, but only 0 present.",
+            ));
+        }
+        let transfer = match arg(args, 1).as_object() {
+            Some(options) => options.get(js_string!("transfer"), cx)?,
+            None => JsValue::undefined(),
+        };
+        structured_clone(&arg(args, 0), &transfer, cx)
     });
     context.register_global_property(
         js_string!("structuredClone"),
@@ -641,70 +773,6 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         js_string!("performance"),
         performance,
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
-    )?;
-
-    // AbortSignal first: a controller makes one.
-    let (signal_class, _) = class(
-        context,
-        "AbortSignal",
-        |_, _, _| Err(type_error("Illegal constructor")),
-        SIGNAL_METHODS,
-        &[],
-    )?;
-    let abort_now = function(context, "abort", 1, |_, args, cx| {
-        let signal = new_signal(cx)?;
-        abort(&signal, arg(args, 0), cx)?;
-        Ok(signal.into())
-    });
-    signal_class.set(js_string!("abort"), abort_now, false, context)?;
-    let timeout = function(context, "timeout", 1, |_, args, cx| {
-        let signal = new_signal(cx)?;
-        let ms = arg(args, 0).to_number(cx)?;
-        let fire = FunctionObjectBuilder::new(
-            cx.realm(),
-            NativeFunction::from_copy_closure_with_captures(
-                |_, _, signal: &JsObject, cx| {
-                    let error = JsNativeError::error()
-                        .with_message("The operation timed out")
-                        .into_opaque(cx);
-                    error.set(js_string!("name"), js_string!("TimeoutError"), false, cx)?;
-                    abort(signal, error.into(), cx)?;
-                    Ok(JsValue::undefined())
-                },
-                signal.clone(),
-            ),
-        )
-        .build();
-        let set_timeout = cx.global_object().get(js_string!("setTimeout"), cx)?;
-        crate::call(
-            cx,
-            &set_timeout,
-            &JsValue::undefined(),
-            &[fire.into(), ms.into()],
-        )?;
-        Ok(signal.into())
-    });
-    signal_class.set(js_string!("timeout"), timeout, false, context)?;
-    class(
-        context,
-        "AbortController",
-        |this, _, cx| {
-            let controller = made_by(this, cx)?;
-            let signal = new_signal(cx)?;
-            controller.set(js_string!("signal"), signal, false, cx)?;
-            Ok(controller.into())
-        },
-        &[("abort", 1, |this, args, cx| {
-            let signal = match this.as_object() {
-                Some(c) => c.get(js_string!("signal"), cx)?,
-                None => JsValue::undefined(),
-            };
-            if let Some(signal) = signal.as_object() {
-                abort(&signal, arg(args, 0), cx)?;
-            }
-            Ok(JsValue::undefined())
-        })],
-        &[],
     )?;
 
     let (_, blob_proto) = class(context, "Blob", construct_blob, BLOB_METHODS, &[])?;

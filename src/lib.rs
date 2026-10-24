@@ -17,10 +17,12 @@
 //!
 //! [Boa]: https://boajs.dev
 
+mod dom_events;
 mod encoding;
 mod indexeddb;
 mod intl;
 pub mod isolate;
+mod messaging;
 mod modules;
 mod native;
 mod node;
@@ -659,6 +661,8 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     encoding::install(context)?;
     url::install(context)?;
     web::install(context)?;
+    dom_events::install(context)?;
+    messaging::install(context)?;
     worker::install(context)?;
     indexeddb::install(context)?;
     wasm::install(context)?;
