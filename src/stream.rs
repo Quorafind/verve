@@ -4486,8 +4486,6 @@ pub(crate) fn legacy_module(context: &mut Context, name: &str) -> JsResult<JsVal
 
 // ─── fs.createReadStream, fs.createWriteStream ───────────────────────────────────────────────
 
-// Reached from `fs`, which hooks these up as `createReadStream` and `createWriteStream`.
-#[allow(dead_code)]
 fn fs_path(value: &JsValue, context: &mut Context) -> JsResult<String> {
     if let Some(bytes) = crate::encoding::bytes_of(value, context)? {
         return Ok(String::from_utf8_lossy(&bytes).into_owned());
@@ -4506,8 +4504,6 @@ fn fs_path(value: &JsValue, context: &mut Context) -> JsResult<String> {
     })
 }
 
-// Reached from `fs`, which hooks these up as `createReadStream` and `createWriteStream`.
-#[allow(dead_code)]
 fn fs_error(context: &mut Context, error: &std::io::Error, path: &str, call: &str) -> JsValue {
     let code = match error.kind() {
         std::io::ErrorKind::NotFound => "ENOENT",
@@ -4525,8 +4521,6 @@ fn fs_error(context: &mut Context, error: &std::io::Error, path: &str, call: &st
 }
 
 /// The options of `createReadStream`/`createWriteStream`: an object, or an encoding's name.
-// Reached from `fs`, which hooks these up as `createReadStream` and `createWriteStream`.
-#[allow(dead_code)]
 fn fs_options(value: &JsValue, context: &mut Context) -> JsResult<JsObject> {
     if let Some(options) = value.as_object().filter(|_| !value.is_string()) {
         let copy = object(context);
@@ -4547,8 +4541,6 @@ fn fs_options(value: &JsValue, context: &mut Context) -> JsResult<JsObject> {
 /// the file a chunk (64 KiB unless asked otherwise) at a time, from `start` to `end`
 /// inclusive. Says `open` and `ready` a tick after it is made; a file that cannot be opened
 /// destroys it with the error.
-// Reached from `fs`, which hooks these up as `createReadStream` and `createWriteStream`.
-#[allow(dead_code)]
 pub(crate) fn create_read_stream(context: &mut Context, args: &[JsValue]) -> JsResult<JsValue> {
     let path = fs_path(&arg(args, 0), context)?;
     let options = fs_options(&arg(args, 1), context)?;
@@ -4665,8 +4657,6 @@ pub(crate) fn create_read_stream(context: &mut Context, args: &[JsValue]) -> JsR
 /// `fs.createWriteStream(path, { flags })`: a `Writable` writing each chunk to the file as it
 /// comes — the file made empty first (`'w'`), or added to (`'a'`). Says `open` and `ready` a
 /// tick after it is made, `finish` and `close` when ended.
-// Reached from `fs`, which hooks these up as `createReadStream` and `createWriteStream`.
-#[allow(dead_code)]
 pub(crate) fn create_write_stream(context: &mut Context, args: &[JsValue]) -> JsResult<JsValue> {
     let path = fs_path(&arg(args, 0), context)?;
     let options = fs_options(&arg(args, 1), context)?;

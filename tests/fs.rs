@@ -275,3 +275,36 @@ fn times_modes_and_links() {
     );
     assert_eq!(result, ["2000000000", "EACCES", "0", "string", "false"]);
 }
+
+#[test]
+fn file_streams_pipe_through_zlib_and_back() {
+    let dir = folder("streams");
+    let mut rt = RuntimeX::new();
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        const fs = require('fs');
+        const path = require('path');
+        const zlib = require('zlib');
+        const { pipeline } = require('stream');
+        const source = path.join(__dirname, 'source.txt');
+        const packed = path.join(__dirname, 'source.txt.gz');
+        const text = 'a line of a note\n'.repeat(5000);
+        fs.writeFileSync(source, text);
+        exports.result = ['pending'];
+        pipeline(fs.createReadStream(source, { highWaterMark: 1024 }), zlib.createGzip(), fs.createWriteStream(packed), (error) => {
+            const back = zlib.gunzipSync(fs.readFileSync(packed)).toString();
+            const partial = [];
+            fs.createReadStream(source, { start: 2, end: 5, encoding: 'utf8' })
+                .on('data', (chunk) => partial.push(chunk))
+                .on('end', () => {
+                    exports.result = [String(error), back === text, partial.join(''),
+                        fs.createReadStream(source) instanceof fs.ReadStream,
+                        fs.createWriteStream(path.join(__dirname, 'w.txt')) instanceof require('stream').Writable];
+                });
+        });
+    "#,
+    );
+    assert_eq!(result, ["undefined", "true", "line", "true", "true"]);
+}

@@ -2042,9 +2042,35 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
         fs.set(JsString::from(name), value, false, context)?;
     }
     fs.set(js_string!("promises"), promises, false, context)?;
-    // `createReadStream`, `createWriteStream`, `ReadStream` and `WriteStream` are made of the
-    // `stream` module's classes, and set on `fs` here.
+    // The file streams are the `stream` module's `Readable` and `Writable`, made when first
+    // used: requiring `fs` does not make the stream classes.
+    crate::native::exports(
+        context,
+        &fs,
+        &[
+            ("createReadStream", 2, |_, args, cx| {
+                crate::stream::create_read_stream(cx, args)
+            }),
+            ("createWriteStream", 2, |_, args, cx| {
+                crate::stream::create_write_stream(cx, args)
+            }),
+        ],
+    )?;
+    crate::native::accessors(
+        context,
+        &fs,
+        &[
+            ("ReadStream", |_, _, cx| stream_class(cx, "Readable"), None),
+            ("WriteStream", |_, _, cx| stream_class(cx, "Writable"), None),
+        ],
+    )?;
     Ok(fs.into())
+}
+
+/// `fs.ReadStream` and `fs.WriteStream`: the `stream` classes the file streams are made of.
+fn stream_class(context: &mut Context, name: &str) -> JsResult<JsValue> {
+    let stream = crate::modules::node_module(context, "stream")?;
+    get(&stream, name, context)
 }
 
 /// The `EventEmitter` part of a watcher or a handle, set up as `EventEmitter.call(this)` would.
