@@ -2667,18 +2667,10 @@ impl Array {
             // e. Set k to k + 1.
         }
         // 4. Sort items using an implementation-defined sequence of calls to SortCompare. If any such call returns an abrupt completion, stop before performing any further calls to SortCompare and return that Completion Record.
-        let mut sort_err = Ok(());
-        items.sort_by(|x, y| {
-            if sort_err.is_ok() {
-                sort_compare(x, y, context).unwrap_or_else(|err| {
-                    sort_err = Err(err);
-                    Ordering::Equal
-                })
-            } else {
-                Ordering::Equal
-            }
-        });
-        sort_err?;
+        // `slice::sort_by` may panic when the comparison is not a total order, and a JavaScript
+        // comparator need not be one (`() => Math.random() - 0.5`), so sort with a merge sort
+        // that stays in bounds and terminates whatever the comparator answers.
+        stable_sort_by(&mut items, |x, y| sort_compare(x, y, context))?;
 
         // 5. Return items.
         Ok(items)
@@ -3377,6 +3369,72 @@ fn compare_array_elements(
     // NOTE: skipped IsLessThan because it just makes a lexicographic comparison
     // when x and y are strings
     Ok(x_str.cmp(&y_str))
+}
+
+/// Sorts `items` stably with a fallible comparison, stopping at its first error.
+///
+/// A bottom-up merge sort over runs sorted by insertion. Unlike `slice::sort_by`, it never panics
+/// and always terminates, whatever `compare` answers — an inconsistent comparison only gives an
+/// unspecified order, which is what the specification allows for one. It makes O(n log n) calls,
+/// and O(n) on input that is already sorted. After an error, `items` holds no particular order
+/// (or nothing).
+pub(crate) fn stable_sort_by<T, E, F>(items: &mut Vec<T>, mut compare: F) -> Result<(), E>
+where
+    T: Clone,
+    F: FnMut(&T, &T) -> Result<Ordering, E>,
+{
+    const RUN: usize = 16;
+
+    let len = items.len();
+    if len < 2 {
+        return Ok(());
+    }
+
+    // Sort each run of `RUN` items by insertion.
+    for start in (0..len).step_by(RUN) {
+        let end = min(start + RUN, len);
+        for i in start + 1..end {
+            let mut j = i;
+            while j > start && compare(&items[j - 1], &items[j])? == Ordering::Greater {
+                items.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+    }
+
+    // Merge neighbouring runs, doubling their width, between `items` and a buffer.
+    let mut src = std::mem::take(items);
+    let mut dst = Vec::with_capacity(len);
+    let mut width = RUN;
+    while width < len {
+        for lo in (0..len).step_by(2 * width) {
+            let mid = min(lo + width, len);
+            let hi = min(lo + 2 * width, len);
+            if mid == hi || compare(&src[mid - 1], &src[mid])? != Ordering::Greater {
+                // A lone run, or two runs already in order.
+                dst.extend_from_slice(&src[lo..hi]);
+                continue;
+            }
+            let (mut l, mut r) = (lo, mid);
+            while l < mid && r < hi {
+                // Take from the right only when it is strictly smaller, to keep the sort stable.
+                if compare(&src[l], &src[r])? == Ordering::Greater {
+                    dst.push(src[r].clone());
+                    r += 1;
+                } else {
+                    dst.push(src[l].clone());
+                    l += 1;
+                }
+            }
+            dst.extend_from_slice(&src[l..mid]);
+            dst.extend_from_slice(&src[r..hi]);
+        }
+        std::mem::swap(&mut src, &mut dst);
+        dst.clear();
+        width *= 2;
+    }
+    *items = src;
+    Ok(())
 }
 
 /// `FindViaPredicate ( O, len, direction, predicate, thisArg )`

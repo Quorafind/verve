@@ -25,6 +25,14 @@ always agree with one another.
   (`COMPILED`, up to 1024 of them), so a regular expression literal evaluated again — once per
   line of a note, in Dataview's parser — no longer compiles its pattern every time.
 
+- `boa_engine`, `builtins/array`: `sort`, `toSorted` and the typed arrays' `sort`/`toSorted` sort
+  with their own stable merge sort (`stable_sort_by`), not `slice::sort_by`. Since Rust 1.81
+  `sort_by` may panic when the comparison is not a total order, and a JavaScript comparator often
+  is not one (`(a, b) => a.compareDocumentPosition(b) === 4 ? -1 : 1`, a random one, one that
+  answers `NaN`) — the panic took the whole app down. The merge sort only reads in bounds and
+  always ends; such a comparator gets an unspecified order, as the specification allows. An
+  exception from the comparator still stops the sort at once.
+
 - `boa_gc`, `lib.rs`: a collection no longer frees what it found dead before it returns. The
   dead nodes leave the heap, and their memory is returned a few at a time by later allocations
   (`BoaGc::unfreed`, `FREE_PER_ALLOCATION`), the rest before the next collection — and all of

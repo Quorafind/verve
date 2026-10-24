@@ -955,6 +955,87 @@ fn array_sort() {
 }
 
 #[test]
+fn array_sort_with_an_inconsistent_comparator_does_not_panic() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            const big = Array.from({ length: 2000 }, (_, i) => (i * 7919) % 2003);
+            const sorts = [
+                () => Math.random() - 0.5,
+                () => 1,
+                () => -1,
+                () => NaN,
+                (a, b) => (a % 3 === 0 ? -1 : 1),
+                (a, b) => (a < b ? 1 : -1) * (a % 2 ? 1 : -1),
+            ];
+            let count = 0;
+            for (const cmp of sorts) {
+                for (const len of [0, 1, 2, 15, 16, 17, 100, 2000]) {
+                    const arr = big.slice(0, len);
+                    const sorted = arr.slice().sort(cmp);
+                    // The order is unspecified, but nothing is lost or duplicated.
+                    if (sorted.length !== len) throw new Error("length");
+                    if (sorted.slice().sort((a, b) => a - b).join() !== arr.slice().sort((a, b) => a - b).join()) {
+                        throw new Error("contents");
+                    }
+                    arr.toSorted(cmp);
+                    new Float64Array(arr).sort(cmp);
+                    new Int32Array(arr).toSorted(cmp);
+                    count++;
+                }
+            }
+        "#}),
+        TestAction::assert_eq("count", 48),
+    ]);
+}
+
+#[test]
+fn array_sort_is_stable_and_correct() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            let seed = 1;
+            const rand = () => (seed = (seed * 16807) % 2147483647);
+            const items = Array.from({ length: 5000 }, (_, i) => ({ key: rand() % 50, i }));
+            const sorted = items.slice().sort((a, b) => a.key - b.key);
+            let ok = sorted.length === items.length;
+            for (let i = 1; i < sorted.length; i++) {
+                const a = sorted[i - 1], b = sorted[i];
+                if (a.key > b.key || (a.key === b.key && a.i > b.i)) ok = false;
+            }
+            const nums = Array.from({ length: 3000 }, rand);
+            const asc = nums.slice().sort((a, b) => a - b);
+            for (let i = 1; i < asc.length; i++) if (asc[i - 1] > asc[i]) ok = false;
+            const desc = asc.slice().sort((a, b) => b - a);
+            for (let i = 1; i < desc.length; i++) if (desc[i - 1] < desc[i]) ok = false;
+            const holes = [3, , undefined, 1, , 2].sort();
+        "#}),
+        TestAction::assert("ok"),
+        TestAction::assert_eq("holes.length", 6),
+        TestAction::assert("holes[0] === 1 && holes[2] === 3 && holes[3] === undefined"),
+        TestAction::assert("!(4 in holes) && !(5 in holes)"),
+    ]);
+}
+
+#[test]
+fn array_sort_stops_at_a_comparator_error() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            let calls = 0;
+            let caught;
+            try {
+                Array.from({ length: 100 }, (_, i) => 100 - i).sort((a, b) => {
+                    if (++calls === 30) throw new RangeError("stop");
+                    return a - b;
+                });
+            } catch (e) {
+                caught = e;
+            }
+        "#}),
+        TestAction::assert("caught instanceof RangeError"),
+        TestAction::assert_eq("calls", 30),
+    ]);
+}
+
+#[test]
 fn array_of_neg_zero() {
     run_test_actions([
         TestAction::run("let arr = [-0, -0, -0, -0];"),
