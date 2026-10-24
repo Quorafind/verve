@@ -464,6 +464,41 @@ impl RuntimeX {
         shared(&self.context).timers.borrow().len()
     }
 
+    /// Each pending timer as its callback's name, its source when it has none, and when it
+    /// is due: for finding what a script left running.
+    pub fn pending_timers(&mut self) -> Vec<String> {
+        let timers: Vec<(Millis, Option<Millis>, JsValue)> = shared(&self.context)
+            .timers
+            .borrow()
+            .values()
+            .map(|t| (t.due, t.repeat, t.callback.clone()))
+            .collect();
+        timers
+            .into_iter()
+            .map(|(due, repeat, callback)| {
+                let name = callback
+                    .as_object()
+                    .and_then(|f| f.get(js_string!("name"), &mut self.context).ok())
+                    .map(|n| print(&n))
+                    .unwrap_or_default();
+                let name = if name.is_empty() {
+                    callback
+                        .as_object()
+                        .and_then(|f| f.get(js_string!("toString"), &mut self.context).ok())
+                        .and_then(|to| call(&mut self.context, &to, &callback, &[]).ok())
+                        .map(|s| print(&s).chars().take(120).collect())
+                        .unwrap_or_default()
+                } else {
+                    name
+                };
+                format!(
+                    "{name} due {due}{}",
+                    repeat.map(|r| format!(" every {r}")).unwrap_or_default()
+                )
+            })
+            .collect()
+    }
+
     /// Takes what was written to the console since the last time it was taken.
     pub fn take_console(&mut self) -> Vec<ConsoleLine> {
         std::mem::take(&mut *shared(&self.context).console.borrow_mut())
