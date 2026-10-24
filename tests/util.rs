@@ -208,3 +208,26 @@ fn promisify_callbackify_deprecate_and_the_rest() {
         .collect();
     assert_eq!(warnings.len(), 1, "deprecate warns once");
 }
+
+/// A callable `Proxy` whose traps make a fresh stand-in for every name asked — how bundles and
+/// test harnesses fake a module — is written as a function, not walked forever.
+#[test]
+fn a_proxy_that_answers_everything_is_written_as_a_function() {
+    let mut rt = RuntimeX::new();
+    let result = run(
+        &mut rt,
+        r#"
+        const util = require('util');
+        let made = 0;
+        const stand_in = () => new Proxy(function stub() {}, {
+            get: (t, k) => k === 'prototype' ? t.prototype : (made++, stand_in()),
+            ownKeys: () => ['a', 'b', 'c', 'prototype', 'length', 'name'],
+            getOwnPropertyDescriptor: (t, k) => Reflect.getOwnPropertyDescriptor(t, k) || { value: stand_in(), enumerable: true, configurable: true },
+        });
+        const stub = stand_in();
+        console.log('logged', stub);
+        exports.result = [util.inspect(stub).startsWith('[Function'), util.inspect({ x: stub }).startsWith('{ x: [Function'), made < 50, util.inspect(new Proxy({ a: 1 }, {}))];
+    "#,
+    );
+    assert_eq!(result, ["true", "true", "true", "{ a: 1 }"]);
+}

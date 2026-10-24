@@ -702,6 +702,14 @@ fn format_value(
     let Some(target) = value.as_object() else {
         return format_primitive(walk, value, context);
     };
+    // Node writes a Proxy as its target, without running its traps; Boa does not hand the
+    // target out. A callable one — a class of this runtime's, or a library's stand-in for
+    // anything — is written as the function it is, its keys not walked: a trap may make a fresh
+    // value for every name asked, and walking those never ends.
+    if target.is_callable() && JsProxy::from_object(target.clone()).is_ok() {
+        let base = function_base(&target, &Some("Function".to_owned()), "", context)?;
+        return Ok(walk.stylize(&base, "special"));
+    }
     if walk.options.custom_inspect {
         let symbol = custom_symbol(context)?;
         let custom = target.get(symbol.to_property_key(context)?, context)?;
