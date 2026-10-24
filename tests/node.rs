@@ -65,7 +65,7 @@ fn path_util_events_os_and_url() {
             String(bus instanceof EventEmitter),
             typeof os.platform(),
             typeof os.homedir(),
-            fileURLToPath('file:///tmp/x.md').endsWith('tmp/x.md') ? 'ok' : 'bad',
+            fileURLToPath(require('url').pathToFileURL(__filename)) === __filename ? 'ok' : 'bad',
             String(new URL('https://e.com').host),
         ];
     "#);

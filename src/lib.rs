@@ -18,6 +18,7 @@
 //! [Boa]: https://boajs.dev
 
 mod encoding;
+mod fs;
 mod indexeddb;
 mod intl;
 pub mod isolate;
@@ -25,6 +26,7 @@ mod modules;
 mod native;
 mod node;
 mod node_url;
+mod os;
 mod path;
 mod process;
 mod querystring;
