@@ -1,0 +1,11 @@
+{
+  "name": "runtime-x-real-esm-acceptance",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "nanoid": "5.1.6",
+    "chalk": "5.6.2",
+    "date-fns": "4.1.0",
+    "zod": "4.1.12"
+  }
+}

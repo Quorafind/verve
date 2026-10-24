@@ -10,13 +10,17 @@ A JavaScript runtime for live plugins, in Rust.
   browser and Node in one — every one a Rust function: CommonJS `require`, timers on a clock the
   host drives, microtasks, `console`, `process`. Nothing here is JavaScript written to stand in
   for Node or the web.
-- **Modules** are CommonJS as Node has them: every built-in answers to its bare name and to
-  `node:` before it; a plugin's own files resolve as Node resolves them (extensions, folders,
-  `package.json`'s `main`, `node_modules`); `require.cache`, `require.resolve`, `module`, and
-  `require('module')` (`createRequire`, `builtinModules`, `isBuiltin`). Node's own modules are
-  made the first time they are required, the web's globals the first time they are read. The
-  host requires natively with `RuntimeX::require`, and gets a `window.require` of no module's
-  from `RuntimeX::global_require`.
+- **Modules** are Node 22's CommonJS and native ECMAScript modules. `.mjs`, `.cjs`, package
+  `type` and ambiguous `.js` syntax select the format. Both use package `exports`, `imports`
+  (`#` names), self references, patterns and ordered conditions; ESM uses exact file URLs,
+  never extension or directory-index guessing. `require(esm)` handles synchronous graphs,
+  rejects top-level await before execution, and honors the `module.exports` export.
+  Builtins are native synthetic modules sharing their CommonJS default export, with
+  `syncBuiltinESMExports`; CJS named exports are discovered statically in Rust.
+  `RuntimeX::load_esm` and `RuntimeX::import_module` return namespace promises; host-driven
+  ticks resume top-level await without waiting. `forget_module` clears both module caches.
+  The host still requires natively with `RuntimeX::require` and obtains Electron's
+  `window.require` from `RuntimeX::global_require`.
 - **Node's classes extend every way**: `class X extends EventEmitter`, and the older
   `function X() { EventEmitter.call(this) }` with `util.inherits` — each class is a `Proxy` of
   its native constructor, whose `apply` trap sets up the caller's own object.
@@ -27,6 +31,15 @@ A JavaScript runtime for live plugins, in Rust.
   What runs in one is the embedder's: implement `isolate::Guest`.
 
 ## What a plugin finds
+
+**Modules**
+- Static and dynamic ESM imports, including imports from CommonJS wrappers and global scripts;
+  Node package maps and conditions, builtins and statically discovered CJS named exports.
+- `import.meta.url`, `filename`, `dirname` and synchronous `resolve`; JSON imports with
+  `with { type: 'json' }`; `data:` and `blob:` modules. A blob import captures its bytes when
+  `import()` is called, so immediate `URL.revokeObjectURL` does not cancel it.
+- Module workers (`new Worker(url, { type: 'module' })`), with static imports and top-level
+  await. Unsupported import schemes reject with Node error codes, never an unsettled promise.
 
 **The web's globals**
 - `EventTarget`, `Event`, `CustomEvent`, `MessageEvent`, `ErrorEvent`, `CloseEvent`,

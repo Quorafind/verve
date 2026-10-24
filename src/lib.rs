@@ -333,8 +333,9 @@ impl RuntimeX {
             .expect("a require function is made")
     }
 
-    /// Runs `source` as the CommonJS module at `filename`, answering its `module.exports`.
-    /// Its own `require` resolves relative names against the folder it is in.
+    /// Runs `source` in the Node-selected format at `filename`: CommonJS exports or the
+    /// synchronous ESM namespace. Use [`Self::load_esm`] for graphs with top-level await.
+    /// A module's own `require` resolves relative names against the folder it is in.
     pub fn load_module(&mut self, filename: &Path, source: &str) -> Result<JsValue, String> {
         let path = esm::absolute(filename, &self.context);
         let result = (|| {
