@@ -269,7 +269,7 @@ pub(crate) const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("ref", 0, |this, _, _| Ok(this.clone())),
     ("unref", 0, |this, _, _| Ok(this.clone())),
 ];
-fn init_server(target: &JsObject, args: &[JsValue], cx: &mut Context) -> JsResult<()> {
+pub(crate) fn init_server(target: &JsObject, args: &[JsValue], cx: &mut Context) -> JsResult<()> {
     let emitter = crate::events::emitter_class(cx)?;
     crate::call(cx, &emitter.into(), &target.clone().into(), &[])?;
     let options = arg(args, 0);
@@ -429,6 +429,9 @@ pub(crate) fn endpoints(
 pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context) -> JsResult<()> {
     let this: JsValue = target.clone().into();
     match event {
+        Event::Secure(protocol, alpn, cipher, cert) => {
+            super::tls::secured(&this, protocol, alpn, cipher, cert, cx)?
+        }
         Event::Dns(result) => super::dns::deliver(id, result, cx)?,
         Event::Connected(local, peer) => {
             endpoints(&this, local, peer, cx)?;
@@ -458,8 +461,9 @@ pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context)
             emit(&this, "listening", &[], cx)?;
         }
         Event::Accepted(ticket, local, peer) => {
-            let module = crate::modules::node_module(cx, "net")?;
-            let class = get(&module, "Socket", cx)?
+            let secure = !get(&this, "__tlsOptions", cx)?.is_undefined();
+            let module = crate::modules::node_module(cx, if secure { "tls" } else { "net" })?;
+            let class = get(&module, if secure { "TLSSocket" } else { "Socket" }, cx)?
                 .as_object()
                 .ok_or_else(|| crate::native::type_error("Socket"))?;
             let options = get(&this, "__networkOptions", cx)?;
@@ -470,6 +474,7 @@ pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context)
             put(&socket_value, "pending", false, cx)?;
             super::send(cx, Command::Adopt(ticket, child));
             put(&socket_value, "server", this.clone(), cx)?;
+            super::tls::accepted(&this, &socket_value, child, cx)?;
             let connections = get(&this, "__networkConnections", cx)?;
             invoke(&connections, "push", &[socket_value.clone()], cx)?;
             let close = closure(

@@ -52,6 +52,15 @@ socket2 = { version = "=0.6.5", features = ["all"] }
 # System-configured DNS record queries, confined to the fixed resolver pool.
 hickory-resolver = { version = "=0.24.4", features = ["system-config"] }
 
+# TLS client/server handshakes and certificate verification within the mio reactor.
+rustls = { version = "=0.23.43", default-features = false, features = ["std", "ring", "tls12"] }
+# Native trust anchors; loaded off the JavaScript thread.
+rustls-native-certs = "=0.8.4"
+# Node's PEM ca/cert/key options, parsed without OpenSSL.
+rustls-pemfile = "=2.2.0"
+# Decode getPeerCertificate metadata; TLS verification itself remains rustls/webpki.
+x509-parser = "=0.18.0"
+
 [dev-dependencies]
 serde_json = "1"
 # WebAssembly tests write their modules as text.

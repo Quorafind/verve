@@ -28,6 +28,8 @@ pub(crate) enum Command {
     Timeout(Id, u64),
     Dns(Id, super::dns::Query),
     DnsResult(Id, Result<super::dns::Answer, String>),
+    TlsClient(Id, super::tls::Options),
+    TlsServer(Id, super::tls::Options),
     Stop,
 }
 #[derive(Debug)]
@@ -40,6 +42,7 @@ pub(crate) enum Event {
     End,
     Closed,
     Timeout,
+    Secure(String, Vec<u8>, String, Vec<u8>),
     Dns(Result<super::dns::Answer, String>),
     Error(String, String),
 }
@@ -115,6 +118,9 @@ struct Connection {
     timeout: u64,
     activity: Instant,
     alternatives: VecDeque<SocketAddr>,
+    tls: Option<rustls::Connection>,
+    secured: bool,
+    tls_written: Option<usize>,
 }
 impl Connection {
     fn new(socket: TcpStream, connecting: bool) -> Self {
@@ -129,12 +135,17 @@ impl Connection {
             timeout: 0,
             activity: Instant::now(),
             alternatives: VecDeque::new(),
+            tls: None,
+            secured: false,
+            tls_written: None,
         }
     }
     fn interest(&self) -> Option<Interest> {
         match (
-            self.credit && !self.ended,
-            self.connecting || !self.writes.is_empty(),
+            (self.credit && !self.ended) || self.tls.as_ref().is_some_and(|t| t.is_handshaking()),
+            self.connecting
+                || !self.writes.is_empty()
+                || self.tls.as_ref().is_some_and(|t| t.wants_write()),
         ) {
             (true, true) => Some(Interest::READABLE | Interest::WRITABLE),
             (true, false) => Some(Interest::READABLE),
@@ -190,6 +201,7 @@ fn run(
     dns: mpsc::SyncSender<(Id, super::dns::Query)>,
 ) {
     let mut sockets: HashMap<Id, Connection> = HashMap::new();
+    let mut tls_options = HashMap::new();
     let mut listeners: HashMap<Id, Listener> = HashMap::new();
     let mut pending = HashMap::new();
     let mut accepted: HashMap<Id, TcpStream> = HashMap::new();
@@ -203,6 +215,12 @@ fn run(
                 Err(mpsc::TryRecvError::Disconnected) => return,
             };
             match command {
+                Command::TlsClient(id, options) => {
+                    tls_options.insert(id, (options, false));
+                }
+                Command::TlsServer(id, options) => {
+                    tls_options.insert(id, (options, true));
+                }
                 Command::Stop => return,
                 Command::Connect(id, host, port, family) => {
                     pending.insert(id, (false, VecDeque::new(), false, 0));
@@ -364,13 +382,36 @@ fn run(
             }
         }
         for (&id, c) in sockets.iter_mut() {
-            if c.end && c.writes.is_empty() && !c.connecting {
-                let _ = c.socket.shutdown(Shutdown::Write);
+            if let Some((options, server)) = tls_options.remove(&id) {
+                let result = if server {
+                    super::tls::server(&options)
+                } else {
+                    super::tls::client(&options)
+                };
+                match result {
+                    Ok(mut tls) => {
+                        tls.set_buffer_limit(Some(65536));
+                        c.tls = Some(tls);
+                    }
+                    Err(e) => error(&out, id, e),
+                }
+            }
+            if c.end && c.writes.is_empty() && c.tls_written.is_none() && !c.connecting {
+                if let Some(tls) = c.tls.as_mut() {
+                    tls.send_close_notify();
+                } else {
+                    let _ = c.socket.shutdown(Shutdown::Write);
+                }
                 c.end = false;
             }
             if c.timeout != 0 && c.activity.elapsed() >= Duration::from_millis(c.timeout) {
                 c.activity = Instant::now();
                 let _ = out.send((id, Event::Timeout));
+            }
+            if c.tls.is_some() && !c.connecting {
+                if let Err(e) = tls_step(c, id, false, &out) {
+                    error(&out, id, e);
+                }
             }
             if let Err(e) = c.register(&poll, id) {
                 error(&out, id, e);
@@ -436,6 +477,12 @@ fn run(
                     continue;
                 }
             }
+            if c.tls.is_some() {
+                if let Err(e) = tls_step(c, id, ready.is_readable(), &out) {
+                    error(&out, id, e);
+                }
+                continue;
+            }
             if ready.is_writable() {
                 // Fairness: at most one 64 KiB slice per ready socket per poll.
                 if let Some((data, position)) = c.writes.front_mut() {
@@ -476,6 +523,101 @@ fn run(
         }
     }
 }
+fn tls_step(
+    c: &mut Connection,
+    id: Id,
+    readable: bool,
+    out: &mpsc::Sender<(Id, Event)>,
+) -> io::Result<()> {
+    let Some(tls) = c.tls.as_mut() else {
+        return Ok(());
+    };
+    if readable && (c.credit || tls.is_handshaking()) && !c.ended {
+        match tls.read_tls(&mut c.socket) {
+            Ok(0) => {
+                c.ended = true;
+                let _ = out.send((id, Event::End));
+            }
+            Ok(_) => {
+                let state = tls.process_new_packets().map_err(io::Error::other)?;
+                if state.peer_has_closed() {
+                    c.ended = true;
+                }
+                c.activity = Instant::now();
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if !tls.is_handshaking() && !c.secured {
+        c.secured = true;
+        let protocol = match tls.protocol_version() {
+            Some(rustls::ProtocolVersion::TLSv1_3) => "TLSv1.3",
+            _ => "TLSv1.2",
+        }
+        .to_owned();
+        let alpn = tls.alpn_protocol().unwrap_or_default().to_vec();
+        let cipher = tls
+            .negotiated_cipher_suite()
+            .map(|s| format!("{:?}", s.suite()))
+            .unwrap_or_default();
+        let cert = tls
+            .peer_certificates()
+            .and_then(|v| v.first())
+            .map(|v| v.as_ref().to_vec())
+            .unwrap_or_default();
+        let _ = out.send((id, Event::Secure(protocol, alpn, cipher, cert)));
+    }
+    if c.secured && c.tls_written.is_none() {
+        if let Some((bytes, offset)) = c.writes.front_mut() {
+            match tls.writer().write(&bytes[*offset..]) {
+                Ok(n) => {
+                    *offset += n;
+                    if *offset == bytes.len() {
+                        c.tls_written = Some(bytes.len());
+                        c.writes.pop_front();
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    if tls.wants_write() {
+        match tls.write_tls(&mut c.socket) {
+            Ok(_) => {
+                c.activity = Instant::now();
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if !tls.wants_write() {
+        if let Some(n) = c.tls_written.take() {
+            let _ = out.send((id, Event::Written(n)));
+        }
+    }
+    if c.credit && c.secured {
+        let mut bytes = vec![0; 65536];
+        match tls.reader().read(&mut bytes) {
+            Ok(0) => {
+                if c.ended {
+                    c.credit = false;
+                    let _ = out.send((id, Event::End));
+                }
+            }
+            Ok(n) => {
+                bytes.truncate(n);
+                c.credit = false;
+                let _ = out.send((id, Event::Data(bytes)));
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 type Pending = HashMap<Id, (bool, VecDeque<(Vec<u8>, usize)>, bool, u64)>;
 fn open(
     id: Id,

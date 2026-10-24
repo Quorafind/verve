@@ -93,7 +93,12 @@ A JavaScript runtime for live plugins, in Rust.
 - `RuntimeX::set_permissions(Permissions)` defaults to denial: outbound host/port rules,
   independent listening (`Deny`, `Loopback`, `Any`) and DNS. Replacing a policy closes existing
   resources; workers start denied. The reserved `child_process` bit does not enable execution.
-- `tls`, `http`, `https`, `http2`, `dgram`, `cluster`, `child_process` and `node:sqlite` load
+- `tls`: rustls client/server Duplex sockets on the same reactor, system trust by default,
+  PEM `ca`/`cert`/`key`, `secureContext`, SNI and named server contexts, ALPN, TLS 1.2/1.3
+  bounds, cipher selection, client-certificate requests, `rejectUnauthorized`, the JavaScript
+  identity hook, and peer certificate metadata. Trust-store loading and handshakes stay off
+  the realm thread. Legacy TLS versions and OpenSSL engine/session options are not available.
+- `http`, `https`, `http2`, `dgram`, `cluster`, `child_process` and `node:sqlite` load
   with their classes and constants. Process execution, cluster and IPC sockets remain denied.
   Without network capabilities, the original network refusal errors are preserved.
 

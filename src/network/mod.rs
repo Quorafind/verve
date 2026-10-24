@@ -4,6 +4,7 @@
 pub(crate) mod dns;
 pub(crate) mod reactor;
 pub(crate) mod tcp;
+pub(crate) mod tls;
 
 use crate::native::{get, invoke};
 use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};

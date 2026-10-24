@@ -501,6 +501,7 @@ pub(crate) fn tls_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     }
     module.set(js_string!("CLIENT_RENEG_LIMIT"), 3, false, context)?;
     module.set(js_string!("CLIENT_RENEG_WINDOW"), 600, false, context)?;
+    crate::network::tls::install(&module, context)?;
     Ok(module.into())
 }
 

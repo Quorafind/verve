@@ -126,6 +126,27 @@ fn expired_network_deadline_returns_without_waiting() {
     assert!(start.elapsed() < Duration::from_millis(100));
 }
 #[test]
+fn tls_client_server_ca_alpn_identity_and_duplex() {
+    assert_eq!(
+        run(
+            r#"
+        const tls=require('tls'),fs=require('fs'),{Duplex}=require('stream');
+        const cert=fs.readFileSync(__dirname+'/fixtures/network/localhost-cert.pem');
+        const key=fs.readFileSync(__dirname+'/fixtures/network/localhost-key.pem');
+        let checked=false;const server=tls.createServer({cert,key,ALPNProtocols:['http/1.1']},s=>s.end('secure'));
+        server.listen(0,'127.0.0.1',()=>{
+            const s=tls.connect({host:'127.0.0.1',port:server.address().port,servername:'localhost',ca:cert,ALPNProtocols:['http/1.1'],checkServerIdentity:(name,cert)=>{checked=name==='localhost'||name==='127.0.0.1';if(!cert.raw)throw Error('no certificate')}},()=>{});
+            let body='';s.setEncoding('utf8');s.on('data',b=>body+=b);
+            s.on('end',()=>{globalThis.result=[s instanceof Duplex,s.authorized,s.alpnProtocol,body,checked,s.getPeerCertificate().subject.CN];s.end();server.close()});
+        });
+    "#,
+            granted()
+        ),
+        r#"[true,true,"http/1.1","secure",true,"localhost"]"#
+    );
+}
+
+#[test]
 #[ignore = "100 MB acceptance; run during central integration"]
 fn loopback_100mb_obeys_backpressure() {
     assert_eq!(
