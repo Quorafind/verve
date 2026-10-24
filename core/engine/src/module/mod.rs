@@ -678,6 +678,47 @@ impl Module {
             .expect("`then` cannot fail for a native `JsPromise`")
     }
 
+    /// Evaluates a synchronous graph without running unrelated promise jobs.
+    ///
+    /// Every dependency must load immediately. Top-level await and re-entrant evaluation are
+    /// rejected before any module in the graph is evaluated.
+    pub fn load_link_evaluate_sync(&self, context: &mut Context) -> JsResult<()> {
+        let mut pending = vec![self.clone()];
+        let mut visited = Vec::new();
+        while let Some(module) = pending.pop() {
+            if visited.contains(&module) {
+                continue;
+            }
+            visited.push(module.clone());
+            if let ModuleKind::SourceText(source) = module.kind() {
+                pending.extend(source.load_dependencies_sync(&module, context)?);
+            }
+        }
+        for module in visited {
+            if let ModuleKind::SourceText(source) = module.kind() {
+                source.ensure_sync_evaluation()?;
+            }
+        }
+        self.link(context)?;
+        match self.evaluate(context)?.state() {
+            PromiseState::Fulfilled(_) => Ok(()),
+            PromiseState::Rejected(error) => Err(JsError::from_opaque(error)),
+            PromiseState::Pending => Err(JsNativeError::typ()
+                .with_message("Cannot synchronously evaluate a module with top-level await")
+                .into()),
+        }
+    }
+
+    /// Updates an existing synthetic binding without replacing its module namespace.
+    pub fn set_synthetic_export(&self, name: &JsString, value: JsValue) -> JsResult<()> {
+        match self.kind() {
+            ModuleKind::Synthetic(module) => module.set_export(name, value),
+            ModuleKind::SourceText(_) => Err(JsNativeError::typ()
+                .with_message("Cannot set a synthetic export on a source text module")
+                .into()),
+        }
+    }
+
     /// Abstract operation [`GetModuleNamespace ( module )`][spec].
     ///
     /// Gets the [**Module Namespace Object**][ns] that represents this module's exports.
@@ -714,6 +755,28 @@ impl Module {
                 ModuleNamespace::create(self.clone(), unambiguous_names, context)
             })
             .clone()
+    }
+
+    /// Preserves live bindings when a host exposes an additional namespace marker.
+    ///
+    /// The ordinary namespace is unchanged and existing exports are never overridden.
+    pub fn namespace_with_marker(
+        &self,
+        name: JsString,
+        value: JsValue,
+        context: &mut Context,
+    ) -> JsObject {
+        let namespace = self.namespace(context);
+        let names = {
+            let data = namespace
+                .downcast_ref::<ModuleNamespace>()
+                .expect("module namespace has module namespace data");
+            if data.exports().contains(&name) {
+                return namespace.clone();
+            }
+            data.exports().iter().cloned().collect()
+        };
+        ModuleNamespace::create_with_marker(self.clone(), names, name, value, context)
     }
 
     /// Get an exported value from the module.

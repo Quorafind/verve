@@ -20,7 +20,7 @@ use crate::{
     Error,
     lexer::{InputElement, TokenKind},
     parser::{
-        AllowAwait, AllowYield, Cursor, ParseResult, TokenParser,
+        AllowAwait, AllowYield, Cursor, OrAbrupt, ParseResult, TokenParser,
         expression::{
             AssignmentExpression, FormalParameterListOrExpression,
             left_hand_side::{
@@ -29,13 +29,14 @@ use crate::{
                 member::MemberExpression,
                 optional::OptionalExpression,
             },
+            primary::arguments_to_formal_parameters,
         },
     },
     source::ReadChar,
 };
 use boa_ast::{
     Keyword, Position, Punctuator, Span, Spanned,
-    expression::{ImportCall, ImportPhase, SuperCall},
+    expression::{Call, Identifier, ImportCall, ImportPhase, SuperCall},
 };
 use boa_interner::{Interner, Sym};
 
@@ -150,6 +151,70 @@ where
         }
 
         cursor.set_goal(InputElement::TemplateTail);
+
+        let token = cursor.peek(0, interner).or_abrupt()?;
+        let async_span = token.span();
+        let is_async = token.kind() == &TokenKind::Keyword((Keyword::Async, false));
+        let is_async_cover = if is_async {
+            let skip_n = if cursor.peek_is_line_terminator(0, interner).or_abrupt()? {
+                2
+            } else {
+                1
+            };
+            !cursor
+                .peek_is_line_terminator(skip_n, interner)?
+                .unwrap_or(true)
+                && cursor.peek(1, interner)?.is_some_and(|token| {
+                    token.kind() == &TokenKind::Punctuator(Punctuator::OpenParen)
+                })
+        } else {
+            false
+        };
+
+        if is_async_cover {
+            cursor.advance(interner);
+            let (args, args_span, trailing_comma) =
+                Arguments::new(self.allow_yield, self.allow_await).parse_cover(cursor, interner)?;
+
+            // Parse the cover with the normal argument grammar and lexer goals. Only `=>`
+            // decides whether it is a call or an async arrow head; do not scan ahead over it.
+            if cursor
+                .peek(0, interner)?
+                .is_some_and(|token| token.kind() == &TokenKind::Punctuator(Punctuator::Arrow))
+                && !cursor.peek_is_line_terminator(0, interner).or_abrupt()?
+            {
+                return Ok(FormalParameterListOrExpression::AsyncArrowHead {
+                    parameters: arguments_to_formal_parameters(
+                        &args,
+                        trailing_comma,
+                        cursor.strict(),
+                        args_span,
+                    )?,
+                    span_start: args_span.start(),
+                });
+            }
+
+            let mut call = CallExpressionTail::new(
+                self.allow_yield,
+                self.allow_await,
+                Call::new(
+                    Identifier::new(Sym::ASYNC, async_span).into(),
+                    args,
+                    args_span,
+                )
+                .into(),
+            )
+            .parse(cursor, interner)?;
+            if cursor
+                .peek(0, interner)?
+                .is_some_and(|token| token.kind() == &TokenKind::Punctuator(Punctuator::Optional))
+            {
+                call = OptionalExpression::new(self.allow_yield, self.allow_await, call)
+                    .parse(cursor, interner)?
+                    .into();
+            }
+            return Ok(call.into());
+        }
 
         let mut lhs: FormalParameterListOrExpression =
             if let Some(start) = is_keyword_call(Keyword::Super, cursor, interner)? {

@@ -54,12 +54,26 @@ where
     type Output = (Box<[Expression]>, Span);
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+        self.parse_cover(cursor, interner)
+            .map(|(arguments, span, _)| (arguments, span))
+    }
+}
+
+impl Arguments {
+    /// Parses arguments without deciding whether they cover an async arrow head.
+    /// The trailing comma is significant for a rest parameter, but not a spread argument.
+    pub(super) fn parse_cover<R: ReadChar>(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<(Box<[Expression]>, Span, bool)> {
         let start = cursor
             .expect(Punctuator::OpenParen, "arguments", interner)?
             .span()
             .start();
 
         let mut args = Vec::new();
+        let mut trailing_comma = false;
         let end = loop {
             cursor.set_goal(InputElement::RegExp);
             let next_token = cursor.peek(0, interner).or_abrupt()?;
@@ -83,6 +97,7 @@ where
                     }
 
                     if let Some(next) = cursor.next_if(Punctuator::CloseParen, interner)? {
+                        trailing_comma = true;
                         break next.span().end();
                     }
                 }
@@ -118,6 +133,10 @@ where
             }
         };
         cursor.set_goal(InputElement::Div);
-        Ok((args.into_boxed_slice(), Span::new(start, end)))
+        Ok((
+            args.into_boxed_slice(),
+            Span::new(start, end),
+            trailing_comma,
+        ))
     }
 }

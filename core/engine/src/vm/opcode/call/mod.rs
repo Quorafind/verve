@@ -601,6 +601,16 @@ impl ImportCall {
         };
 
         // 8. Perform HostLoadImportedModule(referrer, specifierString, empty, promiseCapability).
+        if let Err(error) = context
+            .module_loader()
+            .prepare_import(&referrer, &request, context)
+        {
+            let error = error.into_opaque(context)?;
+            cap.reject()
+                .call(&JsValue::undefined(), &[error], context)?;
+            context.vm.set_register(specifier_op.into(), promise.into());
+            return Ok(());
+        }
         let job = NativeAsyncJob::with_realm(
             async move |context| {
                 load_dyn_import(referrer, request, cap, phase, context).await?;

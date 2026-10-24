@@ -146,6 +146,18 @@ impl From<ActiveRunnable> for Referrer {
 /// `import.meta` requests.
 #[dynify]
 pub trait ModuleLoader: Any {
+    /// Captures host-owned sources before a dynamic import yields to the job queue.
+    ///
+    /// A blob URL may be revoked immediately after `import()` returns its promise.
+    fn prepare_import(
+        self: Rc<Self>,
+        _referrer: &Referrer,
+        _request: &ModuleRequest,
+        _context: &mut Context,
+    ) -> JsResult<()> {
+        Ok(())
+    }
+
     /// Host hook [`HostLoadImportedModule ( referrer, specifier, hostDefined, payload )`][spec].
     ///
     /// This hook allows to customize the module loading functionality of the engine. Technically,

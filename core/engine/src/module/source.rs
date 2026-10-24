@@ -625,6 +625,67 @@ impl SourceTextModule {
         }
     }
 
+    pub(super) fn load_dependencies_sync(
+        &self,
+        module: &Module,
+        context: &mut Context,
+    ) -> JsResult<Vec<Module>> {
+        let mut dependencies = Vec::with_capacity(self.code.requested_modules.len());
+        for request in &self.code.requested_modules {
+            let cached = self.loaded_modules.borrow().get(request).cloned();
+            let loaded = match cached {
+                Some(loaded) => loaded,
+                None => {
+                    let loader = context.module_loader();
+                    let loaded = {
+                        let context = RefCell::new(&mut *context);
+                        let future = loader.load_imported_module(
+                            Referrer::Module(module.clone()),
+                            request.clone(),
+                            &context,
+                        );
+                        let mut stack = [MaybeUninit::<u8>::uninit(); 16];
+                        let mut heap = Vec::<MaybeUninit<u8>>::new();
+                        let future = future.init2(&mut stack, &mut heap);
+                        let mut future = std::pin::pin!(future);
+                        let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+                        match future.as_mut().poll(&mut task) {
+                            std::task::Poll::Ready(result) => result?,
+                            std::task::Poll::Pending => {
+                                return Err(JsNativeError::typ()
+                                    .with_message("Module loading did not complete synchronously")
+                                    .into());
+                            }
+                        }
+                    };
+                    self.loaded_modules
+                        .borrow_mut()
+                        .insert(request.clone(), loaded.clone());
+                    loaded
+                }
+            };
+            dependencies.push(loaded);
+        }
+        Ok(dependencies)
+    }
+
+    pub(super) fn ensure_sync_evaluation(&self) -> JsResult<()> {
+        if self.code.has_tla {
+            return Err(JsNativeError::typ()
+                .with_message("Cannot synchronously evaluate a module with top-level await")
+                .into());
+        }
+        if matches!(
+            &*self.status.borrow(),
+            ModuleStatus::Evaluating { .. } | ModuleStatus::EvaluatingAsync { .. }
+        ) {
+            return Err(JsNativeError::typ()
+                .with_message("Cannot synchronously evaluate a module that is already evaluating")
+                .into());
+        }
+        Ok(())
+    }
+
     /// Concrete method [`GetExportedNames ( [ exportStarSet ] )`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-getexportednames

@@ -6,6 +6,10 @@ pub(crate) enum FormalParameterListOrExpression {
         fpl: FormalParameterList,
         span_start: Position,
     },
+    AsyncArrowHead {
+        parameters: FormalParameterList,
+        span_start: Position,
+    },
     Expression(ast::Expression),
 }
 
@@ -13,7 +17,8 @@ impl FormalParameterListOrExpression {
     pub(crate) fn try_into_expression(self) -> ParseResult<ast::Expression> {
         match self {
             FormalParameterListOrExpression::Expression(expr) => Ok(expr),
-            FormalParameterListOrExpression::FormalParameterList { span_start, .. } => {
+            FormalParameterListOrExpression::FormalParameterList { span_start, .. }
+            | FormalParameterListOrExpression::AsyncArrowHead { span_start, .. } => {
                 Err(Error::General {
                     message: "invalid arrow-function arguments (parentheses around the arrow-function may help)".into(),
                     position: span_start,

@@ -38,6 +38,7 @@ pub struct ModuleNamespace {
     /// a lookup to check if the pointer is alive. The logic is correct either way.
     #[unsafe_ignore_trace]
     resolved_bindings: FxHashMap<JsString, ResolvedBinding>,
+    marker: Option<(JsString, JsValue)>,
 }
 
 impl JsData for ModuleNamespace {
@@ -104,9 +105,30 @@ impl ModuleNamespace {
                 module,
                 exports,
                 resolved_bindings,
+                marker: None,
             },
             vec![js_string!("Module").into()],
         )
+    }
+
+    pub(crate) fn create_with_marker(
+        module: Module,
+        names: Vec<JsString>,
+        name: JsString,
+        value: JsValue,
+        context: &mut Context,
+    ) -> JsObject {
+        let namespace = Self::create(module, names, context);
+        {
+            let mut data = namespace
+                .downcast_mut::<Self>()
+                .expect("namespace factory creates a module namespace");
+            if data.exports.insert(name.clone()) {
+                data.exports.sort();
+                data.marker = Some((name, value));
+            }
+        }
+        namespace
     }
 
     /// Gets the export names of the Module Namespace object.
@@ -311,6 +333,11 @@ fn module_namespace_exotic_try_get(
     let Some(export_name) = exports.get(&key).cloned() else {
         return Ok(None);
     };
+    if let Some((name, value)) = &obj.marker
+        && name == &export_name
+    {
+        return Ok(Some(value.clone()));
+    }
 
     // 4. Let m be O.[[Module]].
     let module = obj.module();
@@ -399,6 +426,11 @@ fn module_namespace_exotic_get(
     let Some(export_name) = exports.get(&key).cloned() else {
         return Ok(JsValue::undefined());
     };
+    if let Some((name, value)) = &obj.marker
+        && name == &export_name
+    {
+        return Ok(value.clone());
+    }
 
     // 4. Let m be O.[[Module]].
     let module = obj.module();

@@ -10,12 +10,10 @@
 use super::arrow_function::ExpressionBody;
 use crate::{
     error::{Error, ErrorContext, ParseResult},
-    lexer::{Error as LexError, TokenKind},
+    lexer::{Error as LexError, Token, TokenKind},
     parser::{
-        AllowIn, AllowYield, Cursor, OrAbrupt, TokenParser,
-        expression::BindingIdentifier,
-        function::{FormalParameters, FunctionBody},
-        name_in_lexically_declared_names,
+        AllowIn, AllowYield, Cursor, OrAbrupt, TokenParser, expression::BindingIdentifier,
+        function::FunctionBody, name_in_lexically_declared_names,
     },
     source::ReadChar,
 };
@@ -68,34 +66,34 @@ where
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
         let async_token =
             cursor.expect((Keyword::Async, false), "async arrow function", interner)?;
-        let start_linear_span = async_token.linear_span();
-        let async_token_span = async_token.span();
         cursor.peek_expect_no_lineterminator(0, "async arrow function", interner)?;
 
         let next_token = cursor.peek(0, interner).or_abrupt()?;
-        let (params, params_start_position) =
-            if next_token.kind() == &TokenKind::Punctuator(Punctuator::OpenParen) {
-                let params_start_position = cursor
-                    .expect(Punctuator::OpenParen, "async arrow function", interner)?
-                    .span()
-                    .end();
+        let params_start_position = next_token.span().start();
+        let param = BindingIdentifier::new(self.allow_yield, true)
+            .parse(cursor, interner)
+            .set_context("async arrow function")?;
+        let params = FormalParameterList::from(FormalParameter::new(
+            Variable::from_identifier(param, None),
+            false,
+        ));
 
-                let params = FormalParameters::new(false, true).parse(cursor, interner)?;
-                cursor.expect(Punctuator::CloseParen, "async arrow function", interner)?;
-                (params, params_start_position)
-            } else {
-                let params_start_position = next_token.span().start();
-                let param = BindingIdentifier::new(self.allow_yield, true)
-                    .parse(cursor, interner)
-                    .set_context("async arrow function")?;
-                (
-                    FormalParameterList::from(FormalParameter::new(
-                        Variable::from_identifier(param, None),
-                        false,
-                    )),
-                    params_start_position,
-                )
-            };
+        self.parse_body(cursor, interner, params, params_start_position, async_token)
+    }
+}
+
+impl AsyncArrowFunction {
+    /// Finishes an async arrow after its binding identifier or cover call has been parsed.
+    pub(super) fn parse_body<R: ReadChar>(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+        params: FormalParameterList,
+        params_start_position: ast::Position,
+        async_token: Token,
+    ) -> ParseResult<ast::function::AsyncArrowFunction> {
+        let start_linear_span = async_token.linear_span();
+        let async_token_span = async_token.span();
 
         cursor.peek_expect_no_lineterminator(0, "async arrow function", interner)?;
         cursor.expect(Punctuator::Arrow, "async arrow function", interner)?;

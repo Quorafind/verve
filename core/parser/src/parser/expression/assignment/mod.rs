@@ -128,18 +128,18 @@ where
                 if !cursor
                     .peek_is_line_terminator(skip_n, interner)
                     .or_abrupt()?
-                    && (matches!(peek_1, TokenKind::Punctuator(Punctuator::OpenParen))
-                        || (matches!(
-                            peek_1,
-                            TokenKind::IdentifierName(_)
-                                | TokenKind::Keyword((
-                                    Keyword::Yield | Keyword::Await | Keyword::Of,
-                                    _
-                                ))
-                        ) && matches!(
-                            cursor.peek(2, interner).or_abrupt()?.kind(),
-                            TokenKind::Punctuator(Punctuator::Arrow)
-                        )))
+                    && matches!(
+                        peek_1,
+                        TokenKind::IdentifierName(_)
+                            | TokenKind::Keyword((
+                                Keyword::Yield | Keyword::Await | Keyword::Of,
+                                _
+                            ))
+                    )
+                    && matches!(
+                        cursor.peek(2, interner).or_abrupt()?.kind(),
+                        TokenKind::Punctuator(Punctuator::Arrow)
+                    )
                 {
                     return Ok(AsyncArrowFunction::new(self.allow_in, self.allow_yield)
                         .parse(cursor, interner)?
@@ -152,6 +152,7 @@ where
         cursor.set_goal(InputElement::Div);
 
         let peek_token = cursor.peek(0, interner).or_abrupt()?;
+        let start_token = peek_token.clone();
         let position = peek_token.span().start();
         let start_linear_span = peek_token.linear_span();
         let lhs = ConditionalExpression::new(self.allow_in, self.allow_yield, self.allow_await)
@@ -159,6 +160,14 @@ where
 
         // If the left hand side is a parameter list, we must parse an arrow function.
         let mut lhs = match lhs {
+            FormalParameterListOrExpression::AsyncArrowHead {
+                parameters,
+                span_start,
+            } => {
+                return AsyncArrowFunction::new(self.allow_in, self.allow_yield)
+                    .parse_body(cursor, interner, parameters, span_start, start_token)
+                    .map(Into::into);
+            }
             FormalParameterListOrExpression::FormalParameterList {
                 fpl: parameters, ..
             } => {

@@ -6,6 +6,21 @@ always agree with one another.
 
 ## What it carries
 
+- `boa_engine`, `module`, `vm/opcode/call`: `ModuleLoader::prepare_import` runs before a
+  dynamic import enters the job queue, so hosts can capture a blob URL before JavaScript revokes
+  it. A preparation error rejects the import promise. `Module::load_link_evaluate_sync` loads
+  synchronous dependency graphs without draining unrelated jobs, rejects top-level await before
+  evaluation and detects re-entrant evaluation; `Module::set_synthetic_export` updates live
+  bindings in synthetic module namespaces. `Module::namespace_with_marker` supplies an additional
+  immutable marker without snapshotting live bindings or changing the ordinary namespace.
+  Node-specific errors and resolution remain the embedder's responsibility.
+
+- `boa_parser`, `expression`: `async(...)` uses the ordinary argument grammar until a following
+  `=>` identifies an async arrow head. A call to a function named `async`, including the nested
+  `iterator(item, async(callback))` used by asynckit, remains a call and keeps its following
+  operators and call chain. Async arrows retain their binding, rest, `await`, strict-mode and
+  duplicate-parameter checks; regex and template arguments use the normal lexer goals.
+
 - `boa_ast`, `scope_analyzer.rs`: a class method's computed name (`class C { [key]() {} }`) is
   visited by the scope analysis, as a field's and an object method's are. Without it a binding the
   name used from an enclosing function was read from the wrong environment and the class threw

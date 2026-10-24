@@ -1,6 +1,10 @@
-use crate::parser::tests::{check_invalid_script, check_script_parser};
+use crate::{
+    Parser, Source,
+    parser::tests::{check_invalid_script, check_script_parser},
+};
 use boa_ast::{
     Declaration, Expression, LinearPosition, LinearSpan, Span, Statement, StatementList,
+    StatementListItem,
     declaration::{LexicalDeclaration, Variable},
     expression::{
         Call, Identifier, Parenthesized, RegExpLiteral,
@@ -12,6 +16,7 @@ use boa_ast::{
         },
     },
     function::{AsyncArrowFunction, FormalParameter, FormalParameterList, FunctionBody},
+    scope::Scope,
 };
 use boa_interner::{Interner, Sym};
 use boa_macros::utf16;
@@ -1200,6 +1205,192 @@ fn parse_async_arrow_function_named_of() {
         ],
         interner,
     );
+}
+
+#[test]
+fn async_named_calls_use_argument_grammar() {
+    for source in [
+        "async()",
+        "async(a)",
+        "async(a, b)",
+        "async(a, b,)",
+        "async((a, b))",
+        "async(a)(b)",
+        "async(a).b[c](d)",
+        "async(a)?.b",
+        "async(a) + b * c",
+        "a + async(b) * c",
+        "async(a) / b / c",
+        "async(a) ? b : c",
+        "async(...items)",
+        "async(...getItems(), a, ...other,)",
+        "async(a = b)",
+        "async(a += b)",
+        "async([a, b], {x: a}, [a] = b, {x: a} = b)",
+        r"async(/\)/, /=>/, a / b)",
+        "async(`) => ${f(a, b)} ${`nested ${c}`}`)",
+        "async(a)`template ${b}`",
+        "async(await)",
+        "async(a = await)",
+        "async\n(a)",
+        "async/*\n*/(a)",
+        r"\u0061sync(a)",
+        "(async)(a)",
+        "obj.async(a)",
+        "new async(a)",
+        "new async(a)(b)",
+        "async function f() { return async(await value); }",
+        "function* f() { return async(yield value); }",
+        "aborter = iterator(item, async(callback));",
+    ] {
+        let result = Parser::new(Source::from_bytes(source))
+            .parse_script(&Scope::new_global(), &mut Interner::default());
+        assert!(result.is_ok(), "`{source}` failed to parse: {result:?}");
+    }
+}
+
+#[test]
+fn async_call_cover_in_module() {
+    let source = "export const aborter = iterator(item, async(callback));\n\
+                  export const arrow = async (a, b) => await a + b;";
+    let result = Parser::new(Source::from_bytes(source))
+        .parse_module(&Scope::new_global(), &mut Interner::default());
+    assert!(result.is_ok(), "module failed to parse: {result:?}");
+}
+
+#[test]
+fn async_call_cover_preserves_precedence() {
+    fn expression(source: &str) -> Expression {
+        let script = Parser::new(Source::from_bytes(source))
+            .parse_script(&Scope::new_global(), &mut Interner::default())
+            .unwrap();
+        let StatementListItem::Statement(statement) = &script.statements().statements()[0] else {
+            panic!("expected expression statement");
+        };
+        let Statement::Expression(expression) = statement.as_ref() else {
+            panic!("expected expression statement");
+        };
+        expression.clone()
+    }
+
+    let Expression::Call(call) = expression("async(a)(b)") else {
+        panic!("expected successive calls");
+    };
+    assert!(matches!(call.function(), Expression::Call(_)));
+
+    let Expression::Binary(binary) = expression("async(a) + b * c") else {
+        panic!("expected addition");
+    };
+    assert_eq!(binary.op(), ArithmeticOp::Add.into());
+    assert!(matches!(binary.lhs(), Expression::Call(_)));
+    assert!(
+        matches!(binary.rhs(), Expression::Binary(mul) if mul.op() == ArithmeticOp::Mul.into())
+    );
+
+    let Expression::New(new) = expression("new async(a)") else {
+        panic!("expected construction, not a call inside new");
+    };
+    assert!(
+        matches!(new.constructor(), Expression::Identifier(identifier) if identifier.sym() == Sym::ASYNC)
+    );
+}
+
+#[test]
+fn async_parenthesized_arrows_still_parse() {
+    for source in [
+        "async () => 0",
+        "async (a) => a",
+        "async (a, b,) => a + b",
+        "async (a = /\\)/, b = `) => ${a}`) => b",
+        "async ({x = 1}, [y = 2], ...rest) => x + y",
+        "async ({x: {y}}, [a, ...b]) => y",
+        "async (...[a, b]) => a",
+        "async (...{length}) => length",
+        "async (a = obj.await, b = {await: 1}) => a",
+        "async (a = function () { return await; }) => a",
+        "async (a = () => await) => a",
+        "async (a = {await() { return await; }}) => a",
+        "async ({[key]: value}, [a = obj.x]) => value",
+        "async /* comment */ (a) /* comment */ => await a",
+        "async (yield) => yield",
+        "async (a) => b => a + b",
+    ] {
+        let result = Parser::new(Source::from_bytes(source))
+            .parse_script(&Scope::new_global(), &mut Interner::default())
+            .unwrap_or_else(|error| panic!("`{source}` failed to parse: {error}"));
+        let StatementListItem::Statement(statement) = &result.statements().statements()[0] else {
+            panic!("expected expression statement");
+        };
+        assert!(
+            matches!(
+                statement.as_ref(),
+                Statement::Expression(Expression::AsyncArrowFunction(_))
+            ),
+            "`{source}` is not an async arrow"
+        );
+    }
+}
+
+#[test]
+fn async_arrow_cover_rejects_invalid_parameters() {
+    for source in [
+        "async (a, a) => 0",
+        "async ({a}, [a]) => 0",
+        "async (a = 0, a) => 0",
+        "async (...a,) => 0",
+        "async (...a, b) => 0",
+        "async (...a = []) => 0",
+        "async (...f()) => 0",
+        "async ((a)) => 0",
+        "async ((a, b)) => 0",
+        "async (a + b) => 0",
+        "async (a += b) => 0",
+        "async (obj.a) => 0",
+        "async ([obj.a]) => 0",
+        "async ({a: obj.a}) => 0",
+        "async (...[obj.a]) => 0",
+        "async (await) => 0",
+        "async ({await}) => 0",
+        "async (a = await) => 0",
+        "async (a = {await}) => 0",
+        "async ({[await]: a}) => 0",
+        "async (a = (await) => 0) => 0",
+        "async function f() { return async(a = await b) => 0; }",
+        "function* f() { return async(a = yield b) => 0; }",
+        "async (a = 0) => { 'use strict'; }",
+        "async ([a] = [0]) => { 'use strict'; }",
+        "async (a) => { let a; }",
+        "'use strict'; async (eval) => 0",
+        "'use strict'; async ([arguments]) => 0",
+        "async\n(a) => 0",
+        "async/*\n*/(a) => 0",
+        "async(a)\n=> 0",
+        "async(a)/*\n*/=> 0",
+        r"\u0061sync(a) => 0",
+        "async(a)(b) => 0",
+        "async(a) + b => 0",
+        "a + async(b) => 0",
+        "new async(a) => 0",
+        "async({a = 1})",
+        "async(,)",
+    ] {
+        check_invalid_script(source);
+    }
+}
+
+#[test]
+fn ordinary_arrow_cover_early_errors_are_unchanged() {
+    for source in [
+        "(a, a) => 0",
+        "(...a,) => 0",
+        "(a = 0) => { 'use strict'; }",
+        "(a) => { let a; }",
+        "'use strict'; (eval) => 0",
+        "(a)\n=> 0",
+        "a + (b) => 0",
+    ] {
+        check_invalid_script(source);
+    }
 }
 
 macro_rules! check_non_reserved_identifier {

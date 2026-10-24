@@ -20,6 +20,8 @@ mod template;
 
 pub(in crate::parser) mod object_initializer;
 
+use core::ops::ControlFlow;
+
 use self::{
     array_initializer::ArrayLiteral, async_function_expression::AsyncFunctionExpression,
     async_generator_expression::AsyncGeneratorExpression, class_expression::ClassExpression,
@@ -48,12 +50,18 @@ use boa_ast::{
     declaration::Variable,
     expression::{
         Identifier, Parenthesized, This,
+        access::PropertyAccess,
         literal::{self, Literal, LiteralKind, TemplateElement},
-        operator::{assign::AssignTarget, binary::BinaryOp},
+        operator::{
+            assign::{AssignOp, AssignTarget},
+            binary::BinaryOp,
+        },
     },
-    function::{FormalParameter, FormalParameterList},
+    function::{ClassElement, FormalParameter, FormalParameterList, FunctionBody},
     operations::{ContainsSymbol, contains},
     pattern::{ArrayPattern, ObjectPattern, Pattern},
+    property::PropertyName,
+    visitor::{VisitWith, Visitor},
 };
 use boa_interner::{Interner, Sym};
 
@@ -549,6 +557,146 @@ where
             fpl: parameters,
             span_start: span.start(),
         })
+    }
+}
+
+/// Reinterprets a cover call's arguments only after seeing its async arrow.
+/// Keep this separate from ordinary parenthesized arrows, whose cover grammar is different.
+pub(super) fn arguments_to_formal_parameters(
+    arguments: &[ast::Expression],
+    trailing_comma: bool,
+    strict: bool,
+    span: Span,
+) -> ParseResult<FormalParameterList> {
+    let mut parameters = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        let (node, rest) = if let ast::Expression::Spread(spread) = argument {
+            if index + 1 != arguments.len() || trailing_comma {
+                return Err(Error::general(
+                    "rest parameter must be last formal parameter",
+                    span.start(),
+                ));
+            }
+            (spread.target(), true)
+        } else {
+            (argument, false)
+        };
+        // An argument is an AssignmentExpression, not the comma expression accepted by the
+        // ordinary parenthesized cover. Rest parameters also cannot have initializers.
+        if !matches!(
+            node,
+            ast::Expression::Identifier(_)
+                | ast::Expression::ObjectLiteral(_)
+                | ast::Expression::ArrayLiteral(_)
+        ) && !matches!(node, ast::Expression::Assign(assign) if !rest && assign.op() == AssignOp::Assign)
+        {
+            return Err(Error::general(
+                "invalid async arrow parameter",
+                node.span().start(),
+            ));
+        }
+        expression_to_formal_parameters(node, &mut parameters, strict, span)?;
+        if rest {
+            let parameter = parameters
+                .last_mut()
+                .expect("converted rest parameter disappeared");
+            *parameter = FormalParameter::new(parameter.variable().clone(), true);
+        }
+    }
+    let parameters = FormalParameterList::from(parameters);
+    if let ControlFlow::Break(message) = parameters.visit_with(&mut AsyncParameterValidator {
+        in_expression: false,
+        strict,
+    }) {
+        return Err(Error::general(message, span.start()));
+    }
+    Ok(parameters)
+}
+
+/// Assignment patterns permit property-access targets, but bindings do not. Also reject
+/// `await` identifiers parsed with the enclosing call's [Await] grammar, not the arrow's.
+#[derive(Debug)]
+struct AsyncParameterValidator {
+    in_expression: bool,
+    strict: bool,
+}
+
+impl<'ast> Visitor<'ast> for AsyncParameterValidator {
+    type BreakTy = &'static str;
+
+    fn visit_identifier(&mut self, node: &'ast Identifier) -> ControlFlow<Self::BreakTy> {
+        if node.sym() == Sym::AWAIT {
+            return ControlFlow::Break("keyword `await` not allowed in async arrow parameters");
+        }
+        if !self.in_expression && self.strict && [Sym::EVAL, Sym::ARGUMENTS].contains(&node.sym()) {
+            return ControlFlow::Break("invalid binding identifier in strict mode");
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn visit_property_access(&mut self, node: &'ast PropertyAccess) -> ControlFlow<Self::BreakTy> {
+        if !self.in_expression {
+            return ControlFlow::Break("property access is not a binding identifier");
+        }
+        node.visit_with(self)
+    }
+
+    fn visit_property_name(&mut self, node: &'ast PropertyName) -> ControlFlow<Self::BreakTy> {
+        match node {
+            PropertyName::Computed(expression) => self.visit_expression(expression),
+            PropertyName::Literal(_) => ControlFlow::Continue(()),
+        }
+    }
+
+    fn visit_expression(&mut self, node: &'ast ast::Expression) -> ControlFlow<Self::BreakTy> {
+        let in_expression = self.in_expression;
+        self.in_expression = true;
+        let result = match node {
+            ast::Expression::FunctionExpression(_)
+            | ast::Expression::GeneratorExpression(_)
+            | ast::Expression::AsyncFunctionExpression(_)
+            | ast::Expression::AsyncGeneratorExpression(_)
+            | ast::Expression::AsyncArrowFunction(_) => ControlFlow::Continue(()),
+            // Arrow parameters inherit [Await]; their bodies, like other function bodies, do not.
+            ast::Expression::ArrowFunction(arrow) => arrow.parameters().visit_with(self),
+            _ => node.visit_with(self),
+        };
+        self.in_expression = in_expression;
+        result
+    }
+
+    fn visit_property_definition(
+        &mut self,
+        node: &'ast literal::PropertyDefinition,
+    ) -> ControlFlow<Self::BreakTy> {
+        if let literal::PropertyDefinition::MethodDefinition(method) = node {
+            return self.visit_property_name(method.name());
+        }
+        node.visit_with(self)
+    }
+
+    fn visit_formal_parameter_list(
+        &mut self,
+        node: &'ast FormalParameterList,
+    ) -> ControlFlow<Self::BreakTy> {
+        if self.in_expression {
+            return ControlFlow::Continue(());
+        }
+        node.visit_with(self)
+    }
+
+    fn visit_function_body(&mut self, _: &'ast FunctionBody) -> ControlFlow<Self::BreakTy> {
+        ControlFlow::Continue(())
+    }
+
+    fn visit_class_element(&mut self, node: &'ast ClassElement) -> ControlFlow<Self::BreakTy> {
+        match node {
+            ClassElement::MethodDefinition(_) => node.visit_with(self),
+            ClassElement::FieldDefinition(field) | ClassElement::StaticFieldDefinition(field) => {
+                self.visit_property_name(field.name())
+            }
+            _ => ControlFlow::Continue(()),
+        }
     }
 }
 

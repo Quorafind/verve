@@ -325,6 +325,79 @@ fn function_constructor_nested_lexical_binding() {
     )]);
 }
 
+#[test]
+fn named_async_call_in_asynckit_iterator() {
+    run_test_actions([TestAction::assert(indoc! {r#"
+        function async(callback) {
+            return function (value) { callback(value); };
+        }
+        function iterator(item, callback) {
+            callback(item);
+            return function () { return 'aborted'; };
+        }
+        let observed;
+        function callback(value) { observed = value; }
+        const item = 42;
+        let aborter;
+        aborter = iterator(item, async(callback));
+        observed === 42 && aborter() === 'aborted';
+    "#})]);
+}
+
+#[test]
+fn named_async_calls_keep_arguments_and_precedence() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            function async(...args) { return args; }
+            let a = 1, b = 2;
+        "#}),
+        TestAction::assert("async().length === 0"),
+        TestAction::assert("async(a, b).join() === '1,2'"),
+        TestAction::assert("async(...[a, b], ...[3],).join() === '1,2,3'"),
+        TestAction::assert("async(a = 4, {b}, [b])[0] === 4 && a === 4"),
+        TestAction::assert(r"async(/\)/, /=>/)[0].test(')')"),
+        TestAction::assert("async(`) => ${a} ${`nested ${b}`}`)[0] === ') => 4 nested 2'"),
+        TestAction::assert("async\n(a)[0] === 4"),
+        TestAction::assert(indoc! {r#"
+            (() => {
+                function async(a) { return b => a + b; }
+                return async(2)(3) === 5;
+            })()
+        "#}),
+        TestAction::assert(indoc! {r#"
+            (() => {
+                function async(a) { return a * 2; }
+                return async(2) + 3 * 4 === 16 && 1 + async(2) * 3 === 13;
+            })()
+        "#}),
+        TestAction::assert(indoc! {r#"
+            (() => {
+                function async(a) { this.value = a; }
+                return new async(7).value === 7;
+            })()
+        "#}),
+    ]);
+}
+
+#[test]
+fn async_arrow_cover_keeps_async_body_and_source_text() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            let result;
+            const arrow = async ({x = 2} = {}, [y] = [3], ...rest) => {
+                return await Promise.resolve(x + y + rest.length);
+            };
+            arrow(undefined, undefined, 10, 20).then(value => { result = value; });
+        "#}),
+        TestAction::inspect_context(|context| context.run_jobs().unwrap()),
+        TestAction::assert_eq("result", 7),
+        TestAction::assert("arrow.length === 0"),
+        TestAction::assert("arrow.toString().startsWith('async ({x = 2}')"),
+        TestAction::assert("(async () => 0)() instanceof Promise"),
+        TestAction::assert("(async (a, b) => a + b).length === 2"),
+    ]);
+}
+
 /// A function with thousands of bindings, as a bundle's top level in a `CommonJS` wrapper is,
 /// with the duplicates the declaration instantiation must merge. Looking names up in lists made
 /// parsing and compiling such a function quadratic.
