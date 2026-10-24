@@ -31,6 +31,9 @@ pub struct ClassDeclaration {
 
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) name_scope: Scope,
+
+    // Empty when unknown.
+    linear_span: LinearSpanIgnoreEq,
 }
 
 impl ClassDeclaration {
@@ -49,7 +52,25 @@ impl ClassDeclaration {
             constructor,
             elements,
             name_scope: Scope::default(),
+            linear_span: LinearSpan::new(LinearPosition::new(0), LinearPosition::new(0)).into(),
         }
+    }
+
+    /// Sets where the class is in the source text, from `class` to its closing `}`: the
+    /// `[[SourceText]]` that `Function.prototype.toString` returns for its constructor.
+    #[inline]
+    #[must_use]
+    pub fn with_linear_span(mut self, linear_span: LinearSpan) -> Self {
+        self.linear_span = linear_span.into();
+        self
+    }
+
+    /// Returns where the class is in the source text, if known.
+    #[inline]
+    #[must_use]
+    pub fn linear_span(&self) -> Option<LinearSpan> {
+        let span = self.linear_span.0;
+        (span.start() != span.end()).then_some(span)
     }
 
     /// Returns the name of the class declaration.
@@ -179,6 +200,9 @@ pub struct ClassExpression {
 
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) name_scope: Option<Scope>,
+
+    // Empty when unknown.
+    linear_span: LinearSpanIgnoreEq,
 }
 
 impl ClassExpression {
@@ -205,7 +229,25 @@ impl ClassExpression {
             elements,
             span,
             name_scope,
+            linear_span: LinearSpan::new(LinearPosition::new(0), LinearPosition::new(0)).into(),
         }
+    }
+
+    /// Sets where the class is in the source text, from `class` to its closing `}`: the
+    /// `[[SourceText]]` that `Function.prototype.toString` returns for its constructor.
+    #[inline]
+    #[must_use]
+    pub fn with_linear_span(mut self, linear_span: LinearSpan) -> Self {
+        self.linear_span = linear_span.into();
+        self
+    }
+
+    /// Returns where the class is in the source text, if known.
+    #[inline]
+    #[must_use]
+    pub fn linear_span(&self) -> Option<LinearSpan> {
+        let span = self.linear_span.0;
+        (span.start() != span.end()).then_some(span)
     }
 
     /// Returns the name of the class expression.

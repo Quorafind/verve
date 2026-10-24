@@ -194,3 +194,45 @@ fn function_constructor_early_errors_super() {
         ),
     ]);
 }
+
+/// `Function.prototype.toString` returns a function's source text, a class constructor's
+/// included: libraries tell classes from functions with `/^class[\s{]/`.
+#[test]
+fn function_prototype_to_string_source_text() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            const str = (f) => Function.prototype.toString.call(f);
+            class A{}
+            class D extends A { constructor() { super(); } static s() {} get g() { return 1; } }
+            const C = class /* c */ { m() {} };
+        "#}),
+        TestAction::assert_eq("str(A)", js_str!("class A{}")),
+        TestAction::assert_eq(
+            "str(class B extends Object { x(){} })",
+            js_str!("class B extends Object { x(){} }"),
+        ),
+        TestAction::assert_eq("str(C)", js_str!("class /* c */ { m() {} }")),
+        TestAction::assert(r"/^class[\s{]/.test(str(D)) && str(D).endsWith('return 1; } }')"),
+        TestAction::assert_eq("str(D.s)", js_str!("s() {}")),
+        TestAction::assert_eq(
+            "str(Object.getOwnPropertyDescriptor(D.prototype, 'g').get)",
+            js_str!("get g() { return 1; }"),
+        ),
+        TestAction::assert_eq("str(({ m() { return 1 } }).m)", js_str!("m() { return 1 }")),
+        TestAction::assert_eq("str(async () => 1)", js_str!("async () => 1")),
+        TestAction::assert_eq("str(function* g() {})", js_str!("function* g() {}")),
+        TestAction::assert_eq(
+            "str(async function af() {})",
+            js_str!("async function af() {}"),
+        ),
+        TestAction::assert_eq(
+            "str(new Function('a', 'b', 'return a'))",
+            js_str!("function anonymous(a,b\n) {\nreturn a\n}"),
+        ),
+        TestAction::assert_eq("str(Math.max)", js_str!("function max() { [native code] }")),
+        TestAction::assert_eq(
+            "str(function f() {}.bind(null))",
+            js_str!("function () { [native code] }"),
+        ),
+    ]);
+}

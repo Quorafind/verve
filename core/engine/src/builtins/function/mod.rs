@@ -532,6 +532,7 @@ impl BuiltInFunctionObject {
             parameters
         };
 
+        let body_string = body.clone();
         let body = if body.is_empty() {
             FunctionBody::new(StatementList::default(), Span::new((1, 1), (1, 1)))
         } else {
@@ -654,7 +655,40 @@ impl BuiltInFunctionObject {
         }
 
         let in_with = context.vm.frame().environments.has_object_environment();
-        let spanned_source_text = SpannedSourceText::new_empty();
+
+        // 30. Let sourceText be the string-concatenation of prefix, " anonymous(", P, 0x000A (LINE
+        //     FEED), ") {", bodyParseString, and "}" — what `toString` returns for the function.
+        let prefix = match (r#async, generator) {
+            (false, false) => "function",
+            (false, true) => "function*",
+            (true, false) => "async function",
+            (true, true) => "async function*",
+        };
+        let mut source_text = boa_ast::SourceText::with_capacity(0);
+        let mut push = |units: &mut dyn Iterator<Item = u16>| {
+            for unit in units {
+                source_text.collect_code_point(u32::from(unit));
+            }
+        };
+        push(&mut prefix.encode_utf16());
+        push(&mut " anonymous(".encode_utf16());
+        for (i, param) in param_list.iter().enumerate() {
+            if i > 0 {
+                push(&mut ",".encode_utf16());
+            }
+            push(&mut param.iter());
+        }
+        push(&mut "\n) {\n".encode_utf16());
+        push(&mut body_string.iter());
+        push(&mut "\n}".encode_utf16());
+        let span = boa_ast::LinearSpan::new(
+            boa_ast::LinearPosition::new(0),
+            source_text.cur_linear_position(),
+        );
+        let spanned_source_text = SpannedSourceText::new(
+            crate::spanned_source_text::SourceText::new(source_text),
+            Some(span),
+        );
 
         let code = FunctionCompiler::new(spanned_source_text)
             .name(js_string!("anonymous"))

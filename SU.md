@@ -120,6 +120,16 @@ always agree with one another.
   19.4 s → 8.0 s, compile 17.9 s → 2.2 s; make.md (5.6 MB): 3.3 + 2.6 s → 2.2 + 0.9 s; a
   synthetic 1 MB top level: compile 1.85 s → 0.31 s.
 
+- `Function.prototype.toString` of a class constructor returns the class's source text, from
+  `class` to its closing `}` (`[[SourceText]]`), not `function A() { [native code] }`. Dependency
+  injection libraries tell a class from a function with `/^class[\s{]/` on it (the Journals
+  plugin: "Expected a Token, MultiToken, or class constructor; received function"). The parser
+  sets the span on `ClassDeclaration`/`ClassExpression` (`with_linear_span`; the class tail now
+  returns its closing brace's linear position) and `compile_class` gives it to the constructor's
+  code. Methods, accessors, arrows and the rest already returned their source. And a function
+  made by `new Function(…)` returns the source text the specification builds for it,
+  `function anonymous(a,b\n) {\nreturn a\n}`, rather than `[native code]`.
+
 - `boa_gc`, `lib.rs`: a collection no longer frees what it found dead before it returns. The
   dead nodes leave the heap, and their memory is returned a few at a time by later allocations
   (`BoaGc::unfreed`, `FREE_PER_ALLOCATION`), the rest before the next collection — and all of
