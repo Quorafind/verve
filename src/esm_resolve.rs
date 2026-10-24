@@ -161,7 +161,7 @@ fn resolve_inner(
     }
     let mut at = path.parent();
     while let Some(dir) = at {
-        if !dir.file_name().is_some_and(|s| s == "node_modules") {
+        if dir.file_name().is_none_or(|s| s != "node_modules") {
             let root = dir.join("node_modules").join(name);
             if root.is_dir() {
                 let json = manifest(&root)?;

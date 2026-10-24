@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::future::{Ready, ready};
+use std::future::ready;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -508,7 +508,7 @@ impl ModuleLoader for Loader {
         referrer: Referrer,
         request: ModuleRequest,
         context: &RefCell<&mut Context>,
-    ) -> Ready<JsResult<Module>> {
+    ) -> impl std::future::Future<Output = JsResult<Module>> {
         ready(self.request(&referrer, &request, &mut context.borrow_mut()))
     }
 

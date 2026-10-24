@@ -674,10 +674,9 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
                             .unwrap_or_default(),
                         _ => PathBuf::from(crate::shared(cx).cwd.borrow().clone()),
                     };
-                    match resolve(cx, &folder, &name) {
-                        Some(Resolved::Builtin(name)) => Ok(js_text(&name)),
-                        Some(Resolved::File(path)) => Ok(path_text(&path)),
-                        None => Err(not_found(cx, &name)),
+                    match resolve(cx, &folder, &name)? {
+                        Resolved::Builtin(name) => Ok(js_text(&name)),
+                        Resolved::File(path) => Ok(path_text(&path)),
                     }
                 }),
                 ("_nodeModulePaths", 1, |_, args, cx| {
