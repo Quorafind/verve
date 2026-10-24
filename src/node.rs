@@ -470,228 +470,6 @@ fn util_module(context: &mut Context) -> JsResult<JsValue> {
     Ok(util.into())
 }
 
-// ─── events ─────────────────────────────────────────────────────────────────────────────────
-
-/// The listeners of `name` on an emitter: its `_events[name]`, as Node keeps them.
-fn listeners_of(
-    emitter: &JsValue,
-    name: &JsValue,
-    context: &mut Context,
-) -> JsResult<Vec<JsValue>> {
-    let Some(emitter) = emitter.as_object() else {
-        return Ok(Vec::new());
-    };
-    let events = emitter.get(js_string!("_events"), context)?;
-    let Some(events) = events.as_object() else {
-        return Ok(Vec::new());
-    };
-    let key = name.to_property_key(context)?;
-    let list = events.get(key, context)?;
-    let Some(list) = list.as_object() else {
-        return Ok(Vec::new());
-    };
-    let list = JsArray::from_object(list.clone())?;
-    (0..list.length(context)?)
-        .map(|at| list.get(at, context))
-        .collect()
-}
-
-fn set_listeners(
-    emitter: &JsValue,
-    name: &JsValue,
-    list: Vec<JsValue>,
-    context: &mut Context,
-) -> JsResult<()> {
-    let Some(emitter) = emitter.as_object() else {
-        return Ok(());
-    };
-    let mut events = emitter.get(js_string!("_events"), context)?;
-    if !events.is_object() {
-        events = object(context).into();
-        emitter.set(js_string!("_events"), events.clone(), false, context)?;
-    }
-    let events = events.as_object().expect("an object");
-    let key = name.to_property_key(context)?;
-    if list.is_empty() {
-        events.delete_property_or_throw(key, context)?;
-    } else {
-        let array = JsArray::from_iter(list, context);
-        events.set(key, array, false, context)?;
-    }
-    Ok(())
-}
-
-fn add_listener(
-    this: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-    first: bool,
-) -> JsResult<JsValue> {
-    let (name, listener) = (arg(args, 0), arg(args, 1));
-    if !listener.is_callable() {
-        return Err(type_error(
-            "The \"listener\" argument must be of type Function",
-        ));
-    }
-    let mut list = listeners_of(this, &name, context)?;
-    if first {
-        list.insert(0, listener)
-    } else {
-        list.push(listener)
-    }
-    set_listeners(this, &name, list, context)?;
-    Ok(this.clone())
-}
-
-/// A listener that takes itself off before it runs: what `once` adds. It keeps the function it
-/// stands for as `listener`, so `off(f)` finds it.
-fn once_wrapper(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let (name, listener) = (arg(args, 0), arg(args, 1));
-    let wrapper: JsObject = FunctionObjectBuilder::new(
-        context.realm(),
-        NativeFunction::from_copy_closure_with_captures(
-            |this, args, (name, listener): &(JsValue, JsValue), cx| {
-                let list: Vec<JsValue> = listeners_of(this, name, cx)?
-                    .into_iter()
-                    .filter(|l| {
-                        let own = l
-                            .as_object()
-                            .and_then(|o| o.get(js_string!("listener"), cx).ok());
-                        !own.is_some_and(|own| own == *listener)
-                    })
-                    .collect();
-                set_listeners(this, name, list, cx)?;
-                crate::call(cx, listener, this, args)
-            },
-            (name.clone(), listener.clone()),
-        ),
-    )
-    .build()
-    .into();
-    wrapper.set(js_string!("listener"), listener, false, context)?;
-    let _ = this;
-    Ok(wrapper.into())
-}
-
-const EMITTER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
-    ("on", 2, |this, args, cx| {
-        add_listener(this, args, cx, false)
-    }),
-    ("addListener", 2, |this, args, cx| {
-        add_listener(this, args, cx, false)
-    }),
-    ("prependListener", 2, |this, args, cx| {
-        add_listener(this, args, cx, true)
-    }),
-    ("once", 2, |this, args, cx| {
-        let wrapper = once_wrapper(this, args, cx)?;
-        add_listener(this, &[arg(args, 0), wrapper], cx, false)
-    }),
-    ("prependOnceListener", 2, |this, args, cx| {
-        let wrapper = once_wrapper(this, args, cx)?;
-        add_listener(this, &[arg(args, 0), wrapper], cx, true)
-    }),
-    ("off", 2, remove_listener),
-    ("removeListener", 2, remove_listener),
-    ("removeAllListeners", 1, |this, args, cx| {
-        let name = arg(args, 0);
-        if name.is_undefined() {
-            if let Some(emitter) = this.as_object() {
-                let fresh = object(cx);
-                emitter.set(js_string!("_events"), fresh, false, cx)?;
-            }
-        } else {
-            set_listeners(this, &name, Vec::new(), cx)?;
-        }
-        Ok(this.clone())
-    }),
-    ("emit", 1, |this, args, cx| {
-        let name = arg(args, 0);
-        let list = listeners_of(this, &name, cx)?;
-        if list.is_empty() {
-            // An `error` nobody listens for is thrown, as Node throws it.
-            if name
-                .as_string()
-                .is_some_and(|n| n.to_std_string_escaped() == "error")
-            {
-                return Err(JsError::from_opaque(arg(args, 1)));
-            }
-            return Ok(false.into());
-        }
-        for listener in list {
-            crate::call(cx, &listener, this, &args[1.min(args.len())..])?;
-        }
-        Ok(true.into())
-    }),
-    ("listeners", 1, |this, args, cx| {
-        let list = listeners_of(this, &arg(args, 0), cx)?;
-        Ok(JsArray::from_iter(list, cx).into())
-    }),
-    ("rawListeners", 1, |this, args, cx| {
-        let list = listeners_of(this, &arg(args, 0), cx)?;
-        Ok(JsArray::from_iter(list, cx).into())
-    }),
-    ("listenerCount", 1, |this, args, cx| {
-        Ok(listeners_of(this, &arg(args, 0), cx)?.len().into())
-    }),
-    ("eventNames", 0, |this, _, cx| {
-        let Some(emitter) = this.as_object() else {
-            return Ok(JsArray::new(cx)?.into());
-        };
-        let events = emitter.get(js_string!("_events"), cx)?;
-        let names: Vec<JsValue> = match events.as_object() {
-            Some(events) => events
-                .own_property_keys(cx)?
-                .into_iter()
-                .map(|k| js_text(&k.to_string()))
-                .collect(),
-            None => Vec::new(),
-        };
-        Ok(JsArray::from_iter(names, cx).into())
-    }),
-    ("setMaxListeners", 1, |this, _, _| Ok(this.clone())),
-    ("getMaxListeners", 0, |_, _, _| Ok(10.into())),
-];
-
-fn remove_listener(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let (name, listener) = (arg(args, 0), arg(args, 1));
-    let mut list = listeners_of(this, &name, context)?;
-    let at = list.iter().rposition(|l| {
-        *l == listener
-            || l.as_object()
-                .and_then(|o| o.get(js_string!("listener"), context).ok())
-                .is_some_and(|own| own == listener)
-    });
-    if let Some(at) = at {
-        list.remove(at);
-        set_listeners(this, &name, list, context)?;
-    }
-    Ok(this.clone())
-}
-
-fn events_module(context: &mut Context) -> JsResult<JsValue> {
-    // Constructed — `new EventEmitter()`, `super()` — or called on an object as
-    // `EventEmitter.call(this)` by older code: see `crate::native`.
-    let (emitter, _) = crate::native::class(
-        context,
-        crate::native::ClassSpec {
-            name: "EventEmitter",
-            init: |target, _, cx| {
-                if !target.has_own_property(js_string!("_events"), cx)? {
-                    let events = object(cx);
-                    target.set(js_string!("_events"), events, false, cx)?;
-                }
-                Ok(())
-            },
-            methods: EMITTER_METHODS,
-            ..Default::default()
-        },
-    )?;
-    emitter.set(js_string!("EventEmitter"), emitter.clone(), false, context)?;
-    emitter.set(js_string!("defaultMaxListeners"), 10, false, context)?;
-    Ok(emitter.into())
-}
-
 // ─── os ─────────────────────────────────────────────────────────────────────────────────────
 
 fn home() -> String {
@@ -1280,7 +1058,7 @@ fn url_module(context: &mut Context) -> JsResult<JsValue> {
 pub(crate) const MODULES: &[(&str, crate::ModuleMaker)] = &[
     ("path", |cx, _| path_module(cx)),
     ("util", |cx, _| util_module(cx)),
-    ("events", |cx, _| events_module(cx)),
+    ("events", crate::events::events_module),
     ("os", |cx, _| os_module(cx)),
     ("url", |cx, _| url_module(cx)),
     ("fs", |cx, _| fs_module(cx)),
@@ -1296,6 +1074,14 @@ pub(crate) const MODULES: &[(&str, crate::ModuleMaker)] = &[
     ("crypto", crate::crypto::module),
     ("zlib", crate::zlib::module),
     ("stream/web", crate::streams::module),
+    ("stream", crate::stream::stream_module),
+    ("stream/promises", crate::stream::promises_module),
+    ("_stream_readable", crate::stream::legacy_module),
+    ("_stream_writable", crate::stream::legacy_module),
+    ("_stream_duplex", crate::stream::legacy_module),
+    ("_stream_transform", crate::stream::legacy_module),
+    ("_stream_passthrough", crate::stream::legacy_module),
+    ("string_decoder", crate::string_decoder::module),
 ];
 
 /// The `EventEmitter` class, made once for the realm.

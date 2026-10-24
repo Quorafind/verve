@@ -20,6 +20,7 @@
 mod crypto;
 mod encoding;
 mod fetch;
+mod events;
 mod indexeddb;
 mod intl;
 pub mod isolate;
@@ -28,6 +29,8 @@ mod native;
 mod node;
 mod process;
 mod streams;
+mod stream;
+mod string_decoder;
 mod url;
 mod wasm;
 mod web;
