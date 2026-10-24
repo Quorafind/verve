@@ -1015,46 +1015,6 @@ fn http_module(context: &mut Context) -> JsResult<JsValue> {
     Ok(module.into())
 }
 
-// ─── url ────────────────────────────────────────────────────────────────────────────────────
-
-fn url_module(context: &mut Context) -> JsResult<JsValue> {
-    let module = object(context);
-    for name in ["URL", "URLSearchParams"] {
-        let class = context.global_object().get(JsString::from(name), context)?;
-        module.set(JsString::from(name), class, false, context)?;
-    }
-    with_functions(
-        context,
-        &module,
-        &[
-            ("fileURLToPath", 1, |_, args, cx| {
-                let text = text_of(&arg(args, 0), cx)?;
-                let path = text.strip_prefix("file://").unwrap_or(&text);
-                let path = if cfg!(windows) {
-                    path.trim_start_matches('/')
-                } else {
-                    path
-                };
-                Ok(js_text(path))
-            }),
-            ("pathToFileURL", 1, |_, args, cx| {
-                let path = text_of(&arg(args, 0), cx)?.replace('\\', "/");
-                let href = if path.starts_with('/') {
-                    format!("file://{path}")
-                } else {
-                    format!("file:///{path}")
-                };
-                let class = cx.global_object().get(js_string!("URL"), cx)?;
-                let class = class
-                    .as_object()
-                    .ok_or_else(|| type_error("URL is not installed"))?;
-                Ok(class.construct(&[js_text(&href)], None, cx)?.into())
-            }),
-        ],
-    )?;
-    Ok(module.into())
-}
-
 // ─── Installing them ────────────────────────────────────────────────────────────────────────
 
 /// Node's modules, by the names `require` answers them to — each made the first time it is
@@ -1066,7 +1026,9 @@ pub(crate) const MODULES: &[(&str, crate::ModuleMaker)] = &[
     ("util", |cx, _| util_module(cx)),
     ("events", |cx, _| events_module(cx)),
     ("os", |cx, _| os_module(cx)),
-    ("url", |cx, _| url_module(cx)),
+    ("url", crate::node_url::module),
+    ("querystring", crate::querystring::querystring_module),
+    ("punycode", crate::querystring::punycode_module),
     ("fs", |cx, _| fs_module(cx)),
     ("fs/promises", |cx, _| {
         let fs = crate::modules::node_module(cx, "fs")?;

@@ -17,8 +17,8 @@ use boa_engine::{
 use crate::native::{arg, coded_error, function, get, js_text, object, text_of};
 
 /// The flavours, as the constant each function is made for.
-const POSIX: u8 = 0;
-const WIN32: u8 = 1;
+pub(crate) const POSIX: u8 = 0;
+pub(crate) const WIN32: u8 = 1;
 /// Drive-aware, `/`-writing: `require('path')` on Windows.
 const MIXED: u8 = 2;
 
@@ -126,7 +126,7 @@ fn normalize_string(
 }
 
 /// The working folder, as `path.resolve` starts from it, in a flavour's terms.
-fn cwd(context: &Context, flavour: u8) -> String {
+pub(crate) fn cwd(context: &Context, flavour: u8) -> String {
     let cwd = crate::shared(context).cwd.borrow().clone();
     match flavour {
         // Node's: on Windows, the working folder with its drive taken off and `/` throughout.
@@ -144,7 +144,7 @@ fn cwd(context: &Context, flavour: u8) -> String {
 
 // ─── posix ──────────────────────────────────────────────────────────────────────────────────
 
-fn posix_resolve(paths: &[String], cwd: &str) -> String {
+pub(crate) fn posix_resolve(paths: &[String], cwd: &str) -> String {
     let mut resolved: Vec<u8> = Vec::new();
     let mut absolute = false;
     let mut i = paths.len() as isize - 1;
@@ -622,7 +622,7 @@ fn win32_join(paths: &[String]) -> String {
     win32_normalize(&joined)
 }
 
-fn win32_resolve(paths: &[String], cwd: &str) -> String {
+pub(crate) fn win32_resolve(paths: &[String], cwd: &str) -> String {
     let mut resolved_device: Vec<u8> = Vec::new();
     let mut resolved_tail: Vec<u8> = Vec::new();
     let mut resolved_absolute = false;
