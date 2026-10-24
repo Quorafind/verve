@@ -129,6 +129,40 @@ fn sockets_are_duplex_and_echo_with_node_event_order() {
     );
 }
 #[test]
+fn pause_stops_read_delivery_until_resume() {
+    assert_eq!(
+        run(
+            r#"
+        const net=require('net');let paused=false,stable=false,received=0;
+        const server=net.createServer(s=>s.end(Buffer.alloc(512*1024)));
+        server.listen(0,'127.0.0.1',()=>{
+            const s=net.connect(server.address().port,'127.0.0.1');
+            s.on('data',b=>{received+=b.length;if(!paused){paused=true;s.pause();const before=received;setTimeout(()=>{stable=received===before;s.resume()},20)}});
+            s.on('close',()=>server.close(()=>globalThis.result=[stable,received===512*1024]));
+        });
+    "#,
+            granted()
+        ),
+        "[true,true]"
+    );
+}
+#[test]
+fn tcp_socket_options_and_inactivity_timeout_are_chainable() {
+    assert_eq!(
+        run(
+            r#"
+        const net=require('net');const server=net.createServer(()=>{});
+        server.listen(0,'127.0.0.1',()=>{
+            const s=net.connect(server.address().port,'127.0.0.1');const chain=s.setNoDelay(true)===s&&s.setKeepAlive(true,1000)===s&&s.setTimeout(20)===s;
+            s.on('timeout',()=>{s.destroy();server.close(()=>globalThis.result=[chain,s.timeout])});
+        });
+    "#,
+            granted()
+        ),
+        "[true,20]"
+    );
+}
+#[test]
 fn dns_lookup_promises_uses_system_pool() {
     assert_eq!(
         run(
@@ -136,6 +170,124 @@ fn dns_lookup_promises_uses_system_pool() {
             granted()
         ),
         r#"[{"address":"127.0.0.1","family":4}]"#
+    );
+}
+#[test]
+fn dns_record_shapes_and_ttl_match_node() {
+    assert_eq!(
+        run(include_str!("fixtures/network/dns-records.cjs"), granted()),
+        r#"[[{"address":"127.0.0.1","ttl":300}],["::1"],[["one","two"]],[{"name":"target.test","port":8443,"priority":1,"weight":2}]]"#
+    );
+}
+#[test]
+fn ipv6_tcp_loopback_is_duplex() {
+    assert_eq!(
+        run(
+            r#"
+        const net=require('net');const server=net.createServer(s=>s.pipe(s));
+        server.on('error',e=>{if(e.code==='EAFNOSUPPORT'||e.code==='EADDRNOTAVAIL')globalThis.result='IPv6 unavailable';else throw e});
+        server.listen(0,'::1',()=>{const s=net.connect({host:'::1',port:server.address().port,family:6});let body='';s.setEncoding('utf8');s.on('data',b=>body+=b);s.on('connect',()=>s.end('ipv6'));s.on('close',()=>server.close(()=>globalThis.result=body))});
+    "#,
+            granted()
+        ),
+        r#""ipv6""#
+    );
+}
+fn node_peer() -> std::process::Command {
+    let mut command = std::process::Command::new(
+        std::env::var_os("RUNTIME_X_NETWORK_NODE").unwrap_or_else(|| "node".into()),
+    );
+    command.arg(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/network/peer.cjs"),
+    );
+    command
+}
+#[test]
+#[ignore = "optional live Node cross-peer; frozen tests do not require Node"]
+fn runtime_client_connects_to_node_server() {
+    use std::io::BufRead;
+    let mut child = node_peer()
+        .arg("server")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let port = line.trim().parse::<u16>().unwrap();
+    let observed = run(
+        &format!(
+            r#"
+        const order=[],s=require('net').connect({port},'127.0.0.1');s.setEncoding('utf8');
+        s.on('connect',()=>order.push('connect'));s.on('ready',()=>{{order.push('ready');s.end('from-runtime')}});
+        s.on('data',b=>order.push(b));s.on('end',()=>order.push('end'));s.on('close',()=>{{order.push('close');globalThis.result=order}});
+    "#
+        ),
+        granted(),
+    );
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        observed,
+        r#"["connect","ready","from-runtime","end","close"]"#
+    );
+}
+#[test]
+#[ignore = "optional live Node cross-peer; frozen tests do not require Node"]
+fn node_client_connects_to_runtime_server() {
+    std::thread::Builder::new().stack_size(16*1024*1024).spawn(|| {
+        runtime_x::set_thread_stack(16*1024*1024);
+        let mut rt=RuntimeX::new();rt.set_permissions(granted());
+        rt.eval(r#"
+            const net=require('net'),order=[];const server=net.createServer(s=>{
+                order.push('connection');s.setEncoding('utf8');s.on('data',b=>order.push(b));s.pipe(s);
+                s.on('end',()=>order.push('end'));s.on('close',()=>{order.push('close');server.close(()=>globalThis.result=order)});
+            });server.listen(0,'127.0.0.1',()=>globalThis.port=server.address().port);
+        "#).unwrap();
+        let deadline=Instant::now()+Duration::from_secs(30);let mut child=None;
+        while !rt.eval("globalThis.result!==undefined").unwrap().to_boolean() {
+            rt.run_due();
+            if child.is_none() {
+                if let Some(port)=rt.eval("globalThis.port").unwrap().as_number() {
+                    child=Some(node_peer().arg("client").arg((port as u16).to_string()).stdout(std::process::Stdio::piped()).spawn().unwrap());
+                }
+            }
+            assert!(Instant::now()<deadline,"Node cross-peer timed out");std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(runtime_x::print(&rt.eval("JSON.stringify(result)").unwrap()),r#"["connection","from-node","end","close"]"#);
+        drop(rt);
+        let output=child.unwrap().wait_with_output().unwrap();assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(),r#"["connect","ready","from-node","end","close"]"#);
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+fn replacing_permissions_closes_listeners_and_completes_pending_dns() {
+    let mut rt = RuntimeX::new();
+    rt.set_permissions(granted());
+    rt.eval(
+        r#"
+        globalThis.closed=false;globalThis.dnsCode='';
+        globalThis.server=require('net').createServer();server.on('close',()=>closed=true);
+        server.listen(0,'127.0.0.1');require('dns').lookup('127.0.0.1',e=>dnsCode=e.code);
+    "#,
+    )
+    .unwrap();
+    rt.set_permissions(Permissions::default());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !rt.eval("closed&&dnsCode!==''").unwrap().to_boolean() {
+        rt.run_due();
+        assert!(
+            Instant::now() < deadline,
+            "policy revocation callbacks were lost"
+        );
+    }
+    assert_eq!(
+        runtime_x::print(
+            &rt.eval("JSON.stringify([closed,dnsCode,server.listening,server.address()])")
+                .unwrap()
+        ),
+        r#"[true,"EACCES",false,null]"#
     );
 }
 #[test]
@@ -169,6 +321,68 @@ fn tls_client_server_ca_alpn_identity_and_duplex() {
             granted()
         ),
         r#"[true,true,"http/1.1","secure",true,"localhost"]"#
+    );
+}
+
+#[test]
+fn tls_untrusted_peer_reports_authorization_without_releasing_early_data() {
+    assert_eq!(
+        run(
+            r#"
+        const tls=require('tls'),fs=require('fs');
+        const cert=fs.readFileSync(__dirname+'/fixtures/network/localhost-cert.pem');
+        const key=fs.readFileSync(__dirname+'/fixtures/network/localhost-key.pem');
+        let checked=false;const server=tls.createServer({cert,key},s=>s.end('untrusted'));
+        server.listen(0,'127.0.0.1',()=>{
+            const s=tls.connect({host:'127.0.0.1',port:server.address().port,servername:'localhost',rejectUnauthorized:false,checkServerIdentity:()=>{checked=true}});
+            let body='';s.setEncoding('utf8');s.on('data',b=>body+=b);
+            s.on('end',()=>{globalThis.result=[s.authorized,s.authorizationError,checked,body];s.end();server.close()});
+        });
+    "#,
+            granted()
+        ),
+        r#"[false,"DEPTH_ZERO_SELF_SIGNED_CERT",false,"untrusted"]"#
+    );
+}
+#[test]
+fn tls_identity_rejection_never_exposes_application_bytes() {
+    assert_eq!(
+        run(
+            r#"
+        const tls=require('tls'),fs=require('fs');
+        const cert=fs.readFileSync(__dirname+'/fixtures/network/localhost-cert.pem');
+        const key=fs.readFileSync(__dirname+'/fixtures/network/localhost-key.pem');
+        const server=tls.createServer({cert,key},s=>{s.on('error',()=>{});s.end('private')});
+        server.on('tlsClientError',()=>{});let code='',bytes=0;
+        server.listen(0,'127.0.0.1',()=>{
+            const s=tls.connect({host:'127.0.0.1',port:server.address().port,ca:cert,checkServerIdentity:()=>Object.assign(Error('identity denied'),{code:'CUSTOM_IDENTITY'})});
+            s.on('data',b=>bytes+=b.length);s.on('error',e=>code=e.code);
+            s.on('close',()=>server.close(()=>globalThis.result=[code,bytes]));
+        });
+    "#,
+            granted()
+        ),
+        r#"["CUSTOM_IDENTITY",0]"#
+    );
+}
+#[test]
+fn https_agent_uses_explicit_ca_and_real_server_type() {
+    assert_eq!(
+        run(
+            r#"
+        const https=require('https'),fs=require('fs');
+        const cert=fs.readFileSync(__dirname+'/fixtures/network/localhost-cert.pem');
+        const key=fs.readFileSync(__dirname+'/fixtures/network/localhost-key.pem');
+        const agent=new https.Agent({keepAlive:true,ca:cert});
+        const server=new https.Server({cert,key},(req,res)=>res.end('https'));
+        server.listen(0,'127.0.0.1',()=>https.get({hostname:'127.0.0.1',port:server.address().port,agent},res=>{
+            const authorized=res.socket.authorized;let body='';res.setEncoding('utf8');res.on('data',b=>body+=b);
+            res.on('end',()=>{globalThis.result=[server instanceof https.Server,res.statusCode,authorized,body];agent.destroy();server.close()});
+        }));
+    "#,
+            granted()
+        ),
+        r#"[true,200,true,"https"]"#
     );
 }
 
@@ -219,6 +433,28 @@ fn udp_send_receive_slice_and_connected_peer() {
             granted()
         ),
         r#"["hello","IPv4",5,"127.0.0.1"]"#
+    );
+}
+#[test]
+fn forged_udp_peer_metadata_cannot_bypass_outbound_rules() {
+    let permissions = Permissions {
+        outbound: vec![NetworkRule {
+            host: Some("allowed.invalid".into()),
+            port: Some(443),
+        }],
+        ..Permissions::default()
+    };
+    assert_eq!(
+        run(
+            r#"
+        const s=require('dgram').createSocket('udp4');
+        // Hidden JavaScript properties are metadata, not a capability token.
+        s.__udpPeer={address:'127.0.0.1',port:9};
+        s.send('denied',e=>{globalThis.result=e.code;s.close()});
+    "#,
+            permissions
+        ),
+        r#""EACCES""#
     );
 }
 #[test]
@@ -291,11 +527,17 @@ fn thousand_connections_share_one_reactor() {
     assert_eq!(
         run(
             r#"
-        const net=require('net');let connected=0,closed=0;const sockets=[];
-        const server=net.createServer(s=>s.on('error',()=>{}));
-        server.listen(0,'127.0.0.1',()=>{for(let i=0;i<1000;i++){const s=net.connect(server.address().port,'127.0.0.1');sockets.push(s);
-            s.on('connect',()=>{if(++connected===1000){for(const t of sockets)t.destroy();server.close()}});
-            s.on('close',()=>{if(++closed===1000)globalThis.result=connected});}});
+        const net=require('net');let started=0,connected=0,accepted=0,closed=0;const sockets=[];
+        function finish(){if(connected===1000&&accepted===1000){for(const t of sockets)t.destroy();server.close()}}
+        const server=net.createServer(s=>{accepted++;s.on('error',()=>{});finish()});
+        server.listen(0,'127.0.0.1',2048,()=>{
+            function open(){started++;const s=net.connect(server.address().port,'127.0.0.1');sockets.push(s);
+                s.on('connect',()=>{connected++;if(started<1000)open();finish()});
+                s.on('error',e=>{throw e});s.on('close',()=>{if(++closed===1000)globalThis.result=connected});
+            }
+            // Bound pending SYNs, not established connections: all 1000 remain live until accepted.
+            for(let i=0;i<10;i++)open();
+        });
     "#,
             granted()
         ),
