@@ -39,8 +39,25 @@ fn emitter_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResu
     Ok(())
 }
 
-/// A microtask from now: `error` to whoever listens for it, then `close` if `close` says so.
+/// A microtask from now: `error` to whoever listens for it, then — if `close` says so — a
+/// socket's `close`, with `hadError`.
 fn fail_later(context: &mut Context, target: &JsObject, error: JsValue, close: bool) {
+    let close = close.then(|| vec![true.into()]);
+    fail_later_with(context, target, error, close);
+}
+
+/// [`fail_later`], with what `close` is emitted with given: a child process's is
+/// `(code, signal)`.
+fn fail_later_with(
+    context: &mut Context,
+    target: &JsObject,
+    error: JsValue,
+    close: Option<Vec<JsValue>>,
+) {
+    let close = match close {
+        Some(args) => crate::native::array(context, args),
+        None => JsValue::undefined(),
+    };
     let fire = closure(
         context,
         "",
@@ -51,15 +68,17 @@ fn fail_later(context: &mut Context, target: &JsObject, error: JsValue, close: b
             if listening.to_number(cx)? > 0. {
                 invoke(&target, "emit", &[js_text("error"), error.clone()], cx)?;
             }
-            if close.to_boolean() {
+            if close.is_object() {
                 if let Some(t) = target.as_object() {
                     t.set(js_string!("destroyed"), true, false, cx)?;
                 }
-                invoke(&target, "emit", &[js_text("close"), true.into()], cx)?;
+                let mut args = vec![js_text("close")];
+                args.extend(crate::native::list_of(close, cx)?);
+                invoke(&target, "emit", &args, cx)?;
             }
             Ok(JsValue::undefined())
         },
-        (target.clone(), error, close.into()),
+        (target.clone(), error, close),
     );
     crate::microtask(context, fire.into(), Vec::new());
 }
@@ -1459,7 +1478,13 @@ fn refused(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsV
         vec![error.clone(), js_text(""), js_text("")],
     );
     let child = make(context, "child_process", "ChildProcess", &[])?;
-    fail_later(context, &child, error, true);
+    // As a program that could not be found closes: Node's negative errno as the code, no signal.
+    fail_later_with(
+        context,
+        &child,
+        error,
+        Some(vec![JsValue::from(-38), JsValue::null()]),
+    );
     Ok(child.into())
 }
 

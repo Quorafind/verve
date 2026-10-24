@@ -449,7 +449,7 @@ fn network_and_processes_refuse() {
         try { cp.execSync('ls') } catch (e) { log.push('execSync ' + e.code) }
         log.push('spawnSync ' + cp.spawnSync('ls').error.code);
         const child = cp.spawn('ls');
-        child.on('error', e => log.push('child ' + e.code));
+        child.on('error', e => log.push('child ' + e.code)).on('close', (code, signal) => log.push('child close ' + code + ' ' + signal));
         log.push(typeof child.stdout.on, require('cluster').isPrimary);
         const srv = net.createServer();
         srv.on('error', e => log.push('listen ' + e.code));
@@ -485,6 +485,7 @@ fn network_and_processes_refuse() {
             "http ENOSYS",
             "exec ENOSYS\"\"",
             "child ENOSYS",
+            "child close -38 null",
             "listen EACCES",
         ],
     );
