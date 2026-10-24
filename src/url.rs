@@ -46,7 +46,12 @@ fn js_text(text: &str) -> JsValue {
     JsString::from(text).into()
 }
 
-fn function(context: &mut Context, name: &str, length: usize, f: NativeFunctionPointer) -> JsObject {
+fn function(
+    context: &mut Context,
+    name: &str,
+    length: usize,
+    f: NativeFunctionPointer,
+) -> JsObject {
     FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
         .name(JsString::from(name))
         .length(length)
@@ -54,7 +59,12 @@ fn function(context: &mut Context, name: &str, length: usize, f: NativeFunctionP
         .into()
 }
 
-fn constructor(context: &mut Context, name: &str, length: usize, f: NativeFunctionPointer) -> JsObject {
+fn constructor(
+    context: &mut Context,
+    name: &str,
+    length: usize,
+    f: NativeFunctionPointer,
+) -> JsObject {
     FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
         .name(JsString::from(name))
         .length(length)
@@ -90,9 +100,15 @@ fn parse(input: &str, base: Option<&str>) -> Result<url::Url, String> {
     parsed.map_err(|_| format!("Invalid URL: {input}"))
 }
 
-fn construct_url(new_target: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn construct_url(
+    new_target: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     if new_target.is_undefined() {
-        return Err(type_error("Class constructor URL cannot be invoked without 'new'"));
+        return Err(type_error(
+            "Class constructor URL cannot be invoked without 'new'",
+        ));
     }
     let input = text_of(&arg(args, 0), context)?;
     let base = match arg(args, 1) {
@@ -113,7 +129,9 @@ fn construct_url(new_target: &JsValue, args: &[JsValue], context: &mut Context) 
 
 fn with_url<R>(this: &JsValue, f: impl FnOnce(&url::Url) -> R) -> JsResult<R> {
     let object = this.as_object().ok_or_else(|| type_error("not a URL"))?;
-    let data = object.downcast_ref::<UrlData>().ok_or_else(|| type_error("not a URL"))?;
+    let data = object
+        .downcast_ref::<UrlData>()
+        .ok_or_else(|| type_error("not a URL"))?;
     Ok(f(&data.url.borrow()))
 }
 
@@ -121,7 +139,9 @@ fn with_url<R>(this: &JsValue, f: impl FnOnce(&url::Url) -> R) -> JsResult<R> {
 fn change_url(this: &JsValue, f: impl FnOnce(&mut url::Url)) -> JsResult<()> {
     let object = this.as_object().ok_or_else(|| type_error("not a URL"))?;
     let params = {
-        let data = object.downcast_ref::<UrlData>().ok_or_else(|| type_error("not a URL"))?;
+        let data = object
+            .downcast_ref::<UrlData>()
+            .ok_or_else(|| type_error("not a URL"))?;
         f(&mut data.url.borrow_mut());
         data.params.borrow().clone()
     };
@@ -142,49 +162,85 @@ type Setter = fn(&mut url::Url, &str);
 const PARTS: &[(&str, Getter, Option<Setter>)] = &[
     ("href", |u| u.as_str().to_owned(), None),
     ("origin", |u| u.origin().ascii_serialization(), None),
-    ("protocol", |u| format!("{}:", u.scheme()), Some(|u, v| {
-        let _ = u.set_scheme(v.trim_end_matches(':'));
-    })),
-    ("username", |u| u.username().to_owned(), Some(|u, v| {
-        let _ = u.set_username(v);
-    })),
-    ("password", |u| u.password().unwrap_or("").to_owned(), Some(|u, v| {
-        let _ = u.set_password(Some(v).filter(|v| !v.is_empty()));
-    })),
-    ("host", |u| match (u.host_str(), u.port()) {
-        (Some(h), Some(p)) => format!("{h}:{p}"),
-        (Some(h), None) => h.to_owned(),
-        _ => String::new(),
-    }, Some(|u, v| {
-        let (host, port) = match v.rsplit_once(':') {
-            Some((h, p)) if p.parse::<u16>().is_ok() => (h, p.parse().ok()),
-            _ => (v, None),
-        };
-        if u.set_host(Some(host)).is_ok() {
-            let _ = u.set_port(port);
-        }
-    })),
-    ("hostname", |u| u.host_str().unwrap_or("").to_owned(), Some(|u, v| {
-        let _ = u.set_host(Some(v));
-    })),
-    ("port", |u| u.port().map(|p| p.to_string()).unwrap_or_default(), Some(|u, v| {
-        let _ = u.set_port(if v.is_empty() { None } else { v.parse().ok() });
-    })),
-    ("pathname", |u| u.path().to_owned(), Some(|u, v| u.set_path(v))),
-    ("search", |u| match u.query() {
-        Some(q) if !q.is_empty() => format!("?{q}"),
-        _ => String::new(),
-    }, Some(|u, v| {
-        let v = v.strip_prefix('?').unwrap_or(v);
-        u.set_query(if v.is_empty() { None } else { Some(v) });
-    })),
-    ("hash", |u| match u.fragment() {
-        Some(f) if !f.is_empty() => format!("#{f}"),
-        _ => String::new(),
-    }, Some(|u, v| {
-        let v = v.strip_prefix('#').unwrap_or(v);
-        u.set_fragment(if v.is_empty() { None } else { Some(v) });
-    })),
+    (
+        "protocol",
+        |u| format!("{}:", u.scheme()),
+        Some(|u, v| {
+            let _ = u.set_scheme(v.trim_end_matches(':'));
+        }),
+    ),
+    (
+        "username",
+        |u| u.username().to_owned(),
+        Some(|u, v| {
+            let _ = u.set_username(v);
+        }),
+    ),
+    (
+        "password",
+        |u| u.password().unwrap_or("").to_owned(),
+        Some(|u, v| {
+            let _ = u.set_password(Some(v).filter(|v| !v.is_empty()));
+        }),
+    ),
+    (
+        "host",
+        |u| match (u.host_str(), u.port()) {
+            (Some(h), Some(p)) => format!("{h}:{p}"),
+            (Some(h), None) => h.to_owned(),
+            _ => String::new(),
+        },
+        Some(|u, v| {
+            let (host, port) = match v.rsplit_once(':') {
+                Some((h, p)) if p.parse::<u16>().is_ok() => (h, p.parse().ok()),
+                _ => (v, None),
+            };
+            if u.set_host(Some(host)).is_ok() {
+                let _ = u.set_port(port);
+            }
+        }),
+    ),
+    (
+        "hostname",
+        |u| u.host_str().unwrap_or("").to_owned(),
+        Some(|u, v| {
+            let _ = u.set_host(Some(v));
+        }),
+    ),
+    (
+        "port",
+        |u| u.port().map(|p| p.to_string()).unwrap_or_default(),
+        Some(|u, v| {
+            let _ = u.set_port(if v.is_empty() { None } else { v.parse().ok() });
+        }),
+    ),
+    (
+        "pathname",
+        |u| u.path().to_owned(),
+        Some(|u, v| u.set_path(v)),
+    ),
+    (
+        "search",
+        |u| match u.query() {
+            Some(q) if !q.is_empty() => format!("?{q}"),
+            _ => String::new(),
+        },
+        Some(|u, v| {
+            let v = v.strip_prefix('?').unwrap_or(v);
+            u.set_query(if v.is_empty() { None } else { Some(v) });
+        }),
+    ),
+    (
+        "hash",
+        |u| match u.fragment() {
+            Some(f) if !f.is_empty() => format!("#{f}"),
+            _ => String::new(),
+        },
+        Some(|u, v| {
+            let v = v.strip_prefix('#').unwrap_or(v);
+            u.set_fragment(if v.is_empty() { None } else { Some(v) });
+        }),
+    ),
 ];
 
 fn url_part_get(this: &JsValue, name: &str) -> JsResult<JsValue> {
@@ -275,7 +331,10 @@ const URL_STATICS: &[(&str, usize, NativeFunctionPointer)] = &[
             None => None,
         };
         if let Some(bytes) = bytes {
-            crate::shared(cx).blobs.borrow_mut().insert(url.clone(), bytes);
+            crate::shared(cx)
+                .blobs
+                .borrow_mut()
+                .insert(url.clone(), bytes);
         }
         Ok(js_text(&url))
     }),
@@ -288,9 +347,15 @@ const URL_STATICS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 // ─── URLSearchParams ────────────────────────────────────────────────────────────────────────
 
-fn construct_params(new_target: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn construct_params(
+    new_target: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     if new_target.is_undefined() {
-        return Err(type_error("Class constructor URLSearchParams cannot be invoked without 'new'"));
+        return Err(type_error(
+            "Class constructor URLSearchParams cannot be invoked without 'new'",
+        ));
     }
     let init = arg(args, 0);
     let mut pairs: Vec<(String, String)> = Vec::new();
@@ -303,14 +368,18 @@ fn construct_params(new_target: &JsValue, args: &[JsValue], context: &mut Contex
                 let pair = pair
                     .as_object()
                     .and_then(|p| JsArray::from_object(p.clone()).ok())
-                    .ok_or_else(|| type_error("URLSearchParams: each pair must be [name, value]"))?;
+                    .ok_or_else(|| {
+                        type_error("URLSearchParams: each pair must be [name, value]")
+                    })?;
                 let name = text_of(&pair.get(0, context)?, context)?;
                 let value = text_of(&pair.get(1, context)?, context)?;
                 pairs.push((name, value));
             }
         } else {
             for key in object.own_property_keys(context)? {
-                let PropertyKey::String(name) = &key else { continue };
+                let PropertyKey::String(name) = &key else {
+                    continue;
+                };
                 let value = object.get(key.clone(), context)?;
                 pairs.push((name.to_std_string_escaped(), text_of(&value, context)?));
             }
@@ -318,7 +387,9 @@ fn construct_params(new_target: &JsValue, args: &[JsValue], context: &mut Contex
     } else if !init.is_undefined() {
         let text = text_of(&init, context)?;
         let text = text.strip_prefix('?').unwrap_or(&text);
-        pairs = form_urlencoded::parse(text.as_bytes()).into_owned().collect();
+        pairs = form_urlencoded::parse(text.as_bytes())
+            .into_owned()
+            .collect();
     }
     let prototype = prototype_of(new_target, "URLSearchParams", context)?;
     Ok(JsObject::from_proto_and_data(
@@ -338,7 +409,9 @@ fn serialize(pairs: &[(String, String)]) -> String {
 }
 
 fn params(this: &JsValue) -> JsResult<JsObject> {
-    let object = this.as_object().ok_or_else(|| type_error("not a URLSearchParams"))?;
+    let object = this
+        .as_object()
+        .ok_or_else(|| type_error("not a URLSearchParams"))?;
     if object.downcast_ref::<ParamsData>().is_none() {
         return Err(type_error("not a URLSearchParams"));
     }
@@ -444,13 +517,23 @@ const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
             .into())
     }),
     ("sort", 0, |this, _, _| {
-        change_pairs(this, |p| p.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16())))?;
+        change_pairs(this, |p| {
+            p.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()))
+        })?;
         Ok(JsValue::undefined())
     }),
-    ("toString", 0, |this, _, _| Ok(js_text(&serialize(&read_pairs(this)?)))),
-    ("keys", 0, |this, _, cx| Ok(pair_list(cx, read_pairs(this)?, 0))),
-    ("values", 0, |this, _, cx| Ok(pair_list(cx, read_pairs(this)?, 1))),
-    ("entries", 0, |this, _, cx| Ok(pair_list(cx, read_pairs(this)?, 2))),
+    ("toString", 0, |this, _, _| {
+        Ok(js_text(&serialize(&read_pairs(this)?)))
+    }),
+    ("keys", 0, |this, _, cx| {
+        Ok(pair_list(cx, read_pairs(this)?, 0))
+    }),
+    ("values", 0, |this, _, cx| {
+        Ok(pair_list(cx, read_pairs(this)?, 1))
+    }),
+    ("entries", 0, |this, _, cx| {
+        Ok(pair_list(cx, read_pairs(this)?, 2))
+    }),
     ("forEach", 2, |this, args, cx| {
         let callback = arg(args, 0);
         let callable = callback
@@ -465,7 +548,12 @@ const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 // ─── Installing them ────────────────────────────────────────────────────────────────────────
 
-fn define_method(object: &JsObject, name: &str, method: JsObject, context: &mut Context) -> JsResult<()> {
+fn define_method(
+    object: &JsObject,
+    name: &str,
+    method: JsObject,
+    context: &mut Context,
+) -> JsResult<()> {
     object.define_property_or_throw(
         JsString::from(name),
         PropertyDescriptor::builder()
@@ -512,7 +600,8 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     let (url_class, url_proto) = class(context, "URL", construct_url, URL_METHODS)?;
     for (name, get, set) in URL_ACCESSORS {
         let getter = function(context, &format!("get {name}"), 0, *get);
-        let setter = (!matches!(*name, "origin")).then(|| function(context, &format!("set {name}"), 1, *set));
+        let setter = (!matches!(*name, "origin"))
+            .then(|| function(context, &format!("set {name}"), 1, *set));
         let mut descriptor = PropertyDescriptor::builder()
             .get(getter)
             .enumerable(true)
@@ -547,7 +636,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             .configurable(true),
         context,
     )?;
-    let size = function(context, "get size", 0, |this, _, _| Ok(read_pairs(this)?.len().into()));
+    let size = function(context, "get size", 0, |this, _, _| {
+        Ok(read_pairs(this)?.len().into())
+    });
     params_proto.define_property_or_throw(
         js_string!("size"),
         PropertyDescriptor::builder()

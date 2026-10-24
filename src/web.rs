@@ -32,7 +32,12 @@ fn object(context: &mut Context) -> JsObject {
     JsObject::with_object_proto(context.intrinsics())
 }
 
-fn function(context: &mut Context, name: &str, length: usize, f: NativeFunctionPointer) -> JsObject {
+fn function(
+    context: &mut Context,
+    name: &str,
+    length: usize,
+    f: NativeFunctionPointer,
+) -> JsObject {
     FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
         .name(JsString::from(name))
         .length(length)
@@ -40,7 +45,12 @@ fn function(context: &mut Context, name: &str, length: usize, f: NativeFunctionP
         .into()
 }
 
-fn constructor(context: &mut Context, name: &str, length: usize, f: NativeFunctionPointer) -> JsObject {
+fn constructor(
+    context: &mut Context,
+    name: &str,
+    length: usize,
+    f: NativeFunctionPointer,
+) -> JsObject {
     FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
         .name(JsString::from(name))
         .length(length)
@@ -74,7 +84,11 @@ fn class(
         let method_fn = function(context, method, *length, *f);
         prototype.define_property_or_throw(
             JsString::from(*method),
-            PropertyDescriptor::builder().value(method_fn).writable(true).enumerable(false).configurable(true),
+            PropertyDescriptor::builder()
+                .value(method_fn)
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
             context,
         )?;
     }
@@ -82,21 +96,36 @@ fn class(
         let get = function(context, &format!("get {getter}"), 0, *f);
         prototype.define_property_or_throw(
             JsString::from(*getter),
-            PropertyDescriptor::builder().get(get).enumerable(true).configurable(true),
+            PropertyDescriptor::builder()
+                .get(get)
+                .enumerable(true)
+                .configurable(true),
             context,
         )?;
     }
     prototype.define_property_or_throw(
         js_string!("constructor"),
-        PropertyDescriptor::builder().value(class.clone()).writable(true).enumerable(false).configurable(true),
+        PropertyDescriptor::builder()
+            .value(class.clone())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
         context,
     )?;
     class.define_property_or_throw(
         js_string!("prototype"),
-        PropertyDescriptor::builder().value(prototype.clone()).writable(false).enumerable(false).configurable(false),
+        PropertyDescriptor::builder()
+            .value(prototype.clone())
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
         context,
     )?;
-    context.register_global_property(JsString::from(name), class.clone(), Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        JsString::from(name),
+        class.clone(),
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
     Ok((class, prototype))
 }
 
@@ -113,7 +142,14 @@ fn random_uuid() -> String {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 fn crypto(context: &mut Context) -> JsResult<JsObject> {
@@ -144,8 +180,15 @@ fn crypto(context: &mut Context) -> JsResult<JsObject> {
         }
         Ok(array)
     });
-    crypto.set(js_string!("getRandomValues"), get_random_values, false, context)?;
-    let uuid = function(context, "randomUUID", 0, |_, _, _| Ok(js_text(&random_uuid())));
+    crypto.set(
+        js_string!("getRandomValues"),
+        get_random_values,
+        false,
+        context,
+    )?;
+    let uuid = function(context, "randomUUID", 0, |_, _, _| {
+        Ok(js_text(&random_uuid()))
+    });
     crypto.set(js_string!("randomUUID"), uuid, false, context)?;
     let subtle = object(context);
     let digest = function(context, "digest", 2, |_, args, cx| {
@@ -164,7 +207,8 @@ fn crypto(context: &mut Context) -> JsResult<JsObject> {
             "SHA-384" => sha2::Sha384::digest(&data).to_vec(),
             "SHA-512" => sha2::Sha512::digest(&data).to_vec(),
             other => {
-                let error = JsNativeError::error().with_message(format!("digest: {other} is not supported"));
+                let error = JsNativeError::error()
+                    .with_message(format!("digest: {other} is not supported"));
                 return Ok(JsPromise::reject(JsError::from(error), cx)?.into());
             }
         };
@@ -180,14 +224,21 @@ fn crypto(context: &mut Context) -> JsResult<JsObject> {
 
 /// A deep copy, as `structuredClone` makes it: plain objects, arrays, dates, maps, sets,
 /// typed arrays and errors, cycles kept as cycles; functions and symbols refused.
-fn clone_value(value: &JsValue, seen: &mut Vec<(JsObject, JsObject)>, context: &mut Context) -> JsResult<JsValue> {
+fn clone_value(
+    value: &JsValue,
+    seen: &mut Vec<(JsObject, JsObject)>,
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let Some(source) = value.as_object() else {
         if value.is_symbol() {
             return Err(clone_error("a Symbol"));
         }
         return Ok(value.clone());
     };
-    if let Some((_, copy)) = seen.iter().find(|(original, _)| JsObject::equals(original, &source)) {
+    if let Some((_, copy)) = seen
+        .iter()
+        .find(|(original, _)| JsObject::equals(original, &source))
+    {
         return Ok(copy.clone().into());
     }
     if source.is_callable() {
@@ -199,23 +250,35 @@ fn clone_value(value: &JsValue, seen: &mut Vec<(JsObject, JsObject)>, context: &
         return Ok(copy.into());
     }
     if let Some(bytes) = crate::encoding::bytes_of(value, context)? {
-        let is_buffer = boa_engine::object::builtins::JsArrayBuffer::from_object(source.clone()).is_ok();
+        let is_buffer =
+            boa_engine::object::builtins::JsArrayBuffer::from_object(source.clone()).is_ok();
         let copy = JsUint8Array::from_iter(bytes, context)?;
-        return if is_buffer { copy.buffer(context) } else { Ok(copy.into()) };
+        return if is_buffer {
+            copy.buffer(context)
+        } else {
+            Ok(copy.into())
+        };
     }
     if let Ok(map) = JsMap::from_object(source.clone()) {
         let copy = JsMap::new(context);
         seen.push((source.clone(), copy.clone().into()));
         let entries = map.entries(context)?;
         let list = JsArray::from_iter(std::iter::empty(), context);
-        let from = context.intrinsics().constructors().array().constructor().get(js_string!("from"), context)?;
+        let from = context
+            .intrinsics()
+            .constructors()
+            .array()
+            .constructor()
+            .get(js_string!("from"), context)?;
         let all = crate::call(context, &from, &JsValue::undefined(), &[entries.into()])?;
         let _ = list;
         if let Some(all) = all.as_object() {
             let all = JsArray::from_object(all.clone())?;
             for at in 0..all.length(context)? {
                 let pair = all.get(at, context)?;
-                let pair = JsArray::from_object(pair.as_object().ok_or_else(|| clone_error("a map entry"))?)?;
+                let pair = JsArray::from_object(
+                    pair.as_object().ok_or_else(|| clone_error("a map entry"))?,
+                )?;
                 let key = clone_value(&pair.get(0, context)?, seen, context)?;
                 let item = clone_value(&pair.get(1, context)?, seen, context)?;
                 copy.set(key, item, context)?;
@@ -227,7 +290,12 @@ fn clone_value(value: &JsValue, seen: &mut Vec<(JsObject, JsObject)>, context: &
         let copy = JsSet::new(context);
         seen.push((source.clone(), copy.clone().into()));
         let values = set.values(context)?;
-        let from = context.intrinsics().constructors().array().constructor().get(js_string!("from"), context)?;
+        let from = context
+            .intrinsics()
+            .constructors()
+            .array()
+            .constructor()
+            .get(js_string!("from"), context)?;
         let all = crate::call(context, &from, &JsValue::undefined(), &[values.into()])?;
         if let Some(all) = all.as_object() {
             let all = JsArray::from_object(all.clone())?;
@@ -280,8 +348,13 @@ fn clone_error(what: &str) -> JsError {
 // ─── AbortController and AbortSignal ────────────────────────────────────────────────────────
 
 fn new_signal(context: &mut Context) -> JsResult<JsObject> {
-    let class = context.global_object().get(js_string!("AbortSignal"), context)?;
-    let prototype = class.as_object().map(|c| c.get(js_string!("prototype"), context)).transpose()?;
+    let class = context
+        .global_object()
+        .get(js_string!("AbortSignal"), context)?;
+    let prototype = class
+        .as_object()
+        .map(|c| c.get(js_string!("prototype"), context))
+        .transpose()?;
     let signal = object(context);
     if let Some(prototype) = prototype.and_then(|p| p.as_object()) {
         signal.set_prototype(Some(prototype));
@@ -316,14 +389,24 @@ fn abort(signal: &JsObject, reason: JsValue, context: &mut Context) -> JsResult<
     event.set(js_string!("target"), signal.clone(), false, context)?;
     let handler = signal.get(js_string!("onabort"), context)?;
     if handler.is_callable() {
-        crate::call(context, &handler, &signal.clone().into(), &[event.clone().into()])?;
+        crate::call(
+            context,
+            &handler,
+            &signal.clone().into(),
+            &[event.clone().into()],
+        )?;
     }
     let listeners = signal.get(js_string!("__listeners"), context)?;
     if let Some(listeners) = listeners.as_object() {
         let listeners = JsArray::from_object(listeners.clone())?;
         for at in 0..listeners.length(context)? {
             let listener = listeners.get(at, context)?;
-            crate::call(context, &listener, &signal.clone().into(), &[event.clone().into()])?;
+            crate::call(
+                context,
+                &listener,
+                &signal.clone().into(),
+                &[event.clone().into()],
+            )?;
         }
     }
     Ok(())
@@ -333,7 +416,8 @@ const SIGNAL_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("addEventListener", 2, |this, args, cx| {
         let kind = text_of(&arg(args, 0), cx)?;
         let listener = arg(args, 1);
-        if kind == "abort" && listener.is_callable()
+        if kind == "abort"
+            && listener.is_callable()
             && let Some(signal) = this.as_object()
             && let Some(list) = signal.get(js_string!("__listeners"), cx)?.as_object()
         {
@@ -360,7 +444,9 @@ const SIGNAL_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(JsValue::undefined())
     }),
     ("throwIfAborted", 0, |this, _, cx| {
-        let Some(signal) = this.as_object() else { return Ok(JsValue::undefined()) };
+        let Some(signal) = this.as_object() else {
+            return Ok(JsValue::undefined());
+        };
         if signal.get(js_string!("aborted"), cx)?.to_boolean() {
             return Err(JsError::from_opaque(signal.get(js_string!("reason"), cx)?));
         }
@@ -384,11 +470,20 @@ fn dress_blob(blob: &JsObject, bytes: Vec<u8>, kind: &str, context: &mut Context
     let data = JsUint8Array::from_iter(bytes, context)?;
     blob.define_property_or_throw(
         js_string!("__bytes"),
-        PropertyDescriptor::builder().value(data).writable(false).enumerable(false).configurable(false),
+        PropertyDescriptor::builder()
+            .value(data)
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
         context,
     )?;
     blob.set(js_string!("size"), size, false, context)?;
-    blob.set(js_string!("type"), js_text(&kind.to_ascii_lowercase()), false, context)?;
+    blob.set(
+        js_string!("type"),
+        js_text(&kind.to_ascii_lowercase()),
+        false,
+        context,
+    )?;
     Ok(())
 }
 
@@ -396,7 +491,9 @@ fn dress_blob(blob: &JsObject, bytes: Vec<u8>, kind: &str, context: &mut Context
 /// theirs.
 fn parts_bytes(parts: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
     let mut out = Vec::new();
-    let Some(list) = parts.as_object() else { return Ok(out) };
+    let Some(list) = parts.as_object() else {
+        return Ok(out);
+    };
     let list = JsArray::from_object(list.clone())?;
     for at in 0..list.length(context)? {
         let part = list.get(at, context)?;
@@ -404,7 +501,10 @@ fn parts_bytes(parts: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
             out.extend(text_of(&part, context)?.into_bytes());
         } else if let Some(bytes) = crate::encoding::bytes_of(&part, context)? {
             out.extend(bytes);
-        } else if part.as_object().is_some_and(|o| o.has_own_property(js_string!("__bytes"), context).unwrap_or(false)) {
+        } else if part.as_object().is_some_and(|o| {
+            o.has_own_property(js_string!("__bytes"), context)
+                .unwrap_or(false)
+        }) {
             out.extend(blob_bytes(&part, context)?);
         } else {
             out.extend(text_of(&part, context)?.into_bytes());
@@ -417,7 +517,11 @@ fn kind_of(options: &JsValue, context: &mut Context) -> JsResult<String> {
     match options.as_object() {
         Some(o) => {
             let kind = o.get(js_string!("type"), context)?;
-            if kind.is_undefined() { Ok(String::new()) } else { text_of(&kind, context) }
+            if kind.is_undefined() {
+                Ok(String::new())
+            } else {
+                text_of(&kind, context)
+            }
         }
         None => Ok(String::new()),
     }
@@ -437,7 +541,12 @@ fn construct_file(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     let options = arg(args, 2);
     let kind = kind_of(&options, context)?;
     dress_blob(&file, bytes, &kind, context)?;
-    file.set(js_string!("name"), js_text(&text_of(&arg(args, 1), context)?), false, context)?;
+    file.set(
+        js_string!("name"),
+        js_text(&text_of(&arg(args, 1), context)?),
+        false,
+        context,
+    )?;
     let modified = match options.as_object() {
         Some(o) => o.get(js_string!("lastModified"), context)?,
         None => JsValue::undefined(),
@@ -496,13 +605,21 @@ const BLOB_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 pub fn install(context: &mut Context) -> JsResult<()> {
     let crypto = crypto(context)?;
-    context.register_global_property(js_string!("crypto"), crypto, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("crypto"),
+        crypto,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
 
     let clone = function(context, "structuredClone", 1, |_, args, cx| {
         let mut seen = Vec::new();
         clone_value(&arg(args, 0), &mut seen, cx)
     });
-    context.register_global_property(js_string!("structuredClone"), clone, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("structuredClone"),
+        clone,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
 
     // `performance.now()`: milliseconds on the host's clock, the timers' own.
     let performance = object(context);
@@ -516,9 +633,15 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         let f = function(context, name, 1, |_, _, _| Ok(JsValue::undefined()));
         performance.set(JsString::from(name), f, false, context)?;
     }
-    let entries = function(context, "getEntriesByName", 1, |_, _, cx| Ok(JsArray::new(cx)?.into()));
+    let entries = function(context, "getEntriesByName", 1, |_, _, cx| {
+        Ok(JsArray::new(cx)?.into())
+    });
     performance.set(js_string!("getEntriesByName"), entries, false, context)?;
-    context.register_global_property(js_string!("performance"), performance, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("performance"),
+        performance,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
 
     // AbortSignal first: a controller makes one.
     let (signal_class, _) = class(
@@ -553,7 +676,12 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         )
         .build();
         let set_timeout = cx.global_object().get(js_string!("setTimeout"), cx)?;
-        crate::call(cx, &set_timeout, &JsValue::undefined(), &[fire.into(), ms.into()])?;
+        crate::call(
+            cx,
+            &set_timeout,
+            &JsValue::undefined(),
+            &[fire.into(), ms.into()],
+        )?;
         Ok(signal.into())
     });
     signal_class.set(js_string!("timeout"), timeout, false, context)?;

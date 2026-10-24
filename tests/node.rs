@@ -9,7 +9,9 @@ fn run(body: &str) -> Vec<String> {
     let dir = std::env::temp_dir().join(format!("runtime-x-node-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let main = dir.join("main.js");
-    let exports = rt.load_module(&main, body).unwrap_or_else(|e| panic!("{e}"));
+    let exports = rt
+        .load_module(&main, body)
+        .unwrap_or_else(|e| panic!("{e}"));
     let json = rt.eval("JSON.stringify").unwrap();
     let text = rt
         .call(&json, &rt_undefined(), &[exports])
@@ -70,9 +72,24 @@ fn path_util_events_os_and_url() {
     assert_eq!(
         result,
         [
-            "a/c/d.md", "/vault/x.md", "/a/b", "c", ".gz", "../c/d", "true", "b",
-            "x is 42, {\"a\":1}", "on 12,once,on 34", "1", "0", "true", "true", "string",
-            "string", "ok", "e.com",
+            "a/c/d.md",
+            "/vault/x.md",
+            "/a/b",
+            "c",
+            ".gz",
+            "../c/d",
+            "true",
+            "b",
+            "x is 42, {\"a\":1}",
+            "on 12,once,on 34",
+            "1",
+            "0",
+            "true",
+            "true",
+            "string",
+            "string",
+            "ok",
+            "e.com",
         ]
     );
 }
@@ -113,7 +130,9 @@ fn fs_reads_and_writes_and_child_process_refuses() {
     // every microtask before it answers.
     assert_eq!(
         result,
-        ["héllo", "6", "true", "true", "a.txt", "ENOENT", "two", "ENOSYS"]
+        [
+            "héllo", "6", "true", "true", "a.txt", "ENOENT", "two", "ENOSYS"
+        ]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -133,5 +152,8 @@ fn http_refuses_to_serve_and_console_keeps_time() {
         console.assert(1 === 1, 'not shown');
         exports.result = out;
     "#);
-    assert_eq!(result, ["function", "Not Found", "server EACCES", "get ENOSYS"]);
+    assert_eq!(
+        result,
+        ["function", "Not Found", "server EACCES", "get ENOSYS"]
+    );
 }

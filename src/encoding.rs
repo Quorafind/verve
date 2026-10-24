@@ -6,8 +6,7 @@
 //! engine's own, and only what Node adds is here.
 
 use boa_engine::{
-    Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
-    js_string,
+    Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string,
     native_function::NativeFunctionPointer,
     object::{
         FunctionObjectBuilder,
@@ -112,11 +111,17 @@ pub fn bytes_of(value: &JsValue, context: &mut Context) -> JsResult<Option<Vec<u
     let Ok(buffer) = JsArrayBuffer::from_object(buffer.clone()) else {
         return Ok(None);
     };
-    let offset = object.get(js_string!("byteOffset"), context)?.to_number(context)? as usize;
-    let length = object.get(js_string!("byteLength"), context)?.to_number(context)? as usize;
+    let offset = object
+        .get(js_string!("byteOffset"), context)?
+        .to_number(context)? as usize;
+    let length = object
+        .get(js_string!("byteLength"), context)?
+        .to_number(context)? as usize;
     let all = buffer.to_vec().unwrap_or_default();
     let end = (offset + length).min(all.len());
-    Ok(Some(all.get(offset.min(end)..end).unwrap_or_default().to_vec()))
+    Ok(Some(
+        all.get(offset.min(end)..end).unwrap_or_default().to_vec(),
+    ))
 }
 
 /// What a string is in `encoding`, Node's names.
@@ -192,7 +197,11 @@ fn construct_encoder(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsRes
     encoder.set(js_string!("encoding"), js_string!("utf-8"), false, context)?;
     let encode = function(context, "encode", 1, |_, args, cx| {
         let input = arg(args, 0);
-        let text = if input.is_undefined() { String::new() } else { text_of(&input, cx)? };
+        let text = if input.is_undefined() {
+            String::new()
+        } else {
+            text_of(&input, cx)?
+        };
         uint8(cx, text.into_bytes())
     });
     encoder.set(js_string!("encode"), encode, false, context)?;
@@ -238,7 +247,9 @@ fn construct_decoder(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         "latin1" | "iso-8859-1" | "windows-1252" | "ascii" | "us-ascii" => "windows-1252",
         other => {
             return Err(JsNativeError::range()
-                .with_message(format!("TextDecoder: the encoding '{other}' is not supported"))
+                .with_message(format!(
+                    "TextDecoder: the encoding '{other}' is not supported"
+                ))
                 .into());
         }
     };
@@ -252,7 +263,12 @@ fn construct_decoder(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         None => false,
     };
     let decoder = JsObject::with_object_proto(context.intrinsics());
-    decoder.set(js_string!("encoding"), JsString::from(encoding), false, context)?;
+    decoder.set(
+        js_string!("encoding"),
+        JsString::from(encoding),
+        false,
+        context,
+    )?;
     decoder.set(js_string!("fatal"), fatal, false, context)?;
     decoder.set(js_string!("ignoreBOM"), ignore_bom, false, context)?;
     let decode_fn = function(context, "decode", 1, |this, args, cx| {
@@ -260,8 +276,9 @@ fn construct_decoder(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         let bytes = if input.is_undefined() {
             Vec::new()
         } else {
-            bytes_of(&input, cx)?
-                .ok_or_else(|| type_error("TextDecoder.decode: not an ArrayBuffer or a view of one"))?
+            bytes_of(&input, cx)?.ok_or_else(|| {
+                type_error("TextDecoder.decode: not an ArrayBuffer or a view of one")
+            })?
         };
         let field = |name: &str, cx: &mut Context| -> JsResult<JsValue> {
             match this.as_object() {
@@ -427,7 +444,9 @@ const BUFFER_STATICS: &[(&str, usize, NativeFunctionPointer)] = &[
         let size = arg(args, 0).to_number(cx)? as usize;
         make_buffer(cx, vec![0; size])
     }),
-    ("isBuffer", 1, |_, args, cx| Ok(is_buffer(&arg(args, 0), cx)?.into())),
+    ("isBuffer", 1, |_, args, cx| {
+        Ok(is_buffer(&arg(args, 0), cx)?.into())
+    }),
     ("isEncoding", 1, |_, args, cx| {
         let name = text_of(&arg(args, 0), cx)?;
         Ok(encode("", &name).is_ok().into())
@@ -544,10 +563,11 @@ const BUFFER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("readUInt8", 1, |this, args, cx| {
         let bytes = this_bytes(this, cx)?;
         let at = arg(args, 0).to_number(cx).unwrap_or(0.) as usize;
-        bytes
-            .get(at)
-            .map(|b| JsValue::from(*b))
-            .ok_or_else(|| JsNativeError::range().with_message("offset out of range").into())
+        bytes.get(at).map(|b| JsValue::from(*b)).ok_or_else(|| {
+            JsNativeError::range()
+                .with_message("offset out of range")
+                .into()
+        })
     }),
 ];
 
@@ -559,7 +579,12 @@ fn function(context: &mut Context, name: &str, length: usize, f: NativeFunctionP
         .into()
 }
 
-fn constructor(context: &mut Context, name: &str, length: usize, f: NativeFunctionPointer) -> JsObject {
+fn constructor(
+    context: &mut Context,
+    name: &str,
+    length: usize,
+    f: NativeFunctionPointer,
+) -> JsObject {
     FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
         .name(JsString::from(name))
         .length(length)
@@ -570,12 +595,24 @@ fn constructor(context: &mut Context, name: &str, length: usize, f: NativeFuncti
 
 pub fn install(context: &mut Context) -> JsResult<()> {
     for (name, f) in [("atob", atob as NativeFunctionPointer), ("btoa", btoa)] {
-        context.register_global_callable(JsString::from(name), 1, NativeFunction::from_fn_ptr(f))?;
+        context.register_global_callable(
+            JsString::from(name),
+            1,
+            NativeFunction::from_fn_ptr(f),
+        )?;
     }
     let encoder = constructor(context, "TextEncoder", 0, construct_encoder);
-    context.register_global_property(js_string!("TextEncoder"), encoder, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("TextEncoder"),
+        encoder,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
     let decoder = constructor(context, "TextDecoder", 0, construct_decoder);
-    context.register_global_property(js_string!("TextDecoder"), decoder, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("TextDecoder"),
+        decoder,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
 
     // Buffer: a constructor whose prototype inherits Uint8Array's.
     let buffer = constructor(context, "Buffer", 2, construct_buffer);
@@ -620,7 +657,11 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         let method = function(context, name, *length, *f);
         buffer.set(JsString::from(*name), method, false, context)?;
     }
-    context.register_global_property(js_string!("Buffer"), buffer, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("Buffer"),
+        buffer,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
     Ok(())
 }
 

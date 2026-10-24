@@ -13,9 +13,9 @@
 //! bundles ship their workers — or a `data:` one.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
 use std::time::Duration;
 
 use boa_engine::{
@@ -58,7 +58,12 @@ fn type_error(message: impl Into<String>) -> JsError {
     JsNativeError::typ().with_message(message.into()).into()
 }
 
-fn function(context: &mut Context, name: &str, length: usize, f: NativeFunctionPointer) -> JsObject {
+fn function(
+    context: &mut Context,
+    name: &str,
+    length: usize,
+    f: NativeFunctionPointer,
+) -> JsObject {
     FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
         .name(JsString::from(name))
         .length(length)
@@ -100,7 +105,11 @@ pub(crate) fn clone_out(value: &JsValue, context: &mut Context) -> JsResult<Clon
     clone_value(value, context, &mut seen)
 }
 
-fn clone_value(value: &JsValue, from: &mut Context, seen: &mut HashMap<JsObject, usize>) -> JsResult<Cloned> {
+fn clone_value(
+    value: &JsValue,
+    from: &mut Context,
+    seen: &mut HashMap<JsObject, usize>,
+) -> JsResult<Cloned> {
     if let Some(text) = value.as_string() {
         return Ok(Cloned::String(text.iter().collect()));
     }
@@ -109,7 +118,9 @@ fn clone_value(value: &JsValue, from: &mut Context, seen: &mut HashMap<JsObject,
             return Err(type_error("DataCloneError: a Symbol could not be cloned"));
         }
         if value.is_bigint() {
-            return Ok(Cloned::BigInt(value.to_string(from)?.to_std_string_escaped()));
+            return Ok(Cloned::BigInt(
+                value.to_string(from)?.to_std_string_escaped(),
+            ));
         }
         if let Some(n) = value.as_number() {
             return Ok(Cloned::Number(n));
@@ -117,7 +128,11 @@ fn clone_value(value: &JsValue, from: &mut Context, seen: &mut HashMap<JsObject,
         if let Some(b) = value.as_boolean() {
             return Ok(Cloned::Bool(b));
         }
-        return Ok(if value.is_null() { Cloned::Null } else { Cloned::Undefined });
+        return Ok(if value.is_null() {
+            Cloned::Null
+        } else {
+            Cloned::Undefined
+        });
     };
     if let Some(at) = seen.get(&source) {
         return Ok(Cloned::Seen(*at));
@@ -129,7 +144,9 @@ fn clone_value(value: &JsValue, from: &mut Context, seen: &mut HashMap<JsObject,
     let number = seen.len();
     seen.insert(source.clone(), number);
     if let Ok(date) = JsDate::from_object(source.clone()) {
-        return Ok(Cloned::Date(date.get_time(from)?.as_number().unwrap_or(f64::NAN)));
+        return Ok(Cloned::Date(
+            date.get_time(from)?.as_number().unwrap_or(f64::NAN),
+        ));
     }
     if let Ok(buffer) = JsArrayBuffer::from_object(source.clone()) {
         return Ok(Cloned::Buffer(buffer.to_vec().unwrap_or_default()));
@@ -191,7 +208,11 @@ fn clone_value(value: &JsValue, from: &mut Context, seen: &mut HashMap<JsObject,
         let item = source.get(name.clone(), from)?;
         fields.push((name.iter().collect(), clone_value(&item, from, seen)?));
     }
-    Ok(if error { Cloned::Error(fields) } else { Cloned::Object(fields) })
+    Ok(if error {
+        Cloned::Error(fields)
+    } else {
+        Cloned::Object(fields)
+    })
 }
 
 /// `cloned`, made again in `context`'s realm.
@@ -207,8 +228,13 @@ fn make(cloned: &Cloned, to: &mut Context, made: &mut Vec<JsObject>) -> JsResult
         Cloned::Bool(b) => (*b).into(),
         Cloned::Number(n) => (*n).into(),
         Cloned::String(units) => JsString::from(units.as_slice()).into(),
-        Cloned::BigInt(text) => boa_engine::JsBigInt::from_string(text).map_or(JsValue::undefined(), JsValue::from),
-        Cloned::Seen(at) => made.get(*at).cloned().map_or(JsValue::undefined(), JsValue::from),
+        Cloned::BigInt(text) => {
+            boa_engine::JsBigInt::from_string(text).map_or(JsValue::undefined(), JsValue::from)
+        }
+        Cloned::Seen(at) => made
+            .get(*at)
+            .cloned()
+            .map_or(JsValue::undefined(), JsValue::from),
         Cloned::Date(time) => {
             let date = JsDate::new(to);
             date.set_time(*time, to)?;
@@ -278,10 +304,19 @@ fn entries(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
         .array()
         .constructor()
         .get(js_string!("from"), context)?;
-    let list = crate::call(context, &from, &JsValue::undefined(), std::slice::from_ref(value))?;
-    let Some(list) = list.as_object() else { return Ok(Vec::new()) };
+    let list = crate::call(
+        context,
+        &from,
+        &JsValue::undefined(),
+        std::slice::from_ref(value),
+    )?;
+    let Some(list) = list.as_object() else {
+        return Ok(Vec::new());
+    };
     let list = JsArray::from_object(list)?;
-    (0..list.length(context)?).map(|at| list.get(at, context)).collect()
+    (0..list.length(context)?)
+        .map(|at| list.get(at, context))
+        .collect()
 }
 
 // ─── The worker's own realm ─────────────────────────────────────────────────────────────────
@@ -297,12 +332,20 @@ fn worker_runtime(name: &str) -> JsResult<RuntimeX> {
     // There to be assigned, as a worker's global scope has them — `onmessage = …` in a strict
     // script needs the property to be there first.
     for handler in ["onmessage", "onerror", "onmessageerror"] {
-        context.register_global_property(JsString::from(handler), JsValue::null(), Attribute::all())?;
+        context.register_global_property(
+            JsString::from(handler),
+            JsValue::null(),
+            Attribute::all(),
+        )?;
     }
     let listeners = JsArray::new(context)?;
     global.define_property_or_throw(
         js_string!("__listeners"),
-        PropertyDescriptor::builder().value(listeners).writable(true).enumerable(false).configurable(true),
+        PropertyDescriptor::builder()
+            .value(listeners)
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
         context,
     )?;
     let functions: [(&str, usize, NativeFunctionPointer); 5] = [
@@ -318,10 +361,16 @@ fn worker_runtime(name: &str) -> JsResult<RuntimeX> {
             }
             Ok(JsValue::undefined())
         }),
-        ("addEventListener", 2, |_, args, cx| add_listener(&cx.global_object(), args, cx)),
-        ("removeEventListener", 2, |_, args, cx| remove_listener(&cx.global_object(), args, cx)),
+        ("addEventListener", 2, |_, args, cx| {
+            add_listener(&cx.global_object(), args, cx)
+        }),
+        ("removeEventListener", 2, |_, args, cx| {
+            remove_listener(&cx.global_object(), args, cx)
+        }),
         ("importScripts", 0, |_, _, _| {
-            Err(type_error("importScripts: a worker here runs the one script it was given"))
+            Err(type_error(
+                "importScripts: a worker here runs the one script it was given",
+            ))
         }),
     ];
     for (name, length, f) in functions {
@@ -343,12 +392,19 @@ fn add_listener(target: &JsObject, args: &[JsValue], context: &mut Context) -> J
     Ok(JsValue::undefined())
 }
 
-fn remove_listener(target: &JsObject, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn remove_listener(
+    target: &JsObject,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let listener = arg(args, 1);
     let Some(list) = target.get(js_string!("__listeners"), context)?.as_object() else {
         return Ok(JsValue::undefined());
     };
-    let kept: Vec<JsValue> = entries(&list.into(), context)?.into_iter().filter(|l| *l != listener).collect();
+    let kept: Vec<JsValue> = entries(&list.into(), context)?
+        .into_iter()
+        .filter(|l| *l != listener)
+        .collect();
     let fresh = JsArray::from_iter(kept, context);
     target.set(js_string!("__listeners"), fresh, false, context)?;
     Ok(JsValue::undefined())
@@ -372,7 +428,12 @@ fn dispatch_message(target: &JsObject, data: JsValue, context: &mut Context) {
         handlers.extend(list);
     }
     for handler in handlers {
-        if let Err(error) = crate::call(context, &handler, &target.clone().into(), &[event.clone().into()]) {
+        if let Err(error) = crate::call(
+            context,
+            &handler,
+            &target.clone().into(),
+            &[event.clone().into()],
+        ) {
             crate::report(context, &error);
         }
     }
@@ -413,17 +474,29 @@ const WORKER_STACK: usize = 16 * 1024 * 1024;
 
 /// A worker's life, on its thread: the script run, then every message heard and every timer
 /// fired as they come, until its page lets go of it, terminates it, or it closes itself.
-fn worker_thread(name: String, script: String, inbox: Receiver<ToWorker>, out: Sender<FromWorker>, progress: Arc<Progress>) {
+fn worker_thread(
+    name: String,
+    script: String,
+    inbox: Receiver<ToWorker>,
+    out: Sender<FromWorker>,
+    progress: Arc<Progress>,
+) {
     let mut runtime = match worker_runtime(&name) {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = out.send(FromWorker::Console(Level::Error, format!("Uncaught (in worker) {error}")));
+            let _ = out.send(FromWorker::Console(
+                Level::Error,
+                format!("Uncaught (in worker) {error}"),
+            ));
             let _ = out.send(FromWorker::Closed);
             return;
         }
     };
     if let Err(error) = runtime.eval(&script) {
-        let _ = out.send(FromWorker::Console(Level::Error, format!("Uncaught (in worker) {error}")));
+        let _ = out.send(FromWorker::Console(
+            Level::Error,
+            format!("Uncaught (in worker) {error}"),
+        ));
     }
     if !flush(&mut runtime, &out, &progress) {
         return;
@@ -482,7 +555,10 @@ fn worker_thread(name: String, script: String, inbox: Receiver<ToWorker>, out: S
 /// timer is due. Answers whether it is still open.
 fn flush(runtime: &mut RuntimeX, out: &Sender<FromWorker>, progress: &Progress) -> bool {
     for line in runtime.take_console() {
-        let _ = out.send(FromWorker::Console(line.level, format!("[worker] {}", line.text)));
+        let _ = out.send(FromWorker::Console(
+            line.level,
+            format!("[worker] {}", line.text),
+        ));
     }
     let (outbox, closed) = shared(runtime.context())
         .port
@@ -497,7 +573,10 @@ fn flush(runtime: &mut RuntimeX, out: &Sender<FromWorker>, progress: &Progress) 
             }
             Err(error) => {
                 let text = error.to_string();
-                let _ = out.send(FromWorker::Console(Level::Error, format!("[worker] {text}")));
+                let _ = out.send(FromWorker::Console(
+                    Level::Error,
+                    format!("[worker] {text}"),
+                ));
             }
         }
     }
@@ -531,18 +610,28 @@ fn script_of(url: &str, context: &Context) -> Option<String> {
 fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let url = arg(args, 0).to_string(context)?.to_std_string_escaped();
     let script = script_of(&url, context).ok_or_else(|| {
-        type_error(format!("Worker: '{url}' is not a script here — a blob: or data: address is"))
+        type_error(format!(
+            "Worker: '{url}' is not a script here — a blob: or data: address is"
+        ))
     })?;
     let name = match arg(args, 1).as_object() {
         Some(o) => o.get(js_string!("name"), context)?,
         None => JsValue::undefined(),
     };
-    let name = if name.is_undefined() { String::new() } else { name.to_string(context)?.to_std_string_escaped() };
+    let name = if name.is_undefined() {
+        String::new()
+    } else {
+        name.to_string(context)?.to_std_string_escaped()
+    };
     let (to, inbox) = mpsc::channel();
     let (out, from) = mpsc::channel();
     let progress = Arc::new(Progress::default());
     let thread_progress = Arc::clone(&progress);
-    let thread_name = if name.is_empty() { "worker".to_owned() } else { format!("worker {name}") };
+    let thread_name = if name.is_empty() {
+        "worker".to_owned()
+    } else {
+        format!("worker {name}")
+    };
     std::thread::Builder::new()
         .name(thread_name)
         .stack_size(WORKER_STACK)
@@ -556,7 +645,11 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     let listeners = JsArray::new(context)?;
     object.define_property_or_throw(
         js_string!("__listeners"),
-        PropertyDescriptor::builder().value(listeners).writable(true).enumerable(false).configurable(true),
+        PropertyDescriptor::builder()
+            .value(listeners)
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
         context,
     )?;
     object.set(js_string!("onmessage"), JsValue::null(), false, context)?;
@@ -566,7 +659,11 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     state.next_timer.set(id + 1);
     object.define_property_or_throw(
         js_string!("__worker"),
-        PropertyDescriptor::builder().value(id).writable(false).enumerable(false).configurable(false),
+        PropertyDescriptor::builder()
+            .value(id)
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
         context,
     )?;
     state.workers.borrow_mut().push(WorkerSlot {
@@ -582,7 +679,9 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
 }
 
 fn worker_id(this: &JsValue, context: &mut Context) -> JsResult<Option<u32>> {
-    let Some(object) = this.as_object() else { return Ok(None) };
+    let Some(object) = this.as_object() else {
+        return Ok(None);
+    };
     let id = object.get(js_string!("__worker"), context)?;
     Ok(id.as_number().map(|n| n as u32))
 }
@@ -590,7 +689,9 @@ fn worker_id(this: &JsValue, context: &mut Context) -> JsResult<Option<u32>> {
 const WORKER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     // The message copied now, and sent to the worker's thread, which hears it when it can.
     ("postMessage", 2, |this, args, cx| {
-        let Some(id) = worker_id(this, cx)? else { return Ok(JsValue::undefined()) };
+        let Some(id) = worker_id(this, cx)? else {
+            return Ok(JsValue::undefined());
+        };
         let cloned = clone_out(&arg(args, 0), cx)?;
         let state = shared(cx);
         let workers = state.workers.borrow();
@@ -613,13 +714,17 @@ const WORKER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         }
         Ok(JsValue::undefined())
     }),
-    ("addEventListener", 2, |this, args, cx| match this.as_object() {
-        Some(object) => add_listener(&object, args, cx),
-        None => Ok(JsValue::undefined()),
+    ("addEventListener", 2, |this, args, cx| {
+        match this.as_object() {
+            Some(object) => add_listener(&object, args, cx),
+            None => Ok(JsValue::undefined()),
+        }
     }),
-    ("removeEventListener", 2, |this, args, cx| match this.as_object() {
-        Some(object) => remove_listener(&object, args, cx),
-        None => Ok(JsValue::undefined()),
+    ("removeEventListener", 2, |this, args, cx| {
+        match this.as_object() {
+            Some(object) => remove_listener(&object, args, cx),
+            None => Ok(JsValue::undefined()),
+        }
     }),
 ];
 
@@ -663,7 +768,9 @@ pub(crate) fn run_workers(page: &mut Context, deadline: Option<std::time::Instan
             }
             found
         };
-        let Some((id, object, event)) = next else { break };
+        let Some((id, object, event)) = next else {
+            break;
+        };
         busy = true;
         {
             match event {
@@ -693,7 +800,8 @@ pub(crate) fn next_due(page: &Context) -> Option<crate::Millis> {
     let now = epoch_ms();
     let mut next: Option<crate::Millis> = None;
     for worker in workers.iter().filter(|w| !w.closed) {
-        let due = if !worker.heard.is_empty() || worker.progress.pending.load(Ordering::SeqCst) > 0 {
+        let due = if !worker.heard.is_empty() || worker.progress.pending.load(Ordering::SeqCst) > 0
+        {
             Some(0.)
         } else {
             match worker.progress.next_timer.load(Ordering::SeqCst) {
@@ -721,7 +829,9 @@ pub(crate) fn wait(page: &Context, timeout: Duration) -> bool {
             let workers = state.workers.borrow();
             (
                 workers.iter().any(|w| !w.heard.is_empty()),
-                workers.iter().any(|w| w.progress.pending.load(Ordering::SeqCst) > 0),
+                workers
+                    .iter()
+                    .any(|w| w.progress.pending.load(Ordering::SeqCst) > 0),
             )
         };
         if heard {
@@ -735,12 +845,15 @@ pub(crate) fn wait(page: &Context, timeout: Duration) -> bool {
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let class: JsObject = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(construct_worker))
-        .name(js_string!("Worker"))
-        .length(2)
-        .constructor(true)
-        .build()
-        .into();
+    let class: JsObject = FunctionObjectBuilder::new(
+        context.realm(),
+        NativeFunction::from_fn_ptr(construct_worker),
+    )
+    .name(js_string!("Worker"))
+    .length(2)
+    .constructor(true)
+    .build()
+    .into();
     let prototype = JsObject::with_object_proto(context.intrinsics());
     for (name, length, f) in WORKER_METHODS {
         let method = function(context, name, *length, *f);
@@ -749,9 +862,17 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     prototype.set(js_string!("constructor"), class.clone(), false, context)?;
     class.define_property_or_throw(
         js_string!("prototype"),
-        PropertyDescriptor::builder().value(prototype).writable(false).enumerable(false).configurable(false),
+        PropertyDescriptor::builder()
+            .value(prototype)
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
         context,
     )?;
-    context.register_global_property(js_string!("Worker"), class, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("Worker"),
+        class,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
     Ok(())
 }

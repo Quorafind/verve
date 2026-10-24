@@ -44,8 +44,14 @@ impl Guest for Scripts {
 
 fn spawn(name: &str, wakes: Arc<AtomicUsize>) -> Isolate<Scripts> {
     Isolate::spawn(
-        Options { name: name.into(), ..Options::default() },
-        || Scripts { runtime: RuntimeX::new(), ran: 0 },
+        Options {
+            name: name.into(),
+            ..Options::default()
+        },
+        || Scripts {
+            runtime: RuntimeX::new(),
+            ran: 0,
+        },
         move || {
             wakes.fetch_add(1, Ordering::SeqCst);
         },
@@ -94,8 +100,14 @@ fn a_script_that_will_not_return_is_stopped_from_outside() {
     let after = eval(&isolate, "'after'");
     assert!(started.elapsed() < Duration::from_millis(50));
     // A watchdog sees it busy, and stops it.
-    while isolate.busy_for().is_none_or(|busy| busy < Duration::from_millis(100)) {
-        assert!(started.elapsed() < Duration::from_secs(10), "it never looked busy");
+    while isolate
+        .busy_for()
+        .is_none_or(|busy| busy < Duration::from_millis(100))
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "it never looked busy"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(isolate.interrupt());
@@ -117,7 +129,10 @@ fn a_panic_ends_its_own_isolate_and_no_other() {
         assert!(started.elapsed() < Duration::from_secs(10), "it never died");
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(doomed.health(), Health::Dead("a plugin's host went wrong".into()));
+    assert_eq!(
+        doomed.health(),
+        Health::Dead("a plugin's host went wrong".into())
+    );
     // Sent to the dead one: dropped, not waited for.
     eval(&doomed, "1");
     // The other one is untouched.

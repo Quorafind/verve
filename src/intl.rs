@@ -101,10 +101,15 @@ fn method(context: &mut Context, name: &str, length: usize, f: NativeFunction) -
 fn collator(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let options = arg(args, 1);
     let numeric = option(&options, "numeric", context)?.to_boolean();
-    let sensitivity = option_str(&options, "sensitivity", context)?.unwrap_or_else(|| "variant".into());
+    let sensitivity =
+        option_str(&options, "sensitivity", context)?.unwrap_or_else(|| "variant".into());
     let settings = ObjectInitializer::new(context)
         .property(js_string!("numeric"), numeric, Attribute::all())
-        .property(js_string!("sensitivity"), JsString::from(sensitivity.as_str()), Attribute::all())
+        .property(
+            js_string!("sensitivity"),
+            JsString::from(sensitivity.as_str()),
+            Attribute::all(),
+        )
         .property(js_string!("locale"), js_string!("en-US"), Attribute::all())
         .property(js_string!("usage"), js_string!("sort"), Attribute::all())
         .build();
@@ -117,7 +122,10 @@ fn collator(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<Js
                 let a = arg(args, 0).to_string(context)?.to_std_string_escaped();
                 let b = arg(args, 1).to_string(context)?.to_std_string_escaped();
                 let numeric = settings.get(js_string!("numeric"), context)?.to_boolean();
-                let sensitivity = settings.get(js_string!("sensitivity"), context)?.to_string(context)?.to_std_string_escaped();
+                let sensitivity = settings
+                    .get(js_string!("sensitivity"), context)?
+                    .to_string(context)?
+                    .to_std_string_escaped();
                 Ok(match collate(&a, &b, numeric, &sensitivity) {
                     Ordering::Less => -1,
                     Ordering::Equal => 0,
@@ -132,7 +140,10 @@ fn collator(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<Js
         context,
         "resolvedOptions",
         0,
-        NativeFunction::from_copy_closure_with_captures(|_, _, settings: &JsObject, _| Ok(settings.clone().into()), settings),
+        NativeFunction::from_copy_closure_with_captures(
+            |_, _, settings: &JsObject, _| Ok(settings.clone().into()),
+            settings,
+        ),
     );
     Ok(ObjectInitializer::new(context)
         .property(js_string!("compare"), compare, Attribute::all())
@@ -144,7 +155,13 @@ fn collator(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<Js
 /// `1234.5` as `1,234.5`, with at most `max` and at least `min` digits after the point.
 pub fn group(value: f64, min: usize, max: usize) -> String {
     if !value.is_finite() {
-        return if value.is_nan() { "NaN".into() } else if value > 0. { "∞".into() } else { "-∞".into() };
+        return if value.is_nan() {
+            "NaN".into()
+        } else if value > 0. {
+            "∞".into()
+        } else {
+            "-∞".into()
+        };
     }
     // Half away from zero, as Intl rounds; Rust's formatting rounds half to even.
     let scale = 10f64.powi(max as i32);
@@ -163,22 +180,44 @@ pub fn group(value: f64, min: usize, max: usize) -> String {
         }
         grouped.push(c);
     }
-    let sign = if value < 0. && (whole != "0" || fraction.chars().any(|c| c != '0')) { "-" } else { "" };
-    if fraction.is_empty() { format!("{sign}{grouped}") } else { format!("{sign}{grouped}.{fraction}") }
+    let sign = if value < 0. && (whole != "0" || fraction.chars().any(|c| c != '0')) {
+        "-"
+    } else {
+        ""
+    };
+    if fraction.is_empty() {
+        format!("{sign}{grouped}")
+    } else {
+        format!("{sign}{grouped}.{fraction}")
+    }
 }
 
 fn number_format(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let options = arg(args, 1);
     let style = option_str(&options, "style", context)?.unwrap_or_else(|| "decimal".into());
-    let min = option(&options, "minimumFractionDigits", context)?.as_number().unwrap_or(0.) as usize;
+    let min = option(&options, "minimumFractionDigits", context)?
+        .as_number()
+        .unwrap_or(0.) as usize;
     let max = option(&options, "maximumFractionDigits", context)?
         .as_number()
         .map_or(if style == "percent" { 0 } else { 3 }, |n| n as usize)
         .max(min);
     let settings = ObjectInitializer::new(context)
-        .property(js_string!("style"), JsString::from(style.as_str()), Attribute::all())
-        .property(js_string!("minimumFractionDigits"), min as f64, Attribute::all())
-        .property(js_string!("maximumFractionDigits"), max as f64, Attribute::all())
+        .property(
+            js_string!("style"),
+            JsString::from(style.as_str()),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("minimumFractionDigits"),
+            min as f64,
+            Attribute::all(),
+        )
+        .property(
+            js_string!("maximumFractionDigits"),
+            max as f64,
+            Attribute::all(),
+        )
         .property(js_string!("locale"), js_string!("en-US"), Attribute::all())
         .build();
     let format = method(
@@ -188,9 +227,16 @@ fn number_format(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
         NativeFunction::from_copy_closure_with_captures(
             |_, args, settings: &JsObject, context| {
                 let value = arg(args, 0).to_number(context)?;
-                let style = settings.get(js_string!("style"), context)?.to_string(context)?.to_std_string_escaped();
-                let min = settings.get(js_string!("minimumFractionDigits"), context)?.to_number(context)? as usize;
-                let max = settings.get(js_string!("maximumFractionDigits"), context)?.to_number(context)? as usize;
+                let style = settings
+                    .get(js_string!("style"), context)?
+                    .to_string(context)?
+                    .to_std_string_escaped();
+                let min = settings
+                    .get(js_string!("minimumFractionDigits"), context)?
+                    .to_number(context)? as usize;
+                let max = settings
+                    .get(js_string!("maximumFractionDigits"), context)?
+                    .to_number(context)? as usize;
                 let out = match style.as_str() {
                     "percent" => format!("{}%", group(value * 100., min, max)),
                     _ => group(value, min, max),
@@ -204,7 +250,10 @@ fn number_format(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
         context,
         "resolvedOptions",
         0,
-        NativeFunction::from_copy_closure_with_captures(|_, _, settings: &JsObject, _| Ok(settings.clone().into()), settings),
+        NativeFunction::from_copy_closure_with_captures(
+            |_, _, settings: &JsObject, _| Ok(settings.clone().into()),
+            settings,
+        ),
     );
     Ok(ObjectInitializer::new(context)
         .property(js_string!("format"), format, Attribute::all())
@@ -227,7 +276,10 @@ fn date_time_format(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
             } else {
                 date
             };
-            let method = date.as_object().map(|o| o.get(js_string!("toLocaleDateString"), context)).transpose()?;
+            let method = date
+                .as_object()
+                .map(|o| o.get(js_string!("toLocaleDateString"), context))
+                .transpose()?;
             match method {
                 Some(method) => crate::call(context, &method, &date, &[]),
                 None => Ok(js_string!("").into()),
@@ -241,8 +293,16 @@ fn date_time_format(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
         NativeFunction::from_fn_ptr(|_, _, context| {
             Ok(ObjectInitializer::new(context)
                 .property(js_string!("locale"), js_string!("en-US"), Attribute::all())
-                .property(js_string!("calendar"), js_string!("gregory"), Attribute::all())
-                .property(js_string!("numberingSystem"), js_string!("latn"), Attribute::all())
+                .property(
+                    js_string!("calendar"),
+                    js_string!("gregory"),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("numberingSystem"),
+                    js_string!("latn"),
+                    Attribute::all(),
+                )
                 .property(js_string!("timeZone"), js_string!("UTC"), Attribute::all())
                 .build()
                 .into())
@@ -262,7 +322,12 @@ fn plural_rules(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<J
         1,
         NativeFunction::from_fn_ptr(|_, args, context| {
             let n = arg(args, 0).to_number(context)?;
-            Ok(if n == 1. { js_string!("one") } else { js_string!("other") }.into())
+            Ok(if n == 1. {
+                js_string!("one")
+            } else {
+                js_string!("other")
+            }
+            .into())
         }),
     );
     Ok(ObjectInitializer::new(context)
@@ -281,8 +346,16 @@ fn relative_time_format(_: &JsValue, _: &[JsValue], context: &mut Context) -> Js
             let unit = arg(args, 1).to_string(context)?.to_std_string_escaped();
             let unit = unit.trim_end_matches('s');
             let count = n.abs();
-            let unit = if count == 1. { unit.to_owned() } else { format!("{unit}s") };
-            let out = if n < 0. { format!("{count} {unit} ago") } else { format!("in {count} {unit}") };
+            let unit = if count == 1. {
+                unit.to_owned()
+            } else {
+                format!("{unit}s")
+            };
+            let out = if n < 0. {
+                format!("{count} {unit} ago")
+            } else {
+                format!("in {count} {unit}")
+            };
             Ok(JsString::from(out.as_str()).into())
         }),
     );
@@ -302,20 +375,29 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     ];
     let mut objects = Vec::new();
     for (name, f) in constructors {
-        let function: JsObject = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-            .name(JsString::from(name))
-            .length(2)
-            .constructor(true)
-            .build()
-            .into();
+        let function: JsObject =
+            FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
+                .name(JsString::from(name))
+                .length(2)
+                .constructor(true)
+                .build()
+                .into();
         objects.push((name, function));
     }
     let mut intl = ObjectInitializer::new(context);
     for (name, function) in objects {
-        intl.property(JsString::from(name), function, Attribute::WRITABLE | Attribute::CONFIGURABLE);
+        intl.property(
+            JsString::from(name),
+            function,
+            Attribute::WRITABLE | Attribute::CONFIGURABLE,
+        );
     }
     let intl = intl.build();
-    context.register_global_property(js_string!("Intl"), intl, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("Intl"),
+        intl,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
     Ok(())
 }
 
@@ -325,7 +407,10 @@ mod tests {
 
     #[test]
     fn text_is_sorted_as_people_read_it() {
-        assert_eq!(collate("item 10", "item 9", true, "base"), Ordering::Greater);
+        assert_eq!(
+            collate("item 10", "item 9", true, "base"),
+            Ordering::Greater
+        );
         assert_eq!(collate("item 10", "item 9", false, "base"), Ordering::Less);
         assert_eq!(collate("apple", "Banana", false, "variant"), Ordering::Less);
         assert_eq!(collate("a", "A", false, "base"), Ordering::Equal);

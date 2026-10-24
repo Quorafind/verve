@@ -41,7 +41,9 @@ fn outcome(rt: &mut RuntimeX) -> String {
 fn stores_indexes_cursors_and_ranges() {
     let mut rt = RuntimeX::with_clock(|| 0.);
     js(&mut rt, PRELUDE);
-    js(&mut rt, r#"
+    js(
+        &mut rt,
+        r#"
         (async () => {
             const db = await openDb('notes', 1, (db, e) => {
                 out.push('upgrade ' + e.oldVersion + '->' + e.newVersion);
@@ -108,7 +110,8 @@ fn stores_indexes_cursors_and_ranges() {
 
             out.push(indexedDB.cmp(1, 'a'), indexedDB.cmp([1, 2], [1, 2]), indexedDB.cmp('b', 'a'));
         })().catch(e => out.push('failed ' + e));
-    "#);
+    "#,
+    );
     assert_eq!(
         outcome(&mut rt),
         r#"["upgrade 0->1","notes,plain",1,1,2,"complete","a.md",5,1,"12",1,3,"a.md,b.md",3,2,"2,3","hello","ConstraintError","abort","3:c.md 2:b.md 1:a.md","a.md,B.md",2,-1,0,1]"#
@@ -123,20 +126,25 @@ fn databases_are_kept_on_disk() {
         let mut rt = RuntimeX::with_clock(|| 0.);
         rt.set_storage_dir(Some(dir.clone()));
         js(&mut rt, PRELUDE);
-        js(&mut rt, r#"
+        js(
+            &mut rt,
+            r#"
             (async () => {
                 const db = await openDb('kept', 2, (db) => db.createObjectStore('kv'));
                 const tx = db.transaction('kv', 'readwrite');
                 tx.objectStore('kv').put({ n: 42, list: [1, 'two'] }, 'answer');
                 out.push(await done(tx));
             })().catch(e => out.push('failed ' + e));
-        "#);
+        "#,
+        );
         assert_eq!(outcome(&mut rt), r#"["complete"]"#);
     }
     let mut rt = RuntimeX::with_clock(|| 0.);
     rt.set_storage_dir(Some(dir.clone()));
     js(&mut rt, PRELUDE);
-    js(&mut rt, r#"
+    js(
+        &mut rt,
+        r#"
         (async () => {
             // Opened again with no version: no upgrade, the version it had.
             const db = await openDb('kept', undefined, () => out.push('upgraded?'));
@@ -149,7 +157,11 @@ fn databases_are_kept_on_disk() {
             await req(indexedDB.deleteDatabase('kept'));
             out.push((await indexedDB.databases()).length);
         })().catch(e => out.push('failed ' + e));
-    "#);
-    assert_eq!(outcome(&mut rt), r#"[2,42,"two","kept@2","VersionError",0]"#);
+    "#,
+    );
+    assert_eq!(
+        outcome(&mut rt),
+        r#"[2,42,"two","kept@2","VersionError",0]"#
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

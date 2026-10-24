@@ -25,9 +25,8 @@ use boa_engine::{
     property::{Attribute, PropertyDescriptor},
 };
 use wasmi::{
-    AsContextMut, Caller, Engine, Extern, ExternRef, ExternType, Func, FuncRef,
-    FuncType, Global, Memory, MemoryType, Module, Mutability, Store, StoreContextMut, Table,
-    TableType, Val,
+    AsContextMut, Caller, Engine, Extern, ExternRef, ExternType, Func, FuncRef, FuncType, Global,
+    Memory, MemoryType, Module, Mutability, Store, StoreContextMut, Table, TableType, Val,
     core::{F32, F64, ValType},
 };
 
@@ -90,11 +89,25 @@ fn object(context: &mut Context) -> JsObject {
 }
 
 fn list_of(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
-    let from = context.intrinsics().constructors().array().constructor().get(js_string!("from"), context)?;
-    let list = crate::call(context, &from, &JsValue::undefined(), std::slice::from_ref(value))?;
-    let Some(list) = list.as_object() else { return Ok(Vec::new()) };
+    let from = context
+        .intrinsics()
+        .constructors()
+        .array()
+        .constructor()
+        .get(js_string!("from"), context)?;
+    let list = crate::call(
+        context,
+        &from,
+        &JsValue::undefined(),
+        std::slice::from_ref(value),
+    )?;
+    let Some(list) = list.as_object() else {
+        return Ok(Vec::new());
+    };
     let list = JsArray::from_object(list)?;
-    (0..list.length(context)?).map(|at| list.get(at, context)).collect()
+    (0..list.length(context)?)
+        .map(|at| list.get(at, context))
+        .collect()
 }
 
 fn engine(context: &Context) -> Engine {
@@ -110,15 +123,24 @@ fn instance(context: &Context, id: u32) -> JsResult<Rc<Wasm>> {
         .instances
         .get(id as usize)
         .cloned()
-        .ok_or_else(|| JsNativeError::typ().with_message("not a WebAssembly object").into())
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("not a WebAssembly object")
+                .into()
+        })
 }
 
 /// One of `WebAssembly`'s errors — `CompileError`, `LinkError`, `RuntimeError` — made by its
 /// class, so `instanceof` knows it.
 fn wasm_error(context: &mut Context, class: &str, message: &str) -> JsError {
     let made = (|| -> JsResult<JsValue> {
-        let namespace = context.global_object().get(js_string!("WebAssembly"), context)?;
-        let class = namespace.as_object().map(|n| n.get(JsString::from(class), context)).transpose()?;
+        let namespace = context
+            .global_object()
+            .get(js_string!("WebAssembly"), context)?;
+        let class = namespace
+            .as_object()
+            .map(|n| n.get(JsString::from(class), context))
+            .transpose()?;
         match class.and_then(|c| c.as_object()) {
             Some(class) => Ok(class.construct(&[js_text(message)], None, context)?.into()),
             None => Ok(JsValue::undefined()),
@@ -126,7 +148,9 @@ fn wasm_error(context: &mut Context, class: &str, message: &str) -> JsError {
     })();
     match made {
         Ok(value) if value.is_object() => JsError::from_opaque(value),
-        _ => JsNativeError::error().with_message(format!("{class}: {message}")).into(),
+        _ => JsNativeError::error()
+            .with_message(format!("{class}: {message}"))
+            .into(),
     }
 }
 
@@ -134,23 +158,37 @@ fn link_error(context: &mut Context, message: &str) -> JsError {
     wasm_error(context, "LinkError", message)
 }
 
-fn hidden(target: &JsObject, name: &str, value: impl Into<JsValue>, context: &mut Context) -> JsResult<()> {
+fn hidden(
+    target: &JsObject,
+    name: &str,
+    value: impl Into<JsValue>,
+    context: &mut Context,
+) -> JsResult<()> {
     target.define_property_or_throw(
         JsString::from(name),
-        PropertyDescriptor::builder().value(value.into()).writable(true).enumerable(false).configurable(true),
+        PropertyDescriptor::builder()
+            .value(value.into())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
         context,
     )?;
     Ok(())
 }
 
 fn hidden_number(target: &JsValue, name: &str, context: &mut Context) -> Option<u32> {
-    let value = target.as_object()?.get(JsString::from(name), context).ok()?;
+    let value = target
+        .as_object()?
+        .get(JsString::from(name), context)
+        .ok()?;
     value.as_number().map(|n| n as u32)
 }
 
 fn with_proto(context: &mut Context, class: &str) -> JsResult<JsObject> {
     let made = object(context);
-    let namespace = context.global_object().get(js_string!("WebAssembly"), context)?;
+    let namespace = context
+        .global_object()
+        .get(js_string!("WebAssembly"), context)?;
     if let Some(namespace) = namespace.as_object()
         && let Some(class) = namespace.get(JsString::from(class), context)?.as_object()
     {
@@ -173,7 +211,9 @@ fn with_store<R>(wasm: &Wasm, f: impl FnOnce(StoreContextMut<'_, HostData>) -> R
     }
     match wasm.store.try_borrow_mut() {
         Ok(mut store) => Ok(f(store.as_context_mut())),
-        Err(_) => Err(JsNativeError::error().with_message("the WebAssembly instance is busy").into()),
+        Err(_) => Err(JsNativeError::error()
+            .with_message("the WebAssembly instance is busy")
+            .into()),
     }
 }
 
@@ -193,7 +233,11 @@ fn sync_in(wasm: &Wasm, store: &mut StoreContextMut<'_, HostData>) {
 
 /// The module's memories out to JavaScript's buffers: done as the module is left. A memory
 /// that has grown gets a buffer of its own, the old one detached.
-fn sync_out(wasm: &Wasm, store: &StoreContextMut<'_, HostData>, context: &mut Context) -> JsResult<()> {
+fn sync_out(
+    wasm: &Wasm,
+    store: &StoreContextMut<'_, HostData>,
+    context: &mut Context,
+) -> JsResult<()> {
     let memories = wasm.memories.borrow();
     let mut views = wasm.views.borrow_mut();
     for (at, memory) in memories.iter().enumerate() {
@@ -263,14 +307,24 @@ fn val_of(arg: Arg, store: &mut StoreContextMut<'_, HostData>, wasm: &Wasm) -> V
     }
 }
 
-fn js_of(value: &Val, store: &StoreContextMut<'_, HostData>, wasm_id: u32, context: &mut Context) -> JsResult<JsValue> {
+fn js_of(
+    value: &Val,
+    store: &StoreContextMut<'_, HostData>,
+    wasm_id: u32,
+    context: &mut Context,
+) -> JsResult<JsValue> {
     Ok(match value {
         Val::I32(n) => (*n).into(),
         Val::I64(n) => boa_engine::JsBigInt::from(*n).into(),
         Val::F32(n) => f64::from(n.to_float()).into(),
         Val::F64(n) => n.to_float().into(),
         Val::ExternRef(r) => match r.data(store).and_then(|d| d.downcast_ref::<u32>()) {
-            Some(index) => store.data().externs.get(*index as usize).cloned().unwrap_or_default(),
+            Some(index) => store
+                .data()
+                .externs
+                .get(*index as usize)
+                .cloned()
+                .unwrap_or_default(),
             None => JsValue::null(),
         },
         Val::FuncRef(r) => match r.func() {
@@ -283,7 +337,12 @@ fn js_of(value: &Val, store: &StoreContextMut<'_, HostData>, wasm_id: u32, conte
 // ─── Calls ──────────────────────────────────────────────────────────────────────────────────
 
 /// A function of the module as JavaScript calls it.
-fn export_function(context: &mut Context, wasm_id: u32, func: Func, store: &StoreContextMut<'_, HostData>) -> JsResult<JsObject> {
+fn export_function(
+    context: &mut Context,
+    wasm_id: u32,
+    func: Func,
+    store: &StoreContextMut<'_, HostData>,
+) -> JsResult<JsObject> {
     let wasm = instance(context, wasm_id)?;
     let index = {
         let mut funcs = wasm.funcs.borrow_mut();
@@ -304,7 +363,12 @@ fn export_function(context: &mut Context, wasm_id: u32, func: Func, store: &Stor
     Ok(function)
 }
 
-fn call_export(wasm_id: u32, index: u32, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn call_export(
+    wasm_id: u32,
+    index: u32,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let wasm = instance(context, wasm_id)?;
     let func = wasm.funcs.borrow()[index as usize];
     let ty = with_store(&wasm, |store| func.ty(&store))?;
@@ -317,7 +381,10 @@ fn call_export(wasm_id: u32, index: u32, args: &[JsValue], context: &mut Context
         let previous = store.data().context;
         store.data_mut().context = context_ptr;
         sync_in(&wasm, &mut store);
-        let params: Vec<Val> = prepared.into_iter().map(|a| val_of(a, &mut store, &wasm)).collect();
+        let params: Vec<Val> = prepared
+            .into_iter()
+            .map(|a| val_of(a, &mut store, &wasm))
+            .collect();
         let mut results: Vec<Val> = ty.results().iter().map(|t| Val::default(*t)).collect();
         let called = func.call(&mut store, &params, &mut results);
         // SAFETY: the pointer is the `context` this call was made with.
@@ -363,55 +430,61 @@ fn error_text(error: &wasmi::Error) -> String {
 /// A function JavaScript gave the module to import, as the module calls it.
 fn host_function(store: &mut Store<HostData>, ty: FuncType, import: usize) -> Func {
     let results: Vec<ValType> = ty.results().to_vec();
-    Func::new(&mut *store, ty, move |mut caller: Caller<'_, HostData>, params: &[Val], out: &mut [Val]| {
-        let context_ptr = caller.data().context;
-        // SAFETY: the realm the call into the module was made from, waiting on it.
-        let context = unsafe { &mut *context_ptr };
-        let wasm_id = caller.data().id;
-        let Ok(wasm) = instance(context, wasm_id) else {
-            return Err(wasmi::Error::new("the instance is gone"));
-        };
-        let function = caller.data().imports[import].clone();
-        let ctx = caller.as_context_mut();
-        let mut args = Vec::new();
-        for param in params {
-            match js_of(param, &ctx, wasm_id, context) {
-                Ok(value) => args.push(value),
-                Err(error) => return Err(throw(context, error)),
+    Func::new(
+        &mut *store,
+        ty,
+        move |mut caller: Caller<'_, HostData>, params: &[Val], out: &mut [Val]| {
+            let context_ptr = caller.data().context;
+            // SAFETY: the realm the call into the module was made from, waiting on it.
+            let context = unsafe { &mut *context_ptr };
+            let wasm_id = caller.data().id;
+            let Ok(wasm) = instance(context, wasm_id) else {
+                return Err(wasmi::Error::new("the instance is gone"));
+            };
+            let function = caller.data().imports[import].clone();
+            let ctx = caller.as_context_mut();
+            let mut args = Vec::new();
+            for param in params {
+                match js_of(param, &ctx, wasm_id, context) {
+                    Ok(value) => args.push(value),
+                    Err(error) => return Err(throw(context, error)),
+                }
             }
-        }
-        if let Err(error) = sync_out(&wasm, &ctx, context) {
-            return Err(throw(context, error));
-        }
-        drop(ctx);
-        // While JavaScript runs, a call back into the module goes through this caller.
-        let previous = wasm.caller.replace(&mut caller as *mut Caller<'_, HostData> as *mut ());
-        let returned = crate::call(context, &function, &JsValue::undefined(), &args);
-        wasm.caller.set(previous);
-        let mut ctx = caller.as_context_mut();
-        sync_in(&wasm, &mut ctx);
-        let returned = match returned {
-            Ok(value) => value,
-            Err(error) => return Err(throw(context, error)),
-        };
-        // What it answered, as the results the module expects.
-        let values = match results.len() {
-            0 => Vec::new(),
-            1 => vec![returned],
-            _ => match list_of(&returned, context) {
-                Ok(list) => list,
-                Err(error) => return Err(throw(context, error)),
-            },
-        };
-        for (at, ty) in results.iter().enumerate() {
-            let value = values.get(at).cloned().unwrap_or_default();
-            match arg_for(&value, *ty, context) {
-                Ok(prepared) => out[at] = val_of(prepared, &mut ctx, &wasm),
-                Err(error) => return Err(throw(context, error)),
+            if let Err(error) = sync_out(&wasm, &ctx, context) {
+                return Err(throw(context, error));
             }
-        }
-        Ok(())
-    })
+            drop(ctx);
+            // While JavaScript runs, a call back into the module goes through this caller.
+            let previous = wasm
+                .caller
+                .replace(&mut caller as *mut Caller<'_, HostData> as *mut ());
+            let returned = crate::call(context, &function, &JsValue::undefined(), &args);
+            wasm.caller.set(previous);
+            let mut ctx = caller.as_context_mut();
+            sync_in(&wasm, &mut ctx);
+            let returned = match returned {
+                Ok(value) => value,
+                Err(error) => return Err(throw(context, error)),
+            };
+            // What it answered, as the results the module expects.
+            let values = match results.len() {
+                0 => Vec::new(),
+                1 => vec![returned],
+                _ => match list_of(&returned, context) {
+                    Ok(list) => list,
+                    Err(error) => return Err(throw(context, error)),
+                },
+            };
+            for (at, ty) in results.iter().enumerate() {
+                let value = values.get(at).cloned().unwrap_or_default();
+                match arg_for(&value, *ty, context) {
+                    Ok(prepared) => out[at] = val_of(prepared, &mut ctx, &wasm),
+                    Err(error) => return Err(throw(context, error)),
+                }
+            }
+            Ok(())
+        },
+    )
 }
 
 /// A JavaScript error, kept to be thrown again where the module was called from.
@@ -432,7 +505,8 @@ fn bytes_from(value: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
 
 fn compile(bytes: &[u8], context: &mut Context) -> JsResult<JsObject> {
     let engine = engine(context);
-    let module = Module::new(&engine, bytes).map_err(|e| wasm_error(context, "CompileError", &e.to_string()))?;
+    let module = Module::new(&engine, bytes)
+        .map_err(|e| wasm_error(context, "CompileError", &e.to_string()))?;
     let id = {
         let state = shared(context);
         let mut wasm = state.wasm.borrow_mut();
@@ -445,8 +519,9 @@ fn compile(bytes: &[u8], context: &mut Context) -> JsResult<JsObject> {
 }
 
 fn module_of(value: &JsValue, context: &mut Context) -> JsResult<Rc<Module>> {
-    let id = hidden_number(value, "__module", context)
-        .ok_or_else(|| JsError::from(JsNativeError::typ().with_message("not a WebAssembly.Module")))?;
+    let id = hidden_number(value, "__module", context).ok_or_else(|| {
+        JsError::from(JsNativeError::typ().with_message("not a WebAssembly.Module"))
+    })?;
     Ok(shared(context).wasm.borrow().modules[id as usize].clone())
 }
 
@@ -458,7 +533,12 @@ fn new_wasm(context: &Context) -> (u32, Rc<Wasm>) {
     let made = Rc::new(Wasm {
         store: RefCell::new(Store::new(
             &engine,
-            HostData { id, context: std::ptr::null_mut(), imports: Vec::new(), externs: Vec::new() },
+            HostData {
+                id,
+                context: std::ptr::null_mut(),
+                imports: Vec::new(),
+                externs: Vec::new(),
+            },
         )),
         caller: Cell::new(std::ptr::null_mut()),
         memories: RefCell::new(Vec::new()),
@@ -490,13 +570,19 @@ fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsR
             None => JsValue::undefined(),
         };
         let Some(namespace) = namespace.as_object() else {
-            return Err(link_error(context, &format!("import object field '{module_name}' is not an Object")));
+            return Err(link_error(
+                context,
+                &format!("import object field '{module_name}' is not an Object"),
+            ));
         };
         let value = namespace.get(JsString::from(name.as_str()), context)?;
         let item: Extern = match import.ty() {
             ExternType::Func(ty) => {
                 if !value.is_callable() {
-                    return Err(link_error(context, &format!("{module_name}.{name}: function import requires a callable")));
+                    return Err(link_error(
+                        context,
+                        &format!("{module_name}.{name}: function import requires a callable"),
+                    ));
                 }
                 let mut store = wasm.store.borrow_mut();
                 store.data_mut().imports.push(value);
@@ -522,19 +608,29 @@ fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsR
                     None => None,
                 };
                 let Some((wanted, data, view)) = held else {
-                    return Err(link_error(context, &format!("{module_name}.{name}: memory import must be a WebAssembly.Memory")));
+                    return Err(link_error(
+                        context,
+                        &format!(
+                            "{module_name}.{name}: memory import must be a WebAssembly.Memory"
+                        ),
+                    ));
                 };
                 let _ = ty;
                 let ty = wanted;
                 let mut store = wasm.store.borrow_mut();
-                let memory = Memory::new(&mut *store, ty).map_err(|e| link_error(context, &e.to_string()))?;
+                let memory = Memory::new(&mut *store, ty)
+                    .map_err(|e| link_error(context, &e.to_string()))?;
                 let into = memory.data_mut(&mut *store);
                 let n = into.len().min(data.len());
                 into[..n].copy_from_slice(&data[..n]);
                 wasm.memories.borrow_mut().push(memory);
                 wasm.views.borrow_mut().push(view);
                 if let Some(object) = value.as_object() {
-                    rebind.push((object.clone(), "__memory", (wasm.memories.borrow().len() - 1) as u32));
+                    rebind.push((
+                        object.clone(),
+                        "__memory",
+                        (wasm.memories.borrow().len() - 1) as u32,
+                    ));
                 }
                 Extern::Memory(memory)
             }
@@ -560,7 +656,11 @@ fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsR
                     .map_err(|e| link_error(context, &e.to_string()))?;
                 wasm.tables.borrow_mut().push(table);
                 if let Some(object) = value.as_object() {
-                    rebind.push((object.clone(), "__table", (wasm.tables.borrow().len() - 1) as u32));
+                    rebind.push((
+                        object.clone(),
+                        "__table",
+                        (wasm.tables.borrow().len() - 1) as u32,
+                    ));
                 }
                 Extern::Table(table)
             }
@@ -578,17 +678,26 @@ fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsR
     let made = {
         let mut store = wasm.store.borrow_mut();
         store.data_mut().context = context_ptr;
-        let pre = linker.instantiate(&mut *store, module).map_err(|e| e.to_string());
-        let started = pre.and_then(|pre| pre.start(&mut *store).map_err(|e| {
-            if e.downcast_ref::<Thrown>().is_some() { "thrown".to_owned() } else { error_text(&e) }
-        }));
+        let pre = linker
+            .instantiate(&mut *store, module)
+            .map_err(|e| e.to_string());
+        let started = pre.and_then(|pre| {
+            pre.start(&mut *store).map_err(|e| {
+                if e.downcast_ref::<Thrown>().is_some() {
+                    "thrown".to_owned()
+                } else {
+                    error_text(&e)
+                }
+            })
+        });
         started
     };
     let made = match made {
         Ok(made) => made,
         Err(message) if message == "thrown" => {
             let thrown = shared(context).wasm.borrow_mut().thrown.take();
-            return Err(thrown.unwrap_or_else(|| JsNativeError::error().with_message("start failed").into()));
+            return Err(thrown
+                .unwrap_or_else(|| JsNativeError::error().with_message("start failed").into()));
         }
         Err(message) => return Err(link_error(context, &message)),
     };
@@ -596,7 +705,9 @@ fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsR
     let exports = object(context);
     let listed: Vec<(String, Extern)> = {
         let store = wasm.store.borrow();
-        made.exports(&*store).map(|e| (e.name().to_owned(), e.into_extern())).collect()
+        made.exports(&*store)
+            .map(|e| (e.name().to_owned(), e.into_extern()))
+            .collect()
     };
     for (name, item) in listed {
         let value: JsValue = match item {
@@ -653,7 +764,13 @@ fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsR
     Ok(object)
 }
 
-fn handle(context: &mut Context, class: &str, id: u32, kind: &str, index: u32) -> JsResult<JsObject> {
+fn handle(
+    context: &mut Context,
+    class: &str,
+    id: u32,
+    kind: &str,
+    index: u32,
+) -> JsResult<JsObject> {
     let object = with_proto(context, class)?;
     hidden(&object, "__wasm", id, context)?;
     hidden(&object, kind, index, context)?;
@@ -679,7 +796,9 @@ const NAMESPACE: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(Module::validate(&engine(cx), &bytes).is_ok().into())
     }),
     ("compile", 1, |_, args, cx| {
-        let outcome = bytes_from(&arg(args, 0), cx).and_then(|b| compile(&b, cx)).map(JsValue::from);
+        let outcome = bytes_from(&arg(args, 0), cx)
+            .and_then(|b| compile(&b, cx))
+            .map(JsValue::from);
         settled(cx, outcome)
     }),
     ("instantiate", 2, |_, args, cx| {
@@ -687,7 +806,9 @@ const NAMESPACE: &[(&str, usize, NativeFunctionPointer)] = &[
         let imports = arg(args, 1);
         let outcome = if is_module(&source, cx) {
             // A module: the instance alone.
-            module_of(&source, cx).and_then(|m| instantiate(&m, &imports, cx)).map(JsValue::from)
+            module_of(&source, cx)
+                .and_then(|m| instantiate(&m, &imports, cx))
+                .map(JsValue::from)
         } else {
             // Bytes: the module and its instance.
             (|| {
@@ -703,8 +824,12 @@ const NAMESPACE: &[(&str, usize, NativeFunctionPointer)] = &[
         };
         settled(cx, outcome)
     }),
-    ("compileStreaming", 1, |_, args, cx| streaming(args, cx, false)),
-    ("instantiateStreaming", 2, |_, args, cx| streaming(args, cx, true)),
+    ("compileStreaming", 1, |_, args, cx| {
+        streaming(args, cx, false)
+    }),
+    ("instantiateStreaming", 2, |_, args, cx| {
+        streaming(args, cx, true)
+    }),
 ];
 
 /// `compileStreaming` and `instantiateStreaming`: the response's bytes, once it has them.
@@ -714,10 +839,15 @@ fn streaming(args: &[JsValue], context: &mut Context, instantiating: bool) -> Js
         context.realm(),
         NativeFunction::from_fn_ptr(|_, args, cx| {
             let response = arg(args, 0);
-            let read = response.as_object().map(|r| r.get(js_string!("arrayBuffer"), cx)).transpose()?;
+            let read = response
+                .as_object()
+                .map(|r| r.get(js_string!("arrayBuffer"), cx))
+                .transpose()?;
             match read {
                 Some(read) if read.is_callable() => crate::call(cx, &read, &response, &[]),
-                _ => Err(JsNativeError::typ().with_message("WebAssembly streaming needs a Response").into()),
+                _ => Err(JsNativeError::typ()
+                    .with_message("WebAssembly streaming needs a Response")
+                    .into()),
             }
         }),
     )
@@ -728,7 +858,11 @@ fn streaming(args: &[JsValue], context: &mut Context, instantiating: bool) -> Js
         NativeFunction::from_copy_closure_with_captures(
             |_, args, (imports, instantiating): &(JsValue, bool), cx| {
                 let namespace = cx.global_object().get(js_string!("WebAssembly"), cx)?;
-                let name = if *instantiating { js_string!("instantiate") } else { js_string!("compile") };
+                let name = if *instantiating {
+                    js_string!("instantiate")
+                } else {
+                    js_string!("compile")
+                };
                 let f = namespace.as_object().expect("WebAssembly").get(name, cx)?;
                 crate::call(cx, &f, &namespace, &[arg(args, 0), imports.clone()])
             },
@@ -751,10 +885,20 @@ fn construct_instance(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     Ok(instantiate(&module, &arg(args, 1), context)?.into())
 }
 
-fn descriptor_number(descriptor: &JsValue, key: &str, context: &mut Context) -> JsResult<Option<u32>> {
-    let Some(descriptor) = descriptor.as_object() else { return Ok(None) };
+fn descriptor_number(
+    descriptor: &JsValue,
+    key: &str,
+    context: &mut Context,
+) -> JsResult<Option<u32>> {
+    let Some(descriptor) = descriptor.as_object() else {
+        return Ok(None);
+    };
     let value = descriptor.get(JsString::from(key), context)?;
-    if value.is_undefined() { Ok(None) } else { Ok(Some(value.to_u32(context)?)) }
+    if value.is_undefined() {
+        Ok(None)
+    } else {
+        Ok(Some(value.to_u32(context)?))
+    }
 }
 
 /// `new WebAssembly.Memory({ initial, maximum })`: a memory of its own, until a module
@@ -763,7 +907,8 @@ fn construct_memory(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let descriptor = arg(args, 0);
     let initial = descriptor_number(&descriptor, "initial", context)?.unwrap_or(0);
     let maximum = descriptor_number(&descriptor, "maximum", context)?;
-    let ty = MemoryType::new(initial, maximum).map_err(|e| JsError::from(JsNativeError::range().with_message(e.to_string())))?;
+    let ty = MemoryType::new(initial, maximum)
+        .map_err(|e| JsError::from(JsNativeError::range().with_message(e.to_string())))?;
     let (id, wasm) = new_wasm(context);
     let memory = Memory::new(&mut *wasm.store.borrow_mut(), ty)
         .map_err(|e| JsError::from(JsNativeError::range().with_message(e.to_string())))?;
@@ -794,20 +939,36 @@ fn construct_global(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let descriptor = arg(args, 0);
     let (kind, mutable) = match descriptor.as_object() {
         Some(d) => (
-            d.get(js_string!("value"), context)?.to_string(context)?.to_std_string_escaped(),
+            d.get(js_string!("value"), context)?
+                .to_string(context)?
+                .to_std_string_escaped(),
             d.get(js_string!("mutable"), context)?.to_boolean(),
         ),
         None => ("i32".to_owned(), false),
     };
-    let ty = value_type(&kind).ok_or_else(|| JsError::from(JsNativeError::typ().with_message(format!("bad global type {kind}"))))?;
+    let ty = value_type(&kind).ok_or_else(|| {
+        JsError::from(JsNativeError::typ().with_message(format!("bad global type {kind}")))
+    })?;
     let initial = arg(args, 1);
-    let prepared = if initial.is_undefined() { Arg::Val(Val::default(ty)) } else { arg_for(&initial, ty, context)? };
+    let prepared = if initial.is_undefined() {
+        Arg::Val(Val::default(ty))
+    } else {
+        arg_for(&initial, ty, context)?
+    };
     let (id, wasm) = new_wasm(context);
     let global = {
         let mut store = wasm.store.borrow_mut();
         let mut ctx = store.as_context_mut();
         let value = val_of(prepared, &mut ctx, &wasm);
-        Global::new(&mut *store, value, if mutable { Mutability::Var } else { Mutability::Const })
+        Global::new(
+            &mut *store,
+            value,
+            if mutable {
+                Mutability::Var
+            } else {
+                Mutability::Const
+            },
+        )
     };
     wasm.globals.borrow_mut().push(global);
     Ok(handle(context, "Global", id, "__global", 0)?.into())
@@ -817,21 +978,32 @@ fn construct_global(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
 fn construct_table(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let descriptor = arg(args, 0);
     let element = match descriptor.as_object() {
-        Some(d) => d.get(js_string!("element"), context)?.to_string(context)?.to_std_string_escaped(),
+        Some(d) => d
+            .get(js_string!("element"), context)?
+            .to_string(context)?
+            .to_std_string_escaped(),
         None => "anyfunc".to_owned(),
     };
     let element = value_type(&element).unwrap_or(ValType::FuncRef);
     let initial = descriptor_number(&descriptor, "initial", context)?.unwrap_or(0);
     let maximum = descriptor_number(&descriptor, "maximum", context)?;
     let (id, wasm) = new_wasm(context);
-    let table = Table::new(&mut *wasm.store.borrow_mut(), TableType::new(element, initial, maximum), Val::default(element))
-        .map_err(|e| JsError::from(JsNativeError::range().with_message(e.to_string())))?;
+    let table = Table::new(
+        &mut *wasm.store.borrow_mut(),
+        TableType::new(element, initial, maximum),
+        Val::default(element),
+    )
+    .map_err(|e| JsError::from(JsNativeError::range().with_message(e.to_string())))?;
     wasm.tables.borrow_mut().push(table);
     Ok(handle(context, "Table", id, "__table", 0)?.into())
 }
 
 fn memory_of(this: &JsValue, context: &mut Context) -> JsResult<(Rc<Wasm>, usize)> {
-    owned(this, "__memory", context).ok_or_else(|| JsNativeError::typ().with_message("not a WebAssembly.Memory").into())
+    owned(this, "__memory", context).ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("not a WebAssembly.Memory")
+            .into()
+    })
 }
 
 const MEMORY_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[("grow", 1, |this, args, cx| {
@@ -848,7 +1020,9 @@ const MEMORY_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[("grow", 1, |t
     })??;
     match grown {
         Ok(old) => Ok(old.into()),
-        Err(error) => Err(JsNativeError::range().with_message(error.to_string()).into()),
+        Err(error) => Err(JsNativeError::range()
+            .with_message(error.to_string())
+            .into()),
     }
 })];
 
@@ -859,7 +1033,9 @@ const MEMORY_GETTERS: &[(&str, NativeFunctionPointer)] = &[("buffer", |this, _, 
 })];
 
 fn table_of(this: &JsValue, context: &mut Context) -> JsResult<(Rc<Wasm>, u32, Table)> {
-    let (wasm, at) = owned(this, "__table", context).ok_or_else(|| JsError::from(JsNativeError::typ().with_message("not a WebAssembly.Table")))?;
+    let (wasm, at) = owned(this, "__table", context).ok_or_else(|| {
+        JsError::from(JsNativeError::typ().with_message("not a WebAssembly.Table"))
+    })?;
     let table = wasm.tables.borrow()[at];
     let id = hidden_number(this, "__wasm", context).unwrap_or(0);
     Ok((wasm, id, table))
@@ -875,7 +1051,9 @@ const TABLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
             let context = unsafe { &mut *context_ptr };
             match table.get(&store, index) {
                 Some(value) => js_of(&value, &store, id, context),
-                None => Err(JsNativeError::range().with_message("table index out of bounds").into()),
+                None => Err(JsNativeError::range()
+                    .with_message("table index out of bounds")
+                    .into()),
             }
         })?
     }),
@@ -886,7 +1064,9 @@ const TABLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let prepared = arg_for(&arg(args, 1), element, cx)?;
         with_store(&wasm, |mut store| {
             let value = val_of(prepared, &mut store, &wasm);
-            table.set(&mut store, index, value).map_err(|e| JsError::from(JsNativeError::range().with_message(e.to_string())))
+            table
+                .set(&mut store, index, value)
+                .map_err(|e| JsError::from(JsNativeError::range().with_message(e.to_string())))
         })??;
         Ok(JsValue::undefined())
     }),
@@ -902,7 +1082,9 @@ const TABLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
             let init = val_of(init, &mut store, &wasm);
             table.grow(&mut store, delta, init)
         })?;
-        grown.map(JsValue::from).map_err(|e| JsNativeError::range().with_message(e.to_string()).into())
+        grown
+            .map(JsValue::from)
+            .map_err(|e| JsNativeError::range().with_message(e.to_string()).into())
     }),
 ];
 
@@ -912,7 +1094,9 @@ const TABLE_GETTERS: &[(&str, NativeFunctionPointer)] = &[("length", |this, _, c
 })];
 
 fn global_of(this: &JsValue, context: &mut Context) -> JsResult<(Rc<Wasm>, u32, Global)> {
-    let (wasm, at) = owned(this, "__global", context).ok_or_else(|| JsError::from(JsNativeError::typ().with_message("not a WebAssembly.Global")))?;
+    let (wasm, at) = owned(this, "__global", context).ok_or_else(|| {
+        JsError::from(JsNativeError::typ().with_message("not a WebAssembly.Global"))
+    })?;
     let global = wasm.globals.borrow()[at];
     let id = hidden_number(this, "__wasm", context).unwrap_or(0);
     Ok((wasm, id, global))
@@ -934,7 +1118,9 @@ fn global_set(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
     let prepared = arg_for(&arg(args, 0), ty.content(), context)?;
     with_store(&wasm, |mut store| {
         let value = val_of(prepared, &mut store, &wasm);
-        global.set(&mut store, value).map_err(|e| JsError::from(JsNativeError::typ().with_message(e.to_string())))
+        global
+            .set(&mut store, value)
+            .map_err(|e| JsError::from(JsNativeError::typ().with_message(e.to_string())))
     })??;
     Ok(JsValue::undefined())
 }
@@ -956,15 +1142,30 @@ fn describe(module: &Module, exports: bool, context: &mut Context) -> JsResult<J
         for export in module.exports() {
             let entry = object(context);
             entry.set(js_string!("name"), js_text(export.name()), false, context)?;
-            entry.set(js_string!("kind"), js_text(kind(export.ty())), false, context)?;
+            entry.set(
+                js_string!("kind"),
+                js_text(kind(export.ty())),
+                false,
+                context,
+            )?;
             out.push(entry.into());
         }
     } else {
         for import in module.imports() {
             let entry = object(context);
-            entry.set(js_string!("module"), js_text(import.module()), false, context)?;
+            entry.set(
+                js_string!("module"),
+                js_text(import.module()),
+                false,
+                context,
+            )?;
             entry.set(js_string!("name"), js_text(import.name()), false, context)?;
-            entry.set(js_string!("kind"), js_text(kind(import.ty())), false, context)?;
+            entry.set(
+                js_string!("kind"),
+                js_text(kind(import.ty())),
+                false,
+                context,
+            )?;
             out.push(entry.into());
         }
     }
@@ -973,7 +1174,12 @@ fn describe(module: &Module, exports: bool, context: &mut Context) -> JsResult<J
 
 // ─── Installing it ──────────────────────────────────────────────────────────────────────────
 
-fn function(context: &mut Context, name: &str, length: usize, f: NativeFunctionPointer) -> JsObject {
+fn function(
+    context: &mut Context,
+    name: &str,
+    length: usize,
+    f: NativeFunctionPointer,
+) -> JsObject {
     FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
         .name(JsString::from(name))
         .length(length)
@@ -990,12 +1196,13 @@ struct ClassSpec<'a> {
 }
 
 fn class(context: &mut Context, namespace: &JsObject, spec: ClassSpec<'_>) -> JsResult<JsObject> {
-    let constructor: JsObject = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(spec.construct))
-        .name(JsString::from(spec.name))
-        .length(1)
-        .constructor(true)
-        .build()
-        .into();
+    let constructor: JsObject =
+        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(spec.construct))
+            .name(JsString::from(spec.name))
+            .length(1)
+            .constructor(true)
+            .build()
+            .into();
     let prototype = object(context);
     if let Some(parent) = spec.proto_parent {
         prototype.set_prototype(Some(parent));
@@ -1004,7 +1211,11 @@ fn class(context: &mut Context, namespace: &JsObject, spec: ClassSpec<'_>) -> Js
         let f = function(context, name, *length, *f);
         prototype.define_property_or_throw(
             JsString::from(*name),
-            PropertyDescriptor::builder().value(f).writable(true).enumerable(false).configurable(true),
+            PropertyDescriptor::builder()
+                .value(f)
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
             context,
         )?;
     }
@@ -1012,21 +1223,37 @@ fn class(context: &mut Context, namespace: &JsObject, spec: ClassSpec<'_>) -> Js
         let f = function(context, &format!("get {name}"), 0, *f);
         prototype.define_property_or_throw(
             JsString::from(*name),
-            PropertyDescriptor::builder().get(f).enumerable(true).configurable(true),
+            PropertyDescriptor::builder()
+                .get(f)
+                .enumerable(true)
+                .configurable(true),
             context,
         )?;
     }
     prototype.define_property_or_throw(
         js_string!("constructor"),
-        PropertyDescriptor::builder().value(constructor.clone()).writable(true).enumerable(false).configurable(true),
+        PropertyDescriptor::builder()
+            .value(constructor.clone())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
         context,
     )?;
     constructor.define_property_or_throw(
         js_string!("prototype"),
-        PropertyDescriptor::builder().value(prototype).writable(false).enumerable(false).configurable(false),
+        PropertyDescriptor::builder()
+            .value(prototype)
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
         context,
     )?;
-    namespace.set(JsString::from(spec.name), constructor.clone(), false, context)?;
+    namespace.set(
+        JsString::from(spec.name),
+        constructor.clone(),
+        false,
+        context,
+    )?;
     Ok(constructor)
 }
 
@@ -1041,7 +1268,13 @@ fn error_class(context: &mut Context, namespace: &JsObject, name: &'static str) 
     let constructor = class(
         context,
         namespace,
-        ClassSpec { name, construct, methods: &[], getters: &[], proto_parent: Some(error_proto) },
+        ClassSpec {
+            name,
+            construct,
+            methods: &[],
+            getters: &[],
+            proto_parent: Some(error_proto),
+        },
     )?;
     let prototype = constructor.get(js_string!("prototype"), context)?;
     if let Some(prototype) = prototype.as_object() {
@@ -1051,14 +1284,26 @@ fn error_class(context: &mut Context, namespace: &JsObject, name: &'static str) 
     Ok(())
 }
 
-fn make_error(_: &JsValue, args: &[JsValue], context: &mut Context, name: &str) -> JsResult<JsValue> {
+fn make_error(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+    name: &str,
+) -> JsResult<JsValue> {
     let message = match arg(args, 0) {
         m if m.is_undefined() => String::new(),
         m => m.to_string(context)?.to_std_string_escaped(),
     };
-    let error = JsNativeError::error().with_message(message).into_opaque(context);
-    let namespace = context.global_object().get(js_string!("WebAssembly"), context)?;
-    if let Some(class) = namespace.as_object().map(|n| n.get(JsString::from(name), context)).transpose()?
+    let error = JsNativeError::error()
+        .with_message(message)
+        .into_opaque(context);
+    let namespace = context
+        .global_object()
+        .get(js_string!("WebAssembly"), context)?;
+    if let Some(class) = namespace
+        .as_object()
+        .map(|n| n.get(JsString::from(name), context))
+        .transpose()?
         && let Some(class) = class.as_object()
     {
         error.set_prototype(class.get(js_string!("prototype"), context)?.as_object());
@@ -1068,30 +1313,97 @@ fn make_error(_: &JsValue, args: &[JsValue], context: &mut Context, name: &str) 
 
 pub fn install(context: &mut Context) -> JsResult<()> {
     let namespace = object(context);
-    context.register_global_property(js_string!("WebAssembly"), namespace.clone(), Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("WebAssembly"),
+        namespace.clone(),
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
     for (name, length, f) in NAMESPACE {
         let f = function(context, name, *length, *f);
         namespace.set(JsString::from(*name), f, false, context)?;
     }
-    let module = class(context, &namespace, ClassSpec { name: "Module", construct: construct_module, methods: &[], getters: &[], proto_parent: None })?;
+    let module = class(
+        context,
+        &namespace,
+        ClassSpec {
+            name: "Module",
+            construct: construct_module,
+            methods: &[],
+            getters: &[],
+            proto_parent: None,
+        },
+    )?;
     for (name, f) in [
-        ("exports", (|_, args, cx| { let m = module_of(&arg(args, 0), cx)?; describe(&m, true, cx) }) as NativeFunctionPointer),
-        ("imports", |_, args, cx| { let m = module_of(&arg(args, 0), cx)?; describe(&m, false, cx) }),
+        (
+            "exports",
+            (|_, args, cx| {
+                let m = module_of(&arg(args, 0), cx)?;
+                describe(&m, true, cx)
+            }) as NativeFunctionPointer,
+        ),
+        ("imports", |_, args, cx| {
+            let m = module_of(&arg(args, 0), cx)?;
+            describe(&m, false, cx)
+        }),
         ("customSections", |_, _, cx| Ok(JsArray::new(cx)?.into())),
     ] {
         let f = function(context, name, 1, f);
         module.set(JsString::from(name), f, false, context)?;
     }
-    class(context, &namespace, ClassSpec { name: "Instance", construct: construct_instance, methods: &[], getters: &[], proto_parent: None })?;
-    class(context, &namespace, ClassSpec { name: "Memory", construct: construct_memory, methods: MEMORY_METHODS, getters: MEMORY_GETTERS, proto_parent: None })?;
-    class(context, &namespace, ClassSpec { name: "Table", construct: construct_table, methods: TABLE_METHODS, getters: TABLE_GETTERS, proto_parent: None })?;
-    let global = class(context, &namespace, ClassSpec { name: "Global", construct: construct_global, methods: GLOBAL_METHODS, getters: &[], proto_parent: None })?;
+    class(
+        context,
+        &namespace,
+        ClassSpec {
+            name: "Instance",
+            construct: construct_instance,
+            methods: &[],
+            getters: &[],
+            proto_parent: None,
+        },
+    )?;
+    class(
+        context,
+        &namespace,
+        ClassSpec {
+            name: "Memory",
+            construct: construct_memory,
+            methods: MEMORY_METHODS,
+            getters: MEMORY_GETTERS,
+            proto_parent: None,
+        },
+    )?;
+    class(
+        context,
+        &namespace,
+        ClassSpec {
+            name: "Table",
+            construct: construct_table,
+            methods: TABLE_METHODS,
+            getters: TABLE_GETTERS,
+            proto_parent: None,
+        },
+    )?;
+    let global = class(
+        context,
+        &namespace,
+        ClassSpec {
+            name: "Global",
+            construct: construct_global,
+            methods: GLOBAL_METHODS,
+            getters: &[],
+            proto_parent: None,
+        },
+    )?;
     if let Some(prototype) = global.get(js_string!("prototype"), context)?.as_object() {
         let get = function(context, "get value", 0, global_get);
         let set = function(context, "set value", 1, global_set);
         prototype.define_property_or_throw(
             js_string!("value"),
-            PropertyDescriptor::builder().get(get).set(set).enumerable(true).configurable(true),
+            PropertyDescriptor::builder()
+                .get(get)
+                .set(set)
+                .enumerable(true)
+                .configurable(true),
             context,
         )?;
     }

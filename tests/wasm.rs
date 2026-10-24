@@ -22,7 +22,10 @@ fn settle(rt: &mut RuntimeX) {
 fn load(rt: &mut RuntimeX, wat: &str) {
     let bytes = wat::parse_str(wat).unwrap();
     let list: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
-    js(rt, &format!("globalThis.bytes = new Uint8Array([{}])", list.join(",")));
+    js(
+        rt,
+        &format!("globalThis.bytes = new Uint8Array([{}])", list.join(",")),
+    );
 }
 
 const MODULE: &str = r#"
@@ -57,7 +60,9 @@ const MODULE: &str = r#"
 fn a_module_called_both_ways() {
     let mut rt = RuntimeX::with_clock(|| 0.);
     load(&mut rt, MODULE);
-    js(&mut rt, r#"
+    js(
+        &mut rt,
+        r#"
         globalThis.out = [];
         const decoder = new TextDecoder();
         let wasm;
@@ -87,7 +92,8 @@ fn a_module_called_both_ways() {
             out.push(WebAssembly.validate(bytes), WebAssembly.validate(new Uint8Array([0, 1, 2])));
         }).catch(e => out.push('failed ' + e + ' ' + e.stack));
         WebAssembly.compile(new Uint8Array([0, 97, 115, 109, 9, 9, 9, 9])).catch(e => out.push(e instanceof WebAssembly.CompileError));
-    "#);
+    "#,
+    );
     settle(&mut rt);
     assert_eq!(
         js(&mut rt, "JSON.stringify(out)"),
@@ -98,19 +104,25 @@ fn a_module_called_both_ways() {
 #[test]
 fn a_memory_made_by_javascript_is_imported() {
     let mut rt = RuntimeX::with_clock(|| 0.);
-    load(&mut rt, r#"
+    load(
+        &mut rt,
+        r#"
         (module
           (import "js" "mem" (memory 1))
           (func (export "peek") (param i32) (result i32) local.get 0 i32.load8_u)
           (func (export "poke") (param i32 i32) local.get 0 local.get 1 i32.store8))
-    "#);
-    let out = js(&mut rt, r#"
+    "#,
+    );
+    let out = js(
+        &mut rt,
+        r#"
         const mem = new WebAssembly.Memory({ initial: 1, maximum: 2 });
         const early = new Uint8Array(mem.buffer);
         early[5] = 99;
         const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { js: { mem } });
         instance.exports.poke(6, 42);
         [instance.exports.peek(5), new Uint8Array(mem.buffer)[6], early[6], Object.isFrozen(instance.exports)].join()
-    "#);
+    "#,
+    );
     assert_eq!(out, "99,42,42,true");
 }

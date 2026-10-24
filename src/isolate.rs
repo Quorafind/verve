@@ -216,7 +216,9 @@ impl<G: Guest> Isolate<G> {
     pub fn busy_for(&self) -> Option<Duration> {
         match self.shared.busy_since.load(Ordering::SeqCst) {
             0 => None,
-            since => Some(Duration::from_millis(self.shared.now().saturating_sub(since))),
+            since => Some(Duration::from_millis(
+                self.shared.now().saturating_sub(since),
+            )),
         }
     }
 
