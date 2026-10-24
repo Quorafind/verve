@@ -78,7 +78,13 @@ where
             false,
         ));
 
-        self.parse_body(cursor, interner, params, params_start_position, async_token)
+        self.parse_body(
+            cursor,
+            interner,
+            params,
+            params_start_position,
+            &async_token,
+        )
     }
 }
 
@@ -90,7 +96,7 @@ impl AsyncArrowFunction {
         interner: &mut Interner,
         params: FormalParameterList,
         params_start_position: ast::Position,
-        async_token: Token,
+        async_token: &Token,
     ) -> ParseResult<ast::function::AsyncArrowFunction> {
         let start_linear_span = async_token.linear_span();
         let async_token_span = async_token.span();

@@ -149,11 +149,15 @@ pub trait ModuleLoader: Any {
     /// Captures host-owned sources before a dynamic import yields to the job queue.
     ///
     /// A blob URL may be revoked immediately after `import()` returns its promise.
+    #[allow(
+        unused_variables,
+        reason = "hosts with nothing to capture keep the default"
+    )]
     fn prepare_import(
         self: Rc<Self>,
-        _referrer: &Referrer,
-        _request: &ModuleRequest,
-        _context: &mut Context,
+        referrer: &Referrer,
+        request: &ModuleRequest,
+        context: &mut Context,
     ) -> JsResult<()> {
         Ok(())
     }

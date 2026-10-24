@@ -165,7 +165,7 @@ where
                 span_start,
             } => {
                 return AsyncArrowFunction::new(self.allow_in, self.allow_yield)
-                    .parse_body(cursor, interner, parameters, span_start, start_token)
+                    .parse_body(cursor, interner, parameters, span_start, &start_token)
                     .map(Into::into);
             }
             FormalParameterListOrExpression::FormalParameterList {

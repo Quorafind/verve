@@ -633,36 +633,35 @@ impl SourceTextModule {
         let mut dependencies = Vec::with_capacity(self.code.requested_modules.len());
         for request in &self.code.requested_modules {
             let cached = self.loaded_modules.borrow().get(request).cloned();
-            let loaded = match cached {
-                Some(loaded) => loaded,
-                None => {
-                    let loader = context.module_loader();
-                    let loaded = {
-                        let context = RefCell::new(&mut *context);
-                        let future = loader.load_imported_module(
-                            Referrer::Module(module.clone()),
-                            request.clone(),
-                            &context,
-                        );
-                        let mut stack = [MaybeUninit::<u8>::uninit(); 16];
-                        let mut heap = Vec::<MaybeUninit<u8>>::new();
-                        let future = future.init2(&mut stack, &mut heap);
-                        let mut future = std::pin::pin!(future);
-                        let mut task = std::task::Context::from_waker(std::task::Waker::noop());
-                        match future.as_mut().poll(&mut task) {
-                            std::task::Poll::Ready(result) => result?,
-                            std::task::Poll::Pending => {
-                                return Err(JsNativeError::typ()
-                                    .with_message("Module loading did not complete synchronously")
-                                    .into());
-                            }
+            let loaded = if let Some(loaded) = cached {
+                loaded
+            } else {
+                let loader = context.module_loader();
+                let fetched = {
+                    let context = RefCell::new(&mut *context);
+                    let future = loader.load_imported_module(
+                        Referrer::Module(module.clone()),
+                        request.clone(),
+                        &context,
+                    );
+                    let mut stack = [MaybeUninit::<u8>::uninit(); 16];
+                    let mut heap = Vec::<MaybeUninit<u8>>::new();
+                    let future = future.init2(&mut stack, &mut heap);
+                    let mut future = std::pin::pin!(future);
+                    let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+                    match future.as_mut().poll(&mut task) {
+                        std::task::Poll::Ready(result) => result?,
+                        std::task::Poll::Pending => {
+                            return Err(JsNativeError::typ()
+                                .with_message("Module loading did not complete synchronously")
+                                .into());
                         }
-                    };
-                    self.loaded_modules
-                        .borrow_mut()
-                        .insert(request.clone(), loaded.clone());
-                    loaded
-                }
+                    }
+                };
+                self.loaded_modules
+                    .borrow_mut()
+                    .insert(request.clone(), fetched.clone());
+                fetched
             };
             dependencies.push(loaded);
         }
