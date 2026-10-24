@@ -24,6 +24,8 @@ mod dom_events;
 mod encoding;
 mod events;
 mod fetch;
+mod fs;
+mod hooks;
 mod indexeddb;
 mod intl;
 pub mod isolate;
@@ -32,12 +34,20 @@ mod modules;
 mod native;
 mod navigator;
 mod node;
+mod node_url;
+mod os;
+mod path;
 mod process;
+mod querystring;
+mod readline;
+mod sockets;
 mod stream;
 mod streams;
 mod string_decoder;
+mod timers;
 mod url;
 mod util;
+mod vm;
 mod wasm;
 mod web;
 mod worker;
@@ -131,9 +141,13 @@ struct Microtasks {
 }
 
 impl JobExecutor for Microtasks {
-    fn enqueue_job(self: Rc<Self>, job: Job, _context: &mut Context) {
+    fn enqueue_job(self: Rc<Self>, job: Job, context: &mut Context) {
         match job {
-            Job::PromiseJob(job) => self.queue.borrow_mut().push_back(job),
+            // Carrying the `AsyncLocalStorage` stores set as it was queued.
+            Job::PromiseJob(job) => self
+                .queue
+                .borrow_mut()
+                .push_back(hooks::carry(job, context)),
             Job::GenericJob(job) => self.generic.borrow_mut().push_back(job),
             // Timers are this runtime's own (see `set_timer`), and nothing a plugin can reach
             // queues an async or finalization job.
@@ -777,6 +791,8 @@ fn set_timer(args: &[JsValue], repeat: bool, context: &mut Context) -> JsResult<
     };
     // As browsers and Node both do: a delay that is not a positive number is no delay, and an
     // interval of no delay is one millisecond, or it would never let anything else run.
+    // Run, when it fires, with the `AsyncLocalStorage` stores set as it was started.
+    let callback = hooks::carry_callback(callback, context);
     let id = set_timeout(
         context,
         callback,
@@ -819,7 +835,14 @@ pub fn set_timeout(
 }
 
 fn clear_timer_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    if let Some(id) = args.first().and_then(JsValue::as_number) {
+    let given = args.first().cloned().unwrap_or_default();
+    // A number, or a `Timeout` from `require('timers')`, which turns into its number.
+    let id = if given.is_object() {
+        given.to_number(context)?
+    } else {
+        given.as_number().unwrap_or(f64::NAN)
+    };
+    if id.is_finite() {
         clear_timer(context, id as u32);
     }
     Ok(JsValue::undefined())
