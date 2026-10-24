@@ -25,6 +25,7 @@ pub mod isolate;
 mod messaging;
 mod modules;
 mod native;
+mod navigator;
 mod node;
 mod process;
 mod url;
@@ -663,6 +664,7 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     web::install(context)?;
     dom_events::install(context)?;
     messaging::install(context)?;
+    navigator::install(context)?;
     worker::install(context)?;
     indexeddb::install(context)?;
     wasm::install(context)?;

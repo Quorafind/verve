@@ -22,7 +22,7 @@ use crate::{Level, console_line};
 /// current desktop app, is built on.
 pub const NODE_VERSION: &str = "22.16.0";
 pub const ELECTRON_VERSION: &str = "37.2.0";
-const CHROME_VERSION: &str = "138.0.7204.97";
+pub(crate) const CHROME_VERSION: &str = "138.0.7204.97";
 const V8_VERSION: &str = "13.8.258.19-electron.0";
 
 fn arch() -> &'static str {
