@@ -156,7 +156,15 @@ where
                 cursor.advance(interner);
                 let (args, args_span) =
                     Arguments::new(self.allow_yield, self.allow_await).parse(cursor, interner)?;
-                SuperCall::new(args, Span::new(start, args_span.end())).into()
+                // `super(...)` is a whole CallExpression: `super().then(f)`, `super()[k]`,
+                // `super()()` and a tagged template go on from it like any other call.
+                CallExpressionTail::new(
+                    self.allow_yield,
+                    self.allow_await,
+                    SuperCall::new(args, Span::new(start, args_span.end())).into(),
+                )
+                .parse(cursor, interner)?
+                .into()
             } else if let Some(start) = is_keyword_call(Keyword::Import, cursor, interner)? {
                 // Plain `import(...)` call
                 cursor.advance(interner);

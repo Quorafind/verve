@@ -201,3 +201,37 @@ fn class_boolean_literal_getter_setter_names() {
         TestAction::assert_eq("c.false", 84),
     ]);
 }
+
+#[test]
+fn super_call_as_the_base_of_a_chain() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            class B {
+                constructor(v) { this.v = v; this.k = "key"; }
+                tag(strings) { return strings[0] + this.v; }
+                get self() { return () => this; }
+            }
+            class C extends B {
+                constructor(v) { return super(v).self(); }
+            }
+            class D extends B {
+                constructor(v) { super(v)[this.k] = v * 2; }
+            }
+            class E extends B {
+                constructor(v) { E.seen = super(v).tag`t:`; E.opt = this?.v; }
+            }
+            class F extends B {
+                constructor(v) { F.then = super(v)?.v; }
+            }
+            const c = new C(1);
+            const d = new D(2);
+            new E(3);
+            new F(4);
+        "#}),
+        TestAction::assert_eq("c.v", 1),
+        TestAction::assert("c instanceof C"),
+        TestAction::assert_eq("d.key", 4),
+        TestAction::assert_eq("E.seen", js_str!("t:3")),
+        TestAction::assert_eq("F.then", 4),
+    ]);
+}

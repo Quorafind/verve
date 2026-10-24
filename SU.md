@@ -16,6 +16,11 @@ always agree with one another.
   owns `this` (`Scope::mark_arrow`, set in `visit_function_like`). Before, the method's `this` was
   not kept and the inner arrow read `undefined` (Admonition's and Day Planner's settings).
 
+- `boa_parser`, `left_hand_side/mod.rs`: `super(...)` is a whole CallExpression, so what follows
+  a call follows it too — `super(x).then(f)`, `super()[k]`, `super()()`, `super()?.x`, a tagged
+  template. Before, the parser stopped at the call and `return super(x).then(f)` was a
+  `SyntaxError: expected token ';', got '.'` (Terminal's bundle).
+
 - `boa_engine`, `builtins/regexp`: a compiled pattern is kept per thread by its source and flags
   (`COMPILED`, up to 1024 of them), so a regular expression literal evaluated again — once per
   line of a note, in Dataview's parser — no longer compiles its pattern every time.
