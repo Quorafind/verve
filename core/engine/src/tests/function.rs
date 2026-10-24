@@ -324,3 +324,25 @@ fn function_constructor_nested_lexical_binding() {
         42,
     )]);
 }
+
+/// A function with thousands of bindings, as a bundle's top level in a `CommonJS` wrapper is,
+/// with the duplicates the declaration instantiation must merge. Looking names up in lists made
+/// parsing and compiling such a function quadratic.
+#[test]
+fn many_bindings_in_one_function() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            let src = "(function (a, b) {";
+            for (let i = 0; i < 5000; i++) {
+                src += `var v${i} = ${i}; let l${i} = v${i} + 1; function f${i}() { return l${i}; }\n`;
+            }
+            src += "var a; var v1 = 'again'; function f2() { return 'last'; }";
+            src += "return [a, b, v0, v1, l4999, f0(), f2(), f4999(), typeof f5000]; })";
+            const result = (0, eval)(src)("first", "second");
+        "#}),
+        TestAction::assert_eq(
+            "result.join()",
+            crate::js_string!("first,second,0,again,5000,1,last,5000,undefined"),
+        ),
+    ]);
+}

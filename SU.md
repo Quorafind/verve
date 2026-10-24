@@ -109,6 +109,17 @@ always agree with one another.
   keeps at most three fraction digits (`1,234.568`) instead of returning `toString`'s. The
   locales and options are ignored, as before.
 
+- Parsing and compiling a function with thousands of bindings — a bundle's top level, which Su
+  wraps in a CommonJS function — was quadratic in them, three ways: `boa_ast`'s `Scope` searched
+  its bindings list by name for every identifier (now also a name → position map,
+  `Scope::positions`); `FunctionDeclarationInstantiation` (`bytecompiler/declarations.rs`) kept
+  its name lists as `Vec`s searched with `contains` (now `FxHashSet`s); and the register
+  allocator scanned all registers — one persistent register per local binding — for a free one
+  on every allocation (now a min-heap of free registers, `RegisterAllocator::free`, which hands
+  out the same lowest-free register, so the bytecode is unchanged). Sheet Plus (19 MB): parse
+  19.4 s → 8.0 s, compile 17.9 s → 2.2 s; make.md (5.6 MB): 3.3 + 2.6 s → 2.2 + 0.9 s; a
+  synthetic 1 MB top level: compile 1.85 s → 0.31 s.
+
 - `boa_gc`, `lib.rs`: a collection no longer frees what it found dead before it returns. The
   dead nodes leave the heap, and their memory is returned a few at a time by later allocations
   (`BoaGc::unfreed`, `FREE_PER_ALLOCATION`), the rest before the next collection — and all of

@@ -18,6 +18,7 @@ use boa_ast::{
     visitor::NodeRef,
 };
 use boa_interner::{JStrRef, Sym};
+use rustc_hash::FxHashSet;
 
 #[cfg(feature = "annex-b")]
 use boa_ast::operations::annex_b_function_declarations_names;
@@ -923,10 +924,12 @@ impl ByteCompiler<'_> {
         let var_declarations = var_scoped_declarations(body);
 
         // 11. Let lexicalNames be the LexicallyDeclaredNames of code.
-        let lexical_names = lexically_declared_names(body);
+        // NOTE: The names are kept in sets: a bundle wrapped in a function has thousands of them,
+        //       and searching lists for each made compiling it quadratic.
+        let lexical_names: FxHashSet<Sym> = lexically_declared_names(body).into_iter().collect();
 
         // 12. Let functionNames be a new empty List.
-        let mut function_names = Vec::new();
+        let mut function_names = FxHashSet::default();
 
         // 13. Let functionsToInitialize be a new empty List.
         let mut functions_to_initialize = Vec::new();
@@ -949,17 +952,14 @@ impl ByteCompiler<'_> {
             };
 
             // a.iii. If functionNames does not contain fn, then
-            if !function_names.contains(&name.sym()) {
-                // 1. Insert fn as the first element of functionNames.
-                function_names.push(name.sym());
-
+            // 1. Insert fn as the first element of functionNames.
+            if function_names.insert(name.sym()) {
                 // 2. NOTE: If there are multiple function declarations for the same name, the last declaration is used.
                 // 3. Insert d as the first element of functionsToInitialize.
                 functions_to_initialize.push(function);
             }
         }
 
-        function_names.reverse();
         functions_to_initialize.reverse();
 
         // 15. Let argumentsObjectNeeded be true.
@@ -1097,15 +1097,14 @@ impl ByteCompiler<'_> {
                 let mut variable_scope = self.lexical_scope.clone();
 
                 // d. Let instantiatedVarNames be a new empty List.
-                let mut instantiated_var_names = Vec::new();
+                let mut instantiated_var_names = FxHashSet::default();
+                let parameter_bindings: FxHashSet<Sym> = parameter_bindings.into_iter().collect();
 
                 // e. For each element n of varNames, do
                 for n in var_names {
                     // i. If instantiatedVarNames does not contain n, then
-                    if !instantiated_var_names.contains(&n) {
-                        // 1. Append n to instantiatedVarNames.
-                        instantiated_var_names.push(n);
-
+                    // 1. Append n to instantiatedVarNames.
+                    if instantiated_var_names.insert(n) {
                         let n_string = n.to_js_string(self.interner());
 
                         // 2. Perform ! varEnv.CreateMutableBinding(n, false).
@@ -1146,15 +1145,14 @@ impl ByteCompiler<'_> {
             } else {
                 // a. NOTE: Only a single Environment Record is needed for the parameters and top-level vars.
                 // b. Let instantiatedVarNames be a copy of the List parameterBindings.
-                let mut instantiated_var_names = parameter_bindings;
+                let mut instantiated_var_names: FxHashSet<Sym> =
+                    parameter_bindings.into_iter().collect();
 
                 // c. For each element n of varNames, do
                 for n in var_names {
                     // i. If instantiatedVarNames does not contain n, then
-                    if !instantiated_var_names.contains(&n) {
-                        // 1. Append n to instantiatedVarNames.
-                        instantiated_var_names.push(n);
-
+                    // 1. Append n to instantiatedVarNames.
+                    if instantiated_var_names.insert(n) {
                         let n = n.to_js_string(self.interner());
 
                         // 2. Perform ! env.CreateMutableBinding(n, false).
@@ -1205,7 +1203,7 @@ impl ByteCompiler<'_> {
                         );
 
                         // c. Append F to instantiatedVarNames.
-                        instantiated_var_names.push(f);
+                        instantiated_var_names.insert(f);
                     }
 
                     // 3. When the FunctionDeclaration f is evaluated, perform the following steps

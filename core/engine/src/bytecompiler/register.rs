@@ -1,5 +1,5 @@
 use crate::vm::opcode::RegisterOperand;
-use std::mem::forget;
+use std::{cmp::Reverse, collections::BinaryHeap, mem::forget};
 
 bitflags::bitflags! {
     #[derive(Debug, Default, Clone, Copy)]
@@ -79,21 +79,21 @@ impl Drop for Register {
 #[derive(Debug, Default)]
 pub(crate) struct RegisterAllocator {
     registers: Vec<RegisterEntry>,
+    /// The registers not in use, lowest first. Every local binding of a function holds a
+    /// persistent register, so finding a free one by scanning `registers` made compiling a
+    /// function with thousands of them (a bundle's top level) quadratic.
+    free: BinaryHeap<Reverse<u32>>,
 }
 
 impl RegisterAllocator {
     pub(crate) fn alloc(&mut self) -> Register {
-        if let Some((i, register)) = self
-            .registers
-            .iter_mut()
-            .enumerate()
-            .find(|(_, reg)| !reg.flags.is_used())
-        {
-            assert!(!register.flags.is_persistent());
+        if let Some(Reverse(i)) = self.free.pop() {
+            let register = &mut self.registers[i as usize];
+            assert!(!register.flags.is_used() && !register.flags.is_persistent());
 
             register.flags |= RegisterFlags::USED;
             return Register {
-                index: i as u32,
+                index: i,
                 flags: register.flags,
             };
         }
@@ -133,6 +133,7 @@ impl RegisterAllocator {
             "Cannot deallocate unused variable"
         );
         register.flags.set(RegisterFlags::USED, false);
+        self.free.push(Reverse(reg.index));
 
         // NOTE: We should not drop it since, dropping it used to detect bugs.
         forget(reg);
