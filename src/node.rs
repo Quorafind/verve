@@ -485,180 +485,6 @@ pub fn platform() -> &'static str {
     }
 }
 
-// ─── child_process ──────────────────────────────────────────────────────────────────────────
-
-/// Every way to start a program fails, as one that could not be found does: its callback hears
-/// the error this turn, and what it answers emits `error`.
-fn refused(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let error = JsNativeError::error()
-        .with_message("child_process is not available in Su: plugins cannot start programs")
-        .into_opaque(context);
-    error.set(js_string!("code"), js_string!("ENOSYS"), false, context)?;
-    if let Some(callback) = args.iter().rev().find(|a| a.is_callable()) {
-        crate::microtask(context, callback.clone(), vec![error.into()]);
-    }
-    let events = emitter_class(context)?;
-    let child = events.construct(&[], None, context)?;
-    for stream in ["stdout", "stderr"] {
-        let emitter = events.construct(&[], None, context)?;
-        child.set(JsString::from(stream), emitter, false, context)?;
-    }
-    Ok(child.into())
-}
-
-fn child_process_module(context: &mut Context) -> JsResult<JsValue> {
-    let module = object(context);
-    for name in [
-        "exec",
-        "execFile",
-        "spawn",
-        "fork",
-        "execSync",
-        "execFileSync",
-        "spawnSync",
-    ] {
-        let f = function(context, name, 3, refused);
-        module.set(JsString::from(name), f, false, context)?;
-    }
-    Ok(module.into())
-}
-
-// ─── http, https ────────────────────────────────────────────────────────────────────────────
-
-/// An `EventEmitter` that hears `error` a microtask from now: what a server that cannot
-/// listen, or a request that cannot be sent, does. Plugins make their requests through
-/// `requestUrl`; serving and Node's own client are not something this runtime does.
-fn failing_emitter(context: &mut Context, message: &str, code: &str) -> JsResult<JsObject> {
-    let emitter = emitter_class(context)?.construct(&[], None, context)?;
-    let error = JsNativeError::error()
-        .with_message(message.to_owned())
-        .into_opaque(context);
-    error.set(js_string!("code"), JsString::from(code), false, context)?;
-    let fire = FunctionObjectBuilder::new(
-        context.realm(),
-        NativeFunction::from_copy_closure_with_captures(
-            |_, _, (emitter, error): &(JsObject, JsValue), cx| {
-                // Heard only by one listening: an `error` nobody hears is not thrown here.
-                let count = emitter.get(js_string!("listenerCount"), cx)?;
-                let listening = crate::call(
-                    cx,
-                    &count,
-                    &emitter.clone().into(),
-                    &[js_string!("error").into()],
-                )?;
-                if listening.to_number(cx)? > 0. {
-                    let emit = emitter.get(js_string!("emit"), cx)?;
-                    crate::call(
-                        cx,
-                        &emit,
-                        &emitter.clone().into(),
-                        &[js_string!("error").into(), error.clone()],
-                    )?;
-                }
-                Ok(JsValue::undefined())
-            },
-            (emitter.clone(), error.into()),
-        ),
-    )
-    .build();
-    crate::microtask(context, fire.into(), Vec::new());
-    Ok(emitter)
-}
-
-fn http_module(context: &mut Context) -> JsResult<JsValue> {
-    let module = object(context);
-    let create_server = function(context, "createServer", 2, |_, _, cx| {
-        let server = emitter_class(cx)?.construct(&[], None, cx)?;
-        let listen = function(cx, "listen", 3, |this, _, cx| {
-            if let Some(server) = this.as_object() {
-                let failing =
-                    failing_emitter(cx, "Su does not let plugins serve on a port", "EACCES")?;
-                // The server's own listeners hear it.
-                let fire = FunctionObjectBuilder::new(
-                    cx.realm(),
-                    NativeFunction::from_copy_closure_with_captures(
-                        |_, args, (server,): &(JsObject,), cx| {
-                            let emit = server.get(js_string!("emit"), cx)?;
-                            let error = args.first().cloned().unwrap_or_default();
-                            crate::call(
-                                cx,
-                                &emit,
-                                &server.clone().into(),
-                                &[js_string!("error").into(), error],
-                            )?;
-                            Ok(JsValue::undefined())
-                        },
-                        (server.clone(),),
-                    ),
-                )
-                .build();
-                let on = failing.get(js_string!("on"), cx)?;
-                crate::call(
-                    cx,
-                    &on,
-                    &failing.clone().into(),
-                    &[js_string!("error").into(), fire.into()],
-                )?;
-            }
-            Ok(this.clone())
-        });
-        server.set(js_string!("listen"), listen, false, cx)?;
-        let close = function(cx, "close", 1, |this, args, cx| {
-            if let Some(callback) = args.iter().find(|a| a.is_callable()) {
-                crate::microtask(cx, callback.clone(), Vec::new());
-            }
-            Ok(this.clone())
-        });
-        server.set(js_string!("close"), close, false, cx)?;
-        server.set(js_string!("listening"), false, false, cx)?;
-        Ok(server.into())
-    });
-    module.set(js_string!("createServer"), create_server, false, context)?;
-    for name in ["request", "get"] {
-        let f = function(context, name, 3, |_, _, cx| {
-            Ok(failing_emitter(
-                cx,
-                "Node's http client is not available in Su: use requestUrl",
-                "ENOSYS",
-            )?
-            .into())
-        });
-        module.set(JsString::from(name), f, false, context)?;
-    }
-    let methods: Vec<JsValue> = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
-        .iter()
-        .map(|m| js_text(m))
-        .collect();
-    let methods = JsArray::from_iter(methods, context);
-    module.set(js_string!("METHODS"), methods, false, context)?;
-    let codes = object(context);
-    for (code, text) in [
-        (200, "OK"),
-        (201, "Created"),
-        (204, "No Content"),
-        (301, "Moved Permanently"),
-        (302, "Found"),
-        (304, "Not Modified"),
-        (400, "Bad Request"),
-        (401, "Unauthorized"),
-        (403, "Forbidden"),
-        (404, "Not Found"),
-        (405, "Method Not Allowed"),
-        (500, "Internal Server Error"),
-        (502, "Bad Gateway"),
-        (503, "Service Unavailable"),
-    ] {
-        codes.set(
-            JsString::from(code.to_string()),
-            js_text(text),
-            false,
-            context,
-        )?;
-    }
-    module.set(js_string!("STATUS_CODES"), codes, false, context)?;
-    Ok(module.into())
-}
-
 // ─── Installing them ────────────────────────────────────────────────────────────────────────
 
 /// Node's modules, by the names `require` answers them to — each made the first time it is
@@ -676,16 +502,39 @@ pub(crate) const MODULES: &[(&str, crate::ModuleMaker)] = &[
     ("punycode", crate::querystring::punycode_module),
     ("fs", crate::fs::module),
     ("fs/promises", crate::fs::promises_module),
-    ("child_process", |cx, _| child_process_module(cx)),
-    ("http", |cx, _| http_module(cx)),
-    ("https", |cx, _| http_module(cx)),
+    ("child_process", crate::sockets::child_process_module),
+    ("http", crate::sockets::http_module),
+    ("https", crate::sockets::https_module),
+    ("http2", crate::sockets::http2_module),
+    ("net", crate::sockets::net_module),
+    ("tls", crate::sockets::tls_module),
+    ("dns", crate::sockets::dns_module),
+    ("dns/promises", crate::sockets::dns_promises_module),
+    ("dgram", crate::sockets::dgram_module),
+    ("cluster", crate::sockets::cluster_module),
     ("module", crate::modules::module_module),
+    ("timers", crate::timers::module),
+    ("async_hooks", crate::hooks::async_hooks_module),
+    (
+        "diagnostics_channel",
+        crate::hooks::diagnostics_channel_module,
+    ),
+    ("perf_hooks", crate::hooks::perf_hooks_module),
+    ("inspector", crate::hooks::inspector_module),
+    ("inspector/promises", crate::hooks::inspector_module),
+    ("trace_events", crate::hooks::trace_events_module),
+    ("timers/promises", crate::timers::promises_module),
+    ("vm", crate::vm::vm_module),
+    ("v8", crate::vm::v8_module),
+    ("worker_threads", crate::vm::worker_threads_module),
+    ("wasi", crate::vm::wasi_module),
+    ("readline", crate::readline::readline_module),
+    (
+        "readline/promises",
+        crate::readline::readline_promises_module,
+    ),
+    ("tty", crate::readline::tty_module),
+    ("repl", crate::readline::repl_module),
+    ("console", crate::readline::console_module),
     ("process", crate::process::module),
 ];
-
-/// The `EventEmitter` class, made once for the realm.
-fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
-    crate::modules::node_module(context, "events")?
-        .as_object()
-        .ok_or_else(|| type_error("EventEmitter is not a class"))
-}
