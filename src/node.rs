@@ -83,4 +83,8 @@ pub(crate) const MODULES: &[(&str, crate::ModuleMaker)] = &[
     ("_stream_transform", crate::stream::legacy_module),
     ("_stream_passthrough", crate::stream::legacy_module),
     ("string_decoder", crate::string_decoder::module),
+    ("sqlite", crate::vm::sqlite_module),
 ];
+
+/// The modules Node has only under `node:`: `require('node:sqlite')`, never `require('sqlite')`.
+pub(crate) const PREFIX_ONLY: &[&str] = &["sqlite", "test", "sea"];

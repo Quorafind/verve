@@ -1,4 +1,5 @@
-//! `vm`, `v8`, `worker_threads` and `wasi`: Node's modules about the engine and its threads.
+//! `vm`, `v8`, `worker_threads`, `wasi` and `node:sqlite`: Node's modules about the engine, its
+//! threads, and what it embeds.
 //!
 //! `vm.runInThisContext` evaluates code in the realm's global scope, as Node's does. Node runs
 //! `runInNewContext` and `runInContext` in a realm of their own; here they run in this one,
@@ -522,5 +523,47 @@ pub(crate) fn wasi_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
         },
     )?;
     module.set(js_string!("WASI"), wasi, false, context)?;
+    Ok(module.into())
+}
+
+/// `node:sqlite`: there to be required — bundles that can use it require it at load and choose
+/// later — with `DatabaseSync` and `StatementSync` refusing to be made, since this runtime keeps
+/// no SQLite of its own. Plugins keep their data in the vault, or in IndexedDB.
+pub(crate) fn sqlite_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
+    let module = object(context);
+    for name in ["DatabaseSync", "StatementSync", "Session"] {
+        let (class, _) = class(
+            context,
+            ClassSpec {
+                name,
+                init: |_, _, cx| {
+                    Err(coded_error(
+                        cx,
+                        "node:sqlite is not available here: plugins keep their data in the vault or in IndexedDB",
+                        "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM",
+                    ))
+                },
+                ..ClassSpec::default()
+            },
+        )?;
+        module.set(JsString::from(name), class, false, context)?;
+    }
+    let backup = crate::native::function(context, "backup", 2, |_, _, cx| {
+        Err(coded_error(
+            cx,
+            "node:sqlite is not available here",
+            "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM",
+        ))
+    });
+    module.set(js_string!("backup"), backup, false, context)?;
+    let constants = object(context);
+    for (name, value) in [
+        ("SQLITE_CHANGESET_OMIT", 0),
+        ("SQLITE_CHANGESET_REPLACE", 1),
+        ("SQLITE_CHANGESET_ABORT", 2),
+    ] {
+        constants.set(JsString::from(name), value, false, context)?;
+    }
+    module.set(js_string!("constants"), constants, false, context)?;
     Ok(module.into())
 }
