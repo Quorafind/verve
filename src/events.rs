@@ -207,7 +207,7 @@ pub(crate) fn add_listener(
             .and_then(|o| JsArray::from_object(o.clone()).ok())
             .ok_or_else(|| crate::native::type_error("_events holds something not a listener"))?;
         if prepend {
-            list.unshift(&[listener.clone()], context)?;
+            list.unshift(std::slice::from_ref(listener), context)?;
         } else {
             list.push(listener.clone(), context)?;
         }
@@ -1116,7 +1116,7 @@ const STATICS: &[(&str, usize, NativeFunctionPointer)] = &[
         }
         for target in &args[1..] {
             if get(target, "setMaxListeners", cx)?.is_callable() {
-                invoke(target, "setMaxListeners", &[n.clone()], cx)?;
+                invoke(target, "setMaxListeners", std::slice::from_ref(&n), cx)?;
             }
         }
         Ok(JsValue::undefined())
