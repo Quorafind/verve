@@ -1140,7 +1140,7 @@ mod tests {
 
     #[test]
     fn a_codec_handle_is_fed_from_javascript() {
-        let mut rt = crate::RuntimeX::new();
+        let mut rt = crate::Runtime::new();
         let pack = codec_object(
             rt.context(),
             Kind::for_format("deflate-raw", true).unwrap(),

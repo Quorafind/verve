@@ -6,7 +6,7 @@
 //! drawn in goes on drawing. A message is copied out of one realm into memory neither owns
 //! ([`Cloned`]: objects, arrays, dates, maps, sets, bytes, errors, cycles kept), sent across, and
 //! made again on the other side: the worker hears it as soon as it can, its page on its beat
-//! ([`crate::RuntimeX::run_workers`]), never waiting. What a worker writes to its console comes
+//! ([`crate::Runtime::run_workers`]), never waiting. What a worker writes to its console comes
 //! out on its page's.
 //!
 //! The script comes from a `blob:` address — `URL.createObjectURL(new Blob([code]))`, how
@@ -29,7 +29,7 @@ use boa_engine::{
     property::{Attribute, PropertyDescriptor},
 };
 
-use crate::{Level, RuntimeX, shared};
+use crate::{Level, Runtime, shared};
 
 /// A worker, as its page holds it: the way to its thread, and what came back from it.
 pub(crate) struct WorkerSlot {
@@ -322,8 +322,8 @@ fn entries(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
 // ─── The worker's own realm ─────────────────────────────────────────────────────────────────
 
 /// A runtime made a worker's: `self`, `postMessage`, `close`, the `message` listeners.
-fn worker_runtime(name: &str) -> JsResult<RuntimeX> {
-    let mut runtime = RuntimeX::new();
+fn worker_runtime(name: &str) -> JsResult<Runtime> {
+    let mut runtime = Runtime::new();
     let context = runtime.context();
     *shared(context).port.borrow_mut() = Some(Port::default());
     let global = context.global_object();
@@ -601,7 +601,7 @@ fn worker_thread(
 
 /// What the worker sent and wrote since it last looked, sent to its page, and when its next
 /// timer is due. Answers whether it is still open.
-fn flush(runtime: &mut RuntimeX, out: &Sender<FromWorker>, progress: &Progress) -> bool {
+fn flush(runtime: &mut Runtime, out: &Sender<FromWorker>, progress: &Progress) -> bool {
     for line in runtime.take_console() {
         let _ = out.send(FromWorker::Console(
             line.level,

@@ -1,12 +1,13 @@
-# runtime-x
+# Verve
 
-A JavaScript runtime for live plugins, in Rust.
+A JavaScript runtime for live plugins, in Rust — on its way to a Deno-like runtime, with
+Node's and the web's APIs and no Node underneath.
 
-- **The engine** is [Boa](https://github.com/boa-dev/boa), an interpreter written in Rust — here
-  rebon's branch of it (`boa-rebon`, `main`): 0.22.0 with parser fixes, a cache of compiled
-  regular expressions, a collector that frees lazily, and an interrupt handle. Its `SU.md` lists
-  them.
-- **The runtime** (`RuntimeX`) gives a plugin's `main.js` what it expects of Electron — a
+- **The engine** is [Boa](https://github.com/boa-dev/boa), an interpreter written in Rust,
+  carried in this repository under `boa/`: 0.22.0 with module-loading hooks, parser fixes, a
+  cache of compiled regular expressions, a collector that frees lazily, and an interrupt handle.
+  `boa/SU.md` lists them.
+- **The runtime** (`Runtime`) gives a plugin's `main.js` what it expects of Electron — a
   browser and Node in one — every one a Rust function: CommonJS `require`, timers on a clock the
   host drives, microtasks, `console`, `process`. Nothing here is JavaScript written to stand in
   for Node or the web.
@@ -17,14 +18,14 @@ A JavaScript runtime for live plugins, in Rust.
   rejects top-level await before execution, and honors the `module.exports` export.
   Builtins are native synthetic modules sharing their CommonJS default export, with
   `syncBuiltinESMExports`; CJS named exports are discovered statically in Rust.
-  `RuntimeX::load_esm` and `RuntimeX::import_module` return namespace promises; host-driven
+  `Runtime::load_esm` and `Runtime::import_module` return namespace promises; host-driven
   ticks resume top-level await without waiting. `forget_module` clears both module caches.
-  The host still requires natively with `RuntimeX::require` and obtains Electron's
-  `window.require` from `RuntimeX::global_require`.
+  The host still requires natively with `Runtime::require` and obtains Electron's
+  `window.require` from `Runtime::global_require`.
 - **Node's classes extend every way**: `class X extends EventEmitter`, and the older
   `function X() { EventEmitter.call(this) }` with `util.inherits` — each class is a `Proxy` of
   its native constructor, whose `apply` trap sets up the caller's own object.
-- **Isolates** (`runtime_x::isolate`) put a runtime — and whatever the embedder serves with it —
+- **Isolates** (`verve::isolate`) put a runtime — and whatever the embedder serves with it —
   on a thread of its own. The embedder sends jobs and reads back events and snapshots, and never
   waits: a script busy for seconds holds only its own thread. A panic ends only its own isolate,
   and a script that will not return is stopped from outside (`Isolate::interrupt`), uncatchably.
@@ -106,17 +107,17 @@ A JavaScript runtime for live plugins, in Rust.
 
 ```toml
 [dependencies]
-runtime-x = { git = "http://nas.taila4c97f.ts.net:3000/boninall/runtime-x.git", branch = "main" }
+verve = { git = "https://github.com/Quorafind/verve.git", branch = "main" }
 
-# The same Boa runtime-x is built against.
+# The same Boa Verve is built against: the crates under `boa/` in the same repository.
 [patch.crates-io]
-boa_ast = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_engine = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_gc = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_interner = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_macros = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_parser = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_string = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
+boa_ast = { git = "https://github.com/Quorafind/verve.git", branch = "main" }
+boa_engine = { git = "https://github.com/Quorafind/verve.git", branch = "main" }
+boa_gc = { git = "https://github.com/Quorafind/verve.git", branch = "main" }
+boa_interner = { git = "https://github.com/Quorafind/verve.git", branch = "main" }
+boa_macros = { git = "https://github.com/Quorafind/verve.git", branch = "main" }
+boa_parser = { git = "https://github.com/Quorafind/verve.git", branch = "main" }
+boa_string = { git = "https://github.com/Quorafind/verve.git", branch = "main" }
 ```
 
 Optimise Boa in the dev profile too (`[profile.dev.package.boa_engine] opt-level = 3`, and the
@@ -130,9 +131,22 @@ holding it, IndexedDB as `idb` and Dexie use it, WebAssembly called both ways, a
 answering without being waited for, stopped from outside, and failing alone.
 
 `cargo test --test corpus -- --ignored` loads real community plugins from the corpus beside the
-repository (`../obsidian-corpus/plugins`, or `RUNTIME_X_CORPUS`), the host's own modules stood
+repository (`../obsidian-corpus/plugins`, or `VERVE_CORPUS`), the host's own modules stood
 in for.
 
 Run the runtime on a thread with room for its stack, as workers and isolates do (16 MB or
 more): Boa's interpreter recurses deeply, and a dev build overflows Windows' 1 MB main thread
 on ordinary bundles.
+
+## Boa in this repository
+
+`boa/` is Boa's own tree and workspace, brought in with `git subtree` with its history, so Boa's
+crates keep their names and an embedder patches them as above. The root workspace excludes it.
+To take a newer Boa from upstream:
+
+```sh
+git subtree pull --prefix=boa https://github.com/boa-dev/boa.git main
+```
+
+Changes to Boa itself are commits under `boa/` like any other; `git subtree split --prefix=boa`
+gives them back as a Boa branch to offer upstream.

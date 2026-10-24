@@ -1,17 +1,17 @@
 //! `atob`/`btoa`, `TextEncoder`/`TextDecoder` and Node's `Buffer`, as plugin bundles use them.
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
-fn js(runtime: &mut RuntimeX, source: &str) -> String {
+fn js(runtime: &mut Runtime, source: &str) -> String {
     let value = runtime
         .eval(source)
         .unwrap_or_else(|e| panic!("{source}: {e}"));
-    runtime_x::print(&value)
+    verve::print(&value)
 }
 
 #[test]
 fn bytes_and_text_answer_as_a_browser_and_node_do() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let cases = [
         // atob and btoa: binary strings.
         ("btoa('hello')", "aGVsbG8="),
@@ -105,7 +105,7 @@ fn bytes_and_text_answer_as_a_browser_and_node_do() {
 /// Day Planner among others, define their errors that way.
 #[test]
 fn a_computed_method_name_reads_the_enclosing_functions_bindings() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     for source in [
         "(function(){ var k = 'x'; function f(){ return class { [k](){ return 7 } } } return new (f())().x() })()",
         "(function(){ const k = Symbol.for('x'); const C = function(){ class E extends globalThis.Error { [k](){ return 7 } } return E }(); return new C()[k]() })()",
@@ -121,7 +121,7 @@ fn a_computed_method_name_reads_the_enclosing_functions_bindings() {
 /// — Admonition's, Day Planner's — read their plugin so.
 #[test]
 fn an_arrow_within_an_arrow_keeps_the_methods_this() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     for (source, expected) in [
         (
             "(function(){ return () => (() => this.p)() }).call({ p: 1 })()",
@@ -151,7 +151,7 @@ fn an_arrow_within_an_arrow_keeps_the_methods_this() {
 
 #[test]
 fn urls_parse_and_their_params_follow_them() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let cases = [
         (
             "new URL('https://user:pw@example.com:8080/a/b?x=1&y=two#top').host",
@@ -221,7 +221,7 @@ fn urls_parse_and_their_params_follow_them() {
 
 #[test]
 fn web_globals_answer_as_a_browser_does() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let cases = [
         (
             "/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID())",

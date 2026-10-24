@@ -3,10 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 fn folder(test: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("runtime-x-fs-{}-{test}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("verve-fs-{}-{test}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -14,7 +14,7 @@ fn folder(test: &str) -> PathBuf {
 
 /// Runs `body` as `main.js` in `dir` (whose path it has as `__dirname`), lets its promises and
 /// callbacks settle, then reads `exports.result`.
-fn run_in(rt: &mut RuntimeX, dir: &Path, body: &str) -> Vec<String> {
+fn run_in(rt: &mut Runtime, dir: &Path, body: &str) -> Vec<String> {
     let exports = rt
         .load_module(&dir.join("main.js"), body)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -23,7 +23,7 @@ fn run_in(rt: &mut RuntimeX, dir: &Path, body: &str) -> Vec<String> {
     let text = rt
         .call(&json, &boa_engine::JsValue::undefined(), &[exports])
         .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text)).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
     parsed["result"]
         .as_array()
         .unwrap_or_else(|| panic!("no result in {parsed}"))
@@ -39,7 +39,7 @@ fn run_in(rt: &mut RuntimeX, dir: &Path, body: &str) -> Vec<String> {
 #[test]
 fn reads_writes_and_stats() {
     let dir = folder("rw");
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,
@@ -100,7 +100,7 @@ fn reads_writes_and_stats() {
 #[test]
 fn folders_made_listed_copied_and_removed() {
     let dir = folder("dirs");
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,
@@ -165,7 +165,7 @@ fn folders_made_listed_copied_and_removed() {
 #[test]
 fn descriptors_read_and_write_at_positions() {
     let dir = folder("fds");
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,
@@ -194,7 +194,7 @@ fn descriptors_read_and_write_at_positions() {
 #[test]
 fn callbacks_and_promises() {
     let dir = folder("async");
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     rt.load_module(
         &dir.join("main.js"),
         r#"
@@ -231,7 +231,7 @@ fn callbacks_and_promises() {
     )
     .unwrap_or_else(|e| panic!("{e}"));
     rt.run_microtasks();
-    let log = runtime_x::print(&rt.eval("log.join('|')").unwrap());
+    let log = verve::print(&rt.eval("log.join('|')").unwrap());
     let parts: Vec<&str> = log.split('|').collect();
     for expected in [
         "written null",
@@ -253,7 +253,7 @@ fn callbacks_and_promises() {
 #[test]
 fn times_modes_and_links() {
     let dir = folder("meta");
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,
@@ -279,7 +279,7 @@ fn times_modes_and_links() {
 #[test]
 fn file_streams_pipe_through_zlib_and_back() {
     let dir = folder("streams");
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,

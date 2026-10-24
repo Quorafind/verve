@@ -4,7 +4,7 @@
 //! An isolate is what V8 calls one — a heap of its own (Boa's collector keeps one per thread),
 //! one thread running it — together with the loop that keeps it: the embedder sends it **jobs**,
 //! closures run on the isolate's thread in the order they were sent, with the guest — whatever
-//! the embedder put there: a [`RuntimeX`](crate::RuntimeX) and the API it serves — in hand; the
+//! the embedder put there: a [`Runtime`](crate::Runtime) and the API it serves — in hand; the
 //! guest's own beat runs between them (timers, workers, whatever else it has due); and after each
 //! turn the guest hands back **events** — what its scripts asked of the embedder, the answers to
 //! jobs — and, when something changed, a **view**: a snapshot of whatever the embedder reads of

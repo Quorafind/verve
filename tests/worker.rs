@@ -1,16 +1,16 @@
 //! Web Workers: a script from a blob address, run in a realm of its own on a thread of its own,
 //! spoken to by messages that are copied across — and a page that never waits for one.
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
-fn js(rt: &mut RuntimeX, source: &str) -> String {
+fn js(rt: &mut Runtime, source: &str) -> String {
     let value = rt.eval(source).unwrap_or_else(|e| panic!("{source}: {e}"));
-    runtime_x::print(&value)
+    verve::print(&value)
 }
 
 #[test]
 fn a_worker_answers_its_page() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     js(
         &mut rt,
         r#"
@@ -71,7 +71,7 @@ fn a_worker_answers_its_page() {
 /// and every beat in between returns at once.
 #[test]
 fn a_busy_worker_does_not_hold_its_page() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     js(
         &mut rt,
         r#"
@@ -125,7 +125,7 @@ fn a_busy_worker_does_not_hold_its_page() {
 /// the page has sent it nothing — and a worker whose script failed is waited on no longer.
 #[test]
 fn a_worker_is_heard_from_its_script_alone() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     js(
         &mut rt,
         r#"

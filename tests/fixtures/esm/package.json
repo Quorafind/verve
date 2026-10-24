@@ -1,5 +1,5 @@
 {
-  "name": "runtime-x-esm-fixture",
+  "name": "verve-esm-fixture",
   "type": "module",
   "exports": {
     ".": "./value.js",

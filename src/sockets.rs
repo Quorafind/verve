@@ -24,7 +24,7 @@ use crate::native::{
 };
 
 const NO_NETWORK: &str =
-    "Su does not let plugins open network connections with Node's modules: use requestUrl";
+    "Verve does not let plugins open network connections with Node's modules: use requestUrl";
 
 fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
     crate::modules::node_module(context, "events")?
@@ -249,7 +249,7 @@ const SERVER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         if let Some(server) = this.as_object() {
             let error = coded_error_value(
                 cx,
-                "listen EACCES: Su does not let plugins serve on a port",
+                "listen EACCES: Verve does not let plugins serve on a port",
                 "EACCES",
             );
             if let Some(e) = error.as_object() {
@@ -1282,7 +1282,7 @@ pub(crate) fn dgram_module(context: &mut Context, _: &str) -> JsResult<JsValue> 
                 if let Some(socket) = this.as_object() {
                     let error = coded_error_value(
                         cx,
-                        "bind EACCES: Su does not let plugins open sockets",
+                        "bind EACCES: Verve does not let plugins open sockets",
                         "EACCES",
                     );
                     fail_later(cx, &socket, error, false);
@@ -1407,7 +1407,7 @@ pub(crate) fn cluster_module(context: &mut Context, _: &str) -> JsResult<JsValue
 
 // ─── child_process ──────────────────────────────────────────────────────────────────────────
 
-const NO_PROGRAMS: &str = "child_process is not available in Su: plugins cannot start programs";
+const NO_PROGRAMS: &str = "child_process is not available in Verve: plugins cannot start programs";
 
 fn spawn_error(context: &mut Context, syscall: &str, file: &JsValue) -> JsValue {
     let file = if file.is_string() {

@@ -3,11 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 /// A folder of its own for one test, with `files` written in it.
 fn folder(test: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("runtime-x-modules-{}-{test}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("verve-modules-{}-{test}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for (name, text) in files {
         let path = dir.join(name);
@@ -18,7 +18,7 @@ fn folder(test: &str, files: &[(&str, &str)]) -> PathBuf {
 }
 
 /// Runs `body` as `main.js` in `dir`; it sets `exports.result` to an array.
-fn run_in(rt: &mut RuntimeX, dir: &Path, body: &str) -> Vec<String> {
+fn run_in(rt: &mut Runtime, dir: &Path, body: &str) -> Vec<String> {
     let exports = rt
         .load_module(&dir.join("main.js"), body)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -26,7 +26,7 @@ fn run_in(rt: &mut RuntimeX, dir: &Path, body: &str) -> Vec<String> {
     let text = rt
         .call(&json, &boa_engine::JsValue::undefined(), &[exports])
         .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text)).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
     parsed["result"]
         .as_array()
         .unwrap()
@@ -42,7 +42,7 @@ fn run_in(rt: &mut RuntimeX, dir: &Path, body: &str) -> Vec<String> {
 #[test]
 fn built_ins_answer_to_both_names_and_to_a_trailing_slash() {
     let dir = folder("builtins", &[]);
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,
@@ -113,7 +113,7 @@ fn a_plugins_own_files_folders_packages_and_json() {
             ),
         ],
     );
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,
@@ -155,7 +155,7 @@ fn a_plugins_own_files_folders_packages_and_json() {
 #[test]
 fn process_looks_like_electrons_renderer() {
     let dir = folder("process", &[]);
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,
@@ -224,7 +224,7 @@ fn process_looks_like_electrons_renderer() {
 #[test]
 fn node_classes_extend_three_ways() {
     let dir = folder("classes", &[]);
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,
@@ -261,7 +261,7 @@ fn node_classes_extend_three_ways() {
 #[test]
 fn a_lazy_global_constructs_again_and_again() {
     let dir = folder("lazy", &[]);
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,
@@ -284,7 +284,7 @@ fn the_host_requires_natively_and_gives_scripts_a_window_require() {
         "native-require",
         &[("lib/x.js", "module.exports = 'x file';")],
     );
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let electron = rt.eval("({ remote: 'stub' })").unwrap();
     rt.define_builtin("electron", electron);
     let fs = rt.require("node:original-fs").unwrap();
@@ -341,7 +341,7 @@ fn the_host_requires_natively_and_gives_scripts_a_window_require() {
 #[test]
 fn url_patterns_match_and_say_what_they_matched() {
     let dir = folder("urlpattern", &[]);
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run_in(
         &mut rt,
         &dir,

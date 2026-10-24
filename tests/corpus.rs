@@ -5,12 +5,12 @@
 //! `Proxy` that answers every name with another.
 //!
 //! The plugins are read from the corpus beside this repository
-//! (`../obsidian-corpus/plugins`, or `RUNTIME_X_CORPUS`); without it, there is nothing to load and
+//! (`../obsidian-corpus/plugins`, or `VERVE_CORPUS`); without it, there is nothing to load and
 //! the test says so and passes. `cargo test --test corpus -- --ignored`: the bundles are large.
 
 use std::path::PathBuf;
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 /// A module whose every property is a class, whose every property is one too.
 const STUB: &str = r#"
@@ -71,7 +71,7 @@ const PLUGINS: &[&str] = &[
 ];
 
 fn corpus() -> Option<PathBuf> {
-    let dir = std::env::var_os("RUNTIME_X_CORPUS")
+    let dir = std::env::var_os("VERVE_CORPUS")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../obsidian-corpus/plugins")
@@ -82,7 +82,7 @@ fn corpus() -> Option<PathBuf> {
 /// Loads one plugin's `main.js` as the Obsidian host would, the host's modules stood in for.
 fn load(main: PathBuf) -> Result<(), String> {
     let source = std::fs::read_to_string(&main).map_err(|e| e.to_string())?;
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let stub = rt.eval(STUB)?;
     rt.context()
         .register_global_property(

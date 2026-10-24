@@ -2,15 +2,15 @@
 //! indexes, transactions awaited across, cursors walked, a key range, an abort put back, and
 //! databases that are there again in a runtime started later.
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
-fn js(rt: &mut RuntimeX, source: &str) -> String {
+fn js(rt: &mut Runtime, source: &str) -> String {
     let value = rt.eval(source).unwrap_or_else(|e| panic!("{source}: {e}"));
-    runtime_x::print(&value)
+    verve::print(&value)
 }
 
 /// Runs tasks until nothing is left to do.
-fn settle(rt: &mut RuntimeX) {
+fn settle(rt: &mut Runtime) {
     for _ in 0..500 {
         rt.run_microtasks();
         if rt.run_due() == 0 && rt.next_due().is_none() {
@@ -32,14 +32,14 @@ const PRELUDE: &str = r#"
     });
 "#;
 
-fn outcome(rt: &mut RuntimeX) -> String {
+fn outcome(rt: &mut Runtime) -> String {
     settle(rt);
     js(rt, "JSON.stringify(out)")
 }
 
 #[test]
 fn stores_indexes_cursors_and_ranges() {
-    let mut rt = RuntimeX::with_clock(|| 0.);
+    let mut rt = Runtime::with_clock(|| 0.);
     js(&mut rt, PRELUDE);
     js(
         &mut rt,
@@ -120,10 +120,10 @@ fn stores_indexes_cursors_and_ranges() {
 
 #[test]
 fn databases_are_kept_on_disk() {
-    let dir = std::env::temp_dir().join(format!("runtime-x-idb-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("verve-idb-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     {
-        let mut rt = RuntimeX::with_clock(|| 0.);
+        let mut rt = Runtime::with_clock(|| 0.);
         rt.set_storage_dir(Some(dir.clone()));
         js(&mut rt, PRELUDE);
         js(
@@ -139,7 +139,7 @@ fn databases_are_kept_on_disk() {
         );
         assert_eq!(outcome(&mut rt), r#"["complete"]"#);
     }
-    let mut rt = RuntimeX::with_clock(|| 0.);
+    let mut rt = Runtime::with_clock(|| 0.);
     rt.set_storage_dir(Some(dir.clone()));
     js(&mut rt, PRELUDE);
     js(

@@ -2,17 +2,17 @@
 //! Chromium's `en-US` writes them, text sorted as people read it, plurals, relative times,
 //! lists, display names, locales, and text cut into graphemes, words and sentences.
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 /// Each line of `script` (an expression) evaluated, as a string; an error as `ERR <message>`.
 fn each(script: &str) -> Vec<String> {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     script
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(|line| match rt.eval(&format!("String({line})")) {
-            Ok(value) => runtime_x::print(&value),
+            Ok(value) => verve::print(&value),
             Err(error) => format!("ERR {error}"),
         })
         .collect()

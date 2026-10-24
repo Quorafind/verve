@@ -3,19 +3,19 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 /// Runs `body` — an async function's body, which sets `result` to an array — on a clock the
 /// test moves, until it has set it; answers the array's items as strings.
 pub fn run_async(body: &str) -> Vec<String> {
     let time = Rc::new(Cell::new(0.));
     let read = Rc::clone(&time);
-    let mut rt = RuntimeX::with_clock(move || read.get());
+    let mut rt = Runtime::with_clock(move || read.get());
     let source = format!(
         "globalThis.result = undefined; (async () => {{ {body}\n}})().catch(e => {{ globalThis.result = ['threw ' + (e && e.stack || e)]; }});"
     );
     let dir = std::env::temp_dir();
-    rt.load_module(&dir.join("runtime-x-streams-test.js"), &source)
+    rt.load_module(&dir.join("verve-streams-test.js"), &source)
         .unwrap_or_else(|e| panic!("{e}"));
     for _ in 0..200 {
         if rt
@@ -31,8 +31,8 @@ pub fn run_async(body: &str) -> Vec<String> {
     let text = rt
         .eval("JSON.stringify(globalThis.result)")
         .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text))
-        .unwrap_or_else(|_| panic!("no result: {}", runtime_x::print(&text)));
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text))
+        .unwrap_or_else(|_| panic!("no result: {}", verve::print(&text)));
     parsed
         .as_array()
         .unwrap_or_else(|| panic!("result is not an array: {parsed}"))

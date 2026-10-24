@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use boa_engine::{JsValue, builtins::promise::PromiseState, object::builtins::JsPromise};
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -14,7 +14,7 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn loaded(runtime: &mut RuntimeX, source: &str) -> JsPromise {
+fn loaded(runtime: &mut Runtime, source: &str) -> JsPromise {
     runtime.load_esm(&fixture("probe.mjs"), source).unwrap()
 }
 
@@ -27,15 +27,15 @@ fn fulfilled(promise: &JsPromise) {
 }
 
 fn result(source: &str) -> String {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     let promise = loaded(&mut runtime, source);
     fulfilled(&promise);
-    runtime_x::print(&runtime.eval("JSON.stringify(globalThis.result)").unwrap())
+    verve::print(&runtime.eval("JSON.stringify(globalThis.result)").unwrap())
 }
 
 #[test]
 fn node_22_reference_packages_interop_and_error_codes() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     let promise = runtime
         .load_esm(
             &fixture("node-reference.mjs"),
@@ -58,7 +58,7 @@ fn node_22_reference_packages_interop_and_error_codes() {
 
 #[test]
 fn native_import_api_fulfills_namespaces_and_rejects_resolution_errors() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     let promise = runtime
         .import_module("./value.js", Some(&fixture("probe.mjs")))
         .unwrap();
@@ -71,7 +71,7 @@ fn native_import_api_fulfills_namespaces_and_rejects_resolution_errors() {
 
 #[test]
 fn imports_patterns_external_packages_builtins_and_nested_null_conditions() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     let promise = runtime
         .load_esm(
             &fixture("node-imports.mjs"),
@@ -87,7 +87,7 @@ fn imports_patterns_external_packages_builtins_and_nested_null_conditions() {
 
 #[test]
 fn require_rejects_cjs_esm_back_edges_with_the_node_cycle_code() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     runtime
         .load_module(
             &fixture("cycle-probe.cjs"),
@@ -98,7 +98,7 @@ fn require_rejects_cjs_esm_back_edges_with_the_node_cycle_code() {
         )
         .unwrap();
     assert_eq!(
-        runtime_x::print(&runtime.eval("result").unwrap()),
+        verve::print(&runtime.eval("result").unwrap()),
         "ERR_REQUIRE_CYCLE_MODULE"
     );
 }
@@ -180,7 +180,7 @@ fn esm_cycles_keep_live_bindings() {
 
 #[test]
 fn require_esm_does_not_drain_unrelated_microtasks_and_keeps_namespace_identity() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     runtime.load_module(&fixture("sync.cjs"), r#"
         let ran = false;
         Promise.resolve().then(() => {ran = true});
@@ -190,7 +190,7 @@ fn require_esm_does_not_drain_unrelated_microtasks_and_keeps_namespace_identity(
         globalThis.result = [ran, before, first.count, first.__esModule, first === require('./value.js')];
     "#).unwrap();
     assert_eq!(
-        runtime_x::print(&runtime.eval("JSON.stringify(result)").unwrap()),
+        verve::print(&runtime.eval("JSON.stringify(result)").unwrap()),
         "[false,1,2,true,true]"
     );
 }
@@ -200,28 +200,28 @@ fn package_conditions_are_ordered_and_custom_conditions_are_opt_in() {
     assert_eq!(
         result(
             r#"
-        import {value} from 'runtime-x-esm-fixture/ordered';
-        import {value as fallback} from 'runtime-x-esm-fixture/array';
+        import {value} from 'verve-esm-fixture/ordered';
+        import {value as fallback} from 'verve-esm-fixture/array';
         globalThis.result = [value, fallback];
     "#
         ),
         "[42,42]"
     );
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     runtime.set_module_conditions(vec!["plugin".into()]);
     let promise = loaded(
         &mut runtime,
-        "import value from 'runtime-x-esm-fixture/conditions'; globalThis.result = value",
+        "import value from 'verve-esm-fixture/conditions'; globalThis.result = value",
     );
     fulfilled(&promise);
-    assert_eq!(runtime_x::print(&runtime.eval("result").unwrap()), "custom");
+    assert_eq!(verve::print(&runtime.eval("result").unwrap()), "custom");
 }
 
 #[test]
 fn top_level_await_returns_to_the_host_and_resumes_on_its_clock() {
     let now = Rc::new(Cell::new(0.0));
     let clock = now.clone();
-    let mut runtime = RuntimeX::with_clock(move || clock.get());
+    let mut runtime = Runtime::with_clock(move || clock.get());
     let promise = loaded(
         &mut runtime,
         "import {data} from './tla-graph.mjs'; globalThis.result = data;",
@@ -231,22 +231,22 @@ fn top_level_await_returns_to_the_host_and_resumes_on_its_clock() {
     now.set(10.0);
     assert_eq!(runtime.run_due(), 1);
     fulfilled(&promise);
-    assert_eq!(runtime_x::print(&runtime.eval("result").unwrap()), "42");
+    assert_eq!(verve::print(&runtime.eval("result").unwrap()), "42");
 }
 
 #[test]
 fn cjs_wrappers_and_global_scripts_have_dynamic_import() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     runtime
         .load_module(
             &fixture("dynamic-import.cjs"),
             "import('./value.js').then(m => globalThis.answer = m.value);",
         )
         .unwrap();
-    assert_eq!(runtime_x::print(&runtime.eval("answer").unwrap()), "42");
+    assert_eq!(verve::print(&runtime.eval("answer").unwrap()), "42");
     let value = runtime.eval("import('data:text/javascript,export default 43').then(m => globalThis.answer = m.default)").unwrap();
     fulfilled(&JsPromise::from_object(value.as_object().unwrap()).unwrap());
-    assert_eq!(runtime_x::print(&runtime.eval("answer").unwrap()), "43");
+    assert_eq!(verve::print(&runtime.eval("answer").unwrap()), "43");
 }
 
 #[test]
@@ -318,7 +318,7 @@ fn url_queries_and_fragments_are_distinct_cache_keys() {
 
 #[test]
 fn forget_module_clears_both_cjs_and_esm_views() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     let first = runtime
         .require(fixture("counter.mjs").to_str().unwrap())
         .unwrap();
@@ -327,13 +327,13 @@ fn forget_module_clears_both_cjs_and_esm_views() {
         .require(fixture("counter.mjs").to_str().unwrap())
         .unwrap();
     assert_ne!(first, second);
-    assert_eq!(runtime_x::print(&runtime.eval("executions").unwrap()), "2");
+    assert_eq!(verve::print(&runtime.eval("executions").unwrap()), "2");
     runtime
         .load_module(&fixture("cached.cjs"), "module.exports = 1")
         .unwrap();
     runtime.forget_module(&fixture("cached.cjs"));
     assert_eq!(
-        runtime_x::print(
+        verve::print(
             &runtime
                 .load_module(&fixture("cached.cjs"), "module.exports = 2")
                 .unwrap()
@@ -355,12 +355,12 @@ fn extension_package_type_and_ambiguous_syntax_detection_match_node() {
         ),
         "[42,42,42]"
     );
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     let exports = runtime
         .load_module(&fixture("ambiguous/inline.js"), "export const answer = 42")
         .unwrap();
     assert_eq!(
-        runtime_x::print(
+        verve::print(
             &exports
                 .as_object()
                 .unwrap()
@@ -390,7 +390,7 @@ fn failures_settle_and_esm_error_stacks_use_file_urls() {
 
 #[test]
 fn module_worker_runs_static_import_and_top_level_await() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     runtime.eval(r#"
         globalThis.workerAnswer = 'pending';
         const url = URL.createObjectURL(new Blob([
@@ -403,29 +403,29 @@ fn module_worker_runs_static_import_and_top_level_await() {
     for _ in 0..100 {
         runtime.wait_for_workers(Duration::from_millis(20));
         runtime.run_workers();
-        if runtime_x::print(&runtime.eval("workerAnswer").unwrap()) != "pending" {
+        if verve::print(&runtime.eval("workerAnswer").unwrap()) != "pending" {
             break;
         }
     }
     assert_eq!(
-        runtime_x::print(&runtime.eval("workerAnswer").unwrap()),
+        verve::print(&runtime.eval("workerAnswer").unwrap()),
         "42"
     );
 }
 
 #[test]
-#[ignore = "Run npm ci in tests/fixtures/esm-packages, or set RUNTIME_X_ESM_PACKAGES; no install scripts are needed"]
+#[ignore = "Run npm ci in tests/fixtures/esm-packages, or set VERVE_ESM_PACKAGES; no install scripts are needed"]
 fn real_pinned_nanoid5_chalk5_date_fns4_and_zod4() {
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
-            runtime_x::set_thread_stack(32 * 1024 * 1024);
-            let root = std::env::var_os("RUNTIME_X_ESM_PACKAGES")
+            verve::set_thread_stack(32 * 1024 * 1024);
+            let root = std::env::var_os("VERVE_ESM_PACKAGES")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| {
                     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/esm-packages")
                 });
-            let mut runtime = RuntimeX::new();
+            let mut runtime = Runtime::new();
             let promise = runtime
                 .load_esm(
                     &root.join("accept.mjs"),
@@ -446,7 +446,7 @@ fn real_pinned_nanoid5_chalk5_date_fns4_and_zod4() {
 
 #[test]
 fn dynamic_import_must_reject_instead_of_remaining_pending() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     let value = runtime
         .eval("import('https://example.invalid/module.mjs')")
         .unwrap();
@@ -458,7 +458,7 @@ fn dynamic_import_must_reject_instead_of_remaining_pending() {
                 .unwrap()
                 .get(boa_engine::js_string!("code"), runtime.context())
                 .unwrap();
-            assert_eq!(runtime_x::print(&code), "ERR_UNSUPPORTED_ESM_URL_SCHEME");
+            assert_eq!(verve::print(&code), "ERR_UNSUPPORTED_ESM_URL_SCHEME");
         }
         state => panic!("import must reject with a Node error code, got {state:?}"),
     }
@@ -466,14 +466,14 @@ fn dynamic_import_must_reject_instead_of_remaining_pending() {
 
 #[test]
 fn latex_suite_blob_import_captures_bytes_before_immediate_revoke() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     runtime.eval(r#"
         globalThis.answer = 'pending';
         const url = URL.createObjectURL(new Blob(['export default 42'], {type: 'text/javascript'}));
         globalThis.loading = import(url).then(m => answer = m.default, e => answer = e.code || e.message);
         URL.revokeObjectURL(url);
     "#).unwrap();
-    assert_eq!(runtime_x::print(&runtime.eval("answer").unwrap()), "42");
+    assert_eq!(verve::print(&runtime.eval("answer").unwrap()), "42");
     let promise = runtime.eval("loading").unwrap();
     assert!(matches!(
         JsPromise::from_object(promise.as_object().unwrap())
@@ -485,7 +485,7 @@ fn latex_suite_blob_import_captures_bytes_before_immediate_revoke() {
 
 #[test]
 fn invalid_or_already_revoked_blob_imports_reject_instead_of_hanging() {
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     runtime
         .eval(
             r#"
@@ -514,7 +514,7 @@ fn invalid_or_already_revoked_blob_imports_reject_instead_of_hanging() {
             "code"
         };
         assert_eq!(
-            runtime_x::print(
+            verve::print(
                 &object
                     .get(boa_engine::JsString::from(key), runtime.context())
                     .unwrap()
@@ -527,7 +527,7 @@ fn invalid_or_already_revoked_blob_imports_reject_instead_of_hanging() {
 #[test]
 fn boa_minimal_module_lifecycle() {
     // The engine-level reproduction intentionally uses the same module APIs as the runtime.
-    let mut runtime = RuntimeX::new();
+    let mut runtime = Runtime::new();
     let module = boa_engine::Module::parse(
         boa_engine::Source::from_bytes("export const value = 42"),
         None,

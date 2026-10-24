@@ -7,7 +7,7 @@
 //! when a task finds it with nothing pending — so one that `await`s between its requests, as
 //! the `idb` library does, lives on — and an aborted one is put back as it was. A database is
 //! kept on disk, one JSON file each, in the folder the host names
-//! ([`crate::RuntimeX::set_storage_dir`]); with none, in memory for the life of the runtime.
+//! ([`crate::Runtime::set_storage_dir`]); with none, in memory for the life of the runtime.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};

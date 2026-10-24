@@ -2,7 +2,7 @@
 //! — and `WebSocket`, which this runtime does not connect.
 //!
 //! A message is copied as `structuredClone` copies it, and heard as a task of its own: on the
-//! runtime's clock, at the next [`crate::RuntimeX::run_due`], as a page hears it after the
+//! runtime's clock, at the next [`crate::Runtime::run_due`], as a page hears it after the
 //! script that sent it has finished. Bundles schedule work this way — React's scheduler posts
 //! itself a message to yield — so it is a timer, not a microtask, that delivers it.
 //!

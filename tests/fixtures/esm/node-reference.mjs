@@ -2,7 +2,7 @@ import {createRequire} from 'node:module';
 const require = createRequire(import.meta.url);
 const importDual = (await import('dual')).default;
 const requireDual = require('dual');
-const self = (await import('runtime-x-esm-fixture')).value;
+const self = (await import('verve-esm-fixture')).value;
 const mapped = (await import('#value')).value;
 const named = await import('./named.cjs');
 const cjs = [named.name, named.default.name, named.default.default, named.__esModule];

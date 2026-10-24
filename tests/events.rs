@@ -1,14 +1,14 @@
 //! `events` as Node has it: where listeners are kept, `newListener` and `removeListener`,
 //! `once` wrappers, the leak warning, `errorMonitor`, and the statics `once` and `on`.
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 /// Runs `body` as a CommonJS module; it sets `exports.result` to an array. Promises it starts
 /// settle before this returns; `exports.later`, when it is a function, is called after that
 /// and its array answered instead.
-fn run(body: &str) -> (Vec<String>, Vec<runtime_x::ConsoleLine>) {
-    let mut rt = RuntimeX::new();
-    let dir = std::env::temp_dir().join(format!("runtime-x-events-{}", std::process::id()));
+fn run(body: &str) -> (Vec<String>, Vec<verve::ConsoleLine>) {
+    let mut rt = Runtime::new();
+    let dir = std::env::temp_dir().join(format!("verve-events-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exports = rt
         .load_module(&dir.join("main.js"), body)
@@ -20,7 +20,7 @@ fn run(body: &str) -> (Vec<String>, Vec<runtime_x::ConsoleLine>) {
     let text = rt
         .call(&json, &boa_engine::JsValue::undefined(), &[exports])
         .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text)).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
     let result = parsed
         .as_array()
         .unwrap()

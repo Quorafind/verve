@@ -5,25 +5,25 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 fn folder(test: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("runtime-x-misc-{}-{test}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("verve-misc-{}-{test}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
 /// A runtime on a clock the test moves.
-fn fake_clock() -> (Rc<Cell<f64>>, RuntimeX) {
+fn fake_clock() -> (Rc<Cell<f64>>, Runtime) {
     let time = Rc::new(Cell::new(0.));
     let read = Rc::clone(&time);
-    (time, RuntimeX::with_clock(move || read.get()))
+    (time, Runtime::with_clock(move || read.get()))
 }
 
 /// Runs `body` as a module, then the host's loop until `time` reaches `until`; answers the
 /// global `log` joined by `|`.
-fn run(test: &str, body: &str, until: f64) -> (String, Vec<runtime_x::ConsoleLine>) {
+fn run(test: &str, body: &str, until: f64) -> (String, Vec<verve::ConsoleLine>) {
     let (time, mut rt) = fake_clock();
     let dir = folder(test);
     rt.eval("globalThis.log = []").unwrap();
@@ -36,7 +36,7 @@ fn run(test: &str, body: &str, until: f64) -> (String, Vec<runtime_x::ConsoleLin
         rt.run_microtasks();
         now += 10.;
     }
-    let log = runtime_x::print(&rt.eval("log.join('|')").unwrap());
+    let log = verve::print(&rt.eval("log.join('|')").unwrap());
     (log, rt.take_console())
 }
 

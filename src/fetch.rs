@@ -1441,7 +1441,7 @@ fn multipart(form: &JsObject, context: &mut Context) -> JsResult<(Vec<u8>, Strin
     let mut random = [0u8; 12];
     let _ = getrandom::fill(&mut random);
     let boundary = format!(
-        "----RuntimeXFormBoundary{}",
+        "----RuntimeFormBoundary{}",
         random
             .iter()
             .map(|b| format!("{b:02x}"))

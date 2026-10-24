@@ -4,10 +4,10 @@
 
 use std::path::Path;
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 fn run(body: &str) -> Vec<String> {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let exports = rt
         .load_module(Path::new("/plugins/buffer-test/main.js"), body)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -15,7 +15,7 @@ fn run(body: &str) -> Vec<String> {
     let text = rt
         .call(&json, &boa_engine::JsValue::undefined(), &[exports])
         .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text)).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
     parsed["result"]
         .as_array()
         .unwrap()

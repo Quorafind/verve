@@ -1,8 +1,8 @@
 [package]
-name = "runtime-x"
+name = "verve"
 version = "0.1.0"
 edition = "2024"
-description = "A JavaScript runtime for live plugins: Boa with the web's and Node's everyday APIs in Rust, and isolates — a runtime on a thread of its own, sent jobs, answering with events and snapshots, failing alone."
+description = "Verve, a JavaScript runtime for live plugins: Boa with the web's and Node's everyday APIs in Rust, and isolates — a runtime on a thread of its own, sent jobs, answering with events and snapshots, failing alone."
 publish = false
 
 # A Node-shaped place for a plugin's main.js to run: CommonJS `require`, `module.exports`,
@@ -10,6 +10,8 @@ publish = false
 # interpreter written in Rust; nothing here is JavaScript written to stand in for Node.
 
 [workspace]
+# Boa keeps its own workspace, as upstream has it, so `git subtree pull` stays a plain merge.
+exclude = ["boa"]
 
 [dependencies]
 boa_engine = { version = "=0.22.0", default-features = false, features = ["annex-b"] }
@@ -52,16 +54,17 @@ serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 # WebAssembly tests write their modules as text.
 wat = "1.251"
 
-# Boa as rebon's branch of it: 0.22.0 with the fixes listed in its `SU.md`, and the interrupt
-# handle isolates stop a script with. An embedder patches Boa the same way.
+# Boa as Verve carries it in `boa/`: 0.22.0 with the fixes listed in `boa/SU.md`, and the
+# interrupt handle isolates stop a script with. An embedder takes Boa from this repository too,
+# so its crates and Verve's always agree.
 [patch.crates-io]
-boa_ast = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_engine = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_gc = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_interner = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_macros = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_parser = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
-boa_string = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
+boa_ast = { path = "boa/core/ast" }
+boa_engine = { path = "boa/core/engine" }
+boa_gc = { path = "boa/core/gc" }
+boa_interner = { path = "boa/core/interner" }
+boa_macros = { path = "boa/core/macros" }
+boa_parser = { path = "boa/core/parser" }
+boa_string = { path = "boa/core/string" }
 
 # The interpreter unoptimised is several times slower, in tests as anywhere.
 [profile.dev.package.boa_engine]

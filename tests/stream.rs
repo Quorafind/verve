@@ -1,13 +1,13 @@
 //! `stream` and `string_decoder` as Node has them: reading, writing, transforming, piping,
 //! `pipeline` and `finished`, classes extended the ES5 way and the class way.
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 /// Runs `body` as a CommonJS module; once the microtasks it queued have run (and any timers
 /// due), answers `exports.result` — or what `exports.later()` answers, when it set that.
 fn run(body: &str) -> Vec<String> {
-    let mut rt = RuntimeX::new();
-    let dir = std::env::temp_dir().join(format!("runtime-x-stream-{}", std::process::id()));
+    let mut rt = Runtime::new();
+    let dir = std::env::temp_dir().join(format!("verve-stream-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exports = rt
         .load_module(&dir.join("main.js"), body)
@@ -28,8 +28,8 @@ fn run(body: &str) -> Vec<String> {
         .call(&json, &boa_engine::JsValue::undefined(), &[exports])
         .unwrap_or_else(|e| panic!("{e}"));
     let console = rt.take_console();
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text))
-        .unwrap_or_else(|e| panic!("{e}: {} {console:?}", runtime_x::print(&text)));
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text))
+        .unwrap_or_else(|e| panic!("{e}: {} {console:?}", verve::print(&text)));
     parsed
         .as_array()
         .unwrap_or_else(|| panic!("no result: {console:?}"))

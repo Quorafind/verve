@@ -3,9 +3,9 @@
 
 use std::path::Path;
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
-fn run(rt: &mut RuntimeX, body: &str) -> Vec<String> {
+fn run(rt: &mut Runtime, body: &str) -> Vec<String> {
     let exports = rt
         .load_module(Path::new("/plugins/assert-test/main.js"), body)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -13,7 +13,7 @@ fn run(rt: &mut RuntimeX, body: &str) -> Vec<String> {
     let text = rt
         .call(&json, &boa_engine::JsValue::undefined(), &[exports])
         .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text)).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
     parsed["result"]
         .as_array()
         .unwrap()
@@ -28,7 +28,7 @@ fn run(rt: &mut RuntimeX, body: &str) -> Vec<String> {
 
 #[test]
 fn passing_checks_are_silent_and_failing_ones_read_as_nodes() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run(
         &mut rt,
         r#"
@@ -100,7 +100,7 @@ fn passing_checks_are_silent_and_failing_ones_read_as_nodes() {
 
 #[test]
 fn strict_mode_and_promises() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     rt.load_module(
         Path::new("/plugins/assert-strict/main.js"),
         r#"
@@ -118,7 +118,7 @@ fn strict_mode_and_promises() {
     .unwrap();
     rt.run_microtasks();
     assert_eq!(
-        runtime_x::print(&rt.eval("heard.join('|')").unwrap()),
+        verve::print(&rt.eval("heard.join('|')").unwrap()),
         "true|strictEqual|deepStrictEqual|rejects ok|Missing expected rejection.|doesNotReject ok|Got unwanted rejection."
     );
 }

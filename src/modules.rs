@@ -3,7 +3,7 @@
 //!
 //! A name is looked for, in order:
 //!
-//! 1. Among the built-in modules — what the host defined ([`crate::RuntimeX::define_builtin`]),
+//! 1. Among the built-in modules — what the host defined ([`crate::Runtime::define_builtin`]),
 //!    then Node's own ([`crate::node::MODULES`], each made the first time it is asked for), then
 //!    the host's families. Each answers to its bare name and to `node:` before it
 //!    (`require('node:crypto')`), and to a stray `/` after it (`require('string_decoder/')`, as

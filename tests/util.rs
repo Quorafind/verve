@@ -4,10 +4,10 @@
 
 use std::path::Path;
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 /// Runs `body` as a CommonJS module; it sets `exports.result` to an array of strings.
-fn run(rt: &mut RuntimeX, body: &str) -> Vec<String> {
+fn run(rt: &mut Runtime, body: &str) -> Vec<String> {
     let exports = rt
         .load_module(Path::new("/plugins/util-test/main.js"), body)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -15,7 +15,7 @@ fn run(rt: &mut RuntimeX, body: &str) -> Vec<String> {
     let text = rt
         .call(&json, &boa_engine::JsValue::undefined(), &[exports])
         .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text)).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
     parsed["result"]
         .as_array()
         .unwrap()
@@ -30,7 +30,7 @@ fn run(rt: &mut RuntimeX, body: &str) -> Vec<String> {
 
 #[test]
 fn inspect_writes_values_as_node_does() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run(
         &mut rt,
         r#"
@@ -95,7 +95,7 @@ fn inspect_writes_values_as_node_does() {
 
 #[test]
 fn format_and_the_console_fill_in_specifiers() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run(
         &mut rt,
         r#"
@@ -133,7 +133,7 @@ fn format_and_the_console_fill_in_specifiers() {
 
 #[test]
 fn deep_strict_equality_and_the_type_checks() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run(
         &mut rt,
         r#"
@@ -167,7 +167,7 @@ fn deep_strict_equality_and_the_type_checks() {
 
 #[test]
 fn promisify_callbackify_deprecate_and_the_rest() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     rt.load_module(
         Path::new("/plugins/util-async/main.js"),
         r#"
@@ -195,7 +195,7 @@ fn promisify_callbackify_deprecate_and_the_rest() {
     )
     .unwrap();
     rt.run_microtasks();
-    let heard = runtime_x::print(&rt.eval("heard.join('|')").unwrap());
+    let heard = verve::print(&rt.eval("heard.join('|')").unwrap());
     assert_eq!(
         heard,
         "inherits true true|mime text/html;charset=utf-8|args {\"values\":{\"foo\":true,\"bar\":\"3\"},\"positionals\":[\"pos\"]}|debuglog false|promisify 42|custom c|rejected no|callbackify null 2|falsy ERR_FALSY_VALUE_REJECTION"
@@ -213,7 +213,7 @@ fn promisify_callbackify_deprecate_and_the_rest() {
 /// test harnesses fake a module — is written as a function, not walked forever.
 #[test]
 fn a_proxy_that_answers_everything_is_written_as_a_function() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     let result = run(
         &mut rt,
         r#"

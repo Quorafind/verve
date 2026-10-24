@@ -1,5 +1,5 @@
 {
-  "name": "runtime-x-real-esm-acceptance",
+  "name": "verve-real-esm-acceptance",
   "private": true,
   "type": "module",
   "dependencies": {

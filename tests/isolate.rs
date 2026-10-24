@@ -6,12 +6,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use runtime_x::RuntimeX;
-use runtime_x::isolate::{Guest, Health, Isolate, Options, Outbox};
+use verve::Runtime;
+use verve::isolate::{Guest, Health, Isolate, Options, Outbox};
 
 /// A runtime and nothing else: its jobs evaluate scripts, and its view is how many have run.
 struct Scripts {
-    runtime: RuntimeX,
+    runtime: Runtime,
     ran: u64,
 }
 
@@ -37,7 +37,7 @@ impl Guest for Scripts {
         ran.then_some(self.ran)
     }
 
-    fn interrupt_handle(&mut self) -> Option<runtime_x::isolate::InterruptHandle> {
+    fn interrupt_handle(&mut self) -> Option<verve::isolate::InterruptHandle> {
         Some(self.runtime.interrupt_handle())
     }
 }
@@ -49,7 +49,7 @@ fn spawn(name: &str, wakes: Arc<AtomicUsize>) -> Isolate<Scripts> {
             ..Options::default()
         },
         || Scripts {
-            runtime: RuntimeX::new(),
+            runtime: Runtime::new(),
             ran: 0,
         },
         move || {
@@ -63,7 +63,7 @@ fn eval(isolate: &Isolate<Scripts>, source: &'static str) -> u64 {
     isolate.send(move |guest, out| {
         guest.ran += 1;
         let said = match guest.runtime.eval(source) {
-            Ok(value) => runtime_x::print(&value),
+            Ok(value) => verve::print(&value),
             Err(error) => format!("error: {error}"),
         };
         out.push(said);

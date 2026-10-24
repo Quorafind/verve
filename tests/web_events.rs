@@ -5,13 +5,13 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 /// A runtime on a clock that moves only when told to.
-fn runtime() -> (Rc<Cell<f64>>, RuntimeX) {
+fn runtime() -> (Rc<Cell<f64>>, Runtime) {
     let time = Rc::new(Cell::new(0.));
     let read = Rc::clone(&time);
-    (time, RuntimeX::with_clock(move || read.get()))
+    (time, Runtime::with_clock(move || read.get()))
 }
 
 /// Runs `script` (which fills the global array `log`), then the timers due within `ms`, and
@@ -27,7 +27,7 @@ fn run(script: &str, ms: f64) -> Vec<String> {
         now += 1.;
     }
     let text = rt.eval("JSON.stringify(log.map(String))").unwrap();
-    serde_json::from_str(&runtime_x::print(&text)).unwrap()
+    serde_json::from_str(&verve::print(&text)).unwrap()
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn a_websocket_fails_as_an_unreachable_server_does() {
     .unwrap();
     time.set(1.);
     rt.run_due();
-    let log = runtime_x::print(&rt.eval("log.join('|')").unwrap());
+    let log = verve::print(&rt.eval("log.join('|')").unwrap());
     assert_eq!(
         log,
         "0|wss://example.com/live|1|blob|InvalidStateError|SyntaxError|InvalidAccessError|error error 3|close 1006 false"

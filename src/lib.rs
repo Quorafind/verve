@@ -1,4 +1,4 @@
-//! Runtime X: the Node-shaped environment a community plugin's `main.js` expects, on Boa.
+//! Verve: the Node-shaped environment a community plugin's `main.js` expects, on Boa.
 //!
 //! A plugin is a CommonJS module. It is handed `module`, `exports` and `require`, it reaches
 //! for `setTimeout`, `setInterval`, `queueMicrotask`, `console` and `process`, and it `await`s.
@@ -6,11 +6,11 @@
 //! Rust — there is no Node, no Electron, and no JavaScript written to stand in for either.
 //!
 //! What a module may `require` beyond its own files is whatever the host registered under that
-//! name with [`RuntimeX::define_builtin`]: the Obsidian host registers `obsidian` there, as a
+//! name with [`Runtime::define_builtin`]: the Obsidian host registers `obsidian` there, as a
 //! module object whose classes and functions are native too.
 //!
 //! The runtime does not keep time on its own. The host owns the clock and the loop: it asks
-//! [`RuntimeX::next_due`] when the next timer is, and calls [`RuntimeX::run_due`] then — from a
+//! [`Runtime::next_due`] when the next timer is, and calls [`Runtime::run_due`] then — from a
 //! window's frame, a test's fake clock, whatever drives it. Every entry into JavaScript ends by
 //! running the microtasks it queued, so a promise a callback started settles before the host
 //! looks again.
@@ -83,7 +83,7 @@ pub fn set_thread_stack(bytes: usize) {
     THREAD_STACK.with(|stack| stack.set(Some(bytes)));
 }
 
-/// What makes a module of a family the host defined; see [`RuntimeX::define_builtin_family`].
+/// What makes a module of a family the host defined; see [`Runtime::define_builtin_family`].
 pub type ModuleMaker = fn(&mut Context, &str) -> JsResult<JsValue>;
 
 /// Milliseconds on the host's clock. Only differences between two readings mean anything.
@@ -210,7 +210,7 @@ impl JobExecutor for Microtasks {
                             report(&mut context.borrow_mut(), &error)
                         }
                         std::task::Poll::Pending => {
-                            // RuntimeX installs no asynchronous source loader. It must not
+                            // Runtime installs no asynchronous source loader. It must not
                             // block an embedder's tick on an externally supplied future.
                             let error = JsNativeError::error()
                                 .with_message("A native module job unexpectedly suspended")
@@ -225,17 +225,17 @@ impl JobExecutor for Microtasks {
 }
 
 /// The runtime: one JavaScript realm, its module loader, its timers and its console.
-pub struct RuntimeX {
+pub struct Runtime {
     context: Context,
 }
 
-impl Default for RuntimeX {
+impl Default for Runtime {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl RuntimeX {
+impl Runtime {
     /// A runtime on the system's monotonic clock.
     pub fn new() -> Self {
         let start = web_time::Instant::now();
@@ -276,7 +276,7 @@ impl RuntimeX {
             console_timers: RefCell::new(HashMap::new()),
             console_counts: RefCell::new(HashMap::new()),
             console_depth: std::cell::Cell::new(0),
-            echo: std::env::var_os("RUNTIME_X_ECHO").is_some(),
+            echo: std::env::var_os("VERVE_ECHO").is_some(),
             blobs: RefCell::new(HashMap::new()),
             workers: RefCell::new(Vec::new()),
             port: RefCell::new(None),
@@ -289,7 +289,7 @@ impl RuntimeX {
 
     /// How much native stack a script may use before deep recursion becomes a `RangeError` —
     /// about half the stack of the thread it runs on. A runtime made on a thread of
-    /// runtime-x's own (a worker, an isolate), or after [`set_thread_stack`], has it already.
+    /// Verve's own (a worker, an isolate), or after [`set_thread_stack`], has it already.
     pub fn set_native_stack_limit(&mut self, bytes: usize) {
         self.context
             .runtime_limits_mut()
@@ -449,7 +449,7 @@ impl RuntimeX {
         busy
     }
 
-    /// [`RuntimeX::run_workers`], stopping at `deadline` once something has been heard: what is
+    /// [`Runtime::run_workers`], stopping at `deadline` once something has been heard: what is
     /// left is heard on a later call.
     pub fn run_workers_until(&mut self, deadline: std::time::Instant) -> bool {
         let busy = worker::run_workers(&mut self.context, Some(deadline));
@@ -499,7 +499,7 @@ impl RuntimeX {
         self.run_due_until(None)
     }
 
-    /// [`RuntimeX::run_due`], stopping at `deadline` once one has fired: the rest stay due, and
+    /// [`Runtime::run_due`], stopping at `deadline` once one has fired: the rest stay due, and
     /// fire on a later call — as a browser spreads a burst of tasks over its frames.
     pub fn run_due_until(&mut self, deadline: Option<std::time::Instant>) -> usize {
         let now = self.now();
@@ -608,10 +608,10 @@ pub(crate) fn shared(context: &Context) -> Rc<Shared> {
     context
         .get_data::<Rc<Shared>>()
         .cloned()
-        .expect("runtime-x installed its state")
+        .expect("verve installed its state")
 }
 
-/// What `require(specifier)` answers, from a host's native function; see [`RuntimeX::require`].
+/// What `require(specifier)` answers, from a host's native function; see [`Runtime::require`].
 pub fn require(context: &mut Context, specifier: &str) -> JsResult<JsValue> {
     let cwd = PathBuf::from(shared(context).cwd.borrow().clone());
     modules::require(context, &cwd, specifier, None)
@@ -627,11 +627,11 @@ pub fn now(context: &Context) -> Millis {
     (shared(context).clock)()
 }
 
-/// Writes a line to the console the host reads with [`RuntimeX::take_console`].
+/// Writes a line to the console the host reads with [`Runtime::take_console`].
 pub fn console_line(context: &Context, level: Level, text: String) {
     let state = shared(context);
     if state.echo {
-        eprintln!("[runtime-x {level:?}] {text}");
+        eprintln!("[verve {level:?}] {text}");
     }
     state.console.borrow_mut().push(ConsoleLine { level, text });
 }
@@ -1035,10 +1035,10 @@ fn clear_timer_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 mod tests {
     use super::*;
 
-    fn fake_clock() -> (Rc<Cell<f64>>, RuntimeX) {
+    fn fake_clock() -> (Rc<Cell<f64>>, Runtime) {
         let time = Rc::new(Cell::new(0.));
         let read = Rc::clone(&time);
-        (time, RuntimeX::with_clock(move || read.get()))
+        (time, Runtime::with_clock(move || read.get()))
     }
 
     #[test]

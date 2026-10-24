@@ -2,14 +2,14 @@
 //! bytes, its functions called both ways, its memory read and written from JavaScript and
 //! grown, an error thrown through it, a trap, and its globals and tables.
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
-fn js(rt: &mut RuntimeX, source: &str) -> String {
+fn js(rt: &mut Runtime, source: &str) -> String {
     let value = rt.eval(source).unwrap_or_else(|e| panic!("{source}: {e}"));
-    runtime_x::print(&value)
+    verve::print(&value)
 }
 
-fn settle(rt: &mut RuntimeX) {
+fn settle(rt: &mut Runtime) {
     for _ in 0..50 {
         rt.run_microtasks();
         if rt.run_due() == 0 && rt.next_due().is_none() {
@@ -19,7 +19,7 @@ fn settle(rt: &mut RuntimeX) {
 }
 
 /// The module, as bytes in a global `bytes`.
-fn load(rt: &mut RuntimeX, wat: &str) {
+fn load(rt: &mut Runtime, wat: &str) {
     let bytes = wat::parse_str(wat).unwrap();
     let list: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
     js(
@@ -58,7 +58,7 @@ const MODULE: &str = r#"
 
 #[test]
 fn a_module_called_both_ways() {
-    let mut rt = RuntimeX::with_clock(|| 0.);
+    let mut rt = Runtime::with_clock(|| 0.);
     load(&mut rt, MODULE);
     js(
         &mut rt,
@@ -103,7 +103,7 @@ fn a_module_called_both_ways() {
 
 #[test]
 fn a_memory_made_by_javascript_is_imported() {
-    let mut rt = RuntimeX::with_clock(|| 0.);
+    let mut rt = Runtime::with_clock(|| 0.);
     load(
         &mut rt,
         r#"

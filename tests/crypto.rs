@@ -2,13 +2,13 @@
 //! web's `crypto.subtle` (the AES-GCM with a PBKDF2 key that sync and encryption plugins use),
 //! checked against the published test vectors.
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 /// Runs `body` as a CommonJS module; it sets `exports.result` to an array of strings, perhaps
 /// once its promises settle.
 fn run(body: &str) -> Vec<String> {
-    let mut rt = RuntimeX::new();
-    let dir = std::env::temp_dir().join(format!("runtime-x-crypto-{}", std::process::id()));
+    let mut rt = Runtime::new();
+    let dir = std::env::temp_dir().join(format!("verve-crypto-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exports = rt
         .load_module(&dir.join("main.js"), body)
@@ -17,7 +17,7 @@ fn run(body: &str) -> Vec<String> {
     let text = rt
         .call(&json, &boa_engine::JsValue::undefined(), &[exports])
         .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text)).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
     let Some(result) = parsed["result"].as_array() else {
         panic!("no result: {parsed} {:?}", rt.take_console());
     };

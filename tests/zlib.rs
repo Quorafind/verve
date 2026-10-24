@@ -1,10 +1,10 @@
 //! `zlib` as plugins and the libraries they bundle use it: the synchronous and callback forms
 //! of every format, data Node made read back, Node's errors, and the streams on `Transform`.
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
-fn result_of(rt: &mut RuntimeX, body: &str) -> Vec<String> {
-    let dir = std::env::temp_dir().join(format!("runtime-x-zlib-{}", std::process::id()));
+fn result_of(rt: &mut Runtime, body: &str) -> Vec<String> {
+    let dir = std::env::temp_dir().join(format!("verve-zlib-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exports = rt
         .load_module(&dir.join("main.js"), body)
@@ -13,7 +13,7 @@ fn result_of(rt: &mut RuntimeX, body: &str) -> Vec<String> {
     let text = rt
         .call(&json, &boa_engine::JsValue::undefined(), &[exports])
         .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text)).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
     let Some(result) = parsed["result"].as_array() else {
         panic!("no result: {parsed} {:?}", rt.take_console());
     };
@@ -28,7 +28,7 @@ fn result_of(rt: &mut RuntimeX, body: &str) -> Vec<String> {
 }
 
 fn run(body: &str) -> Vec<String> {
-    result_of(&mut RuntimeX::new(), body)
+    result_of(&mut Runtime::new(), body)
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn errors_carry_nodes_codes_and_callbacks_answer_later() {
 
 #[test]
 fn streams_are_transforms_feeding_the_codec() {
-    let mut rt = RuntimeX::new();
+    let mut rt = Runtime::new();
     // The stream module's `Transform`, as its public API has it, kept to what zlib's streams
     // reach: `transform(chunk, encoding, callback)`, `flush(callback)`, `push`.
     let stream = rt

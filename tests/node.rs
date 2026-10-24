@@ -1,12 +1,12 @@
 //! Node's own modules as a desktop plugin `require`s them: `path`, `util`, `events`, `os`,
 //! `url`, `fs` and `fs/promises`, and `child_process` refusing to start anything.
 
-use runtime_x::RuntimeX;
+use verve::Runtime;
 
 /// Runs `body` as a CommonJS module; it sets `exports.result` to an array of strings.
 fn run(body: &str) -> Vec<String> {
-    let mut rt = RuntimeX::new();
-    let dir = std::env::temp_dir().join(format!("runtime-x-node-{}", std::process::id()));
+    let mut rt = Runtime::new();
+    let dir = std::env::temp_dir().join(format!("verve-node-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let main = dir.join("main.js");
     let exports = rt
@@ -16,7 +16,7 @@ fn run(body: &str) -> Vec<String> {
     let text = rt
         .call(&json, &rt_undefined(), &[exports])
         .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&runtime_x::print(&text)).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
     parsed["result"]
         .as_array()
         .unwrap()
@@ -96,7 +96,7 @@ fn path_util_events_os_and_url() {
 
 #[test]
 fn fs_reads_and_writes_and_child_process_refuses() {
-    let dir = std::env::temp_dir().join(format!("runtime-x-fs-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("verve-fs-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let dir_js = dir.to_string_lossy().replace('\\', "/");
     let result = run(&format!(

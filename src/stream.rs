@@ -4761,14 +4761,14 @@ pub(crate) fn create_write_stream(context: &mut Context, args: &[JsValue]) -> Js
 
 #[cfg(test)]
 mod tests {
-    use crate::RuntimeX;
+    use crate::Runtime;
 
     /// The file streams, reached through a global made for the test: `fs` is not this
     /// module's to wire.
     #[test]
     fn file_streams_read_and_write_the_disk_a_chunk_at_a_time() {
-        let mut rt = RuntimeX::new();
-        let dir = std::env::temp_dir().join(format!("runtime-x-fs-streams-{}", std::process::id()));
+        let mut rt = Runtime::new();
+        let dir = std::env::temp_dir().join(format!("verve-fs-streams-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.txt");
         std::fs::write(&source, "0123456789".repeat(1000)).unwrap();
