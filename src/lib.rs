@@ -20,14 +20,17 @@
 mod assert;
 mod buffer;
 mod crypto;
+mod dom_events;
 mod encoding;
 mod events;
 mod fetch;
 mod indexeddb;
 mod intl;
 pub mod isolate;
+mod messaging;
 mod modules;
 mod native;
+mod navigator;
 mod node;
 mod process;
 mod stream;
@@ -673,6 +676,9 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     streams::install(context)?;
     fetch::install(context)?;
     zlib::install(context)?;
+    dom_events::install(context)?;
+    messaging::install(context)?;
+    navigator::install(context)?;
     worker::install(context)?;
     indexeddb::install(context)?;
     wasm::install(context)?;
