@@ -46,6 +46,7 @@ mod streams;
 mod string_decoder;
 mod timers;
 mod url;
+mod url_pattern;
 mod util;
 mod vm;
 mod wasm;
@@ -710,6 +711,7 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     intl::install(context)?;
     encoding::install(context)?;
     url::install(context)?;
+    url_pattern::install(context)?;
     web::install(context)?;
     crypto::install(context)?;
     streams::install(context)?;

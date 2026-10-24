@@ -335,3 +335,56 @@ fn the_host_requires_natively_and_gives_scripts_a_window_require() {
         ]
     );
 }
+
+/// `URLPattern` as bundles use it: a dictionary of parts with named and regular-expression
+/// groups (zotlit's own pattern), a pattern string, and one against a base URL.
+#[test]
+fn url_patterns_match_and_say_what_they_matched() {
+    let dir = folder("urlpattern", &[]);
+    let mut rt = RuntimeX::new();
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        const items = new URLPattern({ protocol: 'http', hostname: 'zotero.org', pathname: '/:type(users|groups){/local}?/:libraryID/items/:key' });
+        const hit = items.exec('http://zotero.org/users/local/abc/items/K1');
+        const plain = items.exec('http://zotero.org/groups/42/items/K2');
+        const books = new URLPattern('https://example.com/books/:id?');
+        const relative = new URLPattern('./docs/*', 'https://site.dev/app/index.html');
+        exports.result = [
+            hit.pathname.groups.type, hit.pathname.groups.libraryID, hit.pathname.groups.key,
+            plain.pathname.groups.type, plain.pathname.groups.libraryID,
+            items.test('http://zotero.org/people/1/items/K'), items.test('https://zotero.org/users/1/items/K'),
+            items.hasRegExpGroups, items.search,
+            books.test('https://example.com/books'), books.test('https://example.com/books/7'),
+            books.exec('https://example.com/books/7').pathname.groups.id, books.test('https://example.com/books/7/8'),
+            relative.pathname, relative.test('https://site.dev/app/docs/a/b'), relative.test('https://site.dev/docs/a'),
+            new URLPattern({ pathname: '/a/*' }, { ignoreCase: true }).test({ pathname: '/A/b' }),
+            (() => { try { URLPattern({}); return 'called' } catch (e) { return e.name } })(),
+        ];
+    "#,
+    );
+    assert_eq!(
+        result,
+        [
+            "users",
+            "abc",
+            "K1",
+            "groups",
+            "42",
+            "false",
+            "false",
+            "true",
+            "*",
+            "true",
+            "true",
+            "7",
+            "false",
+            "/app/docs/*",
+            "true",
+            "false",
+            "true",
+            "TypeError",
+        ]
+    );
+}
