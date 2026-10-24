@@ -269,12 +269,12 @@ fn exports_resolve(
         if dots != 0 {
             map_match(map, subpath, root, false, mode, conditions, depth)?
         } else if subpath == "." {
-            package_target(exports, root, None, false, mode, conditions, depth)?
+            package_target(exports, root, None, false, mode, conditions, depth)?.url()
         } else {
             None
         }
     } else if subpath == "." {
-        package_target(exports, root, None, false, mode, conditions, depth)?
+        package_target(exports, root, None, false, mode, conditions, depth)?.url()
     } else {
         None
     };
@@ -299,7 +299,8 @@ fn map_match(
     depth: usize,
 ) -> Result<Option<Url>> {
     if let Some(value) = map.get(name).filter(|_| !name.contains('*')) {
-        return package_target(value, root, None, imports, mode, conditions, depth);
+        return package_target(value, root, None, imports, mode, conditions, depth)
+            .map(Target::url);
     }
     let mut matches: Vec<_> = map
         .iter()
@@ -322,7 +323,8 @@ fn map_match(
         .collect();
     matches.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
     if let Some((_, _, matched, value)) = matches.first() {
-        return package_target(value, root, Some(matched), imports, mode, conditions, depth);
+        return package_target(value, root, Some(matched), imports, mode, conditions, depth)
+            .map(Target::url);
     }
     Ok(None)
 }
@@ -336,6 +338,21 @@ fn invalid_segments(path: &str) -> bool {
         .any(|part| part == "." || part == ".." || part.eq_ignore_ascii_case("node_modules"))
 }
 
+enum Target {
+    Unmatched,
+    Blocked,
+    Url(Url),
+}
+
+impl Target {
+    fn url(self) -> Option<Url> {
+        match self {
+            Self::Url(url) => Some(url),
+            Self::Unmatched | Self::Blocked => None,
+        }
+    }
+}
+
 fn package_target(
     target: &Value,
     root: &Path,
@@ -344,12 +361,17 @@ fn package_target(
     mode: Mode,
     conditions: &[String],
     depth: usize,
-) -> Result<Option<Url>> {
+) -> Result<Target> {
     match target {
-        Value::Null => Ok(None),
+        Value::Null => Ok(Target::Blocked),
         Value::String(target) => {
             let replacement = matched.map_or_else(|| target.clone(), |s| target.replace('*', s));
             if !target.starts_with("./") {
+                if imports && target.starts_with("node:") {
+                    return Url::parse(&replacement)
+                        .map(Target::Url)
+                        .map_err(|e| error("ERR_INVALID_PACKAGE_TARGET", e.to_string()));
+                }
                 if imports
                     && !target.starts_with("../")
                     && !target.starts_with('/')
@@ -357,7 +379,7 @@ fn package_target(
                 {
                     let base = file_url(&root.join("package.json"))?;
                     return resolve_inner(&replacement, &base, mode, conditions, depth + 1)
-                        .map(Some);
+                        .map(Target::Url);
                 }
                 return Err(error(
                     "ERR_INVALID_PACKAGE_TARGET",
@@ -372,22 +394,23 @@ fn package_target(
             }
             let base = file_url(&root.join("package.json"))?;
             base.join(&replacement)
-                .map(Some)
+                .map(Target::Url)
                 .map_err(|e| error("ERR_INVALID_PACKAGE_TARGET", e.to_string()))
         }
         Value::Array(targets) => {
             let mut last = None;
             for item in targets {
                 match package_target(item, root, matched, imports, mode, conditions, depth) {
-                    Ok(Some(url)) => return Ok(Some(url)),
-                    Ok(None) => last = None,
+                    Ok(Target::Url(url)) => return Ok(Target::Url(url)),
+                    Ok(Target::Blocked) => last = None,
+                    Ok(Target::Unmatched) => {}
                     Err(err) if err.code == "ERR_INVALID_PACKAGE_TARGET" => last = Some(err),
                     Err(err) => return Err(err),
                 }
             }
             match last {
                 Some(err) => Err(err),
-                None => Ok(None),
+                None => Ok(Target::Blocked),
             }
         }
         Value::Object(map) => {
@@ -411,17 +434,13 @@ fn package_target(
                     || condition == "module-sync"
                     || conditions.contains(condition)
                 {
-                    if let Some(url) =
-                        package_target(target, root, matched, imports, mode, conditions, depth)?
-                    {
-                        return Ok(Some(url));
-                    }
-                    if target.is_null() {
-                        return Ok(None);
+                    match package_target(target, root, matched, imports, mode, conditions, depth)? {
+                        Target::Unmatched => {}
+                        other => return Ok(other),
                     }
                 }
             }
-            Ok(None)
+            Ok(Target::Unmatched)
         }
         _ => Err(error(
             "ERR_INVALID_PACKAGE_TARGET",
