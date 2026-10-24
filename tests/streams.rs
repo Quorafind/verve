@@ -257,3 +257,43 @@ fn blobs_stream_and_stream_web_is_requirable() {
     );
     assert_eq!(result, ["streamed blob", "true", "true", "function"]);
 }
+
+#[test]
+fn compression_streams_round_trip_and_agree_with_zlib() {
+    let result = run_async(
+        r#"
+        const text = 'compress me, '.repeat(300);
+        const out = [];
+        for (const format of ['gzip', 'deflate', 'deflate-raw']) {
+            const packed = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream(format))).arrayBuffer();
+            const back = await new Response(new Response(packed).body.pipeThrough(new DecompressionStream(format))).text();
+            out.push(format + ' ' + (packed.byteLength < text.length) + ' ' + (back === text));
+        }
+        const zlib = require('zlib');
+        const fromNode = zlib.gzipSync(Buffer.from(text));
+        const read = await new Response(new Response(fromNode).body.pipeThrough(new DecompressionStream('gzip'))).text();
+        let unsupported;
+        try { new CompressionStream('lz4'); } catch (e) { unsupported = e.name; }
+        const broken = new DecompressionStream('deflate');
+        const writer = broken.writable.getWriter();
+        writer.write(new Uint8Array([1, 2, 3, 4])).catch(() => {});
+        let failed;
+        try { await broken.readable.getReader().read(); } catch (e) { failed = e.message; }
+        class Packer extends CompressionStream {}
+        result = out.concat([read === text, unsupported, failed, new Packer('gzip') instanceof CompressionStream, require('stream/web').DecompressionStream === DecompressionStream]);
+    "#,
+    );
+    assert_eq!(
+        result,
+        [
+            "gzip true true",
+            "deflate true true",
+            "deflate-raw true true",
+            "true",
+            "TypeError",
+            "Z_DATA_ERROR: incorrect header check",
+            "true",
+            "true",
+        ]
+    );
+}

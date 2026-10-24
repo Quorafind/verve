@@ -40,7 +40,6 @@ pub(crate) enum Kind {
 impl Kind {
     /// The web's `CompressionStream` format (`gzip`, `deflate`, `deflate-raw`) one way or the
     /// other.
-    #[allow(dead_code)] // For `CompressionStream` and `DecompressionStream`.
     pub(crate) fn for_format(format: &str, compress: bool) -> Option<Kind> {
         Some(match (format, compress) {
             ("gzip", true) => Kind::Gzip,
@@ -1179,4 +1178,115 @@ mod tests {
             .unwrap();
         assert_eq!(crate::print(&out), "handle ok");
     }
+}
+
+// ─── CompressionStream and DecompressionStream ──────────────────────────────────────────────
+
+/// A web compression stream's codec, held by its transformer.
+#[derive(Trace, Finalize, JsData)]
+struct WebCodec {
+    #[unsafe_ignore_trace]
+    codec: RefCell<Codec>,
+}
+
+/// Feeds the codec `f`, and enqueues what comes out as a `Uint8Array` — the chunks the web's
+/// streams answer, where Node's answer `Buffer`s.
+fn web_codec_step(
+    state: &JsObject,
+    controller: &JsValue,
+    f: impl FnOnce(&mut Codec) -> Result<Vec<u8>, ZlibError>,
+    context: &mut Context,
+) -> JsResult<()> {
+    let outcome = {
+        let data = state.downcast_ref::<WebCodec>().expect("a web codec");
+        f(&mut data.codec.borrow_mut())
+    };
+    let bytes =
+        outcome.map_err(|error| type_error(format!("{}: {}", error.code, error.message)))?;
+    if !bytes.is_empty() {
+        let chunk = boa_engine::object::builtins::JsUint8Array::from_iter(bytes, context)?;
+        crate::streams::transform_enqueue(context, controller, chunk.into())?;
+    }
+    Ok(())
+}
+
+/// `new CompressionStream(format)` / `new DecompressionStream(format)`: a readable and a
+/// writable side, with a codec of `format` — `gzip`, `deflate` or `deflate-raw` — between them.
+/// Chunks written must be `BufferSource`s; what is read is `Uint8Array`s. A decompression stream
+/// whose input stops short of its end errors when it is closed, as the standard says.
+fn construct_web_codec(
+    this: &JsValue,
+    args: &[JsValue],
+    compress: bool,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = if compress {
+        "CompressionStream"
+    } else {
+        "DecompressionStream"
+    };
+    let fallback = get(this, "prototype", context)?
+        .as_object()
+        .ok_or_else(|| {
+            type_error(format!(
+                "Class constructor {name} cannot be invoked without 'new'"
+            ))
+        })?;
+    let format = text_of(&arg(args, 0), context)?;
+    let kind = Kind::for_format(&format, compress).ok_or_else(|| {
+        type_error(format!(
+            "Failed to construct '{name}': Unsupported compression format: '{format}'"
+        ))
+    })?;
+    let state = JsObject::from_proto_and_data(
+        None,
+        WebCodec {
+            codec: RefCell::new(Codec::new(kind, Options::default())),
+        },
+    );
+    let transform = crate::streams::native_transform(
+        context,
+        state,
+        |state, chunk, controller, cx| {
+            let bytes = crate::encoding::bytes_of(&chunk, cx)?.ok_or_else(|| {
+                type_error("The provided value is not of type '(ArrayBuffer or ArrayBufferView)'")
+            })?;
+            web_codec_step(state, controller, |codec| codec.push(&bytes), cx)
+        },
+        |state, controller, cx| web_codec_step(state, controller, Codec::finish, cx),
+    )?;
+    Ok(crate::streams::pair_instance(
+        context,
+        this,
+        name,
+        fallback,
+        transform,
+        JsValue::undefined(),
+    )?
+    .into())
+}
+
+/// The web's two compression classes, as globals made the first time they are read.
+pub(crate) fn install(context: &mut Context) -> JsResult<()> {
+    crate::native::lazy_global(context, "CompressionStream", |cx| {
+        let (class, _) = crate::streams::pair_class(
+            cx,
+            "CompressionStream",
+            1,
+            |this, args, cx| construct_web_codec(this, args, true, cx),
+            &[],
+        )?;
+        Ok(class.into())
+    })?;
+    crate::native::lazy_global(context, "DecompressionStream", |cx| {
+        let (class, _) = crate::streams::pair_class(
+            cx,
+            "DecompressionStream",
+            1,
+            |this, args, cx| construct_web_codec(this, args, false, cx),
+            &[],
+        )?;
+        Ok(class.into())
+    })?;
+    Ok(())
 }

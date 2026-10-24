@@ -19,8 +19,8 @@
 
 mod crypto;
 mod encoding;
-mod fetch;
 mod events;
+mod fetch;
 mod indexeddb;
 mod intl;
 pub mod isolate;
@@ -28,8 +28,8 @@ mod modules;
 mod native;
 mod node;
 mod process;
-mod streams;
 mod stream;
+mod streams;
 mod string_decoder;
 mod url;
 mod wasm;
@@ -669,6 +669,7 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     crypto::install(context)?;
     streams::install(context)?;
     fetch::install(context)?;
+    zlib::install(context)?;
     worker::install(context)?;
     indexeddb::install(context)?;
     wasm::install(context)?;
