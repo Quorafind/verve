@@ -1,0 +1,63 @@
+[package]
+name = "runtime-x"
+version = "0.1.0"
+edition = "2024"
+description = "A JavaScript runtime for live plugins: Boa with the web's and Node's everyday APIs in Rust, and isolates — a runtime on a thread of its own, sent jobs, answering with events and snapshots, failing alone."
+publish = false
+
+# A Node-shaped place for a plugin's main.js to run: CommonJS `require`, `module.exports`,
+# timers, `console`, `process`. Every one of them is a native Rust function on Boa, an
+# interpreter written in Rust; nothing here is JavaScript written to stand in for Node.
+
+[workspace]
+
+[dependencies]
+boa_engine = { version = "=0.22.0", default-features = false, features = ["annex-b"] }
+boa_gc = "=0.22.0"
+web-time = "=1.1.0"
+# `URL` and `URLSearchParams`: the WHATWG URL standard.
+url = "2.5"
+form_urlencoded = "1.2"
+# `crypto`: the system's randomness, and the digests `crypto.subtle` answers.
+getrandom = "0.3"
+sha1 = "0.10"
+sha2 = "0.10"
+# IndexedDB's databases, kept on disk as JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# WebAssembly, run by an interpreter written in Rust.
+wasmi = "0.35"
+
+[dev-dependencies]
+serde_json = "1"
+# WebAssembly tests write their modules as text.
+wat = "1.251"
+
+# Boa as rebon's branch of it: 0.22.0 with the fixes listed in its `SU.md`, and the interrupt
+# handle isolates stop a script with. An embedder patches Boa the same way.
+[patch.crates-io]
+boa_ast = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
+boa_engine = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
+boa_gc = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
+boa_interner = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
+boa_macros = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
+boa_parser = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
+boa_string = { git = "http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git", branch = "main" }
+
+# The interpreter unoptimised is several times slower, in tests as anywhere.
+[profile.dev.package.boa_engine]
+opt-level = 3
+[profile.dev.package.boa_parser]
+opt-level = 3
+[profile.dev.package.boa_ast]
+opt-level = 3
+[profile.dev.package.boa_gc]
+opt-level = 3
+[profile.dev.package.boa_interner]
+opt-level = 3
+[profile.dev.package.boa_string]
+opt-level = 3
+[profile.dev.package.regress]
+opt-level = 3
+[profile.dev.package.wasmi]
+opt-level = 3
