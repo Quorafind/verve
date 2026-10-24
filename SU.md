@@ -33,6 +33,16 @@ always agree with one another.
   always ends; such a comparator gets an unspecified order, as the specification allows. An
   exception from the comparator still stops the sort at once.
 
+- `boa_engine`, `bytecompiler`: the callee of a method call (`a.f()`, `a[k]()`), an item of an
+  optional chain (`a?.b.c`) and a name looked up in an environment (`x is not defined`) carry
+  their own source position. They had none, so an error there was reported at the start of the
+  enclosing function — for a plugin, whose bundle Su wraps in a CommonJS function, at the first
+  line of `main.js` (`var Kp = window.i18next, za = Kp.createInstance()` in Latex Suite). And
+  reading or setting a property of `null`/`undefined` throws V8's message, `Cannot read
+  properties of undefined (reading 'createInstance')` / `Cannot set properties of null (setting
+  'x')`, not `cannot convert 'null' or 'undefined' to object` (`nullish_base_error` in
+  `vm/opcode`). The bytecode snapshots in `tests/insta-bytecode` changed only in their source maps.
+
 - `boa_gc`, `lib.rs`: a collection no longer frees what it found dead before it returns. The
   dead nodes leave the heap, and their memory is returned a few at a time by later allocations
   (`BoaGc::unfreed`, `FREE_PER_ALLOCATION`), the rest before the next collection — and all of

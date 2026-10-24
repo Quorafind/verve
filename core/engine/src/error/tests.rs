@@ -176,3 +176,79 @@ fn eval_error_has_backtrace() {
         }
     }
 }
+
+/// Evaluates `code` from `test.js` and returns the backtrace of the error it throws, with the
+/// message.
+fn eval_backtrace(code: &[u8]) -> (String, Vec<ShadowEntry>) {
+    let mut context = Context::default();
+    let source = Source::from_bytes(code).with_path(Path::new("test.js"));
+    let err = context.eval(source).expect_err("the code should throw");
+    let message = err
+        .as_native()
+        .map(|e| e.message().to_string())
+        .unwrap_or_default();
+    let entries = err
+        .backtrace
+        .as_ref()
+        .expect("error should have a backtrace")
+        .iter()
+        .cloned()
+        .collect();
+    (message, entries)
+}
+
+/// The callee of a method call (`undefined.f()`) and an item of an optional chain carry their own
+/// position. Before, an error there was reported at the start of the enclosing function — in a
+/// CommonJS wrapper, the start of the whole bundle.
+#[test]
+fn method_call_on_undefined_reports_its_position() {
+    let path = Path::new("test.js");
+    let (message, entries) = eval_backtrace(indoc! {br#"
+        (function (exports, require, module) { var a = 1;
+            var Kp = globalThis.i18next, za = Kp.createInstance();
+        })()
+    "#});
+    assert_eq!(
+        message,
+        "Cannot read properties of undefined (reading 'createInstance')"
+    );
+    assert_bytecode_frame(entries.last().unwrap(), "", path, 2, 42);
+
+    let (_, entries) = eval_backtrace(indoc! {br#"
+        function f(o) {
+            var x = 1;
+            return o[
+                "k"]();
+        }
+        f(null)
+    "#});
+    assert_bytecode_frame(entries.last().unwrap(), "f", path, 4, 9);
+
+    let (message, entries) = eval_backtrace(indoc! {br#"
+        function f(o) {
+            var x = 1;
+            return o?.a.b;
+        }
+        f({})
+    "#});
+    assert_eq!(message, "Cannot read properties of undefined (reading 'b')");
+    assert_bytecode_frame(entries.last().unwrap(), "f", path, 3, 17);
+
+    let (message, entries) = eval_backtrace(indoc! {br#"
+        function f() {
+            var x = 1;
+            return x + notDefined;
+        }
+        f()
+    "#});
+    assert_eq!(message, "notDefined is not defined");
+    assert_bytecode_frame(entries.last().unwrap(), "f", path, 3, 16);
+
+    let (message, _) = eval_backtrace(b"var o = null; o.x = 1;");
+    assert_eq!(message, "Cannot set properties of null (setting 'x')");
+    let (message, _) = eval_backtrace(b"var o; o[Symbol('s')] = 1;");
+    assert_eq!(
+        message,
+        "Cannot set properties of undefined (setting 'Symbol(s)')"
+    );
+}

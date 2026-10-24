@@ -108,6 +108,39 @@ pub(crate) use unary_ops::*;
 #[doc(inline)]
 pub(crate) use value::*;
 
+/// The error for reading or setting a property of `null` or `undefined`, worded as V8 words it
+/// (`Cannot read properties of undefined (reading 'x')`, `Cannot set properties of null (setting
+/// 'x')`), which code and people match on.
+pub(crate) fn nullish_base_error(
+    base: &crate::JsValue,
+    key: Option<&crate::JsValue>,
+    set: bool,
+) -> crate::JsError {
+    let base = if base.is_null() { "null" } else { "undefined" };
+    let (verb, action) = if set {
+        ("set", "setting")
+    } else {
+        ("read", "reading")
+    };
+    let key = key.and_then(|key| {
+        if let Some(string) = key.as_string() {
+            Some(string.to_std_string_escaped())
+        } else if let Some(symbol) = key.as_symbol() {
+            Some(symbol.descriptive_string().to_std_string_escaped())
+        } else if key.is_object() {
+            // Converting an object could run code; leave the key out.
+            None
+        } else {
+            Some(key.display().to_string())
+        }
+    });
+    let message = match key {
+        Some(key) => format!("Cannot {verb} properties of {base} ({action} '{key}')"),
+        None => format!("Cannot {verb} properties of {base}"),
+    };
+    crate::JsNativeError::typ().with_message(message).into()
+}
+
 /// Specific opcodes for bindings.
 ///
 /// This separate enum exists to make matching exhaustive where needed.

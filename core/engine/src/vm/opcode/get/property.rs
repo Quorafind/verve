@@ -4,7 +4,7 @@ use crate::{
     Context, JsResult, JsValue, js_string,
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::PropertyKey,
-    vm::opcode::{IndexOperand, Operation, RegisterOperand},
+    vm::opcode::{IndexOperand, Operation, RegisterOperand, nullish_base_error},
 };
 
 fn get_by_name<const LENGTH: bool>(
@@ -35,6 +35,12 @@ fn get_by_name<const LENGTH: bool>(
     //
     //    To prevent the creation of a temporary JsObject, we directly retrieve the prototype that
     //    `to_object()` would produce, such as `Number.prototype`, `String.prototype`, etc.
+    if object.is_null_or_undefined() {
+        let name = context.vm.frame().code_block().ic[usize::from(index)]
+            .name
+            .clone();
+        return Err(nullish_base_error(object, Some(&name.into()), false));
+    }
     let object = object.base_class(context)?;
 
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
@@ -91,6 +97,9 @@ fn get_by_value<const PUSH_KEY: bool>(
 ) -> JsResult<()> {
     let key_value = context.vm.get_register(key.into()).clone();
     let base = context.vm.get_register(object.into()).clone();
+    if base.is_null_or_undefined() {
+        return Err(nullish_base_error(&base, Some(&key_value), false));
+    }
     let object = base.base_class(context)?;
     let key_value = key_value.to_property_key(context)?;
 

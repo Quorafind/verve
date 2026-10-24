@@ -1460,8 +1460,8 @@ impl<'ctx> ByteCompiler<'ctx> {
 
     fn access_get(&mut self, access: Access<'_>, dst: &Register) {
         match access {
-            Access::Variable { name } => {
-                let name = self.resolve_identifier_expect(name);
+            Access::Variable { name: ident } => {
+                let name = self.resolve_identifier_expect(ident);
                 let binding = self.lexical_scope.get_identifier_reference(name);
                 let index = self.get_binding(&binding);
                 if !self.in_with
@@ -1470,7 +1470,14 @@ impl<'ctx> ByteCompiler<'ctx> {
                     self.bytecode.emit_move(dst.variable(), cached_reg.into());
                     return;
                 }
-                self.emit_binding_access(BindingAccessOpcode::GetName, &index, dst);
+                if matches!(index, BindingKind::Local(_)) {
+                    self.emit_binding_access(BindingAccessOpcode::GetName, &index, dst);
+                } else {
+                    // A name looked up in an environment can throw (`x is not defined`, an
+                    // uninitialized binding); report it at the name.
+                    let mut compiler = self.position_guard(ident);
+                    compiler.emit_binding_access(BindingAccessOpcode::GetName, &index, dst);
+                }
             }
             Access::Property { access } => match access {
                 PropertyAccess::Simple(access) => {
@@ -1841,6 +1848,22 @@ impl<'ctx> ByteCompiler<'ctx> {
         this: &Register,
         dst: &Register,
     ) {
+        // As in `access_get`: an error from the access (`undefined.f()`) is reported at the
+        // field, not at whatever position encloses the call.
+        let mut compiler = match access {
+            PropertyAccess::Simple(access) => self.position_guard(access.field()),
+            PropertyAccess::Private(access) => self.position_guard(access.field()),
+            PropertyAccess::Super(access) => self.position_guard(access.field()),
+        };
+        compiler.compile_access_preserve_this_inner(access, this, dst);
+    }
+
+    fn compile_access_preserve_this_inner(
+        &mut self,
+        access: &PropertyAccess,
+        this: &Register,
+        dst: &Register,
+    ) {
         match access {
             PropertyAccess::Simple(access) => {
                 self.compile_expr(access.target(), this);
@@ -2083,28 +2106,34 @@ impl<'ctx> ByteCompiler<'ctx> {
     ) {
         match kind {
             OptionalOperationKind::SimplePropertyAccess { field } => {
-                self.bytecode.emit_move(this.variable(), value.variable());
+                let mut compiler = self.position_guard(field);
+                compiler
+                    .bytecode
+                    .emit_move(this.variable(), value.variable());
                 match field {
                     PropertyAccessField::Const(name) => {
-                        self.emit_get_property_by_name(value, None, value, name.sym());
+                        compiler.emit_get_property_by_name(value, None, value, name.sym());
                     }
                     PropertyAccessField::Expr(expr) => {
-                        let key = self.register_allocator.alloc();
-                        self.compile_expr(expr, &key);
-                        self.bytecode.emit_get_property_by_value(
+                        let key = compiler.register_allocator.alloc();
+                        compiler.compile_expr(expr, &key);
+                        compiler.bytecode.emit_get_property_by_value(
                             value.variable(),
                             key.variable(),
                             value.variable(),
                             value.variable(),
                         );
-                        self.register_allocator.dealloc(key);
+                        compiler.register_allocator.dealloc(key);
                     }
                 }
             }
             OptionalOperationKind::PrivatePropertyAccess { field } => {
-                self.bytecode.emit_move(this.variable(), value.variable());
-                let index = self.get_or_insert_private_name(*field);
-                self.bytecode.emit_get_private_field(
+                let mut compiler = self.position_guard(field);
+                compiler
+                    .bytecode
+                    .emit_move(this.variable(), value.variable());
+                let index = compiler.get_or_insert_private_name(*field);
+                compiler.bytecode.emit_get_private_field(
                     value.variable(),
                     value.variable(),
                     index.into(),

@@ -1,7 +1,7 @@
 use crate::JsExpect;
 use crate::JsValue;
 use crate::value::JsVariant;
-use crate::vm::opcode::{IndexOperand, RegisterOperand};
+use crate::vm::opcode::{IndexOperand, RegisterOperand, nullish_base_error};
 use crate::{
     Context, JsNativeError, JsResult,
     builtins::function::set_function_name,
@@ -20,6 +20,12 @@ fn set_by_name(
 ) -> JsResult<()> {
     let value = context.vm.get_register(value.into()).clone();
 
+    if value_object.is_null_or_undefined() {
+        let name = context.vm.frame().code_block().ic[usize::from(index)]
+            .name
+            .clone();
+        return Err(nullish_base_error(value_object, Some(&name.into()), true));
+    }
     let object = value_object.to_object(context)?;
 
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
@@ -158,6 +164,9 @@ impl SetPropertyByValue {
         let key = context.vm.get_register(key.into()).clone();
         let receiver = context.vm.get_register(receiver.into()).clone();
         let object = context.vm.get_register(object.into()).clone();
+        if object.is_null_or_undefined() {
+            return Err(nullish_base_error(&object, Some(&key), true));
+        }
         let object = object.to_object(context)?;
 
         let key = key.to_property_key(context)?;
