@@ -345,7 +345,7 @@ fn structured_clone_keeps_kinds_shapes_and_cycles() {
 fn navigator_says_it_is_electrons_chromium() {
     let log = run(
         r#"
-        log.push(/Chrome\/138\./.test(navigator.userAgent), /Electron\/37\./.test(navigator.userAgent),
+        log.push(/Chrome\/142\./.test(navigator.userAgent), /Electron\/39\./.test(navigator.userAgent),
                  ['Win32', 'MacIntel', 'Linux x86_64'].includes(navigator.platform), navigator.language,
                  navigator.hardwareConcurrency > 0, navigator.maxTouchPoints, navigator.onLine,
                  navigator.userAgentData.brands.some(b => b.brand === 'Chromium'), typeof navigator.clipboard);

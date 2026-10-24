@@ -18,12 +18,13 @@ use boa_engine::{
 use crate::native::{arg, array, coded_error, exports, function, invoke, js_text, object, text_of};
 use crate::{Level, console_line};
 
-/// The Node release `process.version` claims: the one Electron 37, and with it Obsidian's
-/// current desktop app, is built on.
-pub const NODE_VERSION: &str = "22.16.0";
-pub const ELECTRON_VERSION: &str = "37.2.0";
-pub(crate) const CHROME_VERSION: &str = "138.0.7204.97";
-const V8_VERSION: &str = "13.8.258.19-electron.0";
+/// The Node release `process.version` claims: the one Electron 39, and with it Obsidian's
+/// current desktop app (1.14), is built on. Plugins check these — Media Extended refuses an
+/// Electron older than 39 — so they match the user agent the embedder gives its `navigator`.
+pub const NODE_VERSION: &str = "22.20.0";
+pub const ELECTRON_VERSION: &str = "39.2.0";
+pub const CHROME_VERSION: &str = "142.0.7444.59";
+const V8_VERSION: &str = "14.2.231.17-electron.0";
 
 fn arch() -> &'static str {
     match std::env::consts::ARCH {
