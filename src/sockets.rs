@@ -741,6 +741,17 @@ pub(crate) fn dns_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
 
 // ─── http, https ────────────────────────────────────────────────────────────────────────────
 
+pub(crate) fn denied_http(cx: &mut Context) -> JsResult<JsValue> {
+    request(&JsValue::undefined(), &[], cx)
+}
+pub(crate) fn status_text(code: u16) -> &'static str {
+    STATUS_CODES
+        .iter()
+        .find(|(c, _)| *c == code)
+        .map(|(_, s)| *s)
+        .unwrap_or("unknown")
+}
+
 const STATUS_CODES: &[(u16, &str)] = &[
     (100, "Continue"),
     (101, "Switching Protocols"),
@@ -996,7 +1007,11 @@ fn request(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValu
     Ok(request.into())
 }
 
-fn validate_header_name(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn validate_header_name(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let name = crate::native::text_of(&arg(args, 0), context)?;
     let token = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
     if name.is_empty() || !name.chars().all(token) {
@@ -1009,7 +1024,7 @@ fn validate_header_name(_: &JsValue, args: &[JsValue], context: &mut Context) ->
     Ok(JsValue::undefined())
 }
 
-fn validate_header_value(
+pub(crate) fn validate_header_value(
     _: &JsValue,
     args: &[JsValue],
     context: &mut Context,
@@ -1138,6 +1153,7 @@ fn http_like(context: &mut Context, https: bool) -> JsResult<JsValue> {
     }
     module.set(js_string!("STATUS_CODES"), codes, false, context)?;
     module.set(js_string!("maxHeaderSize"), 16384, false, context)?;
+    crate::network::http::install(&module, https, context)?;
     Ok(module.into())
 }
 

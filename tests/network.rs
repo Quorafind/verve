@@ -147,6 +147,37 @@ fn tls_client_server_ca_alpn_identity_and_duplex() {
 }
 
 #[test]
+fn http_chunked_raw_headers_cookies_and_no_redirect() {
+    assert_eq!(
+        run(
+            r#"
+        const http=require('http');const server=http.createServer((req,res)=>{
+            res.writeHead(302,{Location:'/not-followed','Set-Cookie':['a=1','b=2'],'X-Mixed':['one','two']});res.write('hel');res.end('lo');
+        });server.listen(0,'127.0.0.1',()=>http.get({host:'127.0.0.1',port:server.address().port,agent:false},res=>{
+            let body='';res.setEncoding('utf8');res.on('data',b=>body+=b);res.on('end',()=>{globalThis.result=[res.statusCode,res.headers.location,res.headers['set-cookie'],res.headers['x-mixed'],res.rawHeaders.includes('X-Mixed'),body];server.close()});
+        }));
+    "#,
+            granted()
+        ),
+        r#"[302,"/not-followed",["a=1","b=2"],"one, two",true,"hello"]"#
+    );
+}
+#[test]
+fn http_agent_reuses_consumed_keepalive_socket() {
+    assert_eq!(
+        run(
+            r#"
+        const http=require('http');const agent=new http.Agent({keepAlive:true});let connections=0;
+        const server=http.createServer((req,res)=>res.end('ok'));server.on('connection',()=>connections++);
+        server.listen(0,'127.0.0.1',()=>{function get(n){http.get({host:'127.0.0.1',port:server.address().port,agent},res=>{res.resume();res.on('end',()=>setImmediate(()=>{if(n===1)get(2);else{globalThis.result=[connections,res.req.reusedSocket];agent.destroy();server.close()}}))})}get(1)});
+    "#,
+            granted()
+        ),
+        "[1,true]"
+    );
+}
+
+#[test]
 #[ignore = "100 MB acceptance; run during central integration"]
 fn loopback_100mb_obeys_backpressure() {
     assert_eq!(

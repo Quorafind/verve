@@ -98,7 +98,12 @@ A JavaScript runtime for live plugins, in Rust.
   bounds, cipher selection, client-certificate requests, `rejectUnauthorized`, the JavaScript
   identity hook, and peer certificate metadata. Trust-store loading and handshakes stay off
   the realm thread. Legacy TLS versions and OpenSSL engine/session options are not available.
-- `http`, `https`, `http2`, `dgram`, `cluster`, `child_process` and `node:sqlite` load
+- `http`/`https`: streaming HTTP/1.1 clients and servers over those sockets, Writable
+  `ClientRequest`/`ServerResponse`, Readable `IncomingMessage`, consumed-response keepalive
+  pooling, chunked bodies and trailers, `rawHeaders`/`headersDistinct`, Node's duplicate-header
+  merging, upgrades, and explicit all/idle connection closure. Redirects are returned, never
+  automatically followed. Host-provided `fetch` is unchanged.
+- `http2`, `dgram`, `cluster`, `child_process` and `node:sqlite` load
   with their classes and constants. Process execution, cluster and IPC sockets remain denied.
   Without network capabilities, the original network refusal errors are preserved.
 

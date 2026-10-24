@@ -61,6 +61,9 @@ rustls-pemfile = "=2.2.0"
 # Decode getPeerCertificate metadata; TLS verification itself remains rustls/webpki.
 x509-parser = "=0.18.0"
 
+# Incremental HTTP/1 head parsing without a blocking HTTP client or async runtime.
+httparse = "=1.10.1"
+
 [dev-dependencies]
 serde_json = "1"
 # WebAssembly tests write their modules as text.

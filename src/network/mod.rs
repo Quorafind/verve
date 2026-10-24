@@ -2,6 +2,7 @@
 //! belongs to one lazy reactor and two DNS workers. A host beat never waits for either.
 
 pub(crate) mod dns;
+pub(crate) mod http;
 pub(crate) mod reactor;
 pub(crate) mod tcp;
 pub(crate) mod tls;
