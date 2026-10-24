@@ -275,6 +275,116 @@ fn async_local_storage_carries_its_store() {
 }
 
 #[test]
+fn async_local_storage_survives_an_await_on_a_later_promise() {
+    let (log, console) = run(
+        "als-await",
+        r#"
+        const { AsyncLocalStorage } = require('async_hooks');
+        const als = new AsyncLocalStorage();
+        // Settled from outside any store, by a timer started outside one.
+        let settle;
+        const later = new Promise((resolve) => { settle = resolve; });
+        setTimeout(() => settle('v'), 20);
+        const step = async (name) => {
+            await later;
+            log.push(name + ' after await ' + als.getStore());
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            log.push(name + ' after timer ' + als.getStore());
+        };
+        // Two calls interleaving: each keeps its own store.
+        als.run('a', () => step('a'));
+        als.run('b', () => step('b'));
+        // A reaction registered outside the store, settled inside it, has no store: the store
+        // is where the reaction was registered, not where the promise settled.
+        let settleInside;
+        const inside = new Promise((resolve) => { settleInside = resolve; });
+        inside.then(() => log.push('outside then ' + als.getStore()));
+        als.run('c', () => settleInside());
+        log.push('sync ' + als.getStore());
+        "#,
+        60.,
+    );
+    assert!(console.is_empty(), "{console:?}");
+    expect(
+        &log,
+        &[
+            "sync undefined",
+            "outside then undefined",
+            "a after await a",
+            "b after await b",
+            "a after timer a",
+            "b after timer b",
+        ],
+    );
+}
+
+#[test]
+fn unhandled_rejections_are_told_to_process() {
+    let (log, console) = run(
+        "unhandled",
+        r#"
+        process.on('unhandledRejection', (reason, promise) => {
+            log.push('unhandled ' + reason.message + ' ' + (promise instanceof Promise));
+            // A listener's own microtasks run before the turn ends.
+            Promise.resolve().then(() => log.push('listener micro'));
+        });
+        process.on('rejectionHandled', (promise) => log.push('handled late ' + (promise instanceof Promise)));
+        // Handled in the same turn: never unhandled.
+        const caught = Promise.reject(new Error('caught'));
+        caught.catch(() => log.push('caught'));
+        // Never handled.
+        Promise.reject(new Error('lost'));
+        // An async function's throw, unawaited.
+        (async () => { throw new Error('async'); })();
+        // Handled a turn later.
+        const late = Promise.reject(new Error('late'));
+        setTimeout(() => late.catch(() => log.push('late caught')), 10);
+        "#,
+        30.,
+    );
+    assert!(console.is_empty(), "{console:?}");
+    expect(
+        &log,
+        &[
+            "caught",
+            "unhandled lost true",
+            "unhandled async true",
+            "unhandled late true",
+            "listener micro",
+            "listener micro",
+            "listener micro",
+            // The handler's own reaction runs in the turn; the turn's end tells `process`.
+            "late caught",
+            "handled late true",
+        ],
+    );
+}
+
+#[test]
+fn an_unhandled_rejection_nobody_listens_for_goes_to_the_console() {
+    let (log, console) = run(
+        "unheard",
+        r#"
+        Promise.reject(new TypeError('nobody listens'));
+        Promise.reject(new Error('handled')).catch(() => log.push('handled'));
+        "#,
+        10.,
+    );
+    expect(&log, &["handled"]);
+    let errors: Vec<_> = console
+        .iter()
+        .filter(|line| line.level == verve::Level::Error)
+        .map(|line| line.text.as_str())
+        .collect();
+    assert_eq!(errors.len(), 1, "{console:?}");
+    assert!(
+        errors[0].starts_with("Uncaught (in promise) TypeError: nobody listens"),
+        "{}",
+        errors[0]
+    );
+}
+
+#[test]
 fn diagnostics_perf_inspector() {
     let (log, _) = run(
         "diag",

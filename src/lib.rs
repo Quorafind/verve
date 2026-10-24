@@ -195,6 +195,11 @@ impl JobExecutor for Microtasks {
                 None => {
                     let next = self.asynchronous.borrow_mut().pop_front();
                     let Some(job) = next else {
+                        // The turn's microtasks are done: what it left rejected and unhandled
+                        // is told now, and a listener's own microtasks run before the turn ends.
+                        if hooks::report_rejections(context) {
+                            continue;
+                        }
                         return Ok(());
                     };
                     let context = RefCell::new(&mut *context);
@@ -247,6 +252,7 @@ impl Runtime {
         let microtasks = Rc::new(Microtasks::default());
         let esm = Rc::new(esm::Loader::default());
         let mut context = ContextBuilder::new()
+            .host_hooks(Rc::new(hooks::Hooks))
             .job_executor(microtasks)
             .module_loader(esm.clone())
             .build()

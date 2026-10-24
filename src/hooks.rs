@@ -4,20 +4,30 @@
 //! channel nobody here subscribes to.
 //!
 //! `AsyncLocalStorage` keeps its store for the synchronous part of `run`, and carries it into the
-//! callbacks queued while it is set: microtasks (`queueMicrotask`, `process.nextTick`, a
-//! promise reaction queued then) and timers. Boa has no hook for when a reaction is *registered*,
-//! so an `await` on a promise that settles later — after `run` has returned — resumes without
-//! the store; an `await` on one already settled keeps it. `AsyncResource` captures the stores
-//! where it is made and restores them in `runInAsyncScope`. `createHook` answers a hook that is
-//! enabled and disabled but never called.
+//! callbacks queued while it is set: microtasks (`queueMicrotask`, `process.nextTick`) and
+//! timers. A promise reaction runs with the stores set where it was *registered* — the `then`,
+//! the `await` — as Node's does, so an `await` on a promise that settles after `run` returned
+//! still resumes inside `run`'s store ([`Hooks`]). `AsyncResource` captures the stores where it
+//! is made and restores them in `runInAsyncScope`. `createHook` answers a hook that is enabled
+//! and disabled but never called.
+//!
+//! The same hooks note promises rejected with no handler, and tell `process` of them —
+//! `unhandledRejection`, `rejectionHandled` — once the microtasks are done.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use boa_engine::{
-    Context, JsObject, JsResult, JsString, JsValue, job::PromiseJob, js_string,
+    Context, JsData, JsError, JsObject, JsResult, JsString, JsValue,
+    builtins::promise::{OperationType, Promise, PromiseState},
+    context::HostHooks,
+    job::{JobCallback, PromiseJob},
+    js_string,
     native_function::NativeFunctionPointer,
+    object::builtins::{JsFunction, JsPromise},
 };
+use boa_gc::{Finalize, Trace};
 
 use crate::native::{
     ClassSpec, arg, array, class, closure, coded_error, exports, function, get, hidden, js_text,
@@ -90,6 +100,154 @@ pub(crate) fn carry_callback(callback: JsValue, context: &mut Context) -> JsValu
         (callback, pairs),
     )
     .into()
+}
+
+// ─── The host's hooks ───────────────────────────────────────────────────────────────────────
+
+/// The runtime's answers to the engine's host hooks: a promise reaction runs with the stores
+/// set where it was registered, and a promise rejected with no handler is noted for
+/// [`report_rejections`].
+pub(crate) struct Hooks;
+
+/// The stores a reaction was registered under, kept on its job callback. Untraced: what it holds
+/// is held from Rust, and so is a root.
+#[derive(Trace, Finalize, JsData)]
+struct Registered(#[unsafe_ignore_trace] Vec<(JsObject, JsValue)>);
+
+impl HostHooks for Hooks {
+    fn make_job_callback(&self, callback: JsFunction, context: &mut Context) -> JobCallback {
+        JobCallback::new(callback, Registered(current(context)))
+    }
+
+    fn call_job_callback(
+        &self,
+        job: &JobCallback,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        match job.host_defined().downcast_ref::<Registered>() {
+            Some(Registered(snapshot)) => within(context, snapshot.clone(), |context| {
+                job.callback().call(this, args, context)
+            }),
+            None => job.callback().call(this, args, context),
+        }
+    }
+
+    fn promise_rejection_tracker(
+        &self,
+        promise: &JsObject<Promise>,
+        operation: OperationType,
+        context: &mut Context,
+    ) {
+        let promise = promise.clone().upcast();
+        let state = rejections(context);
+        match operation {
+            OperationType::Reject => state.pending.borrow_mut().push(promise),
+            OperationType::Handle => {
+                let mut pending = state.pending.borrow_mut();
+                if let Some(at) = pending.iter().position(|p| JsObject::equals(p, &promise)) {
+                    // Handled within the same turn: it was never unhandled.
+                    pending.remove(at);
+                    return;
+                }
+                drop(pending);
+                let mut reported = state.reported.borrow_mut();
+                if let Some(at) = reported.iter().position(|p| JsObject::equals(p, &promise)) {
+                    reported.remove(at);
+                    state.handled_late.borrow_mut().push(promise);
+                }
+            }
+        }
+    }
+}
+
+/// Promises rejected with no handler, from the rejection to the end of the turn, and after.
+#[derive(Default)]
+struct Rejections {
+    /// Rejected with no handler, not yet reported.
+    pending: RefCell<Vec<JsObject>>,
+    /// Reported as unhandled, so a handler added later is `rejectionHandled`. Only the latest
+    /// [`REMEMBERED_REJECTIONS`] are kept: each holds its reason alive, and a program that
+    /// leaves hundreds unhandled is not going to handle the oldest.
+    reported: RefCell<VecDeque<JsObject>>,
+    /// Reported, and handled after all.
+    handled_late: RefCell<Vec<JsObject>>,
+}
+
+const REMEMBERED_REJECTIONS: usize = 256;
+
+fn rejections(context: &mut Context) -> Rc<Rejections> {
+    if let Some(state) = context.get_data::<Rc<Rejections>>() {
+        return state.clone();
+    }
+    let state = Rc::new(Rejections::default());
+    context.insert_data(state.clone());
+    state
+}
+
+/// Tells `process` of the rejections this turn left unhandled — `unhandledRejection`, with the
+/// reason and the promise — and of reported ones that have a handler now (`rejectionHandled`).
+/// With nobody listening for `unhandledRejection`, the reason goes to the console, as an uncaught
+/// error does. Called when the microtask queue is empty; `true` when it said anything, since a
+/// listener may have queued microtasks of its own.
+pub(crate) fn report_rejections(context: &mut Context) -> bool {
+    let Some(state) = context.get_data::<Rc<Rejections>>().cloned() else {
+        return false;
+    };
+    let pending = std::mem::take(&mut *state.pending.borrow_mut());
+    let handled_late = std::mem::take(&mut *state.handled_late.borrow_mut());
+    if pending.is_empty() && handled_late.is_empty() {
+        return false;
+    }
+    let process = crate::native::global(context, "process").unwrap_or_default();
+    for promise in pending {
+        let Ok(PromiseState::Rejected(reason)) =
+            JsPromise::from_object(promise.clone()).map(|p| p.state())
+        else {
+            continue;
+        };
+        let heard = emit(
+            &process,
+            &[js_text("unhandledRejection"), reason.clone(), promise.clone().into()],
+            context,
+        );
+        if !heard {
+            let error = JsError::from_opaque(reason);
+            let text = crate::describe(context, &error);
+            let frames = crate::thrown_at(context, &error);
+            let line = if frames.is_empty() {
+                format!("Uncaught (in promise) {text}")
+            } else {
+                format!("Uncaught (in promise) {text} ({frames})")
+            };
+            crate::console_line(context, crate::Level::Error, line);
+        }
+        let mut reported = state.reported.borrow_mut();
+        if reported.len() == REMEMBERED_REJECTIONS {
+            reported.pop_front();
+        }
+        reported.push_back(promise);
+    }
+    for promise in handled_late {
+        emit(&process, &[js_text("rejectionHandled"), promise.into()], context);
+    }
+    true
+}
+
+/// `process.emit(...)`, and whether anyone listened. A listener that throws is an uncaught error
+/// like any other, and counts as having heard.
+fn emit(process: &JsValue, args: &[JsValue], context: &mut Context) -> bool {
+    if !process.is_object() {
+        return false;
+    }
+    match crate::native::invoke(process, "emit", args, context) {
+        Ok(heard) => heard.to_boolean(),
+        Err(error) => {
+            crate::report(context, &error);
+            true
+        }
+    }
 }
 
 /// Stores as a value a function can hold: `[[storage, store], …]`.
