@@ -13,6 +13,17 @@ A JavaScript runtime for live plugins, in Rust.
   (a realm on a thread of its own), `indexedDB` (kept on disk as JSON), `WebAssembly` (run by
   [wasmi](https://github.com/wasmi-labs/wasmi)); Node's `Buffer`, `path`, `util`, `events`, `os`,
   `url`, `fs`.
+- **Modules** are CommonJS as Node has them: every built-in answers to its bare name and to
+  `node:` before it; a plugin's own files resolve as Node resolves them (extensions, folders,
+  `package.json`'s `main`, `node_modules`); `require.cache`, `require.resolve`, `module`, and
+  `require('module')` (`createRequire`, `builtinModules`, `isBuiltin`). Node's own modules are
+  made the first time they are required.
+- **`process`** is Electron's renderer's: an `EventEmitter` with `versions.node` and
+  `versions.electron`, `env`, `cwd`/`chdir`, `hrtime`, `nextTick`, `memoryUsage`, `emitWarning`,
+  `stdout`/`stderr` writing to the console; `exit` and `abort` are noted and end nothing.
+- **Node's classes extend every way**: `class X extends EventEmitter`, and the older
+  `function X() { EventEmitter.call(this) }` with `util.inherits` — each class is a `Proxy` of
+  its native constructor, whose `apply` trap sets up the caller's own object.
 - **Isolates** (`runtime_x::isolate`) put a runtime — and whatever the embedder serves with it —
   on a thread of its own. The embedder sends jobs and reads back events and snapshots, and never
   waits: a script busy for seconds holds only its own thread. A panic ends only its own isolate,

@@ -11,8 +11,10 @@ use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
     js_string,
     native_function::NativeFunctionPointer,
-    object::{FunctionObjectBuilder, builtins::{JsArray, JsPromise}},
-    property::PropertyDescriptor,
+    object::{
+        FunctionObjectBuilder,
+        builtins::{JsArray, JsPromise},
+    },
 };
 
 fn arg(args: &[JsValue], at: usize) -> JsValue {
@@ -35,7 +37,12 @@ fn object(context: &mut Context) -> JsObject {
     JsObject::with_object_proto(context.intrinsics())
 }
 
-fn function(context: &mut Context, name: &str, length: usize, f: NativeFunctionPointer) -> JsObject {
+fn function(
+    context: &mut Context,
+    name: &str,
+    length: usize,
+    f: NativeFunctionPointer,
+) -> JsObject {
     FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
         .name(JsString::from(name))
         .length(length)
@@ -60,14 +67,20 @@ fn with_functions(
 /// A path's parts, either separator read as one.
 fn split(path: &str) -> (bool, Vec<&str>) {
     let absolute = path.starts_with('/') || path.starts_with('\\') || path.get(1..2) == Some(":");
-    (absolute, path.split(['/', '\\']).filter(|p| !p.is_empty()).collect())
+    (
+        absolute,
+        path.split(['/', '\\']).filter(|p| !p.is_empty()).collect(),
+    )
 }
 
 fn normalize(path: &str) -> String {
     if path.is_empty() {
         return ".".into();
     }
-    let drive = path.get(..2).filter(|d| d.ends_with(':')).map(str::to_owned);
+    let drive = path
+        .get(..2)
+        .filter(|d| d.ends_with(':'))
+        .map(str::to_owned);
     let rest = if drive.is_some() { &path[2..] } else { path };
     let (absolute, parts) = split(rest);
     let absolute = absolute || drive.is_some();
@@ -130,7 +143,11 @@ fn dir_name(path: &str) -> String {
 const PATH_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("join", 2, |_, args, cx| {
         let parts = texts(args, cx)?;
-        let joined: Vec<&str> = parts.iter().map(String::as_str).filter(|p| !p.is_empty()).collect();
+        let joined: Vec<&str> = parts
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !p.is_empty())
+            .collect();
         Ok(js_text(&normalize(&joined.join("/"))))
     }),
     ("resolve", 2, |_, args, cx| {
@@ -138,7 +155,11 @@ const PATH_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
         let parts = texts(args, cx)?;
         let mut out = String::new();
         for part in parts.iter().rev().filter(|p| !p.is_empty()) {
-            out = if out.is_empty() { part.clone() } else { format!("{part}/{out}") };
+            out = if out.is_empty() {
+                part.clone()
+            } else {
+                format!("{part}/{out}")
+            };
             if split(part).0 {
                 break;
             }
@@ -148,10 +169,18 @@ const PATH_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
         }
         let normalized = normalize(&out);
         let trimmed = normalized.trim_end_matches('/');
-        Ok(js_text(if trimmed.is_empty() || trimmed.ends_with(':') { &normalized } else { trimmed }))
+        Ok(js_text(if trimmed.is_empty() || trimmed.ends_with(':') {
+            &normalized
+        } else {
+            trimmed
+        }))
     }),
-    ("normalize", 1, |_, args, cx| Ok(js_text(&normalize(&text_of(&arg(args, 0), cx)?)))),
-    ("dirname", 1, |_, args, cx| Ok(js_text(&dir_name(&text_of(&arg(args, 0), cx)?)))),
+    ("normalize", 1, |_, args, cx| {
+        Ok(js_text(&normalize(&text_of(&arg(args, 0), cx)?)))
+    }),
+    ("dirname", 1, |_, args, cx| {
+        Ok(js_text(&dir_name(&text_of(&arg(args, 0), cx)?)))
+    }),
     ("basename", 2, |_, args, cx| {
         let path = text_of(&arg(args, 0), cx)?;
         let mut base = base_name(&path).to_owned();
@@ -163,14 +192,22 @@ const PATH_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
         }
         Ok(js_text(&base))
     }),
-    ("extname", 1, |_, args, cx| Ok(js_text(ext_name(&text_of(&arg(args, 0), cx)?)))),
-    ("isAbsolute", 1, |_, args, cx| Ok(split(&text_of(&arg(args, 0), cx)?).0.into())),
+    ("extname", 1, |_, args, cx| {
+        Ok(js_text(ext_name(&text_of(&arg(args, 0), cx)?)))
+    }),
+    ("isAbsolute", 1, |_, args, cx| {
+        Ok(split(&text_of(&arg(args, 0), cx)?).0.into())
+    }),
     ("relative", 2, |_, args, cx| {
         let from = normalize(&text_of(&arg(args, 0), cx)?);
         let to = normalize(&text_of(&arg(args, 1), cx)?);
         let (_, from) = split(&from);
         let (_, to) = split(&to);
-        let common = from.iter().zip(to.iter()).take_while(|(a, b)| a == b).count();
+        let common = from
+            .iter()
+            .zip(to.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
         let mut out: Vec<&str> = vec![".."; from.len() - common];
         out.extend(&to[common..]);
         Ok(js_text(&out.join("/")))
@@ -180,11 +217,21 @@ const PATH_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
         let base = base_name(&path).to_owned();
         let ext = ext_name(&path).to_owned();
         let out = object(cx);
-        out.set(js_string!("root"), js_text(if split(&path).0 { "/" } else { "" }), false, cx)?;
+        out.set(
+            js_string!("root"),
+            js_text(if split(&path).0 { "/" } else { "" }),
+            false,
+            cx,
+        )?;
         out.set(js_string!("dir"), js_text(&dir_name(&path)), false, cx)?;
         out.set(js_string!("base"), js_text(&base), false, cx)?;
         out.set(js_string!("ext"), js_text(&ext), false, cx)?;
-        out.set(js_string!("name"), js_text(&base[..base.len() - ext.len()]), false, cx)?;
+        out.set(
+            js_string!("name"),
+            js_text(&base[..base.len() - ext.len()]),
+            false,
+            cx,
+        )?;
         Ok(out.into())
     }),
     ("format", 1, |_, args, cx| {
@@ -193,7 +240,11 @@ const PATH_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
             match parts.as_object() {
                 Some(p) => {
                     let v = p.get(JsString::from(name), cx)?;
-                    if v.is_null_or_undefined() { Ok(String::new()) } else { text_of(&v, cx) }
+                    if v.is_null_or_undefined() {
+                        Ok(String::new())
+                    } else {
+                        text_of(&v, cx)
+                    }
                 }
                 None => Ok(String::new()),
             }
@@ -204,7 +255,11 @@ const PATH_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
             b if !b.is_empty() => b,
             _ => format!("{}{}", field("name", cx)?, field("ext", cx)?),
         };
-        let dir = if dir.is_empty() { root } else { format!("{dir}/") };
+        let dir = if dir.is_empty() {
+            root
+        } else {
+            format!("{dir}/")
+        };
         Ok(js_text(&format!("{dir}{base}").replace("//", "/")))
     }),
     ("toNamespacedPath", 1, |_, args, _| Ok(arg(args, 0))),
@@ -214,7 +269,12 @@ fn path_module(context: &mut Context) -> JsResult<JsValue> {
     let path = object(context);
     with_functions(context, &path, PATH_FUNCTIONS)?;
     path.set(js_string!("sep"), js_string!("/"), false, context)?;
-    path.set(js_string!("delimiter"), js_text(if cfg!(windows) { ";" } else { ":" }), false, context)?;
+    path.set(
+        js_string!("delimiter"),
+        js_text(if cfg!(windows) { ";" } else { ":" }),
+        false,
+        context,
+    )?;
     path.set(js_string!("posix"), path.clone(), false, context)?;
     path.set(js_string!("win32"), path.clone(), false, context)?;
     Ok(path.into())
@@ -224,7 +284,9 @@ fn path_module(context: &mut Context) -> JsResult<JsValue> {
 
 /// `util.format`: `%s`, `%d`, `%i`, `%f`, `%j`, `%o`, `%O` and `%%`, the rest after a space.
 fn format_args(args: &[JsValue], context: &mut Context) -> JsResult<String> {
-    let Some(first) = args.first() else { return Ok(String::new()) };
+    let Some(first) = args.first() else {
+        return Ok(String::new());
+    };
     if !first.is_string() {
         let parts: Vec<String> = args.iter().map(crate::print).collect();
         return Ok(parts.join(" "));
@@ -254,13 +316,22 @@ fn format_args(args: &[JsValue], context: &mut Context) -> JsResult<String> {
                     's' => text_of(value, context)?,
                     'd' | 'i' => {
                         let n = value.to_number(context)?;
-                        if spec == 'i' { format!("{}", n.trunc()) } else { crate::print(&JsValue::from(n)) }
+                        if spec == 'i' {
+                            format!("{}", n.trunc())
+                        } else {
+                            crate::print(&JsValue::from(n))
+                        }
                     }
                     'f' => crate::print(&JsValue::from(value.to_number(context)?)),
                     'j' => {
                         let json = context.intrinsics().objects().json();
                         let stringify = json.get(js_string!("stringify"), context)?;
-                        let out = crate::call(context, &stringify, &json.into(), std::slice::from_ref(value))?;
+                        let out = crate::call(
+                            context,
+                            &stringify,
+                            &json.into(),
+                            std::slice::from_ref(value),
+                        )?;
                         crate::print(&out)
                     }
                     'c' => String::new(),
@@ -279,7 +350,12 @@ fn format_args(args: &[JsValue], context: &mut Context) -> JsResult<String> {
 }
 
 /// `promisify(f)`: a function answering a promise, settled by `f`'s callback.
-fn promisified(this: &JsValue, args: &[JsValue], f: &JsValue, context: &mut Context) -> JsResult<JsValue> {
+fn promisified(
+    this: &JsValue,
+    args: &[JsValue],
+    f: &JsValue,
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let (promise, resolvers) = JsPromise::new_pending(context);
     let settle = FunctionObjectBuilder::new(
         context.realm(),
@@ -287,7 +363,9 @@ fn promisified(this: &JsValue, args: &[JsValue], f: &JsValue, context: &mut Cont
             |_, args, resolvers: &boa_engine::builtins::promise::ResolvingFunctions, cx| {
                 let error = arg(args, 0);
                 if error.is_null_or_undefined() {
-                    resolvers.resolve.call(&JsValue::undefined(), &[arg(args, 1)], cx)?;
+                    resolvers
+                        .resolve
+                        .call(&JsValue::undefined(), &[arg(args, 1)], cx)?;
                 } else {
                     resolvers.reject.call(&JsValue::undefined(), &[error], cx)?;
                 }
@@ -301,14 +379,20 @@ fn promisified(this: &JsValue, args: &[JsValue], f: &JsValue, context: &mut Cont
     call_args.push(settle.into());
     if let Err(error) = crate::call(context, f, this, &call_args) {
         let reason = error.into_opaque(context)?;
-        resolvers.reject.call(&JsValue::undefined(), &[reason], context)?;
+        resolvers
+            .reject
+            .call(&JsValue::undefined(), &[reason], context)?;
     }
     Ok(promise.into())
 }
 
 const UTIL_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
-    ("format", 1, |_, args, cx| Ok(js_text(&format_args(args, cx)?))),
-    ("inspect", 1, |_, args, _| Ok(js_text(&crate::print(&arg(args, 0))))),
+    ("format", 1, |_, args, cx| {
+        Ok(js_text(&format_args(args, cx)?))
+    }),
+    ("inspect", 1, |_, args, _| {
+        Ok(js_text(&crate::print(&arg(args, 0))))
+    }),
     ("promisify", 1, |_, args, cx| {
         let f = arg(args, 0);
         if !f.is_callable() {
@@ -363,13 +447,17 @@ fn util_module(context: &mut Context) -> JsResult<JsValue> {
             ("isDate", 1, |_, args, _| {
                 Ok(arg(args, 0)
                     .as_object()
-                    .is_some_and(|o| boa_engine::object::builtins::JsDate::from_object(o.clone()).is_ok())
+                    .is_some_and(|o| {
+                        boa_engine::object::builtins::JsDate::from_object(o.clone()).is_ok()
+                    })
                     .into())
             }),
             ("isRegExp", 1, |_, args, _| {
                 Ok(arg(args, 0)
                     .as_object()
-                    .is_some_and(|o| boa_engine::object::builtins::JsRegExp::from_object(o.clone()).is_ok())
+                    .is_some_and(|o| {
+                        boa_engine::object::builtins::JsRegExp::from_object(o.clone()).is_ok()
+                    })
                     .into())
             }),
         ],
@@ -385,19 +473,38 @@ fn util_module(context: &mut Context) -> JsResult<JsValue> {
 // ─── events ─────────────────────────────────────────────────────────────────────────────────
 
 /// The listeners of `name` on an emitter: its `_events[name]`, as Node keeps them.
-fn listeners_of(emitter: &JsValue, name: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
-    let Some(emitter) = emitter.as_object() else { return Ok(Vec::new()) };
+fn listeners_of(
+    emitter: &JsValue,
+    name: &JsValue,
+    context: &mut Context,
+) -> JsResult<Vec<JsValue>> {
+    let Some(emitter) = emitter.as_object() else {
+        return Ok(Vec::new());
+    };
     let events = emitter.get(js_string!("_events"), context)?;
-    let Some(events) = events.as_object() else { return Ok(Vec::new()) };
+    let Some(events) = events.as_object() else {
+        return Ok(Vec::new());
+    };
     let key = name.to_property_key(context)?;
     let list = events.get(key, context)?;
-    let Some(list) = list.as_object() else { return Ok(Vec::new()) };
+    let Some(list) = list.as_object() else {
+        return Ok(Vec::new());
+    };
     let list = JsArray::from_object(list.clone())?;
-    (0..list.length(context)?).map(|at| list.get(at, context)).collect()
+    (0..list.length(context)?)
+        .map(|at| list.get(at, context))
+        .collect()
 }
 
-fn set_listeners(emitter: &JsValue, name: &JsValue, list: Vec<JsValue>, context: &mut Context) -> JsResult<()> {
-    let Some(emitter) = emitter.as_object() else { return Ok(()) };
+fn set_listeners(
+    emitter: &JsValue,
+    name: &JsValue,
+    list: Vec<JsValue>,
+    context: &mut Context,
+) -> JsResult<()> {
+    let Some(emitter) = emitter.as_object() else {
+        return Ok(());
+    };
     let mut events = emitter.get(js_string!("_events"), context)?;
     if !events.is_object() {
         events = object(context).into();
@@ -414,13 +521,24 @@ fn set_listeners(emitter: &JsValue, name: &JsValue, list: Vec<JsValue>, context:
     Ok(())
 }
 
-fn add_listener(this: &JsValue, args: &[JsValue], context: &mut Context, first: bool) -> JsResult<JsValue> {
+fn add_listener(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+    first: bool,
+) -> JsResult<JsValue> {
     let (name, listener) = (arg(args, 0), arg(args, 1));
     if !listener.is_callable() {
-        return Err(type_error("The \"listener\" argument must be of type Function"));
+        return Err(type_error(
+            "The \"listener\" argument must be of type Function",
+        ));
     }
     let mut list = listeners_of(this, &name, context)?;
-    if first { list.insert(0, listener) } else { list.push(listener) }
+    if first {
+        list.insert(0, listener)
+    } else {
+        list.push(listener)
+    }
     set_listeners(this, &name, list, context)?;
     Ok(this.clone())
 }
@@ -436,7 +554,9 @@ fn once_wrapper(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
                 let list: Vec<JsValue> = listeners_of(this, name, cx)?
                     .into_iter()
                     .filter(|l| {
-                        let own = l.as_object().and_then(|o| o.get(js_string!("listener"), cx).ok());
+                        let own = l
+                            .as_object()
+                            .and_then(|o| o.get(js_string!("listener"), cx).ok());
                         !own.is_some_and(|own| own == *listener)
                     })
                     .collect();
@@ -454,9 +574,15 @@ fn once_wrapper(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
 }
 
 const EMITTER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
-    ("on", 2, |this, args, cx| add_listener(this, args, cx, false)),
-    ("addListener", 2, |this, args, cx| add_listener(this, args, cx, false)),
-    ("prependListener", 2, |this, args, cx| add_listener(this, args, cx, true)),
+    ("on", 2, |this, args, cx| {
+        add_listener(this, args, cx, false)
+    }),
+    ("addListener", 2, |this, args, cx| {
+        add_listener(this, args, cx, false)
+    }),
+    ("prependListener", 2, |this, args, cx| {
+        add_listener(this, args, cx, true)
+    }),
     ("once", 2, |this, args, cx| {
         let wrapper = once_wrapper(this, args, cx)?;
         add_listener(this, &[arg(args, 0), wrapper], cx, false)
@@ -484,7 +610,10 @@ const EMITTER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let list = listeners_of(this, &name, cx)?;
         if list.is_empty() {
             // An `error` nobody listens for is thrown, as Node throws it.
-            if name.as_string().is_some_and(|n| n.to_std_string_escaped() == "error") {
+            if name
+                .as_string()
+                .is_some_and(|n| n.to_std_string_escaped() == "error")
+            {
                 return Err(JsError::from_opaque(arg(args, 1)));
             }
             return Ok(false.into());
@@ -502,9 +631,13 @@ const EMITTER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let list = listeners_of(this, &arg(args, 0), cx)?;
         Ok(JsArray::from_iter(list, cx).into())
     }),
-    ("listenerCount", 1, |this, args, cx| Ok(listeners_of(this, &arg(args, 0), cx)?.len().into())),
+    ("listenerCount", 1, |this, args, cx| {
+        Ok(listeners_of(this, &arg(args, 0), cx)?.len().into())
+    }),
     ("eventNames", 0, |this, _, cx| {
-        let Some(emitter) = this.as_object() else { return Ok(JsArray::new(cx)?.into()) };
+        let Some(emitter) = this.as_object() else {
+            return Ok(JsArray::new(cx)?.into());
+        };
         let events = emitter.get(js_string!("_events"), cx)?;
         let names: Vec<JsValue> = match events.as_object() {
             Some(events) => events
@@ -536,50 +669,23 @@ fn remove_listener(this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     Ok(this.clone())
 }
 
-fn construct_emitter(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    // Constructed — `this` is then what `new` was given, a constructor — or called on an
-    // object as `EventEmitter.call(this)` by older code.
-    let target = match this.as_object() {
-        Some(constructor) if constructor.is_callable() => {
-            let prototype = constructor.get(js_string!("prototype"), context)?;
-            let made = self::object(context);
-            made.set_prototype(prototype.as_object());
-            made
-        }
-        Some(object) => object.clone(),
-        None => return Ok(JsValue::undefined()),
-    };
-    if !target.has_own_property(js_string!("_events"), context)? {
-        let events = self::object(context);
-        target.set(js_string!("_events"), events, false, context)?;
-    }
-    Ok(target.into())
-}
-
 fn events_module(context: &mut Context) -> JsResult<JsValue> {
-    let emitter: JsObject = FunctionObjectBuilder::new(
-        context.realm(),
-        NativeFunction::from_fn_ptr(|this, args, cx| {
-            // `new EventEmitter()`: `this` is the new object, made on the subclass's prototype.
-            construct_emitter(this, args, cx)
-        }),
-    )
-    .name(js_string!("EventEmitter"))
-    .length(0)
-    .constructor(true)
-    .build()
-    .into();
-    let prototype = object(context);
-    with_functions(context, &prototype, EMITTER_METHODS)?;
-    prototype.define_property_or_throw(
-        js_string!("constructor"),
-        PropertyDescriptor::builder().value(emitter.clone()).writable(true).enumerable(false).configurable(true),
+    // Constructed — `new EventEmitter()`, `super()` — or called on an object as
+    // `EventEmitter.call(this)` by older code: see `crate::native`.
+    let (emitter, _) = crate::native::class(
         context,
-    )?;
-    emitter.define_property_or_throw(
-        js_string!("prototype"),
-        PropertyDescriptor::builder().value(prototype).writable(false).enumerable(false).configurable(false),
-        context,
+        crate::native::ClassSpec {
+            name: "EventEmitter",
+            init: |target, _, cx| {
+                if !target.has_own_property(js_string!("_events"), cx)? {
+                    let events = object(cx);
+                    target.set(js_string!("_events"), events, false, cx)?;
+                }
+                Ok(())
+            },
+            methods: EMITTER_METHODS,
+            ..Default::default()
+        },
     )?;
     emitter.set(js_string!("EventEmitter"), emitter.clone(), false, context)?;
     emitter.set(js_string!("defaultMaxListeners"), 10, false, context)?;
@@ -611,9 +717,15 @@ const OS_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
         }))
     }),
     ("homedir", 0, |_, _, _| Ok(js_text(&home()))),
-    ("tmpdir", 0, |_, _, _| Ok(js_text(&std::env::temp_dir().to_string_lossy()))),
+    ("tmpdir", 0, |_, _, _| {
+        Ok(js_text(&std::env::temp_dir().to_string_lossy()))
+    }),
     ("hostname", 0, |_, _, _| {
-        Ok(js_text(&std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "localhost".into())))
+        Ok(js_text(
+            &std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
+                .unwrap_or_else(|_| "localhost".into()),
+        ))
     }),
     ("release", 0, |_, _, _| Ok(js_string!("").into())),
     ("cpus", 0, |_, _, cx| Ok(JsArray::new(cx)?.into())),
@@ -623,7 +735,9 @@ const OS_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("userInfo", 0, |_, _, cx| {
         let info = object(cx);
         info.set(js_string!("homedir"), js_text(&home()), false, cx)?;
-        let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default();
+        let user = std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_default();
         info.set(js_string!("username"), js_text(&user), false, cx)?;
         Ok(info.into())
     }),
@@ -640,7 +754,12 @@ pub fn platform() -> &'static str {
 fn os_module(context: &mut Context) -> JsResult<JsValue> {
     let os = object(context);
     with_functions(context, &os, OS_FUNCTIONS)?;
-    os.set(js_string!("EOL"), js_text(if cfg!(windows) { "\r\n" } else { "\n" }), false, context)?;
+    os.set(
+        js_string!("EOL"),
+        js_text(if cfg!(windows) { "\r\n" } else { "\n" }),
+        false,
+        context,
+    )?;
     Ok(os.into())
 }
 
@@ -662,7 +781,13 @@ fn with_code(error: JsError, context: &mut Context) -> JsValue {
     let message = error.to_string();
     let value = error.into_opaque(context).unwrap_or_default();
     if let Some(object) = value.as_object() {
-        let code = message.split(':').next().unwrap_or("").trim_start_matches("Error").trim().to_owned();
+        let code = message
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("Error")
+            .trim()
+            .to_owned();
         let _ = object.set(js_string!("code"), js_text(&code), false, context);
     }
     value
@@ -672,7 +797,10 @@ fn path_arg(args: &[JsValue], context: &mut Context) -> JsResult<String> {
     let value = arg(args, 0);
     // A `file:` URL, as Node takes one.
     let text = text_of(&value, context)?;
-    Ok(text.strip_prefix("file:///").map(str::to_owned).unwrap_or(text))
+    Ok(text
+        .strip_prefix("file:///")
+        .map(str::to_owned)
+        .unwrap_or(text))
 }
 
 fn encoding_of(value: &JsValue, context: &mut Context) -> JsResult<Option<String>> {
@@ -694,7 +822,10 @@ fn read_file(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     match encoding_of(&arg(args, 1), context)? {
         Some(encoding) => {
             let buffer = crate::encoding::make_buffer(context, bytes)?;
-            let to_string = buffer.as_object().expect("a buffer").get(js_string!("toString"), context)?;
+            let to_string = buffer
+                .as_object()
+                .expect("a buffer")
+                .get(js_string!("toString"), context)?;
             crate::call(context, &to_string, &buffer, &[js_text(&encoding)])
         }
         None => crate::encoding::make_buffer(context, bytes),
@@ -734,8 +865,17 @@ fn stat(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     out.set(js_string!("size"), meta.len() as f64, false, context)?;
     out.set(js_string!("mtimeMs"), ms(meta.modified()), false, context)?;
     out.set(js_string!("ctimeMs"), ms(meta.created()), false, context)?;
-    out.set(js_string!("birthtimeMs"), ms(meta.created()), false, context)?;
-    for (key, value) in [("mtime", ms(meta.modified())), ("ctime", ms(meta.created())), ("birthtime", ms(meta.created()))] {
+    out.set(
+        js_string!("birthtimeMs"),
+        ms(meta.created()),
+        false,
+        context,
+    )?;
+    for (key, value) in [
+        ("mtime", ms(meta.modified())),
+        ("ctime", ms(meta.created())),
+        ("birthtime", ms(meta.created())),
+    ] {
         let date = boa_engine::object::builtins::JsDate::new(context);
         date.set_time(value, context)?;
         out.set(JsString::from(key), date, false, context)?;
@@ -777,7 +917,11 @@ fn make_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         .map(|o| o.get(js_string!("recursive"), context))
         .transpose()?
         .is_some_and(|r| r.to_boolean());
-    let result = if recursive { std::fs::create_dir_all(&path) } else { std::fs::create_dir(&path) };
+    let result = if recursive {
+        std::fs::create_dir_all(&path)
+    } else {
+        std::fs::create_dir(&path)
+    };
     result.map_err(|e| io_error(e, &path, "mkdir"))?;
     Ok(JsValue::undefined())
 }
@@ -795,12 +939,18 @@ fn remove(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let (recursive, force) = (flag("recursive", context)?, flag("force", context)?);
     let target = std::path::Path::new(&path);
     let result = if target.is_dir() {
-        if recursive { std::fs::remove_dir_all(target) } else { std::fs::remove_dir(target) }
+        if recursive {
+            std::fs::remove_dir_all(target)
+        } else {
+            std::fs::remove_dir(target)
+        }
     } else {
         std::fs::remove_file(target)
     };
     match result {
-        Err(e) if !(force && e.kind() == std::io::ErrorKind::NotFound) => Err(io_error(e, &path, "rm")),
+        Err(e) if !(force && e.kind() == std::io::ErrorKind::NotFound) => {
+            Err(io_error(e, &path, "rm"))
+        }
         _ => Ok(JsValue::undefined()),
     }
 }
@@ -848,7 +998,12 @@ fn fs_module(context: &mut Context) -> JsResult<JsValue> {
     for (name, operation) in FS_OPERATIONS {
         let op: JsValue = function(context, name, 2, *operation).into();
         // `fs.readFileSync`.
-        fs.set(JsString::from(format!("{name}Sync")), op.clone(), false, context)?;
+        fs.set(
+            JsString::from(format!("{name}Sync")),
+            op.clone(),
+            false,
+            context,
+        )?;
         // `fs.promises.readFile`, `require('fs/promises').readFile`.
         let promised = FunctionObjectBuilder::new(
             context.realm(),
@@ -916,13 +1071,10 @@ fn refused(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsV
     if let Some(callback) = args.iter().rev().find(|a| a.is_callable()) {
         crate::microtask(context, callback.clone(), vec![error.into()]);
     }
-    let events = events_module(context)?;
-    let child = events
-        .as_object()
-        .expect("EventEmitter")
-        .construct(&[], None, context)?;
+    let events = emitter_class(context)?;
+    let child = events.construct(&[], None, context)?;
     for stream in ["stdout", "stderr"] {
-        let emitter = events.as_object().expect("EventEmitter").construct(&[], None, context)?;
+        let emitter = events.construct(&[], None, context)?;
         child.set(JsString::from(stream), emitter, false, context)?;
     }
     Ok(child.into())
@@ -930,7 +1082,15 @@ fn refused(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsV
 
 fn child_process_module(context: &mut Context) -> JsResult<JsValue> {
     let module = object(context);
-    for name in ["exec", "execFile", "spawn", "fork", "execSync", "execFileSync", "spawnSync"] {
+    for name in [
+        "exec",
+        "execFile",
+        "spawn",
+        "fork",
+        "execSync",
+        "execFileSync",
+        "spawnSync",
+    ] {
         let f = function(context, name, 3, refused);
         module.set(JsString::from(name), f, false, context)?;
     }
@@ -943,9 +1103,10 @@ fn child_process_module(context: &mut Context) -> JsResult<JsValue> {
 /// listen, or a request that cannot be sent, does. Plugins make their requests through
 /// `requestUrl`; serving and Node's own client are not something this runtime does.
 fn failing_emitter(context: &mut Context, message: &str, code: &str) -> JsResult<JsObject> {
-    let events = events_module(context)?;
-    let emitter = events.as_object().expect("EventEmitter").construct(&[], None, context)?;
-    let error = JsNativeError::error().with_message(message.to_owned()).into_opaque(context);
+    let emitter = emitter_class(context)?.construct(&[], None, context)?;
+    let error = JsNativeError::error()
+        .with_message(message.to_owned())
+        .into_opaque(context);
     error.set(js_string!("code"), JsString::from(code), false, context)?;
     let fire = FunctionObjectBuilder::new(
         context.realm(),
@@ -953,10 +1114,20 @@ fn failing_emitter(context: &mut Context, message: &str, code: &str) -> JsResult
             |_, _, (emitter, error): &(JsObject, JsValue), cx| {
                 // Heard only by one listening: an `error` nobody hears is not thrown here.
                 let count = emitter.get(js_string!("listenerCount"), cx)?;
-                let listening = crate::call(cx, &count, &emitter.clone().into(), &[js_string!("error").into()])?;
+                let listening = crate::call(
+                    cx,
+                    &count,
+                    &emitter.clone().into(),
+                    &[js_string!("error").into()],
+                )?;
                 if listening.to_number(cx)? > 0. {
                     let emit = emitter.get(js_string!("emit"), cx)?;
-                    crate::call(cx, &emit, &emitter.clone().into(), &[js_string!("error").into(), error.clone()])?;
+                    crate::call(
+                        cx,
+                        &emit,
+                        &emitter.clone().into(),
+                        &[js_string!("error").into(), error.clone()],
+                    )?;
                 }
                 Ok(JsValue::undefined())
             },
@@ -971,11 +1142,11 @@ fn failing_emitter(context: &mut Context, message: &str, code: &str) -> JsResult
 fn http_module(context: &mut Context) -> JsResult<JsValue> {
     let module = object(context);
     let create_server = function(context, "createServer", 2, |_, _, cx| {
-        let events = events_module(cx)?;
-        let server = events.as_object().expect("EventEmitter").construct(&[], None, cx)?;
+        let server = emitter_class(cx)?.construct(&[], None, cx)?;
         let listen = function(cx, "listen", 3, |this, _, cx| {
             if let Some(server) = this.as_object() {
-                let failing = failing_emitter(cx, "Su does not let plugins serve on a port", "EACCES")?;
+                let failing =
+                    failing_emitter(cx, "Su does not let plugins serve on a port", "EACCES")?;
                 // The server's own listeners hear it.
                 let fire = FunctionObjectBuilder::new(
                     cx.realm(),
@@ -983,7 +1154,12 @@ fn http_module(context: &mut Context) -> JsResult<JsValue> {
                         |_, args, (server,): &(JsObject,), cx| {
                             let emit = server.get(js_string!("emit"), cx)?;
                             let error = args.first().cloned().unwrap_or_default();
-                            crate::call(cx, &emit, &server.clone().into(), &[js_string!("error").into(), error])?;
+                            crate::call(
+                                cx,
+                                &emit,
+                                &server.clone().into(),
+                                &[js_string!("error").into(), error],
+                            )?;
                             Ok(JsValue::undefined())
                         },
                         (server.clone(),),
@@ -991,7 +1167,12 @@ fn http_module(context: &mut Context) -> JsResult<JsValue> {
                 )
                 .build();
                 let on = failing.get(js_string!("on"), cx)?;
-                crate::call(cx, &on, &failing.clone().into(), &[js_string!("error").into(), fire.into()])?;
+                crate::call(
+                    cx,
+                    &on,
+                    &failing.clone().into(),
+                    &[js_string!("error").into(), fire.into()],
+                )?;
             }
             Ok(this.clone())
         });
@@ -1009,21 +1190,44 @@ fn http_module(context: &mut Context) -> JsResult<JsValue> {
     module.set(js_string!("createServer"), create_server, false, context)?;
     for name in ["request", "get"] {
         let f = function(context, name, 3, |_, _, cx| {
-            Ok(failing_emitter(cx, "Node's http client is not available in Su: use requestUrl", "ENOSYS")?.into())
+            Ok(failing_emitter(
+                cx,
+                "Node's http client is not available in Su: use requestUrl",
+                "ENOSYS",
+            )?
+            .into())
         });
         module.set(JsString::from(name), f, false, context)?;
     }
-    let methods: Vec<JsValue> = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"].iter().map(|m| js_text(m)).collect();
+    let methods: Vec<JsValue> = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+        .iter()
+        .map(|m| js_text(m))
+        .collect();
     let methods = JsArray::from_iter(methods, context);
     module.set(js_string!("METHODS"), methods, false, context)?;
     let codes = object(context);
     for (code, text) in [
-        (200, "OK"), (201, "Created"), (204, "No Content"), (301, "Moved Permanently"), (302, "Found"),
-        (304, "Not Modified"), (400, "Bad Request"), (401, "Unauthorized"), (403, "Forbidden"),
-        (404, "Not Found"), (405, "Method Not Allowed"), (500, "Internal Server Error"),
-        (502, "Bad Gateway"), (503, "Service Unavailable"),
+        (200, "OK"),
+        (201, "Created"),
+        (204, "No Content"),
+        (301, "Moved Permanently"),
+        (302, "Found"),
+        (304, "Not Modified"),
+        (400, "Bad Request"),
+        (401, "Unauthorized"),
+        (403, "Forbidden"),
+        (404, "Not Found"),
+        (405, "Method Not Allowed"),
+        (500, "Internal Server Error"),
+        (502, "Bad Gateway"),
+        (503, "Service Unavailable"),
     ] {
-        codes.set(JsString::from(code.to_string()), js_text(text), false, context)?;
+        codes.set(
+            JsString::from(code.to_string()),
+            js_text(text),
+            false,
+            context,
+        )?;
     }
     module.set(js_string!("STATUS_CODES"), codes, false, context)?;
     Ok(module.into())
@@ -1044,14 +1248,24 @@ fn url_module(context: &mut Context) -> JsResult<JsValue> {
             ("fileURLToPath", 1, |_, args, cx| {
                 let text = text_of(&arg(args, 0), cx)?;
                 let path = text.strip_prefix("file://").unwrap_or(&text);
-                let path = if cfg!(windows) { path.trim_start_matches('/') } else { path };
+                let path = if cfg!(windows) {
+                    path.trim_start_matches('/')
+                } else {
+                    path
+                };
                 Ok(js_text(path))
             }),
             ("pathToFileURL", 1, |_, args, cx| {
                 let path = text_of(&arg(args, 0), cx)?.replace('\\', "/");
-                let href = if path.starts_with('/') { format!("file://{path}") } else { format!("file:///{path}") };
+                let href = if path.starts_with('/') {
+                    format!("file://{path}")
+                } else {
+                    format!("file:///{path}")
+                };
                 let class = cx.global_object().get(js_string!("URL"), cx)?;
-                let class = class.as_object().ok_or_else(|| type_error("URL is not installed"))?;
+                let class = class
+                    .as_object()
+                    .ok_or_else(|| type_error("URL is not installed"))?;
                 Ok(class.construct(&[js_text(&href)], None, cx)?.into())
             }),
         ],
@@ -1061,22 +1275,31 @@ fn url_module(context: &mut Context) -> JsResult<JsValue> {
 
 // ─── Installing them ────────────────────────────────────────────────────────────────────────
 
-/// Node's modules, by the names `require` answers them to.
-pub fn modules(context: &mut Context) -> JsResult<Vec<(&'static str, JsValue)>> {
-    let fs = fs_module(context)?;
-    let promises = fs.as_object().expect("fs").get(js_string!("promises"), context)?;
-    Ok(vec![
-        ("path", path_module(context)?),
-        ("util", util_module(context)?),
-        ("events", events_module(context)?),
-        ("os", os_module(context)?),
-        ("url", url_module(context)?),
-        ("fs", fs),
-        ("fs/promises", promises),
-        ("child_process", child_process_module(context)?),
-        ("http", http_module(context)?),
-        ("https", http_module(context)?),
-    ])
+/// Node's modules, by the names `require` answers them to — each made the first time it is
+/// required, and kept.
+pub(crate) const MODULES: &[(&str, crate::ModuleMaker)] = &[
+    ("path", |cx, _| path_module(cx)),
+    ("util", |cx, _| util_module(cx)),
+    ("events", |cx, _| events_module(cx)),
+    ("os", |cx, _| os_module(cx)),
+    ("url", |cx, _| url_module(cx)),
+    ("fs", |cx, _| fs_module(cx)),
+    ("fs/promises", |cx, _| {
+        let fs = crate::modules::node_module(cx, "fs")?;
+        crate::native::get(&fs, "promises", cx)
+    }),
+    ("child_process", |cx, _| child_process_module(cx)),
+    ("http", |cx, _| http_module(cx)),
+    ("https", |cx, _| http_module(cx)),
+    ("module", crate::modules::module_module),
+    ("process", crate::process::module),
+];
+
+/// The `EventEmitter` class, made once for the realm.
+fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
+    crate::modules::node_module(context, "events")?
+        .as_object()
+        .ok_or_else(|| type_error("EventEmitter is not a class"))
 }
 
 #[cfg(test)]

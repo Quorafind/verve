@@ -19,11 +19,14 @@
 
 mod encoding;
 mod indexeddb;
-pub mod isolate;
-mod wasm;
 mod intl;
+pub mod isolate;
+mod modules;
+mod native;
 mod node;
+mod process;
 mod url;
+mod wasm;
 mod web;
 mod worker;
 
@@ -37,7 +40,7 @@ use boa_engine::{
     context::ContextBuilder,
     job::{Job, JobExecutor, PromiseJob},
     js_string,
-    object::{FunctionObjectBuilder, ObjectInitializer},
+    object::ObjectInitializer,
     property::Attribute,
 };
 
@@ -80,9 +83,14 @@ struct Shared {
     /// Families of built-in modules: every name starting with the prefix is made by the
     /// function, once, and kept with the rest.
     families: RefCell<Vec<(String, ModuleMaker)>>,
-    /// Modules already run, by file: a second `require` of the same file answers the same
-    /// `module.exports`, as Node's cache does.
-    cache: RefCell<HashMap<PathBuf, JsValue>>,
+    /// `require.cache`: the module object of every file run, by its path. A second `require`
+    /// of the same file answers the same `module.exports`, as Node's cache does.
+    module_cache: JsObject,
+    /// The `this` a class was called on without `new` (`EventEmitter.call(this)`), from its
+    /// `apply` trap to its constructor; see `native::instance`.
+    called_on: RefCell<Option<JsValue>>,
+    /// The working folder `process.cwd()` answers and `process.chdir` changes.
+    cwd: RefCell<String>,
     console: RefCell<Vec<ConsoleLine>>,
     /// `console.time`'s labels and when each was started; `console.count`'s counts.
     console_timers: RefCell<HashMap<String, Millis>>,
@@ -173,7 +181,13 @@ impl RuntimeX {
             timers: RefCell::new(BTreeMap::new()),
             builtins: RefCell::new(HashMap::new()),
             families: RefCell::new(Vec::new()),
-            cache: RefCell::new(HashMap::new()),
+            module_cache: JsObject::with_null_proto(),
+            called_on: RefCell::new(None),
+            cwd: RefCell::new(
+                std::env::current_dir()
+                    .map(|dir| dir.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "/".into()),
+            ),
             console: RefCell::new(Vec::new()),
             console_timers: RefCell::new(HashMap::new()),
             console_counts: RefCell::new(HashMap::new()),
@@ -214,7 +228,7 @@ impl RuntimeX {
     /// Runs `source` as the CommonJS module at `filename`, answering its `module.exports`.
     /// Its own `require` resolves relative names against the folder it is in.
     pub fn load_module(&mut self, filename: &Path, source: &str) -> Result<JsValue, String> {
-        let result = run_module(&mut self.context, filename, source);
+        let result = modules::run_module(&mut self.context, filename, source, None);
         self.run_microtasks();
         result.map_err(|error| {
             // A module that throws as it runs is an uncaught error: on the console with where.
@@ -226,7 +240,7 @@ impl RuntimeX {
     /// Forgets a module run from `filename`, so loading it again runs it afresh — what
     /// disabling a plugin and enabling it again needs.
     pub fn forget_module(&mut self, filename: &Path) {
-        shared(&self.context).cache.borrow_mut().remove(filename);
+        modules::forget(&mut self.context, filename);
     }
 
     /// Runs a script in the global scope. For tests and for a host's own probing.
@@ -511,161 +525,6 @@ pub fn print(value: &JsValue) -> String {
     }
 }
 
-fn string_arg(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<String> {
-    Ok(args
-        .get(index)
-        .cloned()
-        .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped())
-}
-
-/// Runs `source` as the CommonJS module at `filename`, with Node's module wrapper.
-fn run_module(context: &mut Context, filename: &Path, source: &str) -> JsResult<JsValue> {
-    let state = shared(context);
-    if let Some(exports) = state.cache.borrow().get(filename) {
-        return Ok(exports.clone());
-    }
-    let folder = filename.parent().unwrap_or(Path::new("")).to_path_buf();
-    // Node's own wrapper, word for word, kept on the module's first line so a line number in an
-    // error is the line in the file.
-    let wrapped =
-        format!("(function (exports, require, module, __filename, __dirname) {{ {source}\n}})");
-    let source_path = filename.to_path_buf();
-    let wrapper = context.eval(Source::from_bytes(&wrapped).with_path(&source_path))?;
-
-    let exports = JsObject::with_object_proto(context.intrinsics());
-    let module = ObjectInitializer::new(context)
-        .property(js_string!("exports"), exports.clone(), Attribute::all())
-        .property(
-            js_string!("id"),
-            JsString::from(filename.to_string_lossy().as_ref()),
-            Attribute::all(),
-        )
-        .property(
-            js_string!("filename"),
-            JsString::from(filename.to_string_lossy().as_ref()),
-            Attribute::all(),
-        )
-        .property(js_string!("loaded"), false, Attribute::all())
-        .build();
-    let require = require_function(context, &folder);
-    module.set(js_string!("require"), require.clone(), false, context)?;
-    // In the cache before it runs, as Node does, so two modules that require each other finish.
-    state
-        .cache
-        .borrow_mut()
-        .insert(filename.to_path_buf(), exports.clone().into());
-    let ran = call(
-        context,
-        &wrapper,
-        &exports.clone().into(),
-        &[
-            exports.into(),
-            require,
-            module.clone().into(),
-            JsString::from(filename.to_string_lossy().as_ref()).into(),
-            JsString::from(folder.to_string_lossy().as_ref()).into(),
-        ],
-    );
-    if let Err(error) = ran {
-        state.cache.borrow_mut().remove(filename);
-        return Err(error);
-    }
-    module.set(js_string!("loaded"), true, false, context)?;
-    let exports = module.get(js_string!("exports"), context)?;
-    state
-        .cache
-        .borrow_mut()
-        .insert(filename.to_path_buf(), exports.clone());
-    Ok(exports)
-}
-
-/// A module's own `require`, resolving relative names against `folder`.
-fn require_function(context: &mut Context, folder: &Path) -> JsValue {
-    let folder = JsString::from(folder.to_string_lossy().as_ref());
-    let function = NativeFunction::from_copy_closure_with_captures(
-        |_, args, folder: &JsString, context| {
-            let name = string_arg(args, 0, context)?;
-            require(
-                context,
-                &PathBuf::from(folder.to_std_string_escaped()),
-                &name,
-            )
-        },
-        folder,
-    );
-    FunctionObjectBuilder::new(context.realm(), function)
-        .name(js_string!("require"))
-        .length(1)
-        .build()
-        .into()
-}
-
-fn require(context: &mut Context, folder: &Path, name: &str) -> JsResult<JsValue> {
-    let bare = name.strip_prefix("node:").unwrap_or(name);
-    if let Some(exports) = shared(context).builtins.borrow().get(bare) {
-        return Ok(exports.clone());
-    }
-    let family = shared(context)
-        .families
-        .borrow()
-        .iter()
-        .find(|(prefix, _)| bare.starts_with(prefix.as_str()))
-        .map(|(_, make)| *make);
-    if let Some(make) = family {
-        let exports = make(context, bare)?;
-        shared(context)
-            .builtins
-            .borrow_mut()
-            .insert(bare.to_owned(), exports.clone());
-        return Ok(exports);
-    }
-    let relative = name.starts_with("./") || name.starts_with("../") || name.starts_with('/');
-    if relative {
-        let base = folder.join(name);
-        let candidates = [
-            base.clone(),
-            base.with_extension("js"),
-            PathBuf::from(format!("{}.js", base.display())),
-            PathBuf::from(format!("{}.json", base.display())),
-            base.join("index.js"),
-        ];
-        for path in candidates {
-            if !path.is_file() {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).map_err(|error| {
-                JsNativeError::error().with_message(format!("{}: {error}", path.display()))
-            })?;
-            if path.extension().is_some_and(|ext| ext == "json") {
-                let parse = context
-                    .intrinsics()
-                    .objects()
-                    .json()
-                    .get(js_string!("parse"), context)?;
-                return call(
-                    context,
-                    &parse,
-                    &JsValue::undefined(),
-                    &[JsString::from(text.as_str()).into()],
-                );
-            }
-            return run_module(context, &path, &text);
-        }
-    }
-    let error = JsNativeError::error()
-        .with_message(format!("Cannot find module '{name}'"))
-        .into_opaque(context);
-    error.set(
-        js_string!("code"),
-        js_string!("MODULE_NOT_FOUND"),
-        false,
-        context,
-    )?;
-    Err(JsError::from_opaque(error.into()))
-}
-
 fn install_globals(context: &mut Context) -> JsResult<()> {
     let global = context.global_object();
     context.register_global_property(js_string!("global"), global.clone(), Attribute::all())?;
@@ -731,7 +590,9 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
         );
     }
     let more: [(&str, boa_engine::native_function::NativeFunctionPointer); 12] = [
-        ("dir", |_, args, context| log(Level::Log, &args[..args.len().min(1)], context)),
+        ("dir", |_, args, context| {
+            log(Level::Log, &args[..args.len().min(1)], context)
+        }),
         ("table", |_, args, context| log(Level::Log, args, context)),
         ("assert", |_, args, context| {
             if args.first().is_some_and(JsValue::to_boolean) {
@@ -748,8 +609,12 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
             state.console_timers.borrow_mut().insert(label, now);
             Ok(JsValue::undefined())
         }),
-        ("timeLog", |_, args, context| console_time(args, context, false)),
-        ("timeEnd", |_, args, context| console_time(args, context, true)),
+        ("timeLog", |_, args, context| {
+            console_time(args, context, false)
+        }),
+        ("timeEnd", |_, args, context| {
+            console_time(args, context, true)
+        }),
         ("count", |_, args, context| {
             let label = console_label(args, context)?;
             let count = {
@@ -768,54 +633,28 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
             Ok(JsValue::undefined())
         }),
         ("group", |_, args, context| console_group(args, context)),
-        ("groupCollapsed", |_, args, context| console_group(args, context)),
+        ("groupCollapsed", |_, args, context| {
+            console_group(args, context)
+        }),
         ("groupEnd", |_, _, context| {
             let state = shared(context);
-            state.console_depth.set(state.console_depth.get().saturating_sub(1));
+            state
+                .console_depth
+                .set(state.console_depth.get().saturating_sub(1));
             Ok(JsValue::undefined())
         }),
         ("clear", |_, _, _| Ok(JsValue::undefined())),
     ];
     for (name, function) in more {
-        console.function(NativeFunction::from_fn_ptr(function), JsString::from(name), 0);
+        console.function(
+            NativeFunction::from_fn_ptr(function),
+            JsString::from(name),
+            0,
+        );
     }
     let console = console.build();
     context.register_global_property(js_string!("console"), console, Attribute::all())?;
 
-    // The process: what a module asks of it to know where it is, and `nextTick`.
-    let platform = match std::env::consts::OS {
-        "windows" => "win32",
-        "macos" => "darwin",
-        other => other,
-    };
-    let env = JsObject::with_object_proto(context.intrinsics());
-    let argv = boa_engine::object::builtins::JsArray::new(context)?;
-    let versions = JsObject::with_object_proto(context.intrinsics());
-    let process = ObjectInitializer::new(context)
-        .property(
-            js_string!("platform"),
-            JsString::from(platform),
-            Attribute::all(),
-        )
-        .property(js_string!("env"), env, Attribute::all())
-        .property(js_string!("argv"), argv, Attribute::all())
-        .property(js_string!("versions"), versions, Attribute::all())
-        .function(
-            NativeFunction::from_fn_ptr(|_, args, context| {
-                let callback = args.first().cloned().unwrap_or_default();
-                microtask(context, callback, args.iter().skip(1).cloned().collect());
-                Ok(JsValue::undefined())
-            }),
-            js_string!("nextTick"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(|_, _, _| Ok(js_string!("/").into())),
-            js_string!("cwd"),
-            0,
-        )
-        .build();
-    context.register_global_property(js_string!("process"), process, Attribute::all())?;
     intl::install(context)?;
     encoding::install(context)?;
     url::install(context)?;
@@ -823,15 +662,9 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     worker::install(context)?;
     indexeddb::install(context)?;
     wasm::install(context)?;
-    // Node's own modules, which Electron gives a desktop plugin.
-    let modules = node::modules(context)?;
-    {
-        let shared = shared(context);
-        let mut builtins = shared.builtins.borrow_mut();
-        for (name, exports) in modules {
-            builtins.insert(name.to_owned(), exports);
-        }
-    }
+    // Node's own modules, which Electron gives a desktop plugin, are made when first required;
+    // `process` is a global too, and an `EventEmitter`.
+    process::install(context)?;
     Ok(())
 }
 
@@ -867,10 +700,18 @@ fn console_time(args: &[JsValue], context: &mut Context, end: bool) -> JsResult<
     let started = {
         let state = shared(context);
         let mut timers = state.console_timers.borrow_mut();
-        if end { timers.remove(&label) } else { timers.get(&label).copied() }
+        if end {
+            timers.remove(&label)
+        } else {
+            timers.get(&label).copied()
+        }
     };
     let Some(started) = started else {
-        console_line(context, Level::Warn, format!("Timer '{label}' does not exist"));
+        console_line(
+            context,
+            Level::Warn,
+            format!("Timer '{label}' does not exist"),
+        );
         return Ok(JsValue::undefined());
     };
     let elapsed = (shared(context).clock)() - started;
