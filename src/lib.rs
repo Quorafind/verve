@@ -198,9 +198,13 @@ impl JobExecutor for Microtasks {
                         return Ok(());
                     };
                     let context = RefCell::new(&mut *context);
-                    let mut future = std::pin::pin!(job.call(&context));
-                    let mut task = std::task::Context::from_waker(std::task::Waker::noop());
-                    match std::future::Future::poll(future.as_mut(), &mut task) {
+                    let polled = {
+                        let mut future = std::pin::pin!(job.call(&context));
+                        let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+                        std::future::Future::poll(future.as_mut(), &mut task)
+                    };
+                    // Release any context borrow held by the future before reporting errors.
+                    match polled {
                         std::task::Poll::Ready(Ok(_)) => {}
                         std::task::Poll::Ready(Err(error)) => {
                             report(&mut context.borrow_mut(), &error)
