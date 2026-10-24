@@ -25,6 +25,7 @@ mod modules;
 mod native;
 mod node;
 mod process;
+mod streams;
 mod url;
 mod wasm;
 mod web;
@@ -659,6 +660,7 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     encoding::install(context)?;
     url::install(context)?;
     web::install(context)?;
+    streams::install(context)?;
     worker::install(context)?;
     indexeddb::install(context)?;
     wasm::install(context)?;

@@ -457,7 +457,7 @@ const SIGNAL_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 // ─── Blob and File ──────────────────────────────────────────────────────────────────────────
 
 /// A blob's bytes are kept as a `Uint8Array` in a property of its own.
-fn blob_bytes(blob: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
+pub(crate) fn blob_bytes(blob: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
     let data = match blob.as_object() {
         Some(b) => b.get(js_string!("__bytes"), context)?,
         None => JsValue::undefined(),
@@ -564,6 +564,12 @@ fn construct_file(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
 }
 
 const BLOB_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
+    // A `ReadableStream` of its bytes, in chunks of 64 KiB.
+    ("stream", 0, |this, _, cx| {
+        let bytes = blob_bytes(this, cx)?;
+        let chunks = bytes.chunks(65536).map(<[u8]>::to_vec).collect();
+        Ok(crate::streams::readable_of_chunks(cx, chunks)?.into())
+    }),
     ("text", 0, |this, _, cx| {
         let bytes = blob_bytes(this, cx)?;
         Ok(JsPromise::resolve(js_text(&String::from_utf8_lossy(&bytes)), cx)?.into())
