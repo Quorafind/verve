@@ -65,6 +65,29 @@ always agree with one another.
   - `bytecompiler/class.rs`: a class method with a literal name has that name in its code, so its
     frames show it (`at method (…)`) rather than looking like top-level code.
 
+- `boa_engine`, `vm/runtime_limits.rs`, `vm/mod.rs`: the recursion limits are V8's, and hitting
+  one throws V8's `RangeError: Maximum call stack size exceeded`, which JavaScript can catch
+  (code probes how deep it may go with `try { recurse() } catch {}`); before, it was an
+  uncatchable `RuntimeLimitError` after only 512 calls, and the value stack's 10 240 slots held
+  even fewer frames — or one function with that many bindings. Measured: a call from JavaScript
+  to JavaScript takes no native stack (its frame is on the heap); a call from native code back
+  into JavaScript nests the interpreter, ~1.6–1.7 KiB a level in a release build (a getter, a
+  `map` callback, `call`/`apply`, a template's `toString`), ~3 KiB for `eval`, ~4.5 KiB for a
+  `JSON.parse` reviver, and 6–7.5 / 10 / 16.6 KiB in a debug build. So:
+  - `recursion` is 10 000 frames (was 512) and `stack_size` 1 Mi values (was 10 Ki).
+  - What bounds the native stack is a new `native_stack` limit, in bytes, counted from where the
+    outermost run of the interpreter started (`Vm::native_stack_base`, `run_depth`) and checked
+    at every call and `eval`: 1 MiB by default, which fits Rust's default 2 MiB thread.
+    **Su should set it to about half the stack of the thread the plugins run on** —
+    `context.runtime_limits_mut().set_native_stack_limit(4 << 20)` on an 8 MiB thread, `16 << 20`
+    on the plugin host's 32 MiB one. With 4 MiB on 8 MiB, a `map`/getter/`apply` chain goes
+    ~2 400 levels deep in release (~550 in debug), a `JSON.parse` reviver ~900 (~250); every
+    kind ended in the `RangeError`, never an overflow, in both profiles.
+  - `RuntimeLimitError::Recursion` and `StackSize` are no longer thrown; the interrupt and the
+    loop limit are still uncatchable.
+  The tests that pinned the old uncatchable error (`recursion_in_async_gen…`,
+  `recursion_in_setter…`) now expect the `RangeError`.
+
 - `boa_gc`, `lib.rs`: a collection no longer frees what it found dead before it returns. The
   dead nodes leave the heap, and their memory is returned a few at a time by later allocations
   (`BoaGc::unfreed`, `FREE_PER_ALLOCATION`), the rest before the next collection — and all of

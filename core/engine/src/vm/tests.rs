@@ -360,9 +360,13 @@ fn recursion_runtime_limit() {
         TestAction::inspect_context(|context| {
             context.runtime_limits_mut().set_recursion_limit(10);
         }),
-        TestAction::assert_runtime_limit_error("factorial(11)", RuntimeLimitError::Recursion),
+        TestAction::assert_native_error(
+            "factorial(11)",
+            JsNativeErrorKind::Range,
+            "Maximum call stack size exceeded",
+        ),
         TestAction::assert_eq("factorial(8)", JsValue::new(40_320)),
-        TestAction::assert_runtime_limit_error(
+        TestAction::assert_native_error(
             indoc! {r#"
                 function x() {
                     x()
@@ -370,8 +374,69 @@ fn recursion_runtime_limit() {
 
                 x()
             "#},
-            RuntimeLimitError::Recursion,
+            JsNativeErrorKind::Range,
+            "Maximum call stack size exceeded",
         ),
+    ]);
+}
+
+/// Reaching the recursion limit throws V8's `RangeError`, which JavaScript can catch (code probes
+/// how deep it may go with `try { recurse() } catch {}`), and what runs after it runs.
+#[test]
+fn recursion_limit_is_a_catchable_range_error() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            let depth = 0;
+            function deep() { depth++; deep(); }
+            let caught;
+            try { deep(); } catch (e) { caught = e; }
+
+            let viaGetters = 0;
+            const o = { get g() { viaGetters++; return this.g; } };
+            let caughtGetter;
+            try { o.g; } catch (e) { caughtGetter = e; }
+
+            function ev(n) { return eval("ev(n + 1)"); }
+            let caughtEval;
+            try { ev(0); } catch (e) { caughtEval = e; }
+        "#}),
+        TestAction::assert("caught instanceof RangeError"),
+        TestAction::assert_eq(
+            "caught.message",
+            js_str!("Maximum call stack size exceeded"),
+        ),
+        TestAction::assert("depth >= 9000"),
+        TestAction::assert("caughtGetter instanceof RangeError && viaGetters > 100"),
+        TestAction::assert("caughtEval instanceof RangeError"),
+        TestAction::assert_eq("[1, 2].map(x => x * 2).join()", js_str!("2,4")),
+    ]);
+}
+
+/// Calls from native code back into JavaScript nest the interpreter on the native stack; they
+/// stop at the native stack limit, with the same catchable `RangeError`, long before the
+/// thread's stack runs out.
+#[test]
+fn native_stack_limit() {
+    run_test_actions([
+        TestAction::inspect_context(|context| {
+            context
+                .runtime_limits_mut()
+                .set_native_stack_limit(256 * 1024);
+        }),
+        TestAction::run(indoc! {r#"
+            let levels = 0;
+            function viaMap() { levels++; return [0].map(viaMap); }
+            let caught;
+            try { viaMap(); } catch (e) { caught = e; }
+            const mapLevels = levels;
+
+            levels = 0;
+            function viaApply() { levels++; return viaApply.apply(null, []); }
+            try { viaApply(); } catch (e) { caught = caught && e; }
+        "#}),
+        TestAction::assert("caught instanceof RangeError"),
+        TestAction::assert("mapLevels > 10 && mapLevels < 5000"),
+        TestAction::assert("levels > 10 && levels < 5000"),
     ]);
 }
 
@@ -495,32 +560,34 @@ fn long_object_chain_gc_trace_stack_overflow() {
 
 // See: https://github.com/boa-dev/boa/issues/4515
 #[test]
-fn recursion_in_async_gen_throws_uncatchable_error() {
+fn recursion_in_async_gen_ends() {
     run_test_actions([
         TestAction::inspect_context(|context| {
             context.runtime_limits_mut().set_recursion_limit(128);
         }),
-        TestAction::assert_runtime_limit_error(
-            indoc! {r#"
-                async function* f() {}
-                f().return({
-                  get then() {
-                    this.then;
-                  },
-                });
-            "#},
-            RuntimeLimitError::Recursion,
-        ),
+        TestAction::run(indoc! {r#"
+            async function* f() {}
+            let rejected;
+            f().return({
+              get then() {
+                this.then;
+              },
+            }).catch((e) => { rejected = e; });
+        "#}),
+        TestAction::inspect_context(|context| {
+            context.run_jobs().unwrap();
+        }),
+        TestAction::assert("rejected instanceof RangeError"),
     ]);
 }
 
 #[test]
-fn recursion_in_setter_throws_uncatchable_error() {
+fn recursion_in_setter_throws_range_error() {
     run_test_actions([
         TestAction::inspect_context(|context| {
             context.runtime_limits_mut().set_recursion_limit(128);
         }),
-        TestAction::assert_runtime_limit_error(
+        TestAction::assert_native_error(
             indoc! {r#"
                 const obj = {
                   set x(value) {
@@ -529,7 +596,8 @@ fn recursion_in_setter_throws_uncatchable_error() {
                 };
                 obj.x = 1;
             "#},
-            RuntimeLimitError::Recursion,
+            JsNativeErrorKind::Range,
+            "Maximum call stack size exceeded",
         ),
     ]);
 }

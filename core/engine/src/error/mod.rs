@@ -309,9 +309,14 @@ pub enum RuntimeLimitError {
     #[error("reached the maximum number of iteration loops on this execution")]
     LoopIteration,
     /// Error for reaching the maximum amount of recursive calls.
+    ///
+    /// No longer thrown: reaching the recursion, value stack or native stack limit throws a
+    /// `RangeError` JavaScript can catch, as V8 does.
     #[error("reached the maximum number of recursive calls on this execution")]
     Recursion,
     /// Error for reaching the maximum stack size
+    ///
+    /// No longer thrown; see [`RuntimeLimitError::Recursion`].
     #[error("reached the maximum stack size on this execution")]
     StackSize,
     /// The host asked, through an [`InterruptHandle`](crate::context::InterruptHandle), for what

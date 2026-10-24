@@ -104,6 +104,10 @@ impl Eval {
             return Ok(x.clone());
         };
 
+        // An eval nests the interpreter on the native stack without a function call, so check
+        // the limits here too (`eval("eval(…)")`).
+        context.check_runtime_limits()?;
+
         // Because of implementation details the following code differs from the spec.
 
         // 3. Let evalRealm be the current Realm Record.

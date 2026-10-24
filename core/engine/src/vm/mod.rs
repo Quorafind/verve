@@ -98,6 +98,12 @@ pub struct Vm {
     /// [`JsObject::construct`](crate::object::JsObject::construct).
     pub(crate) host_call_depth: usize,
 
+    /// How many runs of the interpreter are nested on the native stack.
+    pub(crate) run_depth: usize,
+
+    /// Where the native stack was when the outermost run started.
+    pub(crate) native_stack_base: usize,
+
     pub(crate) shadow_stack: ShadowStack,
 
     #[cfg(feature = "trace")]
@@ -425,6 +431,8 @@ impl Vm {
             interrupt: None,
             native_active_function: None,
             host_call_depth: 0,
+            run_depth: 0,
+            native_stack_base: 0,
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
             trace: false,
@@ -991,6 +999,17 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
+        // The outermost run is where the native stack a script takes is counted from.
+        if self.vm.run_depth == 0 {
+            self.vm.native_stack_base = native_stack_position();
+        }
+        self.vm.run_depth += 1;
+        let record = self.run_loop();
+        self.vm.run_depth -= 1;
+        record
+    }
+
+    fn run_loop(&mut self) -> CompletionRecord {
         while let Some(byte) = self
             .vm
             .frame()
@@ -1031,6 +1050,13 @@ impl Context {
         Ok(())
     }
 
+    /// The error for a call past the recursion or stack limits, as V8 words it.
+    fn stack_overflow() -> JsError {
+        JsNativeError::range()
+            .with_message("Maximum call stack size exceeded")
+            .into()
+    }
+
     /// Checks if we haven't exceeded the defined runtime limits.
     pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
         self.check_interrupt()?;
@@ -1039,17 +1065,39 @@ impl Context {
         // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking
         // `Context::run()` recursively (for example, accessor calls).
         // Subtract 1 to exclude the dummy frame at index 0.
+        //
+        // These throw what V8 throws, a `RangeError` JavaScript can catch (code probes how deep
+        // it may recurse with `try { recurse() } catch {}`); the limits keep the native stack
+        // safe all the same, since only the host calls nest on it.
         let recursion_depth = (self.vm.frames.len() - 1).saturating_add(self.vm.host_call_depth);
         if self.vm.runtime_limits.recursion_limit() <= recursion_depth {
-            return Err(RuntimeLimitError::Recursion.into());
+            return Err(Self::stack_overflow());
+        }
+        // Must throw if nested runs of the interpreter have taken too much native stack.
+        if self.vm.run_depth > 1
+            && self
+                .vm
+                .native_stack_base
+                .saturating_sub(native_stack_position())
+                > self.vm.runtime_limits.native_stack_limit()
+        {
+            return Err(Self::stack_overflow());
         }
         // Must throw if the stack size exceeds the defined maximum length.
         if self.vm.runtime_limits.stack_size_limit() <= self.vm.stack.stack.len() {
-            return Err(RuntimeLimitError::StackSize.into());
+            return Err(Self::stack_overflow());
         }
 
         Ok(())
     }
+}
+
+/// Where the native stack is now: the address of a local. The stack grows down on every
+/// platform Boa runs on, so what a nested call has taken is the base minus this.
+#[inline(never)]
+fn native_stack_position() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(&raw const marker) as usize
 }
 
 /// Yields once to the executor.
