@@ -36,6 +36,7 @@ pub(crate) fn analyze(source: &str) -> Exports {
             if let Some(Token::String(name)) = tokens.get(end + 1)
                 && punct(&tokens, end + 2, ']')
                 && punct(&tokens, end + 3, '=')
+                && !punct(&tokens, end + 4, '=')
             {
                 out.names.insert(name.clone());
             }
@@ -45,26 +46,23 @@ pub(crate) fn analyze(source: &str) -> Exports {
             }
             if punct(&tokens, end + 1, '{') {
                 let mut index = end + 2;
-                let mut depth = 0usize;
-                let mut key = true;
-                while let Some(token) = tokens.get(index) {
-                    match token {
-                        Token::Punct('}') if depth == 0 => break,
-                        Token::Punct('{') | Token::Punct('[') | Token::Punct('(') => depth += 1,
-                        Token::Punct('}') | Token::Punct(']') | Token::Punct(')') => {
-                            depth = depth.saturating_sub(1)
+                while let Some(Token::Word(name) | Token::String(name)) = tokens.get(index) {
+                    let name = name.clone();
+                    index += 1;
+                    if punct(&tokens, index, ':') {
+                        // Node's lexer accepts an identifier value, not an arbitrary expression.
+                        if !matches!(tokens.get(index + 1), Some(Token::Word(value)) if !value.starts_with(|c: char| c.is_ascii_digit()))
+                        {
+                            break;
                         }
-                        Token::Punct(',') if depth == 0 => key = true,
-                        Token::Word(name) | Token::String(name) if depth == 0 && key => {
-                            if punct(&tokens, index + 1, ':')
-                                || punct(&tokens, index + 1, ',')
-                                || punct(&tokens, index + 1, '}')
-                            {
-                                out.names.insert(name.clone());
-                            }
-                            key = false;
-                        }
-                        _ => {}
+                        index += 2;
+                    }
+                    if !punct(&tokens, index, ',') && !punct(&tokens, index, '}') {
+                        break;
+                    }
+                    out.names.insert(name);
+                    if punct(&tokens, index, '}') {
+                        break;
                     }
                     index += 1;
                 }
@@ -79,6 +77,7 @@ pub(crate) fn analyze(source: &str) -> Exports {
             && let Some(end) = exports_object(&tokens, at + 4)
             && punct(&tokens, end, ',')
             && let Some(Token::String(name)) = tokens.get(end + 1)
+            && safe_descriptor(&tokens, end + 3)
         {
             out.names.insert(name.clone());
         }
@@ -93,6 +92,44 @@ pub(crate) fn analyze(source: &str) -> Exports {
     // Node always supplies the entire CommonJS exports value as default, even with __esModule.
     out.names.remove("default");
     out
+}
+
+fn safe_descriptor(tokens: &[Token], at: usize) -> bool {
+    if !punct(tokens, at, '{') {
+        return false;
+    }
+    let mut index = at + 1;
+    while let Some(token) = tokens.get(index) {
+        if token == &Token::Punct('}') {
+            return false;
+        }
+        if word(tokens, index, "value") && punct(tokens, index + 1, ':') {
+            return true;
+        }
+        if word(tokens, index, "get") {
+            if !punct(tokens, index + 1, ':')
+                || !word(tokens, index + 2, "function")
+                || !punct(tokens, index + 3, '(')
+                || !punct(tokens, index + 4, ')')
+                || !punct(tokens, index + 5, '{')
+                || !word(tokens, index + 6, "return")
+                || !matches!(tokens.get(index + 7), Some(Token::Word(_)))
+            {
+                return false;
+            }
+            index += 8;
+            while punct(tokens, index, '.') && matches!(tokens.get(index + 1), Some(Token::Word(_)))
+            {
+                index += 2;
+            }
+            if punct(tokens, index, ';') {
+                index += 1;
+            }
+            return punct(tokens, index, '}');
+        }
+        index += 1;
+    }
+    false
 }
 
 fn exports_object(tokens: &[Token], at: usize) -> Option<usize> {
@@ -249,7 +286,7 @@ mod tests {
         );
         assert_eq!(
             found.names.into_iter().collect::<Vec<_>>(),
-            ["__esModule", "five", "four", "one", "three", "two"]
+            ["__esModule", "one", "three", "two"]
         );
         assert_eq!(
             found.reexports.into_iter().collect::<Vec<_>>(),

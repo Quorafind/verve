@@ -111,6 +111,14 @@ fn resolve_inner(
             format!("Invalid module specifier '{specifier}'"),
         ));
     }
+    if crate::node::MODULES
+        .iter()
+        .any(|(name, _)| *name == specifier)
+        && !crate::node::PREFIX_ONLY.contains(&specifier)
+    {
+        return Url::parse(&format!("node:{specifier}"))
+            .map_err(|e| error("ERR_INVALID_MODULE_SPECIFIER", e.to_string()));
+    }
     if let Ok(url) = Url::parse(specifier) {
         return Ok(url);
     }
@@ -367,11 +375,6 @@ fn package_target(
         Value::String(target) => {
             let replacement = matched.map_or_else(|| target.clone(), |s| target.replace('*', s));
             if !target.starts_with("./") {
-                if imports && target.starts_with("node:") {
-                    return Url::parse(&replacement)
-                        .map(Target::Url)
-                        .map_err(|e| error("ERR_INVALID_PACKAGE_TARGET", e.to_string()));
-                }
                 if imports
                     && !target.starts_with("../")
                     && !target.starts_with('/')
@@ -414,7 +417,10 @@ fn package_target(
             }
         }
         Value::Object(map) => {
-            if map.keys().any(|k| k.parse::<u32>().is_ok()) {
+            if map.keys().any(|key| {
+                key.parse::<u32>()
+                    .is_ok_and(|index| index != u32::MAX && index.to_string() == *key)
+            }) {
                 return Err(error(
                     "ERR_INVALID_PACKAGE_CONFIG",
                     "Numeric package condition keys are not allowed",

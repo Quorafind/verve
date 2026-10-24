@@ -375,7 +375,7 @@ impl RuntimeX {
         &mut self,
         specifier: &str,
         parent: Option<&Path>,
-    ) -> boa_engine::object::builtins::JsPromise {
+    ) -> Result<boa_engine::object::builtins::JsPromise, String> {
         let loader = shared(&self.context).esm.clone();
         let result = loader
             .resolve(
@@ -387,11 +387,11 @@ impl RuntimeX {
             )
             .and_then(|url| loader.start(&url, &mut self.context));
         let promise = match result {
-            Ok(promise) => promise,
+            Ok(promise) => Ok(promise),
             Err(error) => boa_engine::object::builtins::JsPromise::reject(error, &mut self.context),
         };
         self.run_microtasks();
-        promise
+        promise.map_err(|error| describe(&mut self.context, &error))
     }
 
     /// Additional package conditions, following Node's --conditions. Defaults stay Node's;

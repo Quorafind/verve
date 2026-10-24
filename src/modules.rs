@@ -330,11 +330,32 @@ pub(crate) fn load_file(
         cache(context).set(key, module, false, context)?;
         return Ok(value);
     }
-    if crate::esm::is_esm(path, text, context)? {
+    if matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("mjs" | "js") | None
+    ) && crate::esm::is_esm(path, text, context)?
+    {
         let loader = crate::shared(context).esm.clone();
         return loader.require(path, context);
     }
     run_module(context, path, text, parent)
+}
+
+/// The CJS side of a synchronous CJS -> ESM -> CJS cycle cannot expose partial exports.
+pub(crate) fn import_cjs(context: &mut Context, path: &Path) -> JsResult<JsValue> {
+    let key = JsString::from(path.to_string_lossy().as_ref());
+    let cached = cache(context).get(key, context)?;
+    if cached.is_object()
+        && !get(&cached, "loaded", context)?.to_boolean()
+        && crate::shared(context).esm.is_requiring()
+    {
+        return Err(crate::native::coded_error(
+            context,
+            "Cannot import CommonJS in a require(esm) cycle",
+            "ERR_REQUIRE_CYCLE_MODULE",
+        ));
+    }
+    load_file(context, path, None)
 }
 
 /// The prototype of every module object: `require('module').prototype`.

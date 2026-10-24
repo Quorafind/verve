@@ -59,6 +59,10 @@ fn resolve_error(context: &mut Context, error: resolve::ResolveError) -> JsError
 }
 
 impl Loader {
+    pub(crate) fn is_requiring(&self) -> bool {
+        !self.requiring.borrow().is_empty()
+    }
+
     pub(crate) fn conditions(&self, conditions: Vec<String>) {
         *self.conditions.borrow_mut() = conditions;
     }
@@ -104,7 +108,7 @@ impl Loader {
         match url.scheme() {
             "file" | "data" | "blob" => {}
             "node" => {
-                if crate::modules::is_builtin(context, url.as_str()) {
+                if !url.path().ends_with('/') && crate::modules::is_builtin(context, url.as_str()) {
                     return Ok(url);
                 }
                 return Err(coded_error(
@@ -141,7 +145,10 @@ impl Loader {
     ) -> JsResult<()> {
         let name = request.specifier().to_std_string_escaped();
         let url = self.resolve(&name, referrer.path(), Mode::Import, true, context)?;
-        if url.scheme() == "blob" && !self.modules.borrow().contains_key(url.as_str()) {
+        if url.scheme() == "blob"
+            && !self.modules.borrow().contains_key(url.as_str())
+            && !self.captured_blobs.borrow().contains_key(url.as_str())
+        {
             // This hook runs while import() executes, before script code can revoke the URL.
             let bytes = crate::shared(context)
                 .blobs
@@ -190,6 +197,13 @@ impl Loader {
             _ => resolve::file_url(&absolute(filename, context))
                 .map_err(|e| resolve_error(context, e))?,
         };
+        let url = if url.scheme() == "file"
+            && resolve::file_path(&url).is_ok_and(|path| path.is_file())
+        {
+            resolve::finalize(url).map_err(|e| resolve_error(context, e))?
+        } else {
+            url
+        };
         self.sources
             .borrow_mut()
             .insert(url.to_string(), source.to_owned());
@@ -203,6 +217,17 @@ impl Loader {
         match url.scheme() {
             "file" => {
                 let path = resolve::file_path(url).map_err(|e| resolve_error(context, e))?;
+                if path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| !matches!(ext, "js" | "mjs" | "cjs" | "json"))
+                {
+                    return Err(coded_error(
+                        context,
+                        &format!("Unknown file extension for {}", path.display()),
+                        "ERR_UNKNOWN_FILE_EXTENSION",
+                    ));
+                }
                 let text = std::fs::read_to_string(&path).map_err(|e| {
                     coded_error(
                         context,
@@ -453,7 +478,7 @@ impl Loader {
         let text = filename.to_string_lossy();
         let url = Url::parse(&text)
             .ok()
-            .filter(|u| u.scheme() == "file")
+            .filter(|u| matches!(u.scheme(), "file" | "data" | "blob" | "node"))
             .or_else(|| resolve::file_url(&absolute(filename, context)).ok());
         if let Some(url) = url {
             let canonical = resolve::finalize(url.clone()).unwrap_or(url.clone());
@@ -626,7 +651,7 @@ fn synthetic(url: &Url, mut names: Vec<JsString>, builtin: bool, context: &mut C
                 let url = Url::parse(&url)
                     .map_err(|_| coded_error(context, "Invalid module URL", "ERR_INVALID_URL"))?;
                 let path = resolve::file_path(&url).map_err(|e| resolve_error(context, e))?;
-                crate::modules::load_file(context, &path, None)?
+                crate::modules::import_cjs(context, &path)?
             };
             for name in names {
                 let value = if name == &js_string!("default") {
@@ -659,18 +684,22 @@ fn cjs_names(
     names: &mut BTreeSet<String>,
     context: &mut Context,
 ) -> JsResult<()> {
-    if !seen.insert(path.to_path_buf()) {
-        return Ok(());
-    }
-    let found = crate::cjs_exports::analyze(source);
-    names.extend(found.names);
-    for name in found.reexports {
-        let loader = crate::shared(context).esm.clone();
-        if let Ok(url) = loader.resolve(&name, Some(path), Mode::Require, true, context)
-            && let Ok(path) = resolve::file_path(&url)
-            && let Ok(source) = std::fs::read_to_string(&path)
-        {
-            cjs_names(&path, &source, seen, names, context)?;
+    let mut pending = vec![(path.to_path_buf(), source.to_owned())];
+    while let Some((path, source)) = pending.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let found = crate::cjs_exports::analyze(&source);
+        names.extend(found.names);
+        for name in found.reexports {
+            let loader = crate::shared(context).esm.clone();
+            if let Ok(url) = loader.resolve(&name, Some(&path), Mode::Require, true, context)
+                && let Ok(path) = resolve::file_path(&url)
+                && !seen.contains(&path)
+                && let Ok(source) = std::fs::read_to_string(&path)
+            {
+                pending.push((path, source));
+            }
         }
     }
     names.remove("default");
