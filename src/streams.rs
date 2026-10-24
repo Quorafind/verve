@@ -43,32 +43,32 @@ pub(crate) fn pending(context: &mut Context) -> (JsObject, ResolvingFunctions) {
     (promise.into(), resolvers)
 }
 
-fn resolve(resolvers: &ResolvingFunctions, value: JsValue, context: &mut Context) {
+pub(crate) fn resolve(resolvers: &ResolvingFunctions, value: JsValue, context: &mut Context) {
     let _ = resolvers
         .resolve
         .call(&JsValue::undefined(), &[value], context);
 }
 
-fn reject(resolvers: &ResolvingFunctions, reason: JsValue, context: &mut Context) {
+pub(crate) fn reject(resolvers: &ResolvingFunctions, reason: JsValue, context: &mut Context) {
     let _ = resolvers
         .reject
         .call(&JsValue::undefined(), &[reason], context);
 }
 
-fn resolved(value: JsValue, context: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn resolved(value: JsValue, context: &mut Context) -> JsResult<JsValue> {
     Ok(JsPromise::resolve(value, context)?.into())
 }
 
-fn rejected(reason: JsValue, context: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn rejected(reason: JsValue, context: &mut Context) -> JsResult<JsValue> {
     Ok(JsPromise::reject(JsError::from_opaque(reason), context)?.into())
 }
 
 /// An error as the value a promise is rejected with.
-fn error_value(error: JsError, context: &mut Context) -> JsValue {
+pub(crate) fn error_value(error: JsError, context: &mut Context) -> JsValue {
     error.into_opaque(context).unwrap_or_default()
 }
 
-fn type_error_value(message: &str, context: &mut Context) -> JsValue {
+pub(crate) fn type_error_value(message: &str, context: &mut Context) -> JsValue {
     error_value(type_error(message), context)
 }
 
@@ -110,11 +110,11 @@ fn reaction<T: Trace + 'static>(context: &mut Context, captures: T, f: Reaction<
 }
 
 /// A reaction that rethrows: a rejection kept a rejection.
-fn rethrow<T>(_: &T, reason: JsValue, _: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn rethrow<T>(_: &T, reason: JsValue, _: &mut Context) -> JsResult<JsValue> {
     Err(JsError::from_opaque(reason))
 }
 
-fn ignore<T>(_: &T, _: JsValue, _: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn ignore<T>(_: &T, _: JsValue, _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::undefined())
 }
 
@@ -161,7 +161,7 @@ fn native<T: Trace + 'static>(
 
 // ─── Bytes ──────────────────────────────────────────────────────────────────────────────────
 
-fn u8array(bytes: Vec<u8>, context: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn u8array(bytes: Vec<u8>, context: &mut Context) -> JsResult<JsValue> {
     Ok(JsUint8Array::from_iter(bytes, context)?.into())
 }
 
@@ -269,7 +269,7 @@ pub(crate) fn classes(context: &mut Context) -> JsResult<Rc<Classes>> {
 
 /// A web class: a constructor that must be called with `new` (`construct` is handed
 /// `new.target` as `this`), its prototype with `methods` and `accessors`, and `statics`.
-fn web_class(
+pub(crate) fn web_class(
     context: &mut Context,
     name: &str,
     length: usize,
@@ -317,7 +317,7 @@ fn web_class(
 }
 
 /// A web class's own method under a symbol: `[Symbol.asyncIterator]`.
-fn symbol_method(
+pub(crate) fn symbol_method(
     context: &mut Context,
     target: &JsObject,
     symbol: JsSymbol,
@@ -343,7 +343,7 @@ fn illegal(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
 
 /// The prototype the object a constructor makes is made on: `new.target`'s, which `new` (or a
 /// subclass's `super()`) hands a native constructor as `this`.
-fn prototype_for(
+pub(crate) fn prototype_for(
     new_target: &JsValue,
     name: &str,
     fallback: JsObject,
