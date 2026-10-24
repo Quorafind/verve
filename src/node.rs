@@ -1092,6 +1092,8 @@ pub(crate) const MODULES: &[(&str, crate::ModuleMaker)] = &[
     ("util", crate::util::util_module),
     ("util/types", crate::util::types_module),
     ("sys", |cx, _| crate::modules::node_module(cx, "util")),
+    ("assert", crate::assert::assert_module),
+    ("assert/strict", crate::assert::strict_module),
     ("events", |cx, _| events_module(cx)),
     ("os", |cx, _| os_module(cx)),
     ("url", |cx, _| url_module(cx)),
