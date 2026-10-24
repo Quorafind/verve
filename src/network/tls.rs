@@ -245,10 +245,9 @@ fn verification_code(
         use x509_parser::prelude::FromDer;
         if let Ok((_, certificate)) =
             x509_parser::certificate::X509Certificate::from_der(cert.as_ref())
+            && certificate.subject() == certificate.issuer()
         {
-            if certificate.subject() == certificate.issuer() {
-                return "DEPTH_ZERO_SELF_SIGNED_CERT";
-            }
+            return "DEPTH_ZERO_SELF_SIGNED_CERT";
         }
     }
     certificate_code(error)
@@ -497,7 +496,7 @@ fn connect(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue>
             .cloned()
             .unwrap_or_default()
     };
-    let socket = ctor.construct(&[input.clone()], None, cx)?;
+    let socket = ctor.construct(std::slice::from_ref(&input), None, cx)?;
     let value: JsValue = socket.clone().into();
     if let Some(cb) = args.iter().rev().find(|v| v.is_callable()) {
         invoke(&value, "once", &[js_text("secureConnect"), cb.clone()], cx)?;
@@ -565,13 +564,13 @@ fn check_identity(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<J
                 if host.parse::<std::net::IpAddr>().is_err() {
                     matched |= name_matches(name);
                 }
-            } else if let Some(address) = name.strip_prefix("IP Address:") {
-                if let (Ok(host), Ok(address)) = (
+            } else if let Some(address) = name.strip_prefix("IP Address:")
+                && let (Ok(host), Ok(address)) = (
                     host.parse::<std::net::IpAddr>(),
                     address.parse::<std::net::IpAddr>(),
-                ) {
-                    matched |= host == address;
-                }
+                )
+            {
+                matched |= host == address;
             }
         }
     } else if host.parse::<std::net::IpAddr>().is_err() {
@@ -642,7 +641,7 @@ pub(crate) fn install(module: &JsObject, cx: &mut Context) -> JsResult<()> {
             parent: Some(&server_parent),
             init: |target, args, cx| {
                 let options = arg(args, 0);
-                tcp::init_server(target, &[options.clone()], cx)?;
+                tcp::init_server(target, std::slice::from_ref(&options), cx)?;
                 hidden(target, js_string!("__tlsOptions"), options, cx)?;
                 if let Some(cb) = args.iter().rev().find(|v| v.is_callable()) {
                     invoke(
@@ -688,7 +687,7 @@ pub(crate) fn install(module: &JsObject, cx: &mut Context) -> JsResult<()> {
             .as_object()
             .ok_or_else(|| crate::native::type_error("Server"))?;
         let options = arg(args, 0);
-        let server = ctor.construct(&[options.clone()], None, cx)?;
+        let server = ctor.construct(std::slice::from_ref(&options), None, cx)?;
         hidden(&server, js_string!("__tlsOptions"), options, cx)?;
         if let Some(cb) = args.iter().rev().find(|v| v.is_callable()) {
             invoke(
@@ -932,7 +931,8 @@ pub(crate) fn secured(target: &JsValue, info: SessionInfo, cx: &mut Context) -> 
             tcp::put(target, "authorizationError", get(&result, "code", cx)?, cx)?;
         }
     }
-    super::send(cx, Command::TlsAuthorize(super::id(target, cx)?));
+    let id = super::id(target, cx)?;
+    super::send(cx, Command::TlsAuthorize(id));
     tcp::emit(target, "secure", &[], cx)?;
     if get(target, "__tlsServer", cx)?.to_boolean() {
         let failed = get(target, "__tlsHandshakeError", cx)?;
@@ -941,7 +941,12 @@ pub(crate) fn secured(target: &JsValue, info: SessionInfo, cx: &mut Context) -> 
         }
         tcp::put(target, "__tlsHandshakeError", JsValue::undefined(), cx)?;
         let server = get(target, "server", cx)?;
-        tcp::emit(&server, "secureConnection", &[target.clone()], cx)?;
+        tcp::emit(
+            &server,
+            "secureConnection",
+            std::slice::from_ref(target),
+            cx,
+        )?;
     } else {
         tcp::emit(target, "secureConnect", &[], cx)?;
     }

@@ -74,7 +74,7 @@ fn flush(target: &JsValue, payload: usize, cx: &mut Context) -> JsResult<()> {
         cx,
         "",
         0,
-        |_, _, (target, payload): &(JsValue, f64), cx| {
+        |_, _, (target, payload): &(JsValue, f64), _| {
             crate::messaging::socket_part(target, |_, _, _, buffered| {
                 *buffered = (*buffered - *payload).max(0.)
             })?;
@@ -151,8 +151,7 @@ fn receive(target: &JsObject, bytes: Vec<u8>, cx: &mut Context) -> JsResult<()> 
             let native = native
                 .downcast_ref::<Wire>()
                 .ok_or_else(|| crate::native::type_error("WebSocket"))?;
-            let result = native.socket.borrow_mut().read();
-            result
+            native.socket.borrow_mut().read()
         };
         match message {
             Ok(Message::Text(text)) => {

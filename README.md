@@ -10,13 +10,17 @@ A JavaScript runtime for live plugins, in Rust.
   browser and Node in one — every one a Rust function: CommonJS `require`, timers on a clock the
   host drives, microtasks, `console`, `process`. Nothing here is JavaScript written to stand in
   for Node or the web.
-- **Modules** are CommonJS as Node has them: every built-in answers to its bare name and to
-  `node:` before it; a plugin's own files resolve as Node resolves them (extensions, folders,
-  `package.json`'s `main`, `node_modules`); `require.cache`, `require.resolve`, `module`, and
-  `require('module')` (`createRequire`, `builtinModules`, `isBuiltin`). Node's own modules are
-  made the first time they are required, the web's globals the first time they are read. The
-  host requires natively with `RuntimeX::require`, and gets a `window.require` of no module's
-  from `RuntimeX::global_require`.
+- **Modules** are Node 22's CommonJS and native ECMAScript modules. `.mjs`, `.cjs`, package
+  `type` and ambiguous `.js` syntax select the format. Both use package `exports`, `imports`
+  (`#` names), self references, patterns and ordered conditions; ESM uses exact file URLs,
+  never extension or directory-index guessing. `require(esm)` handles synchronous graphs,
+  rejects top-level await before execution, and honors the `module.exports` export.
+  Builtins are native synthetic modules sharing their CommonJS default export, with
+  `syncBuiltinESMExports`; CJS named exports are discovered statically in Rust.
+  `RuntimeX::load_esm` and `RuntimeX::import_module` return namespace promises; host-driven
+  ticks resume top-level await without waiting. `forget_module` clears both module caches.
+  The host still requires natively with `RuntimeX::require` and obtains Electron's
+  `window.require` from `RuntimeX::global_require`.
 - **Node's classes extend every way**: `class X extends EventEmitter`, and the older
   `function X() { EventEmitter.call(this) }` with `util.inherits` — each class is a `Proxy` of
   its native constructor, whose `apply` trap sets up the caller's own object.
@@ -27,6 +31,15 @@ A JavaScript runtime for live plugins, in Rust.
   What runs in one is the embedder's: implement `isolate::Guest`.
 
 ## What a plugin finds
+
+**Modules**
+- Static and dynamic ESM imports, including imports from CommonJS wrappers and global scripts;
+  Node package maps and conditions, builtins and statically discovered CJS named exports.
+- `import.meta.url`, `filename`, `dirname` and synchronous `resolve`; JSON imports with
+  `with { type: 'json' }`; `data:` and `blob:` modules. A blob import captures its bytes when
+  `import()` is called, so immediate `URL.revokeObjectURL` does not cancel it.
+- Module workers (`new Worker(url, { type: 'module' })`), with static imports and top-level
+  await. Unsupported import schemes reject with Node error codes, never an unsettled promise.
 
 **The web's globals**
 - `EventTarget`, `Event`, `CustomEvent`, `MessageEvent`, `ErrorEvent`, `CloseEvent`,
@@ -159,11 +172,98 @@ tarballs. Prepare them outside the checkout with `node tests/fixtures/network/pr
 ignored network tests during integration. Preparation is offline and disables lifecycle scripts;
 normal tests need neither Node nor npm.
 
+`tests/esm.rs` freezes Node 22 package-resolution and interoperability observations. Its real-package
+acceptance fixture pins nanoid 5.1.6, chalk 5.6.2, date-fns 4.1.0 and zod 4.1.12; prepare the fixture
+outside the checkout and set `RUNTIME_X_ESM_PACKAGES` to that package directory. Run
+`cargo test --test network --test esm --test worker -- --include-ignored --test-threads=1` with both
+fixture directories set to include the live Node peers, npm packages and stress cases.
+
+ESM requires the module-loader and synchronous-evaluation changes recorded in Boa's `SU.md`, along
+with its parser correction for calls to functions named `async`. Until those changes are integrated,
+local validation must override all seven Boa crates from the same checkout, not mix patched and
+unpatched engine/GC crates. These changes do not update an embedder's dependencies or grant network
+permissions.
+
 Networking pins mio, socket2, Hickory, rustls (ring), native certificate/PEM readers, x509-parser,
 httparse and tungstenite with their purposes recorded in `Cargo.toml`. HTTP/2 is not implemented.
 DNS uses two fixed workers, never a thread per connection; dropping a realm cancels queued work
 without joining a system lookup that is already in progress. Binary-size/build-time impact and
 Rust integration results must be measured by the integration build, not inferred from the pins.
+
+## Integration observations (2026-10-24)
+
+Windows 10 x64, AMD Ryzen 9 7950X (16 cores / 32 logical processors), 127.1 GiB RAM;
+Rust/Cargo 1.95.0 and Node 22.21.1. Validation used local RuntimeX and Boa checkouts; Boa's
+module/parser changes are on `feat/runtime-x-esm` (`e409fb15`).
+
+- RuntimeX: 185 default tests and the separate real-plugin corpus test passed. The concentrated
+  acceptance run passed all 29 network, 26 ESM and 2 worker tests, including ignored tests.
+  `cargo fmt --check` passed; Clippy passed with only the five existing unrelated warnings.
+- Boa: 320 parser tests passed (one ignored), all 13 module tests and 35 function tests passed;
+  the changed engine/parser packages passed their formatting check.
+- Su: 189 default `obsidian-host` tests passed, followed by the ignored real Latex Suite test
+  and rebuilding `probe`. An external Cargo patch configuration and scratch lockfile kept Su's
+  source dependency configuration and lockfile unchanged; no network permission was enabled.
+- Su's top-300 probe reached the required threshold: 290 plugins enabled; 288 of those probe
+  processes exited normally. `charted-roots` and `journals` enabled but timed out after 180 seconds
+  during later probing. A normal process exit does not imply every command/settings/unload action
+  succeeded: `flexplorer`, `obsidian-annotator`, `obsidian-excalidraw-plugin`, `obsidian-tikzjax`
+  and `podnotes` reported unload errors. The ten enable failures include unsupported host/engine
+  APIs, the deliberately denied child-process/public-key capabilities and the missing
+  `obsidian-clipper` installation. These are recorded failures, not a claim of 300 fully working
+  plugins.
+- The unmodified Latex Suite registers editor extensions and handles the note's `mk` key sequence.
+  Its default snippet is `${}$0{}$`: the resulting note is `${}{}$`, with the caret at position 3,
+  not `$$`. Both the host note and actual CodeMirror document are asserted.
+
+The two ignored stress tests were also run as separate test processes, observing Windows process
+threads and peak working set at a requested 5 ms sampling interval:
+
+| Acceptance | Observed peak threads | Peak working set |
+| --- | ---: | ---: |
+| 100 MiB loopback upload | 10 | 98.6 MiB |
+| 1000 simultaneously established connections | 10 | 73.2 MiB |
+
+The upload additionally asserts that backpressure occurs, all bytes arrive, the JavaScript writable
+queue never exceeds 64 KiB, and it drains completely. The connection test retains all 1000 live
+connections before closing them; neither test creates one I/O thread per connection. These are dev
+build process observations, not release-build size or latency claims.
+
+### Installed compilation targets
+
+`cargo check --lib --target ...` passed for all eleven of these native targets; macOS/Linux checks
+used cargo-zigbuild 0.23.0 with Zig 0.15.2, and Android checks used NDK 28.2.13676358 (API 21):
+
+- `aarch64-apple-darwin`, `x86_64-apple-darwin`.
+- `aarch64-linux-android`, `armv7-linux-androideabi`, `i686-linux-android`, `x86_64-linux-android`.
+- `aarch64-unknown-linux-musl`, `i686-unknown-linux-musl`, `x86_64-unknown-linux-musl`,
+  `x86_64-unknown-linux-gnu`.
+- `x86_64-pc-windows-msvc`.
+
+Two installed targets did not pass. `aarch64-apple-ios` first exceeded cargo-zigbuild's supported
+target set; retrying with LLVM clang reached ring's C build but required `xcrun` and an Apple SDK,
+which this Windows machine does not have. iOS therefore remains unverified, not a passing check.
+`wasm32-unknown-unknown` fails in getrandom without a JavaScript entropy backend; the baseline
+RuntimeX checkout fails there too. This is not a claim of browser/Wasm support. Other targets were
+not installed and were not checked. Cross-target checks do not establish executable linking or
+runtime behavior on those platforms.
+
+### Same-input build and binary observations
+
+The baseline was RuntimeX `46c3072`; the integrated variant includes network and ESM. Both used
+exactly the same 11-line program: create a runtime on a 16 MiB-stack thread, evaluate `1 + 1`, and
+print the answer. Both printed `2`. Both used the same locally patched Boa checkout, dev profile
+(Boa crates, regress and wasmi at opt-level 3), Cargo target directory and shared dependency cache.
+Each variant was built once and then immediately rebuilt without changes, with `-j 4`.
+
+| Variant | First measured build | Unchanged rebuild | Executable bytes | Executable size |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline | 106.687 s | 1.067 s | 33,100,288 | 31.57 MiB |
+| Integrated | 97.621 s | 1.429 s | 41,966,592 | 40.02 MiB |
+
+The dev executable grew by 8,866,304 bytes (8.46 MiB, 26.8%). These are single, shared-cache build
+observations, not clean-build timings, release sizes, or evidence of a compilation speedup. They
+compare the RuntimeX integration, not the separate cost of Boa's module/parser changes.
 
 Run the runtime on a thread with room for its stack, as workers and isolates do (16 MB or
 more): Boa's interpreter recurses deeply, and a dev build overflows Windows' 1 MB main thread

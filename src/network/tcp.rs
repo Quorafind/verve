@@ -565,14 +565,19 @@ pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context)
             put(&socket_value, "server", this.clone(), cx)?;
             super::tls::accepted(&this, &socket_value, child, cx)?;
             let connections = get(&this, "__networkConnections", cx)?;
-            invoke(&connections, "push", &[socket_value.clone()], cx)?;
+            invoke(
+                &connections,
+                "push",
+                std::slice::from_ref(&socket_value),
+                cx,
+            )?;
             let close = closure(
                 cx,
                 "",
                 0,
                 |_, _, (server, socket): &(JsValue, JsValue), cx| {
                     let connections = get(server, "__networkConnections", cx)?;
-                    let index = invoke(&connections, "indexOf", &[socket.clone()], cx)?;
+                    let index = invoke(&connections, "indexOf", std::slice::from_ref(socket), cx)?;
                     invoke(&connections, "splice", &[index, 1.into()], cx)?;
                     finish_server_close(server, cx)?;
                     Ok(JsValue::undefined())
@@ -580,7 +585,7 @@ pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context)
                 (this.clone(), socket_value.clone()),
             );
             invoke(&socket_value, "once", &[js_text("close"), close.into()], cx)?;
-            emit(&this, "connection", &[socket_value.clone()], cx)?;
+            emit(&this, "connection", std::slice::from_ref(&socket_value), cx)?;
             if !get(&socket_value, "__networkPaused", cx)?.to_boolean() {
                 super::send(cx, Command::Read(child, true));
             }

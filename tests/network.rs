@@ -238,7 +238,7 @@ fn node_client_connects_to_runtime_server() {
     std::thread::Builder::new().stack_size(16*1024*1024).spawn(|| {
         runtime_x::set_thread_stack(16*1024*1024);
         let mut rt=RuntimeX::new();rt.set_permissions(granted());
-        rt.eval(r#"
+        rt.load_module(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/network-entry.cjs"), r#"
             const net=require('net'),order=[];const server=net.createServer(s=>{
                 order.push('connection');s.setEncoding('utf8');s.on('data',b=>order.push(b));s.pipe(s);
                 s.on('end',()=>order.push('end'));s.on('close',()=>{order.push('close');server.close(()=>globalThis.result=order)});
@@ -247,10 +247,10 @@ fn node_client_connects_to_runtime_server() {
         let deadline=Instant::now()+Duration::from_secs(30);let mut child=None;
         while !rt.eval("globalThis.result!==undefined").unwrap().to_boolean() {
             rt.run_due();
-            if child.is_none() {
-                if let Some(port)=rt.eval("globalThis.port").unwrap().as_number() {
-                    child=Some(node_peer().arg("client").arg((port as u16).to_string()).stdout(std::process::Stdio::piped()).spawn().unwrap());
-                }
+            if child.is_none()
+                && let Some(port) = rt.eval("globalThis.port").unwrap().as_number()
+            {
+                child = Some(node_peer().arg("client").arg((port as u16).to_string()).stdout(std::process::Stdio::piped()).spawn().unwrap());
             }
             assert!(Instant::now()<deadline,"Node cross-peer timed out");std::thread::sleep(Duration::from_millis(1));
         }
@@ -265,7 +265,8 @@ fn node_client_connects_to_runtime_server() {
 fn replacing_permissions_closes_listeners_and_completes_pending_dns() {
     let mut rt = RuntimeX::new();
     rt.set_permissions(granted());
-    rt.eval(
+    rt.load_module(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/network-entry.cjs"),
         r#"
         globalThis.closed=false;globalThis.dnsCode='';
         globalThis.server=require('net').createServer();server.on('close',()=>closed=true);
@@ -294,8 +295,11 @@ fn replacing_permissions_closes_listeners_and_completes_pending_dns() {
 fn expired_network_deadline_returns_without_waiting() {
     let mut rt = RuntimeX::new();
     rt.set_permissions(granted());
-    rt.eval("require('dns').lookup('runtime-x-does-not-exist.invalid',()=>{})")
-        .unwrap();
+    rt.load_module(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/network-entry.cjs"),
+        "require('dns').lookup('runtime-x-does-not-exist.invalid',()=>{})",
+    )
+    .unwrap();
     let start = Instant::now();
     assert_eq!(rt.run_network_until(Some(start)), 0);
     assert!(start.elapsed() < Duration::from_millis(100));
@@ -487,6 +491,52 @@ fn http_close_all_connections_closes_active_transport() {
         "true"
     );
 }
+#[test]
+fn http_upgrade_completes_messages_without_aborting_them_on_close() {
+    assert_eq!(
+        run(
+            r#"
+        const http=require('http');const complete=[];let aborted=0;
+        const server=http.createServer();
+        server.on('upgrade',(req,socket)=>{
+            complete.push(req.complete);req.on('aborted',()=>aborted++);
+            socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n');
+        });
+        server.listen(0,'127.0.0.1',()=>{
+            const req=http.request({host:'127.0.0.1',port:server.address().port,headers:{Connection:'Upgrade',Upgrade:'test'}});
+            req.on('upgrade',(res,socket)=>{
+                complete.push(res.complete);res.on('aborted',()=>aborted++);
+                socket.resume();socket.on('end',()=>socket.end());
+                socket.on('close',()=>server.close(()=>setImmediate(()=>globalThis.result=[...complete,aborted])));
+            });req.end();
+        });
+    "#,
+            granted()
+        ),
+        "[true,true,0]"
+    );
+}
+
+#[test]
+fn http_server_close_finishes_active_keepalive_responses() {
+    assert_eq!(
+        run(
+            r#"
+        const http=require('http');let closed=false,ended=false,body='';
+        function done(){if(closed&&ended)globalThis.result=[body,closed]}
+        const server=http.createServer((req,res)=>{
+            server.close(()=>{closed=true;done()});setTimeout(()=>res.end('complete'),1);
+        });
+        server.listen(0,'127.0.0.1',()=>http.get({host:'127.0.0.1',port:server.address().port},res=>{
+            res.on('data',b=>body+=b);res.on('end',()=>{ended=true;done()});
+        }));
+    "#,
+            granted()
+        ),
+        r#"["complete",true]"#
+    );
+}
+
 #[test]
 #[ignore = "prepare offline npm fixture and set RUNTIME_X_NETWORK_NPM; central integration"]
 fn real_ws_axios_node_fetch_and_express_packages() {

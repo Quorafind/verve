@@ -1,0 +1,22 @@
+{
+  "name": "runtime-x-esm-fixture",
+  "type": "module",
+  "exports": {
+    ".": "./value.js",
+    "./feature/*": "./features/*.js",
+    "./private": null,
+    "./invalid": "../outside.js",
+    "./ordered": {"default": "./value.js", "node": "./wrong.js"},
+    "./conditions": {"plugin": "./features/custom.js", "default": "./value.js"},
+    "./array": ["invalid", "./value.js"]
+  },
+  "imports": {
+    "#value": "./value.js",
+    "#feature/*": "./features/*.js",
+    "#builtin": "path",
+    "#external": "dual",
+    "#conditional": {"import": "./value.js", "require": "./named.cjs"},
+    "#nested-block": {"node": {"default": null}, "default": "./value.js"},
+    "#missing": null
+  }
+}

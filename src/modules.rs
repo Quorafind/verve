@@ -52,7 +52,7 @@ fn node_table_answers(name: &str) -> bool {
 }
 
 /// Whether `name` is a built-in module, without making it.
-fn is_builtin(context: &Context, name: &str) -> bool {
+pub(crate) fn is_builtin(context: &Context, name: &str) -> bool {
     let bare = bare_name(name);
     let state = crate::shared(context);
     state.builtins.borrow().contains_key(bare)
@@ -171,14 +171,7 @@ fn as_file_or_folder(base: &Path) -> Option<PathBuf> {
         if let Ok(text) = std::fs::read_to_string(&manifest)
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
         {
-            let main = json.get("main").and_then(|m| m.as_str()).or_else(|| {
-                // `"exports": "./x.js"`, or `{ ".": "./x.js" }`, or `{ ".": { "require": … } }`.
-                let exports = json.get("exports")?;
-                let dot = exports.get(".").unwrap_or(exports);
-                dot.as_str()
-                    .or_else(|| dot.get("require").and_then(|r| r.as_str()))
-                    .or_else(|| dot.get("default").and_then(|r| r.as_str()))
-            });
+            let main = json.get("main").and_then(|m| m.as_str());
             if let Some(main) = main {
                 let target = base.join(main);
                 if let Some(found) = as_file_or_folder_plain(&target) {
@@ -224,23 +217,47 @@ fn is_path(name: &str) -> bool {
 }
 
 /// What `name`, required from a module in `folder`, names.
-fn resolve(context: &Context, folder: &Path, name: &str) -> Option<Resolved> {
+fn resolve(context: &mut Context, folder: &Path, name: &str) -> JsResult<Resolved> {
     if is_builtin(context, name) && !is_path(name) {
-        return Some(Resolved::Builtin(name.to_owned()));
+        return Ok(Resolved::Builtin(name.to_owned()));
     }
     if is_path(name) {
-        return as_file_or_folder(&clean(&folder.join(name))).map(Resolved::File);
+        return as_file_or_folder(&clean(&folder.join(name)))
+            .map(Resolved::File)
+            .ok_or_else(|| not_found(context, name));
     }
-    // A package in `node_modules`, here or in a folder above.
-    let mut at = Some(folder);
-    while let Some(dir) = at {
-        let candidate = clean(&dir.join("node_modules").join(name));
-        if let Some(found) = as_file_or_folder(&candidate) {
-            return Some(Resolved::File(found));
-        }
-        at = dir.parent();
+    let loader = crate::shared(context).esm.clone();
+    let url = loader
+        .resolve(
+            name,
+            Some(&folder.join("__require__.cjs")),
+            crate::esm_resolve::Mode::Require,
+            true,
+            context,
+        )
+        .map_err(|error| {
+            // CJS preserves its historical missing-module code; package encapsulation errors
+            // retain their ERR_PACKAGE_* identities shared with ESM.
+            let opaque = error.clone().into_opaque(context).unwrap_or_default();
+            if opaque
+                .as_object()
+                .and_then(|o| o.get(js_string!("code"), context).ok())
+                .is_some_and(|c| crate::print(&c) == "ERR_MODULE_NOT_FOUND")
+            {
+                not_found(context, name)
+            } else {
+                error
+            }
+        })?;
+    if url.scheme() == "node" {
+        return Ok(Resolved::Builtin(url.to_string()));
     }
-    None
+    if url.scheme() != "file" {
+        return Err(not_found(context, name));
+    }
+    let path = crate::esm_resolve::file_path(&url)
+        .map_err(|error| crate::native::coded_error(context, &error.message, error.code))?;
+    Ok(Resolved::File(path))
 }
 
 /// The folders a package is looked for in from `folder`: `require.resolve.paths`, and
@@ -264,12 +281,11 @@ pub(crate) fn require(
     name: &str,
     parent: Option<&JsObject>,
 ) -> JsResult<JsValue> {
-    match resolve(context, folder, name) {
-        Some(Resolved::Builtin(name)) => {
+    match resolve(context, folder, name)? {
+        Resolved::Builtin(name) => {
             builtin(context, &name)?.ok_or_else(|| not_found(context, &name))
         }
-        Some(Resolved::File(path)) => load_file(context, &path, parent),
-        None => Err(not_found(context, name)),
+        Resolved::File(path) => load_file(context, &path, parent),
     }
 }
 
@@ -279,7 +295,11 @@ fn cache(context: &Context) -> JsObject {
 }
 
 /// A file required: answered from the cache, or read and run (or, a `.json`, parsed).
-fn load_file(context: &mut Context, path: &Path, parent: Option<&JsObject>) -> JsResult<JsValue> {
+pub(crate) fn load_file(
+    context: &mut Context,
+    path: &Path,
+    parent: Option<&JsObject>,
+) -> JsResult<JsValue> {
     let key = JsString::from(path.to_string_lossy().as_ref());
     let cached = cache(context).get(key.clone(), context)?;
     if cached.is_object() {
@@ -310,7 +330,32 @@ fn load_file(context: &mut Context, path: &Path, parent: Option<&JsObject>) -> J
         cache(context).set(key, module, false, context)?;
         return Ok(value);
     }
+    if matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("mjs" | "js") | None
+    ) && crate::esm::is_esm(path, text, context)?
+    {
+        let loader = crate::shared(context).esm.clone();
+        return loader.require(path, context);
+    }
     run_module(context, path, text, parent)
+}
+
+/// The CJS side of a synchronous CJS -> ESM -> CJS cycle cannot expose partial exports.
+pub(crate) fn import_cjs(context: &mut Context, path: &Path) -> JsResult<JsValue> {
+    let key = JsString::from(path.to_string_lossy().as_ref());
+    let cached = cache(context).get(key, context)?;
+    if cached.is_object()
+        && !get(&cached, "loaded", context)?.to_boolean()
+        && crate::shared(context).esm.is_requiring()
+    {
+        return Err(crate::native::coded_error(
+            context,
+            "Cannot import CommonJS in a require(esm) cycle",
+            "ERR_REQUIRE_CYCLE_MODULE",
+        ));
+    }
+    load_file(context, path, None)
 }
 
 /// The prototype of every module object: `require('module').prototype`.
@@ -394,7 +439,9 @@ pub(crate) fn run_module(
     // error is the line in the file.
     let wrapped =
         format!("(function (exports, require, module, __filename, __dirname) {{ {source}\n}})");
-    let source_path = filename.to_path_buf();
+    let source_path = crate::esm_resolve::file_url(filename)
+        .map(|url| PathBuf::from(url.as_str()))
+        .unwrap_or_else(|_| filename.to_path_buf());
     let wrapper = context.eval(Source::from_bytes(&wrapped).with_path(&source_path))?;
 
     let module = module_object(context, filename, parent)?;
@@ -424,8 +471,20 @@ pub(crate) fn run_module(
 
 /// Forgets the module run from `filename`, so the next `require` of it runs it afresh.
 pub(crate) fn forget(context: &mut Context, filename: &Path) {
-    let key = JsString::from(clean(filename).to_string_lossy().as_ref());
-    let _ = cache(context).delete_property_or_throw(key, context);
+    let path = url::Url::parse(&filename.to_string_lossy())
+        .ok()
+        .filter(|url| url.scheme() == "file")
+        .and_then(|url| crate::esm_resolve::file_path(&url).ok())
+        .unwrap_or_else(|| crate::esm::absolute(filename, context));
+    for path in [Some(path.clone()), std::fs::canonicalize(&path).ok()]
+        .into_iter()
+        .flatten()
+    {
+        let key = JsString::from(clean(&path).to_string_lossy().as_ref());
+        let _ = cache(context).delete_property_or_throw(key, context);
+    }
+    let loader = crate::shared(context).esm.clone();
+    loader.forget(filename, context);
 }
 
 /// The folder a `require` resolves relative names against, kept as text in the functions that
@@ -493,14 +552,15 @@ pub(crate) fn require_function(
                     .map(|p| PathBuf::from(crate::print(p)))
                     .collect();
             }
+            let mut missing = None;
             for folder in folders {
                 match resolve(context, &folder, &name) {
-                    Some(Resolved::Builtin(name)) => return Ok(js_text(&name)),
-                    Some(Resolved::File(path)) => return Ok(path_text(&path)),
-                    None => {}
+                    Ok(Resolved::Builtin(name)) => return Ok(js_text(&name)),
+                    Ok(Resolved::File(path)) => return Ok(path_text(&path)),
+                    Err(error) => missing = Some(error),
                 }
             }
-            Err(not_found(context, &name))
+            Err(missing.unwrap_or_else(|| not_found(context, &name)))
         },
         captured.clone(),
     );
@@ -614,10 +674,9 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
                             .unwrap_or_default(),
                         _ => PathBuf::from(crate::shared(cx).cwd.borrow().clone()),
                     };
-                    match resolve(cx, &folder, &name) {
-                        Some(Resolved::Builtin(name)) => Ok(js_text(&name)),
-                        Some(Resolved::File(path)) => Ok(path_text(&path)),
-                        None => Err(not_found(cx, &name)),
+                    match resolve(cx, &folder, &name)? {
+                        Resolved::Builtin(name) => Ok(js_text(&name)),
+                        Resolved::File(path) => Ok(path_text(&path)),
                     }
                 }),
                 ("_nodeModulePaths", 1, |_, args, cx| {
@@ -630,7 +689,9 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
                         "(function (exports, require, module, __filename, __dirname) {{ {source}\n}});"
                     )))
                 }),
-                ("syncBuiltinESMExports", 0, |_, _, _| {
+                ("syncBuiltinESMExports", 0, |_, _, context| {
+                    let loader = crate::shared(context).esm.clone();
+                    loader.sync_builtins(context)?;
                     Ok(JsValue::undefined())
                 }),
                 ("findSourceMap", 1, |_, _, _| Ok(JsValue::undefined())),

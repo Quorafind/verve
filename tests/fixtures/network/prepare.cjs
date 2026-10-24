@@ -13,7 +13,12 @@ for (const name of ['package.json', 'package-lock.json', 'npm-smoke.cjs']) {
   fs.copyFileSync(path.join(__dirname, name), path.join(target, name));
 }
 fs.cpSync(path.join(__dirname, 'vendor'), path.join(target, 'vendor'), { recursive: true });
-cp.execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm',
-  ['ci', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--global=false', '--cache', path.join(target, 'cache')],
-  { cwd: target, stdio: 'inherit', shell: process.platform === 'win32' });
+const args = ['ci', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--global=false', '--cache', path.join(target, 'cache')];
+if (process.platform === 'win32') {
+  cp.execFileSync(process.execPath,
+    [path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), ...args],
+    { cwd: target, stdio: 'inherit' });
+} else {
+  cp.execFileSync('npm', args, { cwd: target, stdio: 'inherit' });
+}
 console.log('RUNTIME_X_NETWORK_NPM=' + target);

@@ -99,7 +99,7 @@ pub(crate) fn register(target: &JsObject, cx: &mut Context) -> JsResult<Id> {
     let id = state.next;
     state.targets.insert(id, weak);
     drop(state);
-    crate::native::hidden(target, js_string!("__networkId"), (id as f64).into(), cx)?;
+    crate::native::hidden(target, js_string!("__networkId"), id as f64, cx)?;
     Ok(id)
 }
 

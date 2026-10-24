@@ -19,9 +19,12 @@
 
 mod assert;
 mod buffer;
+mod cjs_exports;
 mod crypto;
 mod dom_events;
 mod encoding;
+mod esm;
+mod esm_resolve;
 mod events;
 mod fetch;
 mod fs;
@@ -125,6 +128,8 @@ struct Shared {
     /// `require.cache`: the module object of every file run, by its path. A second `require`
     /// of the same file answers the same `module.exports`, as Node's cache does.
     module_cache: JsObject,
+    /// The URL-keyed ESM graph, shared by dynamic imports and require(esm).
+    esm: Rc<esm::Loader>,
     /// The `this` a class was called on without `new` (`EventEmitter.call(this)`), from its
     /// `apply` trap to its constructor; see `native::instance`.
     called_on: RefCell<Option<JsValue>>,
@@ -155,6 +160,7 @@ struct Shared {
 struct Microtasks {
     queue: RefCell<VecDeque<PromiseJob>>,
     generic: RefCell<VecDeque<boa_engine::job::GenericJob>>,
+    asynchronous: RefCell<VecDeque<boa_engine::job::NativeAsyncJob>>,
 }
 
 impl JobExecutor for Microtasks {
@@ -166,8 +172,10 @@ impl JobExecutor for Microtasks {
                 .borrow_mut()
                 .push_back(hooks::carry(job, context)),
             Job::GenericJob(job) => self.generic.borrow_mut().push_back(job),
-            // Timers are this runtime's own (see `set_timer`), and nothing a plugin can reach
-            // queues an async or finalization job.
+            // The native module loader returns Ready. TLA is continued by promise reactions,
+            // never by waiting for a host timer while a job holds the context.
+            Job::AsyncJob(job) => self.asynchronous.borrow_mut().push_back(job),
+            // Timers are this runtime's own; finalization jobs do not keep a realm alive.
             _ => {}
         }
     }
@@ -188,7 +196,33 @@ impl JobExecutor for Microtasks {
                         report(context, &error);
                     }
                 }
-                None => return Ok(()),
+                None => {
+                    let next = self.asynchronous.borrow_mut().pop_front();
+                    let Some(job) = next else {
+                        return Ok(());
+                    };
+                    let context = RefCell::new(&mut *context);
+                    let polled = {
+                        let mut future = std::pin::pin!(job.call(&context));
+                        let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+                        std::future::Future::poll(future.as_mut(), &mut task)
+                    };
+                    // Release any context borrow held by the future before reporting errors.
+                    match polled {
+                        std::task::Poll::Ready(Ok(_)) => {}
+                        std::task::Poll::Ready(Err(error)) => {
+                            report(&mut context.borrow_mut(), &error)
+                        }
+                        std::task::Poll::Pending => {
+                            // RuntimeX installs no asynchronous source loader. It must not
+                            // block an embedder's tick on an externally supplied future.
+                            let error = JsNativeError::error()
+                                .with_message("A native module job unexpectedly suspended")
+                                .into();
+                            report(&mut context.borrow_mut(), &error);
+                        }
+                    }
+                }
             }
         }
     }
@@ -252,8 +286,10 @@ impl RuntimeX {
     /// A runtime on a clock of the host's choosing — a test's, which only moves when told to.
     pub fn with_clock(clock: impl Fn() -> Millis + 'static) -> Self {
         let microtasks = Rc::new(Microtasks::default());
+        let esm = Rc::new(esm::Loader::default());
         let mut context = ContextBuilder::new()
             .job_executor(microtasks)
+            .module_loader(esm.clone())
             .build()
             .expect("a Boa context builds");
         // Deep recursion through natives stops with a RangeError before the thread's stack
@@ -270,6 +306,7 @@ impl RuntimeX {
             builtins: RefCell::new(HashMap::new()),
             families: RefCell::new(Vec::new()),
             module_cache: JsObject::with_null_proto(),
+            esm,
             called_on: RefCell::new(None),
             cwd: RefCell::new(
                 std::env::current_dir()
@@ -342,16 +379,72 @@ impl RuntimeX {
             .expect("a require function is made")
     }
 
-    /// Runs `source` as the CommonJS module at `filename`, answering its `module.exports`.
-    /// Its own `require` resolves relative names against the folder it is in.
+    /// Runs `source` in the Node-selected format at `filename`: CommonJS exports or the
+    /// synchronous ESM namespace. Use [`Self::load_esm`] for graphs with top-level await.
+    /// A module's own `require` resolves relative names against the folder it is in.
     pub fn load_module(&mut self, filename: &Path, source: &str) -> Result<JsValue, String> {
-        let result = modules::run_module(&mut self.context, filename, source, None);
+        let path = esm::absolute(filename, &self.context);
+        let result = (|| {
+            if esm::is_esm(&path, source, &mut self.context)? {
+                let loader = shared(&self.context).esm.clone();
+                loader.insert_source(&path, source, &mut self.context)?;
+                loader.require(&path, &mut self.context)
+            } else {
+                modules::run_module(&mut self.context, &path, source, None)
+            }
+        })();
         self.run_microtasks();
         result.map_err(|error| {
             // A module that throws as it runs is an uncaught error: on the console with where.
             report(&mut self.context, &error);
             describe(&mut self.context, &error)
         })
+    }
+
+    /// Loads native ESM source. The promise fulfills with its namespace; top-level await may
+    /// leave it pending until the host drives timers or completes the awaited operation.
+    pub fn load_esm(
+        &mut self,
+        filename: &Path,
+        source: &str,
+    ) -> Result<boa_engine::object::builtins::JsPromise, String> {
+        let loader = shared(&self.context).esm.clone();
+        let result = loader
+            .insert_source(filename, source, &mut self.context)
+            .and_then(|url| loader.start(&url, &mut self.context));
+        self.run_microtasks();
+        result.map_err(|error| describe(&mut self.context, &error))
+    }
+
+    /// Imports a URL, package, builtin or file relative to `parent` (or process.cwd()).
+    /// Resolution failures are rejected promises, as dynamic import failures are in Node.
+    pub fn import_module(
+        &mut self,
+        specifier: &str,
+        parent: Option<&Path>,
+    ) -> Result<boa_engine::object::builtins::JsPromise, String> {
+        let loader = shared(&self.context).esm.clone();
+        let result = loader
+            .resolve(
+                specifier,
+                parent,
+                esm_resolve::Mode::Import,
+                true,
+                &mut self.context,
+            )
+            .and_then(|url| loader.start(&url, &mut self.context));
+        let promise = match result {
+            Ok(promise) => Ok(promise),
+            Err(error) => boa_engine::object::builtins::JsPromise::reject(error, &mut self.context),
+        };
+        self.run_microtasks();
+        promise.map_err(|error| describe(&mut self.context, &error))
+    }
+
+    /// Additional package conditions, following Node's --conditions. Defaults stay Node's;
+    /// browser conditions are opt-in and never grant network permissions.
+    pub fn set_module_conditions(&mut self, conditions: Vec<String>) {
+        shared(&self.context).esm.conditions(conditions);
     }
 
     /// Forgets a module run from `filename`, so loading it again runs it afresh — what

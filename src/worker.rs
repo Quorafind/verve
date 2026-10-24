@@ -477,6 +477,8 @@ const WORKER_STACK: usize = 16 * 1024 * 1024;
 fn worker_thread(
     name: String,
     script: String,
+    url: String,
+    module: bool,
     inbox: Receiver<ToWorker>,
     out: Sender<FromWorker>,
     progress: Arc<Progress>,
@@ -488,17 +490,43 @@ fn worker_thread(
                 Level::Error,
                 format!("Uncaught (in worker) {error}"),
             ));
+            progress.pending.fetch_sub(1, Ordering::SeqCst);
             let _ = out.send(FromWorker::Closed);
             return;
         }
     };
-    if let Err(error) = runtime.eval(&script) {
+    let evaluated = if module {
+        runtime
+            .load_esm(std::path::Path::new(&url), &script)
+            .map(|promise| {
+                let rejected =
+                    crate::native::function(runtime.context(), "", 1, |_, args, context| {
+                        crate::report(context, &JsError::from_opaque(arg(args, 0)));
+                        Ok(JsValue::undefined())
+                    });
+                let _ = promise.then(
+                    None,
+                    boa_engine::object::builtins::JsFunction::from_object(rejected),
+                    runtime.context(),
+                );
+                JsValue::undefined()
+            })
+    } else {
+        runtime
+            .context()
+            .eval(boa_engine::Source::from_bytes(&script).with_path(std::path::Path::new(&url)))
+            .map_err(|error| crate::describe(runtime.context(), &error))
+    };
+    runtime.run_microtasks();
+    if let Err(error) = evaluated {
         let _ = out.send(FromWorker::Console(
             Level::Error,
             format!("Uncaught (in worker) {error}"),
         ));
     }
-    if !flush(&mut runtime, &out, &progress) {
+    let open = flush(&mut runtime, &out, &progress);
+    progress.pending.fetch_sub(1, Ordering::SeqCst);
+    if !open {
         return;
     }
     loop {
@@ -597,13 +625,19 @@ fn script_of(url: &str, context: &Context) -> Option<String> {
     if let Some(bytes) = shared(context).blobs.borrow().get(url) {
         return Some(String::from_utf8_lossy(bytes).into_owned());
     }
+    if let Ok(url) = url::Url::parse(url)
+        && url.scheme() == "file"
+        && let Ok(path) = crate::esm_resolve::file_path(&url)
+    {
+        return std::fs::read_to_string(path).ok();
+    }
     let rest = url.strip_prefix("data:")?;
     let (header, body) = rest.split_once(',')?;
     if header.ends_with(";base64") {
         let bytes = crate::encoding::unbase64(body)?;
         Some(String::from_utf8_lossy(&bytes).into_owned())
     } else {
-        Some(body.replace("%20", " ").replace("%0A", "\n"))
+        crate::esm_resolve::percent_decode(body).ok()
     }
 }
 
@@ -614,7 +648,13 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
             "Worker: '{url}' is not a script here — a blob: or data: address is"
         ))
     })?;
-    let name = match arg(args, 1).as_object() {
+    let options = arg(args, 1);
+    let kind = crate::native::get(&options, "type", context)?;
+    let module = !kind.is_undefined() && crate::native::text_of(&kind, context)? == "module";
+    if !kind.is_undefined() && !module && crate::native::text_of(&kind, context)? != "classic" {
+        return Err(type_error("Worker type must be classic or module"));
+    }
+    let name = match options.as_object() {
         Some(o) => o.get(js_string!("name"), context)?,
         None => JsValue::undefined(),
     };
@@ -625,7 +665,10 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     };
     let (to, inbox) = mpsc::channel();
     let (out, from) = mpsc::channel();
-    let progress = Arc::new(Progress::default());
+    let progress = Arc::new(Progress {
+        pending: AtomicUsize::new(1),
+        ..Progress::default()
+    });
     let thread_progress = Arc::clone(&progress);
     let thread_name = if name.is_empty() {
         "worker".to_owned()
@@ -637,7 +680,7 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
         .stack_size(WORKER_STACK)
         .spawn(move || {
             crate::set_thread_stack(WORKER_STACK);
-            worker_thread(name, script, inbox, out, thread_progress)
+            worker_thread(name, script, url, module, inbox, out, thread_progress)
         })
         .map_err(|error| type_error(format!("Worker: no thread to run it on ({error})")))?;
     let object = JsObject::with_object_proto(context.intrinsics());

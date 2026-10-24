@@ -97,7 +97,7 @@ struct Output {
     counters: Arc<Counters>,
 }
 impl Output {
-    fn send(&self, event: (Id, Event)) -> Result<(), mpsc::SendError<(Id, Event)>> {
+    fn send(&self, event: (Id, Event)) -> Result<(), ()> {
         let n = match &event.1 {
             Event::Data(bytes) | Event::Datagram(bytes, _) => bytes.len(),
             _ => 0,
@@ -105,7 +105,7 @@ impl Output {
         self.counters
             .queued_read_bytes
             .fetch_add(n, Ordering::Relaxed);
-        let result = self.tx.send(event);
+        let result = self.tx.send(event).map_err(|_| ());
         if result.is_err() {
             self.counters
                 .queued_read_bytes
@@ -616,15 +616,14 @@ fn run(
                     }
                 }
                 Command::Accept(id) => {
-                    if let Some(l) = listeners.get_mut(&id) {
-                        if !l.registered
-                            && poll
-                                .registry()
-                                .register(&mut l.socket, Token(id as usize), Interest::READABLE)
-                                .is_ok()
-                        {
-                            l.registered = true;
-                        }
+                    if let Some(l) = listeners.get_mut(&id)
+                        && !l.registered
+                        && poll
+                            .registry()
+                            .register(&mut l.socket, Token(id as usize), Interest::READABLE)
+                            .is_ok()
+                    {
+                        l.registered = true;
                     }
                 }
                 Command::Adopt(ticket, id) => {
@@ -659,10 +658,10 @@ fn run(
                     }
                 }
                 Command::NoDelay(id, enabled) => {
-                    if let Some(c) = sockets.get(&id) {
-                        if let Err(e) = c.socket.set_nodelay(enabled) {
-                            error(&out, id, e);
-                        }
+                    if let Some(c) = sockets.get(&id)
+                        && let Err(e) = c.socket.set_nodelay(enabled)
+                    {
+                        error(&out, id, e);
                     }
                 }
                 Command::KeepAlive(id, enabled, delay) => {
@@ -798,11 +797,12 @@ fn run(
                 c.activity = Instant::now();
                 let _ = out.send((id, Event::Timeout));
             }
-            if c.tls.is_some() && !c.connecting {
-                if let Err(e) = tls_step(c, id, false, &out) {
-                    c.failed = true;
-                    error(&out, id, e);
-                }
+            if c.tls.is_some()
+                && !c.connecting
+                && let Err(e) = tls_step(c, id, false, &out)
+            {
+                c.failed = true;
+                error(&out, id, e);
             }
             if let Err(e) = c.register(&poll, id) {
                 error(&out, id, e);
@@ -1107,19 +1107,21 @@ fn tls_step(c: &mut Connection, id: Id, readable: bool, out: &Output) -> io::Res
             }),
         ));
     }
-    if c.secured && c.tls_permitted && c.tls_written.is_none() {
-        if let Some((bytes, offset)) = c.writes.front_mut() {
-            match tls.writer().write(&bytes[*offset..]) {
-                Ok(n) => {
-                    *offset += n;
-                    if *offset == bytes.len() {
-                        c.tls_written = Some(bytes.len());
-                        c.writes.pop_front();
-                    }
+    if c.secured
+        && c.tls_permitted
+        && c.tls_written.is_none()
+        && let Some((bytes, offset)) = c.writes.front_mut()
+    {
+        match tls.writer().write(&bytes[*offset..]) {
+            Ok(n) => {
+                *offset += n;
+                if *offset == bytes.len() {
+                    c.tls_written = Some(bytes.len());
+                    c.writes.pop_front();
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e),
             }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
         }
     }
     if tls.wants_write() {

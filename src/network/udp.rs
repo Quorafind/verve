@@ -6,7 +6,7 @@ use super::{
 };
 use crate::native::{
     ClassSpec, arg, class, closure, coded_error_value, function, get, hidden, invoke, js_text,
-    list_of, object, text_of,
+    list_of, text_of,
 };
 use boa_engine::{
     Context, JsObject, JsResult, JsString, JsValue, js_string,

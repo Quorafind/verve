@@ -301,16 +301,16 @@ pub(crate) fn install(module: &JsObject, promises: bool, cx: &mut Context) -> Js
         Ok(js_text(if order.is_empty() { "verbatim" } else { &order }))
     });
     module.set(js_string!("getDefaultResultOrder"), get_order, false, cx)?;
-    if let Some(resolver) = get(&module.clone().into(), "Resolver", cx)?.as_object() {
-        if let Some(proto) = resolver.get(js_string!("prototype"), cx)?.as_object() {
-            for key in module.own_property_keys(cx)? {
-                let name = key.to_string();
-                if name.starts_with("resolve")
-                    || ["reverse", "setServers", "getServers"].contains(&name.as_str())
-                {
-                    let value = module.get(key.clone(), cx)?;
-                    proto.set(key, value, false, cx)?;
-                }
+    if let Some(resolver) = get(&module.clone().into(), "Resolver", cx)?.as_object()
+        && let Some(proto) = resolver.get(js_string!("prototype"), cx)?.as_object()
+    {
+        for key in module.own_property_keys(cx)? {
+            let name = key.to_string();
+            if name.starts_with("resolve")
+                || ["reverse", "setServers", "getServers"].contains(&name.as_str())
+            {
+                let value = module.get(key.clone(), cx)?;
+                proto.set(key, value, false, cx)?;
             }
         }
     }

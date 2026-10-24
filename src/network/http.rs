@@ -558,10 +558,14 @@ const OUTGOING: &[(&str, usize, NativeFunctionPointer)] = &[
             0,
             |_, args, (target, cb): &(JsValue, JsValue), cx| {
                 put(target, "finished", true, cx)?;
-                if !get(target, "__httpClient", cx)?.to_boolean()
-                    && !get(target, "__httpKeepAlive", cx)?.to_boolean()
-                {
-                    invoke(&get(target, "socket", cx)?, "end", &[], cx)?;
+                if !get(target, "__httpClient", cx)?.to_boolean() {
+                    let socket = get(target, "socket", cx)?;
+                    let server = get(&socket, "server", cx)?;
+                    if !get(target, "__httpKeepAlive", cx)?.to_boolean()
+                        || get(&server, "__networkClosing", cx)?.to_boolean()
+                    {
+                        invoke(&socket, "end", &[], cx)?;
+                    }
                 }
                 if cb.is_callable() {
                     crate::call(cx, cb, &JsValue::undefined(), args)?;
@@ -578,7 +582,7 @@ const OUTGOING: &[(&str, usize, NativeFunctionPointer)] = &[
         if error.is_object() {
             let socket = get(this, "socket", cx)?;
             if socket.is_object() {
-                invoke(&socket, "destroy", &[error.clone()], cx)?;
+                invoke(&socket, "destroy", std::slice::from_ref(&error), cx)?;
             }
         }
         let cb = arg(args, 1);
@@ -713,7 +717,9 @@ fn new_message(socket: &JsValue, cx: &mut Context) -> JsResult<JsValue> {
     let ctor = get(&module, "IncomingMessage", cx)?
         .as_object()
         .ok_or_else(|| crate::native::type_error("IncomingMessage"))?;
-    Ok(ctor.construct(&[socket.clone()], None, cx)?.into())
+    Ok(ctor
+        .construct(std::slice::from_ref(socket), None, cx)?
+        .into())
 }
 fn on_data(socket: &JsValue, data: Vec<u8>, cx: &mut Context) -> JsResult<()> {
     let native = parser(socket, cx)?;
@@ -728,8 +734,7 @@ fn on_data(socket: &JsValue, data: Vec<u8>, cx: &mut Context) -> JsResult<()> {
             let native = native
                 .downcast_ref::<Data>()
                 .ok_or_else(|| crate::native::type_error("HTTP parser"))?;
-            let result = native.parser.borrow_mut().step();
-            result
+            native.parser.borrow_mut().step()
         };
         let action = match action {
             Ok(Some(v)) => v,
@@ -781,6 +786,8 @@ fn on_data(socket: &JsValue, data: Vec<u8>, cx: &mut Context) -> JsResult<()> {
                         let key = text_of(&get(&request, "__httpOrigin", cx)?, cx)?;
                         pool_remove(&agent, "sockets", &key, socket, cx)?;
                     }
+                    put(&message, "complete", true, cx)?;
+                    put(socket, "__httpMessage", JsValue::undefined(), cx)?;
                     put(socket, "__httpUpgraded", true, cx)?;
                     let bytes = {
                         let native = native
@@ -826,7 +833,9 @@ fn on_data(socket: &JsValue, data: Vec<u8>, cx: &mut Context) -> JsResult<()> {
                     let ctor = get(&module, "ServerResponse", cx)?
                         .as_object()
                         .ok_or_else(|| crate::native::type_error("ServerResponse"))?;
-                    let response: JsValue = ctor.construct(&[message.clone()], None, cx)?.into();
+                    let response: JsValue = ctor
+                        .construct(std::slice::from_ref(&message), None, cx)?
+                        .into();
                     put(&response, "socket", socket.clone(), cx)?;
                     put(&response, "connection", socket.clone(), cx)?;
                     put(&response, "req", message.clone(), cx)?;
@@ -1069,14 +1078,14 @@ fn pool_remove(
     let map = get(agent, collection, cx)?;
     let list = get(&map, key, cx)?;
     if list.is_object() {
-        let index = invoke(&list, "indexOf", &[socket.clone()], cx)?;
+        let index = invoke(&list, "indexOf", std::slice::from_ref(socket), cx)?;
         if index.as_number().is_some_and(|i| i >= 0.) {
             invoke(&list, "splice", &[index, 1.into()], cx)?;
         }
-        if get(&list, "length", cx)?.as_number() == Some(0.) {
-            if let Some(map) = map.as_object() {
-                map.delete_property_or_throw(JsString::from(key), cx)?;
-            }
+        if get(&list, "length", cx)?.as_number() == Some(0.)
+            && let Some(map) = map.as_object()
+        {
+            map.delete_property_or_throw(JsString::from(key), cx)?;
         }
     }
     Ok(())
@@ -1110,7 +1119,7 @@ fn release(request: &JsValue, socket: &JsValue, cx: &mut Context) -> JsResult<()
             .as_number()
             .unwrap_or(256.);
         if get(&list, "length", cx)?.as_number().unwrap_or(0.) < max {
-            invoke(&list, "push", &[socket.clone()], cx)?;
+            invoke(&list, "push", std::slice::from_ref(socket), cx)?;
             put(&free, &key, list, cx)?;
             emit(
                 &agent,
@@ -1225,11 +1234,11 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
     };
     if let Some(defaults) = get(&agent, "options", cx)?.as_object() {
         for key in defaults.own_property_keys(cx)? {
-            if let Some(options) = options.as_object() {
-                if options.get(key.clone(), cx)?.is_undefined() {
-                    let value = defaults.get(key.clone(), cx)?;
-                    options.set(key, value, false, cx)?;
-                }
+            if let Some(options) = options.as_object()
+                && options.get(key.clone(), cx)?.is_undefined()
+            {
+                let value = defaults.get(key.clone(), cx)?;
+                options.set(key, value, false, cx)?;
             }
         }
     }
@@ -1329,7 +1338,7 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
         } else {
             array(cx, Vec::new())
         };
-        invoke(&list, "push", &[socket.clone()], cx)?;
+        invoke(&list, "push", std::slice::from_ref(&socket), cx)?;
         put(&sockets, &key, list, cx)?;
     }
     put(&req, "connection", socket.clone(), cx)?;
@@ -1377,7 +1386,7 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
         "",
         0,
         |_, _, (req, socket): &(JsValue, JsValue), cx| {
-            emit(req, "socket", &[socket.clone()], cx)?;
+            emit(req, "socket", std::slice::from_ref(socket), cx)?;
             Ok(JsValue::undefined())
         },
         (req.clone(), socket),
@@ -1531,12 +1540,19 @@ pub(crate) fn install(module: &JsObject, https: bool, cx: &mut Context) -> JsRes
         },
     )?;
     module.set(js_string!("IncomingMessage"), incoming, false, cx)?;
-    let emitter = crate::events::emitter_class(cx)?;
+    let parent = if https {
+        let http = crate::modules::node_module(cx, "http")?;
+        get(&http, "Agent", cx)?
+            .as_object()
+            .ok_or_else(|| crate::native::type_error("http.Agent"))?
+    } else {
+        crate::events::emitter_class(cx)?
+    };
     let (agent, _) = class(
         cx,
         ClassSpec {
             name: "Agent",
-            parent: Some(&emitter),
+            parent: Some(&parent),
             init: agent_init,
             methods: &[
                 ("destroy", 0, |this, _, cx| {
