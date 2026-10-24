@@ -18,6 +18,7 @@
 //! [Boa]: https://boajs.dev
 
 mod assert;
+mod buffer;
 mod encoding;
 mod indexeddb;
 mod intl;

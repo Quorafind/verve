@@ -665,10 +665,29 @@ fn format_primitive(walk: &Walk, value: &JsValue, context: &mut Context) -> JsRe
 
 /// The symbol a value's own inspect function is kept under: `util.inspect.custom`.
 fn custom_symbol(context: &mut Context) -> JsResult<JsValue> {
-    symbol_for(context, "nodejs.util.inspect.custom")
+    static CUSTOM: std::sync::OnceLock<JsSymbol> = std::sync::OnceLock::new();
+    if let Some(symbol) = CUSTOM.get() {
+        return Ok(symbol.clone().into());
+    }
+    let symbol = symbol_for(context, "nodejs.util.inspect.custom")?;
+    if let Some(found) = symbol.as_symbol() {
+        let _ = CUSTOM.set(found);
+    }
+    Ok(symbol)
 }
 
-fn symbol_for(context: &mut Context, key: &str) -> JsResult<JsValue> {
+/// `Symbol.for(key)`, asked one thread at a time.
+///
+/// Boa's registry of such symbols is shared by every thread, and two threads asking for a key
+/// it does not have yet can each make a symbol of their own — the registry keeps only one, so
+/// a realm that cached the other would never match `Symbol.for(key)` again. Every realm asks
+/// for the runtime's own keys (`util.inspect.custom`) as it is made, so asking under one lock
+/// means the first realm makes the symbol and every other finds it.
+pub(crate) fn symbol_for(context: &mut Context, key: &str) -> JsResult<JsValue> {
+    static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ASKING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let symbol = context.intrinsics().constructors().symbol().constructor();
     let for_fn = symbol.get(js_string!("for"), context)?;
     crate::call(context, &for_fn, &JsValue::undefined(), &[js_text(key)])
