@@ -1,6 +1,7 @@
 use crate::{JsStr, JsString, context::HostHooks, js_string, value::IntegerOrInfinity};
 use boa_macros::js_str;
 use boa_string::JsStrVariant;
+use cow_utils::CowUtils;
 use std::slice::Iter;
 use std::str;
 use std::{borrow::Cow, iter::Peekable};
@@ -797,7 +798,206 @@ pub(super) fn parse_date(date: &JsString, hooks: &dyn HostHooks) -> Option<i64> 
         return Some(t.unix_timestamp() * 1000 + i64::from(t.millisecond()));
     }
 
-    None
+    // What else V8 reads: `2020/01/31 10:00`, `2020-01-31 10:00`, `01/31/2020`,
+    // `January 31, 2020`, `31 Jan 2020 10:00 GMT+0800`, …
+    parse_legacy_date(&date, hooks)
+}
+
+/// Parses the date formats V8 accepts beyond the specified ones ("legacy dates"), which code
+/// and notes use freely: numbers for the date separated by `/`, `-`, `.` or spaces — year first
+/// when the first has three or more digits, else month/day/year — or a month name with a day and
+/// a year; a time `hh:mm[:ss[.sss]]` with an optional `am`/`pm`; a time zone `Z`, `UTC`, `GMT`
+/// and/or an offset `±hh[:]mm`. Weekday names and anything in parentheses are skipped. Without a
+/// time zone the time is local, as in V8.
+fn parse_legacy_date(date: &str, hooks: &dyn HostHooks) -> Option<i64> {
+    const MONTHS: [&[u8; 3]; 12] = [
+        b"jan", b"feb", b"mar", b"apr", b"may", b"jun", b"jul", b"aug", b"sep", b"oct", b"nov",
+        b"dec",
+    ];
+    const WEEKDAYS: [&[u8; 3]; 7] = [b"sun", b"mon", b"tue", b"wed", b"thu", b"fri", b"sat"];
+
+    fn number(bytes: &[u8], i: &mut usize) -> (u32, usize) {
+        let start = *i;
+        let mut value: u32 = 0;
+        while let Some(c) = bytes.get(*i).filter(|c| c.is_ascii_digit()) {
+            value = value.saturating_mul(10).saturating_add(u32::from(c - b'0'));
+            *i += 1;
+        }
+        (value, *i - start)
+    }
+
+    let bytes = date.as_bytes();
+    let mut i = 0;
+    // The numbers of the date, with how many digits each had.
+    let mut numbers: Vec<(u32, usize)> = Vec::with_capacity(3);
+    let mut month_name = None;
+    let mut time: Option<(u32, u32, u32, u32)> = None;
+    let mut pm = None;
+    // The offset of the time zone in minutes east of UTC; `None` for local time.
+    let mut offset: Option<i64> = None;
+
+    while let Some(&c) = bytes.get(i) {
+        match c {
+            b' ' | b',' | b'\t' | b'\n' | b'\r' | b'/' | b'.' => i += 1,
+            b'(' => {
+                let mut depth = 0;
+                while let Some(&c) = bytes.get(i) {
+                    i += 1;
+                    match c {
+                        b'(' => depth += 1,
+                        b')' if depth == 1 => break,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                }
+            }
+            b'+' | b'-' => {
+                // An offset after a time or a `GMT`/`UTC`; otherwise `-` separates the date.
+                if (time.is_none() && offset.is_none())
+                    || !bytes.get(i + 1).is_some_and(u8::is_ascii_digit)
+                {
+                    if c == b'+' {
+                        return None;
+                    }
+                    i += 1;
+                    continue;
+                }
+                let negative = c == b'-';
+                i += 1;
+                let (value, digits) = number(bytes, &mut i);
+                let minutes = match digits {
+                    1 | 2 if bytes.get(i) == Some(&b':') => {
+                        i += 1;
+                        let (minutes, digits) = number(bytes, &mut i);
+                        if digits != 2 {
+                            return None;
+                        }
+                        value * 60 + minutes
+                    }
+                    1 | 2 => value * 60,
+                    4 => (value / 100) * 60 + value % 100,
+                    _ => return None,
+                };
+                let minutes = i64::from(minutes);
+                offset = Some(if negative { -minutes } else { minutes });
+            }
+            c if c.is_ascii_alphabetic() => {
+                let start = i;
+                while bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
+                    i += 1;
+                }
+                let word = date[start..i].cow_to_ascii_lowercase();
+                let word = word.as_bytes();
+                match word {
+                    b"am" | b"pm" if time.is_some() => pm = Some(word == b"pm"),
+                    b"z" | b"utc" | b"gmt" | b"ut" => offset = Some(offset.unwrap_or(0)),
+                    // The `T` between an ISO-like date and its time.
+                    b"t" if bytes.get(i).is_some_and(u8::is_ascii_digit) => {}
+                    _ if word.len() >= 3 => {
+                        let prefix: &[u8; 3] = word[..3].try_into().ok()?;
+                        if let Some(month) = MONTHS.iter().position(|m| *m == prefix) {
+                            if month_name.is_some() {
+                                return None;
+                            }
+                            month_name = u32::try_from(month + 1).ok();
+                        } else if !WEEKDAYS.contains(&prefix) {
+                            return None;
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            c if c.is_ascii_digit() => {
+                let (value, digits) = number(bytes, &mut i);
+                if bytes.get(i) == Some(&b':') {
+                    if time.is_some() {
+                        return None;
+                    }
+                    i += 1;
+                    let (minute, digits) = number(bytes, &mut i);
+                    if digits != 2 {
+                        return None;
+                    }
+                    let mut second = 0;
+                    let mut millisecond = 0;
+                    if bytes.get(i) == Some(&b':') {
+                        i += 1;
+                        let (s, digits) = number(bytes, &mut i);
+                        if digits != 2 {
+                            return None;
+                        }
+                        second = s;
+                        if bytes.get(i) == Some(&b'.') {
+                            i += 1;
+                            let start = i;
+                            let (_, digits) = number(bytes, &mut i);
+                            // Milliseconds are the first three digits of the fraction.
+                            let digits = digits.min(3);
+                            let fraction = date[start..start + digits].parse::<u32>().ok()?;
+                            millisecond = fraction * [1, 100, 10, 1][digits];
+                        }
+                    }
+                    time = Some((value, minute, second, millisecond));
+                } else {
+                    if numbers.len() == 3 {
+                        return None;
+                    }
+                    numbers.push((value, digits));
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    let full_year = |(value, digits): (u32, usize)| -> f64 {
+        match digits {
+            1 | 2 if value < 50 => f64::from(2000 + value),
+            1 | 2 => f64::from(1900 + value),
+            _ => f64::from(value),
+        }
+    };
+    let year_first = |(value, digits): (u32, usize)| digits >= 3 || value > 31;
+
+    let (year, month, day) = match (month_name, numbers.as_slice()) {
+        (Some(month), &[a, b]) if year_first(a) => (full_year(a), month, b.0),
+        (Some(month), &[a, b]) => (full_year(b), month, a.0),
+        (None, &[a, b, c]) if year_first(a) => (full_year(a), b.0, c.0),
+        (None, &[a, b, c]) => (full_year(c), a.0, b.0),
+        _ => return None,
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let (mut hour, minute, second, millisecond) = time.unwrap_or_default();
+    match pm {
+        Some(_) if !(1..=12).contains(&hour) => return None,
+        Some(true) if hour < 12 => hour += 12,
+        Some(false) if hour == 12 => hour = 0,
+        _ => {}
+    }
+    if hour > 24
+        || minute > 59
+        || second > 59
+        || (hour == 24 && (minute, second, millisecond) != (0, 0, 0))
+    {
+        return None;
+    }
+
+    let date = make_date(
+        make_day(year, f64::from(month - 1), f64::from(day)),
+        make_time(
+            f64::from(hour),
+            f64::from(minute),
+            f64::from(second),
+            f64::from(millisecond),
+        ),
+    );
+    let t = match offset {
+        Some(offset) => time_clip(date - offset as f64 * MS_PER_MINUTE),
+        None => time_clip(utc_t(date, hooks)),
+    };
+    t.is_finite().then_some(t as i64)
 }
 
 /// Parses a date string according to the [`Date Time String Format`][spec].

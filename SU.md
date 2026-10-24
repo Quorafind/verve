@@ -94,6 +94,14 @@ always agree with one another.
   does not ship (`Promise.allKeyed`, `Iterator.prototype.includes`, `import.defer`) stay behind
   it.
 
+- `boa_engine`, `builtins/date/utils.rs`: `Date.parse` and `new Date(string)` read the formats
+  V8 reads beyond the specified ones (`parse_legacy_date`): `2020/01/31`, `2020-01-31 10:05`,
+  `2020-1-5`, `01/31/2020`, `12-25-2020`, `January 31, 2020`, `31 Jan 2020`,
+  `Jan 31, 2020 3:04 PM`, `Tue Jan 01 2020 10:00:00 GMT+0800 (China Standard Time)`,
+  `…T10:00:00+0800`; a two-digit year is 19xx from 50, else 20xx. Local time without a zone, as
+  in V8. Before, all of them were `Invalid Date` — moment falls back to `new Date(string)` for
+  them, and notes are full of such dates. An unknown word still makes a string not a date.
+
 - `boa_gc`, `lib.rs`: a collection no longer frees what it found dead before it returns. The
   dead nodes leave the heap, and their memory is returned a few at a time by later allocations
   (`BoaGc::unfreed`, `FREE_PER_ALLOCATION`), the rest before the next collection — and all of

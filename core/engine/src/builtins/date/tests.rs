@@ -992,3 +992,60 @@ fn date_proto_to_locale_string_intl() {
         ),
     ]);
 }
+
+/// The formats V8 parses beyond the specified ones, which plugins and notes use.
+#[test]
+fn date_parse_legacy_formats() {
+    run_test_actions([
+        // With a time zone: an exact instant.
+        TestAction::assert_eq(
+            "Date.parse('Tue Jan 01 2020 10:00:00 GMT+0800 (China Standard Time)')",
+            1_577_844_000_000_f64,
+        ),
+        TestAction::assert_eq(
+            "Date.parse('Jan 1 2020 10:00:00 GMT+0800')",
+            1_577_844_000_000_f64,
+        ),
+        TestAction::assert_eq(
+            "Date.parse('1 January 2020 02:00 UTC')",
+            1_577_844_000_000_f64,
+        ),
+        TestAction::assert_eq(
+            "Date.parse('2020-01-01T10:00:00+0800')",
+            1_577_844_000_000_f64,
+        ),
+        TestAction::assert_eq("Date.parse('2020/01/01 02:00:00 Z')", 1_577_844_000_000_f64),
+        // Without one: local time, as the local constructor makes it.
+        TestAction::assert("Date.parse('2020/01/31') === new Date(2020, 0, 31).getTime()"),
+        TestAction::assert(
+            "Date.parse('2020-01-31 10:05') === new Date(2020, 0, 31, 10, 5).getTime()",
+        ),
+        TestAction::assert(
+            "Date.parse('2020-1-5 10:05:07.25') === new Date(2020, 0, 5, 10, 5, 7, 250).getTime()",
+        ),
+        TestAction::assert("Date.parse('01/31/2020') === new Date(2020, 0, 31).getTime()"),
+        TestAction::assert("Date.parse('12-25-2020') === new Date(2020, 11, 25).getTime()"),
+        TestAction::assert("Date.parse('January 31, 2020') === new Date(2020, 0, 31).getTime()"),
+        TestAction::assert("Date.parse('31 Jan 2020') === new Date(2020, 0, 31).getTime()"),
+        TestAction::assert(
+            "Date.parse('Friday, January 31, 2020') === new Date(2020, 0, 31).getTime()",
+        ),
+        TestAction::assert(
+            "Date.parse('Jan 31, 2020 3:04 PM') === new Date(2020, 0, 31, 15, 4).getTime()",
+        ),
+        TestAction::assert(
+            "Date.parse('1/31/20 12:30 am') === new Date(2020, 0, 31, 0, 30).getTime()",
+        ),
+        TestAction::assert("Date.parse('1/31/99') === new Date(1999, 0, 31).getTime()"),
+        // The specified formats are unchanged: a date alone is UTC.
+        TestAction::assert_eq("Date.parse('2020-01-31')", 1_580_428_800_000_f64),
+        // Not dates.
+        TestAction::assert("isNaN(Date.parse('hello 2020'))"),
+        TestAction::assert("isNaN(Date.parse('2020'.repeat(2) + ' foo'))"),
+        TestAction::assert("isNaN(Date.parse('13/45/2020'))"),
+        TestAction::assert("isNaN(Date.parse('1/2'))"),
+        TestAction::assert("isNaN(Date.parse('Jan 1 2020 25:00'))"),
+        TestAction::assert("isNaN(Date.parse('1.2.3.4'))"),
+    ]);
+}
+
