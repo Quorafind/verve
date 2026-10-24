@@ -18,6 +18,7 @@
 //! [Boa]: https://boajs.dev
 
 mod encoding;
+mod events;
 mod indexeddb;
 mod intl;
 pub mod isolate;
