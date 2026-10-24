@@ -24,6 +24,7 @@ pub mod isolate;
 mod modules;
 mod native;
 mod node;
+mod path;
 mod process;
 mod url;
 mod wasm;
