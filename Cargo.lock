@@ -112,7 +112,7 @@ dependencies = [
 [[package]]
 name = "boa_ast"
 version = "0.22.0"
-source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#2b040bb970109399d74b5c3d3dd8a7de8b41deeb"
+source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#b2f85ce7e241420e758eb02c700e0edb8177ef4e"
 dependencies = [
  "bitflags",
  "boa_interner",
@@ -127,7 +127,7 @@ dependencies = [
 [[package]]
 name = "boa_engine"
 version = "0.22.0"
-source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#2b040bb970109399d74b5c3d3dd8a7de8b41deeb"
+source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#b2f85ce7e241420e758eb02c700e0edb8177ef4e"
 dependencies = [
  "aligned-vec",
  "arrayvec",
@@ -177,7 +177,7 @@ dependencies = [
 [[package]]
 name = "boa_gc"
 version = "0.22.0"
-source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#2b040bb970109399d74b5c3d3dd8a7de8b41deeb"
+source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#b2f85ce7e241420e758eb02c700e0edb8177ef4e"
 dependencies = [
  "arrayvec",
  "boa_macros",
@@ -189,7 +189,7 @@ dependencies = [
 [[package]]
 name = "boa_interner"
 version = "0.22.0"
-source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#2b040bb970109399d74b5c3d3dd8a7de8b41deeb"
+source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#b2f85ce7e241420e758eb02c700e0edb8177ef4e"
 dependencies = [
  "boa_gc",
  "boa_macros",
@@ -204,7 +204,7 @@ dependencies = [
 [[package]]
 name = "boa_macros"
 version = "0.22.0"
-source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#2b040bb970109399d74b5c3d3dd8a7de8b41deeb"
+source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#b2f85ce7e241420e758eb02c700e0edb8177ef4e"
 dependencies = [
  "cfg-if",
  "cow-utils",
@@ -217,7 +217,7 @@ dependencies = [
 [[package]]
 name = "boa_parser"
 version = "0.22.0"
-source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#2b040bb970109399d74b5c3d3dd8a7de8b41deeb"
+source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#b2f85ce7e241420e758eb02c700e0edb8177ef4e"
 dependencies = [
  "bitflags",
  "boa_ast",
@@ -234,7 +234,7 @@ dependencies = [
 [[package]]
 name = "boa_string"
 version = "0.22.0"
-source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#2b040bb970109399d74b5c3d3dd8a7de8b41deeb"
+source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#b2f85ce7e241420e758eb02c700e0edb8177ef4e"
 dependencies = [
  "fast-float2",
  "itoa",
@@ -1453,7 +1453,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "small_btree"
 version = "0.1.0"
-source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#2b040bb970109399d74b5c3d3dd8a7de8b41deeb"
+source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#b2f85ce7e241420e758eb02c700e0edb8177ef4e"
 dependencies = [
  "arrayvec",
 ]
@@ -1556,7 +1556,7 @@ dependencies = [
 [[package]]
 name = "tag_ptr"
 version = "0.1.0"
-source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#2b040bb970109399d74b5c3d3dd8a7de8b41deeb"
+source = "git+http://nas.taila4c97f.ts.net:3000/boninall/boa-rebon.git?branch=main#b2f85ce7e241420e758eb02c700e0edb8177ef4e"
 
 [[package]]
 name = "tap"
