@@ -225,6 +225,7 @@ pub(crate) fn parse_legacy(input: &str, slashes_denote_host: bool) -> Legacy {
 }
 
 /// `url.format` of the parts: what Node writes for a `Url` or a plain object.
+#[allow(clippy::too_many_arguments)]
 fn format_parts(
     protocol: &str,
     slashes: bool,
@@ -430,7 +431,7 @@ fn format(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsVa
             hostname = url::quirks::domain_to_unicode(&hostname);
         }
         let port = field(&input, "port", context)?;
-        let mut out = format!("{protocol}");
+        let mut out = protocol.clone();
         let href = field(&input, "href", context)?;
         if href[protocol.len()..].starts_with("//") {
             out.push_str("//");

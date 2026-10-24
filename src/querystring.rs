@@ -80,11 +80,10 @@ fn separator(value: &JsValue, default: &str, context: &mut Context) -> JsResult<
 /// own forgiving unescape.
 fn decode_part(text: &str, decoder: &JsValue, context: &mut Context) -> JsResult<JsValue> {
     let spaced = text.replace('+', " ");
-    if decoder.is_callable() {
-        if let Ok(value) = crate::call(context, decoder, &JsValue::undefined(), &[js_text(&spaced)])
-        {
-            return Ok(value);
-        }
+    if decoder.is_callable()
+        && let Ok(value) = crate::call(context, decoder, &JsValue::undefined(), &[js_text(&spaced)])
+    {
+        return Ok(value);
     }
     Ok(js_text(&unescape(&spaced)))
 }
@@ -107,12 +106,10 @@ fn parse(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsVal
         _ => 1000,
     };
     let decoder = get(&options, "decodeURIComponent", context)?;
-    let mut seen = 0;
-    for pair in text.split(sep.as_str()) {
+    for (seen, pair) in text.split(sep.as_str()).enumerate() {
         if max_keys > 0 && seen >= max_keys {
             break;
         }
-        seen += 1;
         if pair.is_empty() {
             continue;
         }
@@ -177,7 +174,12 @@ fn stringify(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<J
         .object()
         .constructor()
         .get(js_string!("keys"), context)?;
-    let keys = crate::call(context, &keys_fn, &JsValue::undefined(), &[input.clone()])?;
+    let keys = crate::call(
+        context,
+        &keys_fn,
+        &JsValue::undefined(),
+        std::slice::from_ref(&input),
+    )?;
     let mut parts = Vec::new();
     for key in list_of(&keys, context)? {
         let name = text_of(&key, context)?;

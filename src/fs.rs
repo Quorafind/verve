@@ -895,13 +895,11 @@ fn copy_tree(from: &Path, to: &Path, force: bool, error_on_exist: bool) -> std::
         }
         return Ok(());
     }
-    if to.exists() {
-        if !force {
-            if error_on_exist {
-                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
-            }
-            return Ok(());
+    if to.exists() && !force {
+        if error_on_exist {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
         }
+        return Ok(());
     }
     std::fs::copy(from, to).map(|_| ())
 }
@@ -2051,10 +2049,8 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
 
 /// The `EventEmitter` part of a watcher or a handle, set up as `EventEmitter.call(this)` would.
 fn emitter_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResult<()> {
-    if !this.has_own_property(js_string!("_events"), context)? {
-        let events = object(context);
-        this.set(js_string!("_events"), events, false, context)?;
-    }
+    let emitter = emitter_class(context)?;
+    crate::call(context, &emitter.into(), &this.clone().into(), &[])?;
     Ok(())
 }
 
