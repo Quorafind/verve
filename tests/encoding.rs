@@ -22,6 +22,19 @@ fn bytes_and_text_answer_as_a_browser_and_node_do() {
             "threw",
         ),
         // TextEncoder and TextDecoder: UTF-8 both ways, a view of a larger buffer included.
+        // Their methods are on their prototypes, as bundles reach them.
+        (
+            "TextDecoder.prototype.decode.bind(new TextDecoder)(new Uint8Array([104, 105]))",
+            "hi",
+        ),
+        (
+            "new TextEncoder() instanceof TextEncoder && typeof TextEncoder.prototype.encode",
+            "function",
+        ),
+        (
+            "class Mine extends TextDecoder {}; new Mine().decode(new Uint8Array([97]))",
+            "a",
+        ),
         ("new TextEncoder().encode('é中').length", "5"),
         (
             "Array.from(new TextEncoder().encode('é')).join()",

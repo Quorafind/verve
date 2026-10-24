@@ -143,9 +143,30 @@ fn uint8(context: &mut Context, bytes: Vec<u8>) -> JsResult<JsValue> {
     Ok(JsUint8Array::from_iter(bytes, context)?.into())
 }
 
-fn construct_encoder(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let encoder = JsObject::with_object_proto(context.intrinsics());
+/// The object a constructor makes: on `new_target`'s prototype, so `TextDecoder.prototype.decode`
+/// is the method an instance has, and a subclass's methods are found.
+fn instance_of(new_target: &JsValue, context: &mut Context) -> JsResult<JsObject> {
+    let object = JsObject::with_object_proto(context.intrinsics());
+    if let Some(target) = new_target.as_object()
+        && let Some(prototype) = target.get(js_string!("prototype"), context)?.as_object()
+    {
+        object.set_prototype(Some(prototype));
+    }
+    Ok(object)
+}
+
+fn construct_encoder(
+    new_target: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let encoder = instance_of(new_target, context)?;
     encoder.set(js_string!("encoding"), js_string!("utf-8"), false, context)?;
+    Ok(encoder.into())
+}
+
+fn encoder_methods(context: &mut Context, prototype: &JsObject) -> JsResult<()> {
+    let encoder = prototype;
     let encode = function(context, "encode", 1, |_, args, cx| {
         let input = arg(args, 0);
         let text = if input.is_undefined() {
@@ -184,10 +205,14 @@ fn construct_encoder(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsRes
         Ok(out.into())
     });
     encoder.set(js_string!("encodeInto"), encode_into, false, context)?;
-    Ok(encoder.into())
+    Ok(())
 }
 
-fn construct_decoder(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn construct_decoder(
+    new_target: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let label = match arg(args, 0) {
         value if value.is_undefined() => "utf-8".to_owned(),
         value => text_of(&value, context)?.trim().to_ascii_lowercase(),
@@ -213,7 +238,7 @@ fn construct_decoder(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         Some(o) => o.get(js_string!("ignoreBOM"), context)?.to_boolean(),
         None => false,
     };
-    let decoder = JsObject::with_object_proto(context.intrinsics());
+    let decoder = instance_of(new_target, context)?;
     decoder.set(
         js_string!("encoding"),
         JsString::from(encoding),
@@ -222,6 +247,11 @@ fn construct_decoder(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     )?;
     decoder.set(js_string!("fatal"), fatal, false, context)?;
     decoder.set(js_string!("ignoreBOM"), ignore_bom, false, context)?;
+    Ok(decoder.into())
+}
+
+fn decoder_methods(context: &mut Context, prototype: &JsObject) -> JsResult<()> {
+    let decoder = prototype;
     let decode_fn = function(context, "decode", 1, |this, args, cx| {
         let input = arg(args, 0);
         let bytes = if input.is_undefined() {
@@ -270,7 +300,36 @@ fn construct_decoder(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         Ok(JsString::from(text.as_str()).into())
     });
     decoder.set(js_string!("decode"), decode_fn, false, context)?;
-    Ok(decoder.into())
+    Ok(())
+}
+
+/// Gives `constructor` a prototype of its own, with `methods` on it.
+fn with_prototype(
+    context: &mut Context,
+    constructor: &JsObject,
+    methods: fn(&mut Context, &JsObject) -> JsResult<()>,
+) -> JsResult<()> {
+    let prototype = JsObject::with_object_proto(context.intrinsics());
+    methods(context, &prototype)?;
+    prototype.define_property_or_throw(
+        js_string!("constructor"),
+        boa_engine::property::PropertyDescriptor::builder()
+            .value(constructor.clone())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    constructor.define_property_or_throw(
+        js_string!("prototype"),
+        boa_engine::property::PropertyDescriptor::builder()
+            .value(prototype)
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
+        context,
+    )?;
+    Ok(())
 }
 
 // ─── Buffer ─────────────────────────────────────────────────────────────────────────────────
@@ -311,12 +370,14 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         )?;
     }
     let encoder = constructor(context, "TextEncoder", 0, construct_encoder);
+    with_prototype(context, &encoder, encoder_methods)?;
     context.register_global_property(
         js_string!("TextEncoder"),
         encoder,
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
     )?;
     let decoder = constructor(context, "TextDecoder", 0, construct_decoder);
+    with_prototype(context, &decoder, decoder_methods)?;
     context.register_global_property(
         js_string!("TextDecoder"),
         decoder,
