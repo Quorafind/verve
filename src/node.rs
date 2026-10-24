@@ -1071,6 +1071,14 @@ pub(crate) const MODULES: &[(&str, crate::ModuleMaker)] = &[
     ("https", |cx, _| http_module(cx)),
     ("module", crate::modules::module_module),
     ("process", crate::process::module),
+    ("stream", crate::stream::stream_module),
+    ("stream/promises", crate::stream::promises_module),
+    ("_stream_readable", crate::stream::legacy_module),
+    ("_stream_writable", crate::stream::legacy_module),
+    ("_stream_duplex", crate::stream::legacy_module),
+    ("_stream_transform", crate::stream::legacy_module),
+    ("_stream_passthrough", crate::stream::legacy_module),
+    ("string_decoder", crate::string_decoder::module),
 ];
 
 /// The `EventEmitter` class, made once for the realm.

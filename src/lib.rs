@@ -26,6 +26,8 @@ mod modules;
 mod native;
 mod node;
 mod process;
+mod stream;
+mod string_decoder;
 mod url;
 mod wasm;
 mod web;
