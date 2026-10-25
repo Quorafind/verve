@@ -332,3 +332,11 @@ git subtree pull --prefix=boa https://github.com/boa-dev/boa.git main
 
 Changes to Boa itself are commits under `boa/` like any other; `git subtree split --prefix=boa`
 gives them back as a Boa branch to offer upstream.
+
+## The JIT
+
+With the `jit` feature (`verve = { …, features = ["jit"] }`), Boa compiles hot functions to
+native code with Cranelift: numeric loops run several times faster, everything else as before.
+It is on once built in; `VERVE_JIT=0` or `Runtime::set_jit_enabled(false)` switches it off, and
+`VERVE_JIT_THRESHOLD=0` compiles everything first (for testing). How it works, what it covers,
+its safety for untrusted code and the plan beyond it: [`docs/jit.md`](docs/jit.md).
