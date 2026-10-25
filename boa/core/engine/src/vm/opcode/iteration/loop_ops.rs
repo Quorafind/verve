@@ -21,6 +21,12 @@ impl IncrementLoopIteration {
         }
 
         frame.loop_iteration_count = previous_iteration_count.wrapping_add(1);
+
+        // The loop makes its code hotter, or can go on in compiled code.
+        #[cfg(feature = "jit")]
+        if frame.code_block.jit.wants_entry() {
+            context.vm.jit.pending = true;
+        }
         Ok(())
     }
 }

@@ -115,9 +115,30 @@ pub use boa_macros::js_value;
 /// assert_eq!(value.to_string(&mut context), Ok(js_string!("3")));
 /// ```
 #[derive(Finalize, Debug, Clone, Trace)]
+#[repr(transparent)]
 pub struct JsValue(inner::InnerValue);
 
 impl JsValue {
+    /// The value's 64 bits, as the JIT's compiled code reads them.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) fn raw_bits(&self) -> u64 {
+        self.0.raw_bits()
+    }
+
+    /// A value from its 64 bits, as the JIT's compiled code writes them.
+    ///
+    /// # Safety
+    ///
+    /// `bits` must be a value that holds no pointer: a number, a boolean, `null` or
+    /// `undefined`.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) const unsafe fn from_raw_bits(bits: u64) -> Self {
+        // SAFETY: the caller's.
+        Self(unsafe { inner::InnerValue::from_raw_bits(bits) })
+    }
+
     /// Create a new [`JsValue`] from an inner value.
     #[inline]
     const fn from_inner(inner: inner::InnerValue) -> Self {

@@ -322,6 +322,7 @@ const_assert!(f64::from_bits(bits::MASK_SYMBOL).is_nan());
 const_assert!(f64::from_bits(bits::MASK_BIGINT).is_nan());
 
 /// A NaN-boxed [`JsValue`]'s inner.
+#[cfg_attr(target_pointer_width = "64", repr(transparent))]
 pub(crate) struct NanBoxedValue {
     #[cfg(target_pointer_width = "32")]
     half: u32,
@@ -416,6 +417,25 @@ impl NanBoxedValue {
             half: (addr >> 32) as u32,
             ptr: ptr.cast::<()>().as_ptr().with_addr(addr as usize),
         }
+    }
+
+    /// The value's 64 bits, as compiled code sees them.
+    #[cfg(feature = "jit")]
+    #[inline(always)]
+    pub(crate) fn raw_bits(&self) -> u64 {
+        self.value()
+    }
+
+    /// A value from its 64 bits.
+    ///
+    /// # Safety
+    ///
+    /// `bits` must be a value that holds no pointer: a number, a boolean, `null` or
+    /// `undefined`.
+    #[cfg(feature = "jit")]
+    #[inline(always)]
+    pub(crate) const unsafe fn from_raw_bits(bits: u64) -> Self {
+        Self::from_inner_unchecked(bits)
     }
 
     /// Returns the value contained within this structure as a `u64`.

@@ -172,6 +172,11 @@ pub struct CodeBlock {
     #[cfg(feature = "trace")]
     #[unsafe_ignore_trace]
     pub(crate) traced: Cell<bool>,
+
+    /// How hot the code is, and its compiled code once it is.
+    #[cfg(feature = "jit")]
+    #[unsafe_ignore_trace]
+    pub(crate) jit: super::jit::JitSlot,
 }
 
 /// ---- `CodeBlock` public API ----
@@ -204,6 +209,8 @@ impl CodeBlock {
             debug_id: CodeBlock::get_next_codeblock_id(),
             #[cfg(feature = "trace")]
             traced: Cell::new(false),
+            #[cfg(feature = "jit")]
+            jit: super::jit::JitSlot::default(),
         }
     }
 

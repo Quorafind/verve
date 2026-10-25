@@ -51,6 +51,11 @@ mod runtime_limits;
 
 pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
+
+#[cfg(feature = "jit")]
+pub(crate) mod jit;
+#[cfg(feature = "jit")]
+pub use jit::{JitOptions, JitStats};
 pub(crate) mod source_info;
 
 #[cfg(feature = "flowgraph")]
@@ -105,6 +110,10 @@ pub struct Vm {
     pub(crate) native_stack_base: usize,
 
     pub(crate) shadow_stack: ShadowStack,
+
+    /// The JIT's options, statistics, and whether to look for compiled code to run.
+    #[cfg(feature = "jit")]
+    pub(crate) jit: jit::JitVm,
 
     #[cfg(feature = "trace")]
     pub(crate) trace: bool,
@@ -434,6 +443,8 @@ impl Vm {
             run_depth: 0,
             native_stack_base: 0,
             shadow_stack: ShadowStack::default(),
+            #[cfg(feature = "jit")]
+            jit: jit::JitVm::new(),
             #[cfg(feature = "trace")]
             trace: false,
             #[cfg(feature = "trace")]
@@ -629,6 +640,12 @@ impl Vm {
             .push_bytecode(current_pc, frame.code_block().source_info.clone());
 
         self.frames.push(frame);
+
+        // A new frame on top: its code may be compiled, or getting hot.
+        #[cfg(feature = "jit")]
+        {
+            self.jit.pending = true;
+        }
     }
 
     pub(crate) fn push_frame_with_stack(
@@ -649,6 +666,11 @@ impl Vm {
             return None;
         }
         self.shadow_stack.pop();
+        // The caller is back on top, after its call: compiled code can go on there.
+        #[cfg(feature = "jit")]
+        {
+            self.jit.pending = true;
+        }
         self.frames.pop()
     }
 
@@ -671,6 +693,12 @@ impl Vm {
         self.frame_mut()
             .environments
             .truncate(environment_sp as usize);
+
+        // Compiled code can go on at the handler.
+        #[cfg(feature = "jit")]
+        {
+            self.jit.pending = true;
+        }
 
         true
     }
@@ -1010,14 +1038,29 @@ impl Context {
     }
 
     fn run_loop(&mut self) -> CompletionRecord {
-        while let Some(byte) = self
-            .vm
-            .frame()
-            .code_block
-            .bytecode
-            .bytes
-            .get(self.vm.frame().pc as usize)
-        {
+        loop {
+            // The frame on top changed, or got hotter: run its compiled code if it has some.
+            #[cfg(feature = "jit")]
+            if self.vm.jit.pending {
+                self.vm.jit.pending = false;
+                match jit::try_enter(self) {
+                    None => {}
+                    // Compiled code returned at a frame change: look again at the new top.
+                    Some(ControlFlow::Continue(())) => continue,
+                    Some(ControlFlow::Break(value)) => return value,
+                }
+            }
+
+            let Some(byte) = self
+                .vm
+                .frame()
+                .code_block
+                .bytecode
+                .bytes
+                .get(self.vm.frame().pc as usize)
+            else {
+                break;
+            };
             let opcode = Opcode::decode(*byte);
 
             match self.execute_one(

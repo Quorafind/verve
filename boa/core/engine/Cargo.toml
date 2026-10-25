@@ -91,6 +91,16 @@ xsum = ["dep:xsum"]
 # Native Backtraces
 native-backtrace = []
 
+# A baseline JIT (`vm::jit`): hot bytecode functions are compiled to native code with
+# Cranelift. Off unless enabled; at runtime see `Context::jit_options_mut`.
+jit = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-native",
+    "dep:region",
+    "dep:wasmtime-internal-jit-icache-coherence",
+]
+
 [dependencies]
 tag_ptr.workspace = true
 boa_interner.workspace = true
@@ -123,6 +133,11 @@ thiserror.workspace = true
 dashmap.workspace = true
 num_enum.workspace = true
 thin-vec.workspace = true
+# The `jit` feature. Cranelift 0.135 is the newest whose MSRV (1.95) the tree builds with.
+cranelift-codegen = { version = "~0.135.7", optional = true, default-features = false, features = ["std", "host-arch"] }
+cranelift-frontend = { version = "~0.135.7", optional = true, default-features = false, features = ["std"] }
+cranelift-native = { version = "~0.135.7", optional = true, default-features = false, features = ["std"] }
+region = { version = "3.0.2", optional = true }
 itertools = { workspace = true, default-features = false, features = ["use_alloc"] }
 icu_normalizer = { workspace = true, features = [
     "compiled_data",
@@ -195,6 +210,10 @@ iana-time-zone = { workspace = true, optional = true }
 web-time = { workspace = true, optional = true }
 # NOTE: This enables the wasm_js required for rand to work on wasm
 getrandom = { workspace = true, features = ["wasm_js"], optional = true }
+
+# Instruction cache maintenance for freshly written code; x86-64 keeps its caches coherent.
+[target.'cfg(not(target_arch = "x86_64"))'.dependencies]
+wasmtime-internal-jit-icache-coherence = { version = "=48.0.7", optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
