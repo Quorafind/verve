@@ -152,6 +152,38 @@ fn a_plugins_own_files_folders_packages_and_json() {
     );
 }
 
+/// A native addon is refused the way Node refuses one under `--no-addons`, by
+/// name and code, so a package that falls back from its addon (or reports it)
+/// can tell this from a broken file.
+#[test]
+fn a_native_addon_is_refused_by_name() {
+    let dir = folder(
+        "addon",
+        &[(
+            "node_modules/native/package.json",
+            "{ \"main\": \"./build/binding.node\" }",
+        )],
+    );
+    let binary = dir.join("node_modules/native/build/binding.node");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, [0x4d, 0x5a, 0x90, 0x00, 0xff, 0xfe]).unwrap();
+    let mut rt = Runtime::new();
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        const attempt = (load) => { try { load(); return 'loaded' } catch (e) { return `${e.code}: ${e.message}` } };
+        exports.result = [
+            attempt(() => require('native')),
+            attempt(() => require('./node_modules/native/build/binding.node')),
+        ];
+    "#,
+    );
+    let refused =
+        "ERR_DLOPEN_DISABLED: Cannot load native addon because loading addons is disabled.";
+    assert_eq!(result, [refused, refused]);
+}
+
 #[test]
 fn process_looks_like_electrons_renderer() {
     let dir = folder("process", &[]);
