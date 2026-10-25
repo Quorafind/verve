@@ -17,6 +17,11 @@
 //!
 //! [Boa]: https://boajs.dev
 
+/// The Boa this runtime is built on, for a host defining natives of its own in it: the same
+/// crates, at the same version, so the values it makes are this runtime's.
+pub use boa_engine;
+pub use boa_gc;
+
 mod assert;
 mod buffer;
 mod cjs_exports;
