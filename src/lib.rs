@@ -433,6 +433,8 @@ impl Runtime {
                 .runtime_limits_mut()
                 .set_native_stack_limit(stack / 2);
         }
+        #[cfg(feature = "jit")]
+        jit_from_env(&mut context);
         context.insert_data(Rc::new(Shared {
             clock: Box::new(clock),
             next_timer: Cell::new(1),
@@ -463,6 +465,42 @@ impl Runtime {
         }));
         install_globals(&mut context).expect("the globals install");
         Self { context }
+    }
+
+    /// Whether hot functions run as native code. With the `jit` feature it is on unless
+    /// `VERVE_JIT=0` (or `BOA_JIT=0`) is in the environment; without it, always off and this
+    /// does nothing. Switched off, what was compiled stays unused: everything runs interpreted
+    /// from the next call or loop iteration on.
+    pub fn set_jit_enabled(&mut self, enabled: bool) {
+        #[cfg(feature = "jit")]
+        {
+            self.context.jit_options_mut().enabled = enabled;
+        }
+        #[cfg(not(feature = "jit"))]
+        let _ = enabled;
+    }
+
+    /// Whether hot functions run as native code; see [`Runtime::set_jit_enabled`].
+    pub fn jit_enabled(&self) -> bool {
+        #[cfg(feature = "jit")]
+        {
+            self.context.jit_options().enabled
+        }
+        #[cfg(not(feature = "jit"))]
+        false
+    }
+
+    /// The JIT's options: how hot a function gets before it is compiled, and the limits on what
+    /// is compiled.
+    #[cfg(feature = "jit")]
+    pub fn jit_options_mut(&mut self) -> &mut boa_engine::vm::JitOptions {
+        self.context.jit_options_mut()
+    }
+
+    /// What the JIT has compiled and run so far.
+    #[cfg(feature = "jit")]
+    pub fn jit_stats(&self) -> boa_engine::vm::JitStats {
+        self.context.jit_stats()
     }
 
     /// How much native stack a script may use before deep recursion becomes a `RangeError` —
@@ -1338,5 +1376,22 @@ mod tests {
         assert_eq!(rt.run_due(), 2);
         assert_eq!(print(&rt.eval("n").unwrap()), "1");
         assert!(rt.take_console()[0].text.contains("TypeError: x"));
+    }
+}
+
+/// `VERVE_JIT=0` (also `off`, `false`, `no`) switches the JIT off, and `VERVE_JIT_THRESHOLD=<n>`
+/// sets how hot a function gets before it is compiled (0: before it first runs). Boa's own
+/// `BOA_JIT` and `BOA_JIT_THRESHOLD` apply first.
+#[cfg(feature = "jit")]
+fn jit_from_env(context: &mut Context) {
+    let options = context.jit_options_mut();
+    if let Ok(value) = std::env::var("VERVE_JIT") {
+        options.enabled = !matches!(value.trim(), "0" | "off" | "false" | "no");
+    }
+    if let Some(threshold) = std::env::var("VERVE_JIT_THRESHOLD")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+    {
+        options.threshold = threshold;
     }
 }

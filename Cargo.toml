@@ -97,6 +97,9 @@ base64 = { version = "0.23", optional = true }
 default = ["npm"]
 # The npm installer: an embedder that installs no packages leaves out its HTTP client.
 npm = ["dep:ureq", "dep:tar", "dep:base64"]
+# Boa's baseline JIT: hot functions run as native code (see `docs/jit.md`). Switched off at
+# runtime with `VERVE_JIT=0` or `Runtime::set_jit_enabled(false)`.
+jit = ["boa_engine/jit"]
 
 [dev-dependencies]
 serde_json = "1"
@@ -133,4 +136,12 @@ opt-level = 3
 [profile.dev.package.regress]
 opt-level = 3
 [profile.dev.package.wasmi]
+opt-level = 3
+# The JIT's code generator, so a dev build compiles hot functions in microseconds, not
+# milliseconds (only built with the `jit` feature).
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+[profile.dev.package.regalloc2]
 opt-level = 3
