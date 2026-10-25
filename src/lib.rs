@@ -33,6 +33,7 @@ mod indexeddb;
 mod intl;
 pub mod isolate;
 mod messaging;
+mod module_hooks;
 mod modules;
 mod native;
 mod navigator;

@@ -52,6 +52,10 @@ pub(crate) struct Loader {
     requiring: RefCell<HashSet<String>>,
     require_namespaces: RefCell<HashMap<String, JsObject>>,
     conditions: RefCell<Vec<String>>,
+    /// What each import resolved to through the resolve hooks, by its referrer and specifier: the
+    /// engine asks once while `import()` runs and again to load, and a referrer must get the same
+    /// module for the same specifier every time, whatever a hook would answer now.
+    hooked: RefCell<HashMap<(String, String), Url>>,
 }
 
 fn resolve_error(context: &mut Context, error: resolve::ResolveError) -> JsError {
@@ -65,6 +69,13 @@ impl Loader {
 
     pub(crate) fn conditions(&self, conditions: Vec<String>) {
         *self.conditions.borrow_mut() = conditions;
+    }
+
+    /// The conditions an import resolves under, as a resolve hook is told them.
+    pub(crate) fn condition_names(&self) -> Vec<String> {
+        let mut names = vec!["node".to_owned(), "import".to_owned()];
+        names.extend(self.conditions.borrow().iter().cloned());
+        names
     }
 
     fn parent(&self, parent: Option<&Path>, context: &mut Context) -> JsResult<Url> {
@@ -82,7 +93,25 @@ impl Loader {
         resolve::file_url(&cwd.join("__runtime_eval__.js")).map_err(|e| resolve_error(context, e))
     }
 
+    /// Resolves `specifier`: through the `registerHooks` resolve hooks for an import when there
+    /// are any, by the runtime's own rules otherwise.
     pub(crate) fn resolve(
+        &self,
+        specifier: &str,
+        parent: Option<&Path>,
+        mode: Mode,
+        check_file: bool,
+        context: &mut Context,
+    ) -> JsResult<Url> {
+        if mode == Mode::Import && crate::module_hooks::resolving(context) {
+            let parent = self.parent(parent, context)?;
+            return crate::module_hooks::resolve(specifier, &parent, check_file, context);
+        }
+        self.own_resolve(specifier, parent, mode, check_file, context)
+    }
+
+    /// The runtime's own resolution: Node's, for builtins, files and packages.
+    pub(crate) fn own_resolve(
         &self,
         specifier: &str,
         parent: Option<&Path>,
@@ -143,8 +172,7 @@ impl Loader {
         request: &ModuleRequest,
         context: &mut Context,
     ) -> JsResult<()> {
-        let name = request.specifier().to_std_string_escaped();
-        let url = self.resolve(&name, referrer.path(), Mode::Import, true, context)?;
+        let url = self.resolve_import(referrer, request, context)?;
         if url.scheme() == "blob"
             && !self.modules.borrow().contains_key(url.as_str())
             && !self.captured_blobs.borrow().contains_key(url.as_str())
@@ -169,19 +197,40 @@ impl Loader {
         Ok(())
     }
 
+    /// What an import of `request` from `referrer` loads: resolved once per pair while resolve
+    /// hooks are registered, every time otherwise.
+    fn resolve_import(
+        &self,
+        referrer: &Referrer,
+        request: &ModuleRequest,
+        context: &mut Context,
+    ) -> JsResult<Url> {
+        let name = request.specifier().to_std_string_escaped();
+        if !crate::module_hooks::resolving(context) {
+            return self.resolve(&name, referrer.path(), Mode::Import, true, context);
+        }
+        let key = (
+            referrer
+                .path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            name,
+        );
+        if let Some(url) = self.hooked.borrow().get(&key) {
+            return Ok(url.clone());
+        }
+        let url = self.resolve(&key.1, referrer.path(), Mode::Import, true, context)?;
+        self.hooked.borrow_mut().insert(key, url.clone());
+        Ok(url)
+    }
+
     fn request(
         &self,
         referrer: &Referrer,
         request: &ModuleRequest,
         context: &mut Context,
     ) -> JsResult<Module> {
-        let url = self.resolve(
-            &request.specifier().to_std_string_escaped(),
-            referrer.path(),
-            Mode::Import,
-            true,
-            context,
-        )?;
+        let url = self.resolve_import(referrer, request, context)?;
         self.get(&url, Some(request), context)
     }
 
@@ -291,54 +340,27 @@ impl Loader {
             attributes(request, json, context)?;
             return Ok(module);
         }
-        let is_builtin = url.scheme() == "node";
-        let (source, json) = if is_builtin {
-            (String::new(), false)
+        // What the module is made from: by the `registerHooks` load hooks when there are any,
+        // by the runtime's own loading otherwise.
+        let hooked = crate::module_hooks::loading(context);
+        let loaded = if hooked {
+            crate::module_hooks::load(url, context)?
         } else {
-            self.source(url, context)?
+            self.own_load(url, None, context)?
         };
+        let json = loaded.format == "json";
+        let source = loaded.source.unwrap_or_default();
         attributes(request, json, context)?;
         self.formats.borrow_mut().insert(url.to_string(), json);
-        let module = if is_builtin {
-            let exports = crate::modules::builtin(context, url.as_str())?.ok_or_else(|| {
-                coded_error(
-                    context,
-                    "Unknown builtin module",
-                    "ERR_UNKNOWN_BUILTIN_MODULE",
-                )
-            })?;
-            let mut names: Vec<_> = match exports.as_object() {
-                Some(object) => object
-                    .own_property_keys(context)?
-                    .into_iter()
-                    .filter_map(|key| match key {
-                        PropertyKey::String(name)
-                            if !matches!(
-                                name.to_std_string_escaped().as_str(),
-                                "name"
-                                    | "length"
-                                    | "prototype"
-                                    | "caller"
-                                    | "arguments"
-                                    | "default"
-                            ) =>
-                        {
-                            Some(name)
-                        }
-                        _ => None,
-                    })
-                    .collect(),
-                None => Vec::new(),
-            };
-            names.sort_by_key(JsString::to_std_string_escaped);
-            names.dedup();
-            self.builtin_names
-                .borrow_mut()
-                .insert(url.to_string(), names.clone());
-            synthetic(url, names, true, context)
-        } else if json {
-            let value =
-                if url.scheme() == "file" && url.query().is_none() && url.fragment().is_none() {
+        let module = match loaded.format.as_str() {
+            "builtin" => self.builtin_module(url, context)?,
+            "json" => {
+                let value = if !hooked
+                    && url.scheme() == "file"
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                {
+                    // The same object `require` answers for the file.
                     let path = resolve::file_path(url).map_err(|e| resolve_error(context, e))?;
                     crate::modules::load_file(context, &path, None)?
                 } else {
@@ -354,37 +376,118 @@ impl Loader {
                         &[js_text(source.trim_start_matches('\u{feff}'))],
                     )?
                 };
-            Module::from_value_as_default(value, context)
-        } else if url.scheme() == "file"
-            && !self.sources.borrow().contains_key(url.as_str())
-            && !is_esm(
-                &resolve::file_path(url).map_err(|e| resolve_error(context, e))?,
-                &source,
-                context,
-            )?
-        {
-            let path = resolve::file_path(url).map_err(|e| resolve_error(context, e))?;
-            let mut names = BTreeSet::new();
-            cjs_names(&path, &source, &mut HashSet::new(), &mut names, context)?;
-            synthetic(
-                url,
-                names.into_iter().map(JsString::from).collect(),
-                false,
-                context,
-            )
-        } else {
-            let path = PathBuf::from(url.as_str());
-            Module::parse(
-                Source::from_bytes(source.trim_start_matches('\u{feff}')).with_path(&path),
-                None,
-                context,
-            )?
+                Module::from_value_as_default(value, context)
+            }
+            "commonjs" if url.scheme() == "file" => {
+                let path = resolve::file_path(url).map_err(|e| resolve_error(context, e))?;
+                let mut names = BTreeSet::new();
+                cjs_names(&path, &source, &mut HashSet::new(), &mut names, context)?;
+                synthetic(
+                    url,
+                    names.into_iter().map(JsString::from).collect(),
+                    false,
+                    context,
+                )
+            }
+            "module" => {
+                let path = PathBuf::from(url.as_str());
+                Module::parse(
+                    Source::from_bytes(source.trim_start_matches('\u{feff}')).with_path(&path),
+                    None,
+                    context,
+                )?
+            }
+            format => {
+                return Err(coded_error(
+                    context,
+                    &format!("Unknown module format: {format} for URL {url}"),
+                    "ERR_UNKNOWN_MODULE_FORMAT",
+                ));
+            }
         };
         self.modules
             .borrow_mut()
             .insert(url.to_string(), module.clone());
         self.captured_blobs.borrow_mut().remove(url.as_str());
         Ok(module)
+    }
+
+    /// The runtime's own loading: a module's source, and its format — the one it is handed, or
+    /// the one its URL, its package and its syntax say.
+    pub(crate) fn own_load(
+        &self,
+        url: &Url,
+        format: Option<String>,
+        context: &mut Context,
+    ) -> JsResult<crate::module_hooks::Loaded> {
+        if url.scheme() == "node" {
+            return Ok(crate::module_hooks::Loaded {
+                format: format.unwrap_or_else(|| "builtin".to_owned()),
+                source: None,
+            });
+        }
+        let (source, json) = self.source(url, context)?;
+        let format = match format {
+            Some(format) => format,
+            None if json => "json".to_owned(),
+            None if url.scheme() == "file"
+                && !self.sources.borrow().contains_key(url.as_str())
+                && !is_esm(
+                    &resolve::file_path(url).map_err(|e| resolve_error(context, e))?,
+                    &source,
+                    context,
+                )? =>
+            {
+                "commonjs".to_owned()
+            }
+            None => "module".to_owned(),
+        };
+        Ok(crate::module_hooks::Loaded {
+            format,
+            source: Some(source),
+        })
+    }
+
+    /// A builtin as a module: its exports, live, under their own names.
+    fn builtin_module(&self, url: &Url, context: &mut Context) -> JsResult<Module> {
+        if url.scheme() != "node" {
+            return Err(coded_error(
+                context,
+                &format!("No such built-in module: {url}"),
+                "ERR_UNKNOWN_BUILTIN_MODULE",
+            ));
+        }
+        let exports = crate::modules::builtin(context, url.as_str())?.ok_or_else(|| {
+            coded_error(
+                context,
+                "Unknown builtin module",
+                "ERR_UNKNOWN_BUILTIN_MODULE",
+            )
+        })?;
+        let mut names: Vec<_> = match exports.as_object() {
+            Some(object) => object
+                .own_property_keys(context)?
+                .into_iter()
+                .filter_map(|key| match key {
+                    PropertyKey::String(name)
+                        if !matches!(
+                            name.to_std_string_escaped().as_str(),
+                            "name" | "length" | "prototype" | "caller" | "arguments" | "default"
+                        ) =>
+                    {
+                        Some(name)
+                    }
+                    _ => None,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        names.sort_by_key(JsString::to_std_string_escaped);
+        names.dedup();
+        self.builtin_names
+            .borrow_mut()
+            .insert(url.to_string(), names.clone());
+        Ok(synthetic(url, names, true, context))
     }
 
     pub(crate) fn start(&self, url: &Url, context: &mut Context) -> JsResult<JsPromise> {
@@ -489,6 +592,9 @@ impl Loader {
                 self.require_namespaces.borrow_mut().remove(key);
                 self.captured_blobs.borrow_mut().remove(key);
             }
+            self.hooked
+                .borrow_mut()
+                .retain(|_, resolved| resolved != &url && resolved != &canonical);
         }
     }
 }
