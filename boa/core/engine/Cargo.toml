@@ -99,6 +99,7 @@ jit = [
     "dep:cranelift-native",
     "dep:region",
     "dep:wasmtime-internal-jit-icache-coherence",
+    "dep:libc",
 ]
 
 [dependencies]
@@ -210,6 +211,10 @@ iana-time-zone = { workspace = true, optional = true }
 web-time = { workspace = true, optional = true }
 # NOTE: This enables the wasm_js required for rand to work on wasm
 getrandom = { workspace = true, features = ["wasm_js"], optional = true }
+
+# `MAP_JIT` pages on macOS, which the hardened runtime allows with `allow-jit` alone.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { version = "0.2.180", optional = true }
 
 # Instruction cache maintenance for freshly written code; x86-64 keeps its caches coherent.
 [target.'cfg(not(target_arch = "x86_64"))'.dependencies]

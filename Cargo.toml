@@ -101,6 +101,10 @@ npm = ["dep:ureq", "dep:tar", "dep:base64"]
 # runtime with `VERVE_JIT=0` or `Runtime::set_jit_enabled(false)`.
 jit = ["boa_engine/jit"]
 
+[[example]]
+name = "jit_probe"
+required-features = ["jit"]
+
 [dev-dependencies]
 serde_json = "1"
 # WebAssembly tests write their modules as text.

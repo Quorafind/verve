@@ -281,12 +281,15 @@ JavaScript:
 - **Platforms**:
   - Windows and Linux allow RW→RX remapping by default.
   - Windows processes with Arbitrary Code Guard (ACG) cannot use the JIT at all.
-  - macOS under the hardened runtime: the JIT maps pages with `mmap` and changes them with
-    `mprotect`, without `MAP_JIT`. It therefore needs the broader
-    `com.apple.security.cs.allow-unsigned-executable-memory` entitlement. The way to need only
-    `com.apple.security.cs.allow-jit` is to map code with `MAP_JIT` and toggle write access per
-    thread with `pthread_jit_write_protect_np` (on Apple silicon the toggle is what keeps W^X),
-    flushing with `sys_icache_invalidate`. That is on the roadmap.
+  - macOS: code is mapped with `MAP_JIT`, so a process under the hardened runtime needs only
+    `com.apple.security.cs.allow-jit`. On Apple silicon the pages are switched writable for the
+    compiling thread alone with `pthread_jit_write_protect_np`, written, and switched back
+    before anything runs, which is what keeps W^X there; on Intel they are made read-execute
+    with `mprotect`. The instruction cache is cleared as on other non-x86 targets. Where
+    `MAP_JIT` is refused the ordinary mapping is tried (a process that is not hardened, or holds
+    `allow-unsigned-executable-memory`). A hardened process with neither entitlement runs
+    interpreted. `.github/workflows/macos-jit.yml` checks all three on both architectures, with
+    `examples/jit_probe.rs`.
   - AArch64 Linux: after writing code, `pipeline_flush_mt` issues a `membarrier(2)`
     (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE`) so that every thread's instruction stream sees
     it.
@@ -421,9 +424,7 @@ aborts the tester process, interpreted or not.
 5. **Constant blinding** of every program-chosen `Store*` immediate (`StoreDouble`, `StoreFloat`,
    `StoreInt32`, `StoreInt16`, `StoreInt8`), and an `untrusted` profile of `JitOptions` (blinding
    on, low limits) for Code Mode.
-6. **`MAP_JIT` on macOS**, with `pthread_jit_write_protect_np` and `sys_icache_invalidate`, so a
-   hardened-runtime app needs only `com.apple.security.cs.allow-jit`.
-7. **Unwind information** registered for compiled functions, so native debuggers, crash dumps and
+6. **Unwind information** registered for compiled functions, so native debuggers, crash dumps and
    profilers walk through them.
 
 **Phase 3: type feedback.** Record operand types per instruction in the interpreter and in
