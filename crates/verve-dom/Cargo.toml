@@ -1,0 +1,29 @@
+[package]
+name = "verve-dom"
+version = "0.1.0"
+edition = "2024"
+description = "A headless web document for Verve: the DOM, CSS's cascade and the window's platform pieces in Rust, so React and DOM-using libraries run unchanged — and a snapshot, input and layout interface for whoever draws it."
+publish = false
+
+# A document is opt-in: `verve run` and every other embedder have none unless they install one
+# (`verve_dom::install`). Nothing here is JavaScript standing in for a browser: every class, method
+# and property is a native Rust function on Verve's Boa.
+
+[dependencies]
+verve = { path = "../..", default-features = false }
+boa_engine = { version = "=0.22.0", default-features = false, features = ["annex-b"] }
+boa_gc = "=0.22.0"
+# An `<a>`'s and `location`'s parts, read as a browser reads them.
+url = "2.5"
+# A field's caret moves by grapheme, as a browser's does.
+unicode-segmentation = "1.12"
+# `localStorage`, kept on disk when the embedder says where.
+serde_json = "1"
+
+# `verve-dom run`: `verve run`, with a document in the realm.
+[[bin]]
+name = "verve-dom"
+path = "src/bin/verve-dom.rs"
+
+[dev-dependencies]
+verve = { path = "../..", default-features = false, features = ["npm"] }
