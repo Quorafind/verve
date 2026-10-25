@@ -41,6 +41,10 @@ Node's and the web's APIs and no Node underneath.
   `import()` is called, so immediate `URL.revokeObjectURL` does not cancel it.
 - Module workers (`new Worker(url, { type: 'module' })`), with static imports and top-level
   await. Unsupported import schemes reject with Node error codes, never an unsettled promise.
+- `module.registerHooks` resolve and load hooks, and `module.stripTypeScriptTypes` for the
+  TypeScript a load hook hands on: Node's `strip` mode (types erased in place, every line and
+  column kept) and `transform` mode (enums, namespaces and parameter properties compiled, with
+  an optional source map), parsed and compiled by oxc.
 
 **The web's globals**
 - `EventTarget`, `Event`, `CustomEvent`, `MessageEvent`, `ErrorEvent`, `CloseEvent`,

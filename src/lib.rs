@@ -56,6 +56,7 @@ mod stream;
 mod streams;
 mod string_decoder;
 mod timers;
+mod typescript;
 mod url;
 mod url_pattern;
 mod util;

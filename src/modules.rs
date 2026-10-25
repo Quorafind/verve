@@ -697,15 +697,6 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
                 ("findSourceMap", 1, |_, _, _| Ok(JsValue::undefined())),
                 ("register", 2, |_, _, _| Ok(JsValue::undefined())),
                 ("registerHooks", 1, crate::module_hooks::register_hooks),
-                // Node built without its TypeScript stripper says so with this code; so does
-                // this runtime, which has none yet.
-                ("stripTypeScriptTypes", 1, |_, _, cx| {
-                    Err(crate::native::coded_error(
-                        cx,
-                        "stripTypeScriptTypes is not available in Verve yet",
-                        "ERR_NO_TYPESCRIPT",
-                    ))
-                }),
                 ("enableCompileCache", 0, |_, _, cx| Ok(object(cx).into())),
             ],
             methods: &[("require", 1, |this, args, cx| {
@@ -734,6 +725,8 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
     module.set(js_string!("_extensions"), extensions, false, context)?;
     let paths = JsArray::new(context)?;
     module.set(js_string!("globalPaths"), paths, false, context)?;
+    let strip = crate::typescript::function(context)?;
+    module.set(js_string!("stripTypeScriptTypes"), strip, false, context)?;
     module.set(js_string!("Module"), module.clone(), false, context)?;
     Ok(module.into())
 }

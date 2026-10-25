@@ -69,6 +69,19 @@ httparse = "1.10"
 # RFC 6455 client framing/validation over existing native Duplex sockets, without TLS duplication.
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 
+# `module.stripTypeScriptTypes`: oxc's TypeScript parser, for the spans the strip mode blanks
+# out, and its transformer and printer for the transform mode. 0.146 is the newest oxc that
+# builds on Rust 1.95; later releases ask for 1.96 and up.
+oxc_allocator = "0.146"
+oxc_ast = "0.146"
+oxc_ast_visit = "0.146"
+oxc_codegen = "0.146"
+oxc_diagnostics = "0.146"
+oxc_parser = "0.146"
+oxc_semantic = "0.146"
+oxc_span = "0.146"
+oxc_transformer = "0.146"
+
 [dev-dependencies]
 serde_json = "1"
 # WebAssembly tests write their modules as text.

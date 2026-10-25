@@ -213,11 +213,16 @@ fn require_keeps_commonjs_resolution_unhooked() {
 }
 
 #[test]
-fn strip_typescript_types_is_refused_with_nodes_code() {
+fn strip_typescript_types_erases_types_in_place() {
     let dir = folder("strip", &[]);
     let main = r#"
         import { stripTypeScriptTypes } from 'node:module';
-        try { stripTypeScriptTypes('let x: number = 1'); } catch (e) { globalThis.result = e.code; }
+        let refused;
+        try { stripTypeScriptTypes('enum E { A }'); } catch (e) { refused = e.code; }
+        globalThis.result = { js: stripTypeScriptTypes('let x: number = 1'), refused };
     "#;
-    assert_eq!(run(&dir, main).unwrap(), r#""ERR_NO_TYPESCRIPT""#);
+    assert_eq!(
+        run(&dir, main).unwrap(),
+        r#"{"js":"let x         = 1","refused":"ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX"}"#
+    );
 }
