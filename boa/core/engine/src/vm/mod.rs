@@ -622,10 +622,10 @@ impl Vm {
 
             let register_count = frame.code_block.register_count as usize;
             frame.rp = self.stack.stack.len() as u32;
-            self.stack.stack.resize(
-                self.stack.stack.len() + register_count,
-                JsValue::undefined(),
-            );
+            // `undefined` owns nothing: made in place, rather than cloned as `resize` would.
+            self.stack
+                .stack
+                .extend(std::iter::repeat_with(JsValue::undefined).take(register_count));
         }
 
         // Keep carrying the last active runnable in case the current callframe
