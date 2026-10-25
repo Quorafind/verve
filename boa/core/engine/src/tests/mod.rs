@@ -5,6 +5,7 @@ use indoc::indoc;
 
 mod async_generator;
 mod class;
+mod code_cache;
 mod control_flow;
 mod env;
 mod function;

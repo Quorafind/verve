@@ -17,6 +17,7 @@ use crate::{
     Context,
     vm::{completion_record::CompletionRecord, completion_record::IntoCompletionRecord},
 };
+pub(crate) use args::Operand;
 use args::{Argument, read};
 use std::ops::ControlFlow;
 use thin_vec::ThinVec;
@@ -521,6 +522,27 @@ macro_rules! generate_opcodes {
         }
 
         impl Bytecode {
+            /// Reads past the instruction at `pc` of bytecode that may be malformed, as a
+            /// verifier does: its opcode and where the next one starts, or `None` if the bytes
+            /// end first. Each register and address operand is handed to `operand`.
+            #[allow(unused_parens)]
+            pub(crate) fn check_instruction(
+                &self,
+                pc: usize,
+                operand: &mut dyn FnMut(Operand),
+            ) -> Option<(Opcode, usize)> {
+                let bytes = &self.bytes;
+                let opcode = Opcode::decode(*bytes.get(pc)?);
+                let next = match opcode {
+                    $(
+                        Opcode::$Variant => {
+                            <($($($FieldType),*)?)>::check(bytes, pc + 1, operand)?
+                        }
+                    ),*
+                };
+                Some((opcode, next))
+            }
+
             #[allow(unused_parens)]
             pub(crate) fn next_instruction(&self, pc: usize) -> (Instruction, usize) {
                 let bytes = &self.bytes;

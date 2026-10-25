@@ -86,6 +86,7 @@ pub mod bigint;
 pub mod builtins;
 pub mod bytecompiler;
 pub mod class;
+pub mod code_cache;
 pub mod context;
 pub mod environments;
 pub mod error;

@@ -38,6 +38,12 @@ impl SourceText {
     fn is_empty(&self) -> bool {
         self.source_text.is_none()
     }
+
+    /// The source text's code units.
+    pub(crate) fn code_points(&self) -> Option<&[u16]> {
+        self.inner()
+            .map(|text| text.get_code_points_from_pos(boa_ast::LinearPosition::new(0)))
+    }
 }
 
 /// Contains pointer to source code and span of the object.
@@ -78,6 +84,11 @@ impl SpannedSourceText {
     #[must_use]
     pub(crate) fn source_text(&self) -> SourceText {
         self.source_text.clone()
+    }
+
+    /// The span of the source text this is.
+    pub(crate) const fn span(&self) -> Option<LinearSpan> {
+        self.span
     }
 
     /// Test if the span is empty.
