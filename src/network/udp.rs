@@ -315,8 +315,8 @@ const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         }
         Ok(address)
     }),
-    ("ref", 0, |this, _, _| Ok(this.clone())),
-    ("unref", 0, |this, _, _| Ok(this.clone())),
+    ("ref", 0, |this, _, cx| super::set_ref(this, true, cx)),
+    ("unref", 0, |this, _, cx| super::set_ref(this, false, cx)),
 ];
 pub(crate) fn install(module: &JsObject, cx: &mut Context) -> JsResult<()> {
     let legacy = get(&module.clone().into(), "Socket", cx)?;

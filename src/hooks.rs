@@ -209,10 +209,16 @@ pub(crate) fn report_rejections(context: &mut Context) -> bool {
         };
         let heard = emit(
             &process,
-            &[js_text("unhandledRejection"), reason.clone(), promise.clone().into()],
+            &[
+                js_text("unhandledRejection"),
+                reason.clone(),
+                promise.clone().into(),
+            ],
             context,
         );
-        if !heard {
+        if !heard && crate::process::profile(context).is_some() {
+            crate::process::unhandled_rejection(context, reason);
+        } else if !heard {
             let error = JsError::from_opaque(reason);
             let text = crate::describe(context, &error);
             let frames = crate::thrown_at(context, &error);
@@ -230,7 +236,11 @@ pub(crate) fn report_rejections(context: &mut Context) -> bool {
         reported.push_back(promise);
     }
     for promise in handled_late {
-        emit(&process, &[js_text("rejectionHandled"), promise.into()], context);
+        emit(
+            &process,
+            &[js_text("rejectionHandled"), promise.into()],
+            context,
+        );
     }
     true
 }

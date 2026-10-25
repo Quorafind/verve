@@ -15,6 +15,9 @@
 //! running the microtasks it queued, so a promise a callback started settles before the host
 //! looks again.
 //!
+//! A script can also be a program of its own: [`cli::main`] is `verve run`, which runs one as
+//! `node` would, under the permission model ([`Permissions`]).
+//!
 //! [Boa]: https://boajs.dev
 
 /// The Boa this runtime is built on, for a host defining natives of its own in it: the same
@@ -25,6 +28,7 @@ pub use boa_gc;
 mod assert;
 mod buffer;
 mod cjs_exports;
+pub mod cli;
 mod crypto;
 mod dom_events;
 mod encoding;
@@ -124,6 +128,37 @@ struct Timer {
     repeat: Option<Millis>,
     callback: JsValue,
     args: Vec<JsValue>,
+    /// Whether it keeps a process waiting for it: Node's `ref()` and `unref()`.
+    refed: bool,
+}
+
+/// What a host is told with when work arrives for its realm from another thread — I/O the
+/// network finished, a message a worker sent — so it can sleep until then instead of looking
+/// every millisecond. See [`Runtime::set_waker`].
+pub type Waker = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+/// The realm's waker, shared with the threads that wake it.
+#[derive(Default)]
+pub(crate) struct WakeSlot(std::sync::RwLock<Option<Waker>>);
+
+impl WakeSlot {
+    pub(crate) fn wake(&self) {
+        if let Ok(waker) = self.0.read()
+            && let Some(waker) = waker.as_ref()
+        {
+            waker();
+        }
+    }
+
+    fn set(&self, waker: Option<Waker>) {
+        if let Ok(mut slot) = self.0.write() {
+            *slot = waker;
+        }
+    }
+
+    fn is_set(&self) -> bool {
+        self.0.read().is_ok_and(|slot| slot.is_some())
+    }
 }
 
 /// What the runtime's native functions share, kept in the context's host data.
@@ -163,6 +198,10 @@ struct Shared {
     idb: RefCell<indexeddb::IdbState>,
     /// WebAssembly's modules and instances.
     wasm: RefCell<wasm::WasmState>,
+    /// Who to wake when the network or a worker has something for this realm.
+    wake: std::sync::Arc<WakeSlot>,
+    /// Set when this realm is a process of its own (`verve run`): see `process::Profile`.
+    profile: RefCell<Option<Rc<process::Profile>>>,
 }
 
 /// The microtask queue: promise reactions, `queueMicrotask`, `process.nextTick`.
@@ -385,6 +424,8 @@ impl Runtime {
             port: RefCell::new(None),
             idb: RefCell::new(indexeddb::IdbState::default()),
             wasm: RefCell::new(wasm::WasmState::default()),
+            wake: std::sync::Arc::default(),
+            profile: RefCell::new(None),
         }));
         install_globals(&mut context).expect("the globals install");
         Self { context }
@@ -580,17 +621,28 @@ impl Runtime {
         (shared(&self.context).clock)()
     }
 
+    /// Tells the runtime how to wake its host: `waker` is called, from whichever thread has it,
+    /// when the network has delivered something or a worker has sent something this realm has
+    /// yet to hear. With one set, [`Runtime::next_due`] answers the realm's own timers only —
+    /// it no longer asks to be looked at every millisecond while a socket is open or a worker
+    /// is busy — so a host can sleep until the earlier of that and a wake.
+    pub fn set_waker(&mut self, waker: Option<Waker>) {
+        shared(&self.context).wake.set(waker);
+    }
+
     /// When the earliest timer is due, on the host's clock; `None` when there are none.
     pub fn next_due(&self) -> Option<Millis> {
-        let own = shared(&self.context)
+        let state = shared(&self.context);
+        let own = state
             .timers
             .borrow()
             .values()
             .map(|timer| timer.due)
             .reduce(f64::min);
+        let woken = state.wake.is_set();
         // A worker's, on this realm's clock.
-        let worker = worker::next_due(&self.context).map(|wait| self.now() + wait);
-        let own = if network::active(&self.context) {
+        let worker = worker::next_due(&self.context, woken).map(|wait| self.now() + wait);
+        let own = if network::active(&self.context) && (!woken || network::queued(&self.context)) {
             Some(own.map_or(self.now() + 1., |due| due.min(self.now() + 1.)))
         } else {
             own
@@ -741,6 +793,10 @@ pub fn now(context: &Context) -> Millis {
 /// Writes a line to the console the host reads with [`Runtime::take_console`].
 pub fn console_line(context: &Context, level: Level, text: String) {
     let state = shared(context);
+    if let Some(profile) = state.profile.borrow().as_ref() {
+        profile.console(level, &text);
+        return;
+    }
     if state.echo {
         eprintln!("[verve {level:?}] {text}");
     }
@@ -749,6 +805,10 @@ pub fn console_line(context: &Context, level: Level, text: String) {
 
 /// An error nobody caught, written where an uncaught error goes: the console.
 pub fn report(context: &mut Context, error: &JsError) {
+    if shared(context).profile.borrow().is_some() {
+        process::uncaught(context, error);
+        return;
+    }
     let text = describe(context, error);
     let frames = thrown_at(context, error);
     let line = if frames.is_empty() {
@@ -1123,9 +1183,22 @@ pub fn set_timeout(
             repeat: repeat.then_some(delay.max(1.)),
             callback,
             args,
+            refed: true,
         },
     );
     id
+}
+
+/// Whether the timer `id` keeps a process waiting for it; see `Timeout.unref()`.
+pub(crate) fn ref_timer(context: &Context, id: u32, refed: bool) {
+    if let Some(timer) = shared(context).timers.borrow_mut().get_mut(&id) {
+        timer.refed = refed;
+    }
+}
+
+/// Whether any timer keeps a process waiting for it.
+pub(crate) fn has_ref_timers(context: &Context) -> bool {
+    shared(context).timers.borrow().values().any(|t| t.refed)
 }
 
 fn clear_timer_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

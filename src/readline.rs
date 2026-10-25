@@ -103,11 +103,39 @@ fn on_data(
 ) -> JsResult<JsValue> {
     let chunk = arg(args, 0);
     let text = match crate::encoding::bytes_of(&chunk, context)? {
-        Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Some(bytes) => {
+            // A character split between two chunks is decoded once both halves are here.
+            let carried = interface.get(js_string!("__carry"), context)?;
+            let mut all = crate::encoding::bytes_of(&carried, context)?.unwrap_or_default();
+            all.extend_from_slice(&bytes);
+            let whole = complete_utf8(&all);
+            let rest = crate::encoding::make_buffer(context, all[whole..].to_vec())?;
+            hidden(interface, js_string!("__carry"), rest, context)?;
+            String::from_utf8_lossy(&all[..whole]).into_owned()
+        }
         None => text_of(&chunk, context)?,
     };
     feed(interface, &text, context)?;
     Ok(JsValue::undefined())
+}
+
+/// How much of `bytes` is whole UTF-8: all of it, but for a sequence the end cuts short.
+fn complete_utf8(bytes: &[u8]) -> usize {
+    let len = bytes.len();
+    for back in 1..=len.min(3) {
+        let byte = bytes[len - back];
+        if byte & 0xC0 == 0x80 {
+            continue;
+        }
+        let needs = match byte {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => 1,
+        };
+        return if needs > back { len - back } else { len };
+    }
+    len
 }
 
 fn on_end(
@@ -130,6 +158,25 @@ fn close(interface: &JsObject, context: &mut Context) -> JsResult<()> {
         return Ok(());
     }
     interface.set(js_string!("closed"), true, false, context)?;
+    // As Node's does: the input is let go of — paused, and no longer listened to — so a
+    // process reading it can end.
+    let input = interface.get(js_string!("input"), context)?;
+    if get(&input, "removeListener", context)?.is_callable() {
+        for (event, key) in [("data", "__onData"), ("end", "__onEnd")] {
+            let listener = interface.get(JsString::from(key), context)?;
+            if listener.is_callable() {
+                invoke(
+                    &input,
+                    "removeListener",
+                    &[js_text(event), listener],
+                    context,
+                )?;
+            }
+        }
+    }
+    if get(&input, "pause", context)?.is_callable() {
+        invoke(&input, "pause", &[], context)?;
+    }
     for waiting in list_of(&interface.get(js_string!("__waiting"), context)?, context)? {
         let done = step(JsValue::undefined(), true, context)?;
         crate::call(context, &waiting, &JsValue::undefined(), &[done])?;
@@ -180,9 +227,16 @@ fn interface_init(this: &JsObject, args: &[JsValue], context: &mut Context) -> J
     }
     if get(&input, "on", context)?.is_callable() {
         let data = closure(context, "", 1, on_data, this.clone());
-        invoke(&input, "on", &[js_text("data"), data.into()], context)?;
+        invoke(
+            &input,
+            "on",
+            &[js_text("data"), data.clone().into()],
+            context,
+        )?;
         let end = closure(context, "", 0, on_end, this.clone());
-        invoke(&input, "on", &[js_text("end"), end.into()], context)?;
+        invoke(&input, "on", &[js_text("end"), end.clone().into()], context)?;
+        hidden(this, js_string!("__onData"), data, context)?;
+        hidden(this, js_string!("__onEnd"), end, context)?;
     }
     Ok(())
 }
@@ -209,12 +263,20 @@ const INTERFACE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("pause", 0, |this, _, cx| {
         if let Some(interface) = this.as_object() {
+            let input = interface.get(js_string!("input"), cx)?;
+            if get(&input, "pause", cx)?.is_callable() {
+                invoke(&input, "pause", &[], cx)?;
+            }
             emit(&interface, "pause", &[], cx)?;
         }
         Ok(this.clone())
     }),
     ("resume", 0, |this, _, cx| {
         if let Some(interface) = this.as_object() {
+            let input = interface.get(js_string!("input"), cx)?;
+            if get(&input, "resume", cx)?.is_callable() {
+                invoke(&input, "resume", &[], cx)?;
+            }
             emit(&interface, "resume", &[], cx)?;
         }
         Ok(this.clone())

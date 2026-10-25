@@ -1121,6 +1121,10 @@ fn release(request: &JsValue, socket: &JsValue, cx: &mut Context) -> JsResult<()
         if get(&list, "length", cx)?.as_number().unwrap_or(0.) < max {
             invoke(&list, "push", std::slice::from_ref(socket), cx)?;
             put(&free, &key, list, cx)?;
+            // As Node's agent does: an idle pooled socket keeps no process waiting.
+            if get(socket, "unref", cx)?.is_callable() {
+                invoke(socket, "unref", &[], cx)?;
+            }
             emit(
                 &agent,
                 "free",
@@ -1300,6 +1304,9 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
     }
     let socket = if reused.is_object() {
         put(&req, "reusedSocket", true, cx)?;
+        if get(&reused, "ref", cx)?.is_callable() {
+            invoke(&reused, "ref", &[], cx)?;
+        }
         reused
     } else {
         put(&req, "reusedSocket", false, cx)?;

@@ -75,7 +75,7 @@ pub(crate) fn register(target: &JsObject, cx: &mut Context) -> JsResult<Id> {
     let mut state = shared.network.borrow_mut();
     if state.reactor.is_none() {
         state.reactor = Some(
-            Reactor::new(state.permissions.clone())
+            Reactor::new(state.permissions.clone(), shared.wake.clone())
                 .map_err(|e| crate::native::type_error(e.to_string()))?,
         );
     }
@@ -111,6 +111,7 @@ pub(crate) fn diagnostics(cx: &Context) -> NetworkDiagnostics {
 
 pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> usize {
     let mut count = 0;
+    let mut drained = false;
     // Bound a beat even when JS and I/O keep producing work.
     for _ in 0..1024 {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -136,6 +137,7 @@ pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> us
             }
         };
         let Some((id, event)) = event else {
+            drained = true;
             break;
         };
         if let Event::Dns(result) = event {
@@ -172,11 +174,52 @@ pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> us
         count += 1;
         let _ = cx.run_jobs();
     }
+    // Left for a later beat: the wakes for it were spent on this one, so the host is woken
+    // again rather than left asleep with I/O waiting.
+    if !drained {
+        crate::shared(cx).wake.wake();
+    }
     count
+}
+
+/// Whether anything is waiting to be delivered without the reactor's say: revoked resources.
+pub(crate) fn queued(cx: &Context) -> bool {
+    !crate::shared(cx).network.borrow().revoked.is_empty()
 }
 
 pub(crate) fn active(cx: &Context) -> bool {
     let shared = crate::shared(cx);
     let state = shared.network.borrow();
     !state.targets.is_empty() || !state.dns.pending.is_empty() || !state.revoked.is_empty()
+}
+
+/// `ref()` and `unref()` on a socket or server: whether it keeps a process waiting for it.
+pub(crate) fn set_ref(this: &JsValue, refed: bool, cx: &mut Context) -> JsResult<JsValue> {
+    if let Some(target) = this.as_object() {
+        crate::native::hidden(&target, js_string!("__unref"), !refed, cx)?;
+    }
+    Ok(this.clone())
+}
+
+/// Whether a socket, server or lookup that was not `unref()`ed is still open: what keeps a
+/// process (`verve run`) from exiting.
+pub(crate) fn keeps_alive(cx: &mut Context) -> bool {
+    let (targets, waiting) = {
+        let shared = crate::shared(cx);
+        let state = shared.network.borrow();
+        (
+            state.targets.values().cloned().collect::<Vec<_>>(),
+            !state.dns.pending.is_empty() || !state.revoked.is_empty(),
+        )
+    };
+    waiting
+        || targets.into_iter().any(|weak| {
+            match invoke(&weak.into(), "deref", &[], cx)
+                .ok()
+                .and_then(|v| v.as_object())
+            {
+                Some(target) => !get(&target.into(), "__unref", cx).is_ok_and(|v| v.to_boolean()),
+                None => false,
+            }
+        })
 }

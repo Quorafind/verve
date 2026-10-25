@@ -311,8 +311,8 @@ pub(crate) const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("resetAndDestroy", 0, |this, _, cx| {
         invoke(this, "destroy", &[], cx)
     }),
-    ("ref", 0, |this, _, _| Ok(this.clone())),
-    ("unref", 0, |this, _, _| Ok(this.clone())),
+    ("ref", 0, |this, _, cx| super::set_ref(this, true, cx)),
+    ("unref", 0, |this, _, cx| super::set_ref(this, false, cx)),
 ];
 pub(crate) fn init_server(target: &JsObject, args: &[JsValue], cx: &mut Context) -> JsResult<()> {
     let emitter = crate::events::emitter_class(cx)?;
@@ -443,8 +443,8 @@ pub(crate) const SERVER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         }
         Ok(this.clone())
     }),
-    ("ref", 0, |this, _, _| Ok(this.clone())),
-    ("unref", 0, |this, _, _| Ok(this.clone())),
+    ("ref", 0, |this, _, cx| super::set_ref(this, true, cx)),
+    ("unref", 0, |this, _, cx| super::set_ref(this, false, cx)),
 ];
 pub(crate) fn install(module: &JsObject, cx: &mut Context) -> JsResult<()> {
     let parent = stream_class("Duplex", cx)?;

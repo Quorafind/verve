@@ -599,3 +599,78 @@ fn thousand_connections_share_one_reactor() {
         "1000"
     );
 }
+
+/// With a waker, a host sleeps until the network has something instead of looking every
+/// millisecond: `next_due` stops asking for that poll, and the reactor wakes the host.
+#[test]
+fn a_waker_replaces_the_millisecond_poll() {
+    use std::sync::{Arc, Condvar, Mutex};
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            verve::set_thread_stack(16 * 1024 * 1024);
+            let mut rt = Runtime::new();
+            rt.set_permissions(granted());
+            let woken = Arc::new((Mutex::new(0usize), Condvar::new()));
+            let signal = woken.clone();
+            rt.set_waker(Some(Arc::new(move || {
+                let (count, ready) = &*signal;
+                *count.lock().unwrap() += 1;
+                ready.notify_all();
+            })));
+            rt.load_module(
+                &std::env::temp_dir().join("verve-waker.js"),
+                "const net = require('net');
+                 const server = net.createServer((s) => s.end('woken'));
+                 server.listen(0, '127.0.0.1', () => {
+                     const c = net.connect(server.address().port, '127.0.0.1');
+                     let got = '';
+                     c.on('data', (d) => got += d);
+                     c.on('end', () => { globalThis.result = got; server.close(); });
+                 });",
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut slept = 0;
+            let (count, ready) = &*woken;
+            loop {
+                // Read before looking, so a wake while looking is not lost.
+                let before = *count.lock().unwrap();
+                rt.run_due();
+                if rt
+                    .eval("globalThis.result !== undefined")
+                    .unwrap()
+                    .to_boolean()
+                {
+                    break;
+                }
+                // No timer is set, so nothing is due: the network wakes the host instead.
+                assert_eq!(rt.next_due(), None);
+                let (after, timeout) = ready
+                    .wait_timeout_while(count.lock().unwrap(), Duration::from_secs(10), |n| {
+                        *n == before
+                    })
+                    .unwrap();
+                drop(after);
+                assert!(!timeout.timed_out(), "the network never woke the host");
+                slept += 1;
+                assert!(Instant::now() < deadline, "never finished");
+            }
+            assert!(slept >= 1);
+            assert_eq!(
+                verve::print(&rt.eval("globalThis.result").unwrap()),
+                "woken"
+            );
+            // Without one, the old contract: an open server asks to be looked at shortly.
+            let mut polled = Runtime::new();
+            polled.set_permissions(granted());
+            let _ = polled.load_module(
+                &std::env::temp_dir().join("verve-no-waker.js"),
+                "require('net').createServer().listen(0, '127.0.0.1');",
+            );
+            assert!(polled.next_due().is_some());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

@@ -584,7 +584,27 @@ pub(crate) fn require_function(
     require.set(js_string!("resolve"), resolve, false, context)?;
     let cache = cache(context);
     require.set(js_string!("cache"), cache, false, context)?;
-    require.set(js_string!("main"), JsValue::undefined(), false, context)?;
+    if crate::process::main_path(context).is_some() {
+        // The entry module of a process: looked up when asked, since the entry's own
+        // `require` is made before its module is in the cache.
+        let main = function(context, "main", 0, |_, _, cx| {
+            let Some(path) = crate::process::main_path(cx) else {
+                return Ok(JsValue::undefined());
+            };
+            let key = JsString::from(clean(&path).to_string_lossy().as_ref());
+            crate::shared(cx).module_cache.clone().get(key, cx)
+        });
+        require.define_property_or_throw(
+            js_string!("main"),
+            boa_engine::property::PropertyDescriptor::builder()
+                .get(main)
+                .enumerable(true)
+                .configurable(true),
+            context,
+        )?;
+    } else {
+        require.set(js_string!("main"), JsValue::undefined(), false, context)?;
+    }
     let extensions = extensions(context)?;
     require.set(js_string!("extensions"), extensions, false, context)?;
     Ok(require.into())

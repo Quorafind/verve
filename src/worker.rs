@@ -511,6 +511,8 @@ struct Launch {
     url: String,
     module: bool,
     grant: Grant,
+    /// The page's waker, told whenever the worker sends it something.
+    wake: Arc<crate::WakeSlot>,
 }
 
 /// A worker's life, on its thread: the script run, then every message heard and every timer
@@ -527,7 +529,9 @@ fn worker_thread(
         url,
         module,
         grant,
+        wake,
     } = launch;
+    let out = Outbox { out, wake };
     let startup = Startup(&progress);
     let mut runtime = match worker_runtime(&name, grant) {
         Ok(runtime) => runtime,
@@ -623,9 +627,23 @@ fn worker_thread(
     }
 }
 
+/// The worker's way to its page: every send wakes the page's host.
+struct Outbox {
+    out: Sender<FromWorker>,
+    wake: Arc<crate::WakeSlot>,
+}
+
+impl Outbox {
+    fn send(&self, event: FromWorker) -> Result<(), mpsc::SendError<FromWorker>> {
+        let sent = self.out.send(event);
+        self.wake.wake();
+        sent
+    }
+}
+
 /// What the worker sent and wrote since it last looked, sent to its page, and when its next
 /// timer is due. Answers whether it is still open.
-fn flush(runtime: &mut Runtime, out: &Sender<FromWorker>, progress: &Progress) -> bool {
+fn flush(runtime: &mut Runtime, out: &Outbox, progress: &Progress) -> bool {
     for line in runtime.take_console() {
         let _ = out.send(FromWorker::Console(
             line.level,
@@ -733,6 +751,7 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
             trusted: network.trusted.clone(),
         }
     };
+    let wake = shared(context).wake.clone();
     let thread_name = if name.is_empty() {
         "worker".to_owned()
     } else {
@@ -749,6 +768,7 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
                 url,
                 module,
                 grant,
+                wake,
             };
             worker_thread(launch, inbox, out, thread_progress)
         })
@@ -909,15 +929,21 @@ pub(crate) fn run_workers(page: &mut Context, deadline: Option<std::time::Instan
 
 /// How long until a worker has something for its page, in milliseconds from now: now when it
 /// has sent something or is working on a message, its next timer otherwise.
-pub(crate) fn next_due(page: &Context) -> Option<crate::Millis> {
+///
+/// With a waker set (`woken`), a worker busy with a message or waiting for its own timer wakes
+/// its page when it has something, so only what was already heard is due now.
+pub(crate) fn next_due(page: &Context, woken: bool) -> Option<crate::Millis> {
     gather(page);
     let state = shared(page);
     let workers = state.workers.borrow();
     let now = epoch_ms();
     let mut next: Option<crate::Millis> = None;
     for worker in workers.iter().filter(|w| !w.closed) {
-        let due = if !worker.heard.is_empty() || worker.progress.pending.load(Ordering::SeqCst) > 0
-        {
+        let due = if !worker.heard.is_empty() {
+            Some(0.)
+        } else if woken {
+            None
+        } else if worker.progress.pending.load(Ordering::SeqCst) > 0 {
             Some(0.)
         } else {
             match worker.progress.next_timer.load(Ordering::SeqCst) {
@@ -931,6 +957,12 @@ pub(crate) fn next_due(page: &Context) -> Option<crate::Millis> {
         };
     }
     next
+}
+
+/// Whether a worker this realm started is still running: what keeps a process
+/// (`verve run`) from exiting.
+pub(crate) fn alive(page: &Context) -> bool {
+    shared(page).workers.borrow().iter().any(|w| !w.closed)
 }
 
 /// Waits, up to `timeout`, until a worker that is working on a message has something for its

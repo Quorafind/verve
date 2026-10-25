@@ -44,19 +44,21 @@ fn timeout_id(this: &JsValue, context: &mut Context) -> JsResult<f64> {
     get(this, "_id", context)?.to_number(context)
 }
 
+/// `ref()` and `unref()`: whether the timer keeps a process (`verve run`) waiting for it.
+fn set_ref(this: &JsValue, refed: bool, context: &mut Context) -> JsResult<JsValue> {
+    if let Some(t) = this.as_object() {
+        hidden(&t, js_string!("_ref"), refed, context)?;
+        let id = timeout_id(this, context)?;
+        if id.is_finite() {
+            crate::ref_timer(context, id as u32, refed);
+        }
+    }
+    Ok(this.clone())
+}
+
 const TIMEOUT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
-    ("ref", 0, |this, _, cx| {
-        if let Some(t) = this.as_object() {
-            hidden(&t, js_string!("_ref"), true, cx)?;
-        }
-        Ok(this.clone())
-    }),
-    ("unref", 0, |this, _, cx| {
-        if let Some(t) = this.as_object() {
-            hidden(&t, js_string!("_ref"), false, cx)?;
-        }
-        Ok(this.clone())
-    }),
+    ("ref", 0, |this, _, cx| set_ref(this, true, cx)),
+    ("unref", 0, |this, _, cx| set_ref(this, false, cx)),
     ("hasRef", 0, |this, _, cx| {
         Ok(get(this, "_ref", cx)?.to_boolean().into())
     }),
@@ -73,6 +75,8 @@ const TIMEOUT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
             let repeat = timeout.get(js_string!("_repeat"), cx)?.to_boolean();
             let args = crate::native::list_of(&timeout.get(js_string!("_args"), cx)?, cx)?;
             let id = crate::set_timeout(cx, callback, delay, repeat, args);
+            let refed = get(this, "_ref", cx)?.to_boolean();
+            crate::ref_timer(cx, id, refed);
             hidden(&timeout, js_string!("_id"), id, cx)?;
         }
         Ok(this.clone())

@@ -9,6 +9,11 @@ publish = false
 # timers, `console`, `process`. Every one of them is a native Rust function on Boa, an
 # interpreter written in Rust; nothing here is JavaScript written to stand in for Node.
 
+# `verve run`: a script as a process of its own, under the permission model.
+[[bin]]
+name = "verve"
+path = "src/bin/verve.rs"
+
 [workspace]
 # Boa keeps its own workspace, as upstream has it, so `git subtree pull` stays a plain merge.
 exclude = ["boa"]

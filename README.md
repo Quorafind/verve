@@ -134,6 +134,9 @@ Node's and the web's APIs and no Node underneath.
   `fs.read`, `fs.write`, `worker`, and Verve's `net`; `child`, `addon` and `wasi` are always
   false). `Runtime::add_trusted_certificates` trusts PEM certificates besides the system's, as
   Node's `NODE_EXTRA_CA_CERTS` does. The reserved `child_process` bit does not enable execution.
+- `Runtime::set_waker` lets a host sleep until the network or a worker has something for the
+  realm, instead of being asked (by `next_due`) to look every millisecond while a socket is
+  open.
 - `tls`: rustls client/server Duplex sockets on the same reactor, system trust by default,
   PEM `ca`/`cert`/`key`, `secureContext`, SNI and named server contexts, ALPN, TLS 1.2/1.3
   bounds, cipher selection, client-certificate requests, `rejectUnauthorized`, the JavaScript
@@ -176,6 +179,34 @@ boa_string = { git = "https://github.com/Quorafind/verve.git", branch = "main" }
 Optimise Boa in the dev profile too (`[profile.dev.package.boa_engine] opt-level = 3`, and the
 same for `boa_parser`, `boa_ast`, `boa_gc`, `boa_interner`, `boa_string`, `regress`, `wasmi`):
 unoptimised, the interpreter is several times slower.
+
+## `verve run`
+
+The `verve` binary (and `verve::cli::main`, for an embedder shipping a binary of its own) runs
+a script as a process of its own, as `node script.js` does:
+
+```sh
+verve run --allow-fs-read=./runtime --allow-fs-write=./data main.mjs --its args
+verve run -e "console.log(process.argv)" a b
+```
+
+`process.argv`, `env`, `execPath` and `exitCode` are the process's; `console`,
+`process.stdout` and `process.stderr` write to its descriptors, in order; `process.stdin` reads
+its input (async iteration, `data`, `readline`). It exits as Node exits: when no ref'd timer,
+input being read, worker, or ref'd socket or server is left — `beforeExit` first — with
+`process.exitCode` or 0; 13 for an ES module whose top-level `await` never settled; 1 for an
+uncaught exception or an unhandled rejection. The loop sleeps until the next timer or a wake
+from the input, the network or a worker; nothing polls.
+
+Permissions are on unless `-A`: nothing may be read, written, connected to or started without a
+flag. The entry file itself may be read (not its folder); a `-e` script needs no grant. Flags
+are Deno's with Node's spellings beside them: `--allow-read[=a,b]` / `--allow-fs-read=<path>`,
+`--allow-write[=a,b]` / `--allow-fs-write=<path>`, `--allow-net[=host[:port],…]`,
+`--allow-worker`, `-A`; `--permission` is accepted and changes nothing. Node's
+`--disable-proto=throw|delete`, `--stack-size=<KiB>` (the script thread's stack, at least
+4 MiB), `--no-warnings`, `--experimental-vm-modules`, `--no-addons` and
+`--max-old-space-size` (ignored: bound memory with the OS) are accepted, so a Node command line
+maps one to one. `src/cli.rs` has the whole rule.
 
 ## Checking it
 

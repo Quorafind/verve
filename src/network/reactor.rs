@@ -95,6 +95,7 @@ impl Drop for ThreadCount<'_> {
 struct Output {
     tx: mpsc::Sender<(Id, Event)>,
     counters: Arc<Counters>,
+    wake: Arc<crate::WakeSlot>,
 }
 impl Output {
     fn send(&self, event: (Id, Event)) -> Result<(), ()> {
@@ -106,7 +107,9 @@ impl Output {
             .queued_read_bytes
             .fetch_add(n, Ordering::Relaxed);
         let result = self.tx.send(event).map_err(|_| ());
-        if result.is_err() {
+        if result.is_ok() {
+            self.wake.wake();
+        } else {
             self.counters
                 .queued_read_bytes
                 .fetch_sub(n, Ordering::Relaxed);
@@ -120,7 +123,7 @@ pub(crate) struct Reactor {
     pub counters: Arc<Counters>,
 }
 impl Reactor {
-    pub fn new(permissions: super::Permissions) -> io::Result<Self> {
+    pub fn new(permissions: super::Permissions, host: Arc<crate::WakeSlot>) -> io::Result<Self> {
         let poll = Poll::new()?;
         let wake = Arc::new(Waker::new(poll.registry(), Token(0))?);
         let (tx, commands) = mpsc::channel();
@@ -129,6 +132,7 @@ impl Reactor {
         let out = Output {
             tx: out,
             counters: counters.clone(),
+            wake: host,
         };
         let sender = Sender { tx, wake };
         let resolver = sender.clone();
