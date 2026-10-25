@@ -186,7 +186,12 @@ fn clone_value(
         .object()
         .constructor()
         .get(js_string!("keys"), from)?;
-    let keys = crate::call(from, &keys_fn, &JsValue::undefined(), &[value.clone()])?;
+    let keys = crate::call(
+        from,
+        &keys_fn,
+        &JsValue::undefined(),
+        std::slice::from_ref(value),
+    )?;
     let error = source.is::<boa_engine::builtins::error::Error>();
     let mut names: Vec<JsString> = Vec::new();
     if let Some(keys) = keys.as_object() {
