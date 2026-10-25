@@ -263,9 +263,10 @@ impl Selector {
         self.parts.iter().any(|(compound, _)| {
             compound.pseudo.iter().any(|p| {
                 f(p) || match p {
-                    Pseudo::Not(list) | Pseudo::Is(list) | Pseudo::Where(list) | Pseudo::Has(list) => {
-                        list.says(f)
-                    }
+                    Pseudo::Not(list)
+                    | Pseudo::Is(list)
+                    | Pseudo::Where(list)
+                    | Pseudo::Has(list) => list.says(f),
                     Pseudo::Nth { of: Some(list), .. } => list.says(f),
                     _ => false,
                 }
@@ -292,7 +293,10 @@ impl Selector {
 }
 
 fn is_field(tag: &str) -> bool {
-    matches!(tag, "input" | "textarea" | "select" | "button" | "option" | "optgroup" | "fieldset")
+    matches!(
+        tag,
+        "input" | "textarea" | "select" | "button" | "option" | "optgroup" | "fieldset"
+    )
 }
 
 impl Compound {
@@ -395,13 +399,11 @@ impl Compound {
                 .is_some_and(|p| matches!(dom.get(p).map(|n| &n.kind), Some(NodeKind::Document))),
             Pseudo::Scope => match cx.scope {
                 Some(scope) => scope == id,
-                None => dom
-                    .parent(id)
-                    .is_some_and(|p| matches!(dom.get(p).map(|n| &n.kind), Some(NodeKind::Document))),
+                None => dom.parent(id).is_some_and(|p| {
+                    matches!(dom.get(p).map(|n| &n.kind), Some(NodeKind::Document))
+                }),
             },
-            Pseudo::Link => {
-                matches!(tag.as_str(), "a" | "area") && node.attr("href").is_some()
-            }
+            Pseudo::Link => matches!(tag.as_str(), "a" | "area") && node.attr("href").is_some(),
             Pseudo::Defined => true,
             Pseudo::Never => false,
             Pseudo::Nth {
@@ -420,8 +422,7 @@ impl Compound {
                     .copied()
                     .filter(|c| {
                         dom.get(*c).is_some_and(|n| {
-                            n.is_element()
-                                && (!*of_type || n.tag() == Some(tag.as_str()))
+                            n.is_element() && (!*of_type || n.tag() == Some(tag.as_str()))
                         }) && of.as_ref().is_none_or(|of| of.matches_with(dom, *c, cx))
                     })
                     .collect();
@@ -473,13 +474,23 @@ impl Compound {
             match pseudo {
                 Pseudo::Where(_) => {}
                 Pseudo::Not(list) | Pseudo::Is(list) | Pseudo::Has(list) => {
-                    let best = list.0.iter().map(Selector::specificity).max().unwrap_or_default();
+                    let best = list
+                        .0
+                        .iter()
+                        .map(Selector::specificity)
+                        .max()
+                        .unwrap_or_default();
                     out.0 += best.0;
                     out.1 += best.1;
                     out.2 += best.2;
                 }
                 Pseudo::Nth { of: Some(list), .. } => {
-                    let best = list.0.iter().map(Selector::specificity).max().unwrap_or_default();
+                    let best = list
+                        .0
+                        .iter()
+                        .map(Selector::specificity)
+                        .max()
+                        .unwrap_or_default();
                     out.0 += best.0;
                     out.1 += best.1 + 1;
                     out.2 += best.2;
@@ -516,9 +527,7 @@ fn editable(dom: &Dom, id: NodeId) -> bool {
         return false;
     };
     match node.tag() {
-        Some("input" | "textarea") => {
-            node.attr("readonly").is_none() && !disabled(dom, id)
-        }
+        Some("input" | "textarea") => node.attr("readonly").is_none() && !disabled(dom, id),
         _ => {
             let mut at = Some(id);
             while let Some(n) = at {
@@ -728,12 +737,22 @@ impl<'a> Parser<'a> {
                 if self.peek() == Some('*') {
                     self.at += 1;
                 } else {
-                    out.tag = Some(self.ident().ok_or_else(|| self.error())?.to_ascii_lowercase());
+                    out.tag = Some(
+                        self.ident()
+                            .ok_or_else(|| self.error())?
+                            .to_ascii_lowercase(),
+                    );
                 }
             }
-        } else if self.peek().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '\\' || !c.is_ascii())
+        } else if self
+            .peek()
+            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '\\' || !c.is_ascii())
         {
-            out.tag = Some(self.ident().ok_or_else(|| self.error())?.to_ascii_lowercase());
+            out.tag = Some(
+                self.ident()
+                    .ok_or_else(|| self.error())?
+                    .to_ascii_lowercase(),
+            );
         }
         loop {
             match self.peek() {
@@ -853,7 +872,10 @@ impl<'a> Parser<'a> {
     }
 
     fn pseudo(&mut self) -> Result<Pseudo, SelectorError> {
-        let name = self.ident().ok_or_else(|| self.error())?.to_ascii_lowercase();
+        let name = self
+            .ident()
+            .ok_or_else(|| self.error())?
+            .to_ascii_lowercase();
         if self.peek() == Some('(') {
             self.at += 1;
             self.skip_space();
@@ -885,7 +907,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 "lang" => Pseudo::Lang(self.string_or_ident()?),
-                "dir" => Pseudo::Dir(self.ident().ok_or_else(|| self.error())?.to_ascii_lowercase()),
+                "dir" => Pseudo::Dir(
+                    self.ident()
+                        .ok_or_else(|| self.error())?
+                        .to_ascii_lowercase(),
+                ),
                 "host" | "host-context" | "state" => {
                     self.at -= 1;
                     self.skip_arguments()?;
@@ -929,7 +955,10 @@ impl<'a> Parser<'a> {
             "only-child" => Pseudo::Is(SelectorList(vec![Selector {
                 parts: vec![(
                     Compound {
-                        pseudo: vec![structural(0, 1, false, false), structural(0, 1, true, false)],
+                        pseudo: vec![
+                            structural(0, 1, false, false),
+                            structural(0, 1, true, false),
+                        ],
                         ..Compound::default()
                     },
                     Combinator::None,
@@ -954,7 +983,11 @@ impl<'a> Parser<'a> {
             "before" | "after" | "first-line" | "first-letter" => {
                 return Ok(Pseudo::Never);
             }
-            other if other.starts_with("-webkit-") || other.starts_with("-moz-") || other.starts_with("-ms-") => {
+            other
+                if other.starts_with("-webkit-")
+                    || other.starts_with("-moz-")
+                    || other.starts_with("-ms-") =>
+            {
                 Pseudo::Never
             }
             _ => return Err(self.error()),
@@ -992,7 +1025,11 @@ impl<'a> Parser<'a> {
             }
         };
         let parsed = match text.split_once('n') {
-            Some((a, b)) => parse(a).zip(if b.is_empty() { Some(0) } else { b.parse::<i32>().ok() }),
+            Some((a, b)) => parse(a).zip(if b.is_empty() {
+                Some(0)
+            } else {
+                b.parse::<i32>().ok()
+            }),
             None => text.parse::<i32>().ok().map(|b| (0, b)),
         };
         parsed.ok_or_else(|| self.error())
@@ -1132,7 +1169,14 @@ fn query_matches(query: &str, env: &Environment) -> bool {
     let lower = query.to_ascii_lowercase();
     let (negated, rest) = match lower.strip_prefix("not ") {
         Some(rest) => (true, rest.trim().to_owned()),
-        None => (false, lower.strip_prefix("only ").unwrap_or(&lower).trim().to_owned()),
+        None => (
+            false,
+            lower
+                .strip_prefix("only ")
+                .unwrap_or(&lower)
+                .trim()
+                .to_owned(),
+        ),
     };
     let mut holds = true;
     for term in split_terms(&rest) {
@@ -1195,7 +1239,11 @@ fn feature_matches(feature: &str, env: &Environment) -> bool {
                     "height" => env.height,
                     _ => return true,
                 };
-                let (a, b) = if flipped { (value, have) } else { (have, value) };
+                let (a, b) = if flipped {
+                    (value, have)
+                } else {
+                    (have, value)
+                };
                 return match op {
                     ">=" => a >= b,
                     "<=" => a <= b,
@@ -1250,7 +1298,11 @@ fn resolution(text: &str) -> Option<f32> {
     text.strip_suffix("dppx")
         .or_else(|| text.strip_suffix('x'))
         .and_then(|n| n.trim().parse().ok())
-        .or_else(|| text.strip_suffix("dpi").and_then(|n| n.trim().parse::<f32>().ok()).map(|d| d / 96.))
+        .or_else(|| {
+            text.strip_suffix("dpi")
+                .and_then(|n| n.trim().parse::<f32>().ok())
+                .map(|d| d / 96.)
+        })
         .or_else(|| text.parse().ok())
 }
 
@@ -1392,9 +1444,8 @@ fn parse_block(text: &str, media: &[MediaQuery], rules: &mut Vec<Rule>) {
                     parse_block(body, &inner, rules);
                 }
                 // What it supports is what it was given; layers are read in order.
-                "supports" | "layer" | "document" | "-moz-document" | "scope" | "starting-style" => {
-                    parse_block(body, media, rules)
-                }
+                "supports" | "layer" | "document" | "-moz-document" | "scope"
+                | "starting-style" => parse_block(body, media, rules),
                 _ => {}
             }
         } else if let Ok(selectors) = SelectorList::parse(prelude) {
@@ -1798,7 +1849,11 @@ fn font_size_px(value: &str, parent: f32) -> Option<f32> {
         return keyword;
     }
     if let Some(percent) = value.strip_suffix('%') {
-        return percent.trim().parse::<f32>().ok().map(|p| p / 100. * parent);
+        return percent
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|p| p / 100. * parent);
     }
     if value.ends_with("px") && !value.contains('(') {
         return None;
@@ -1964,7 +2019,16 @@ fn border_parts(value: &str) -> (String, String, String) {
             width = part.to_owned();
         } else if matches!(
             part,
-            "none" | "hidden" | "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset"
+            "none"
+                | "hidden"
+                | "solid"
+                | "dashed"
+                | "dotted"
+                | "double"
+                | "groove"
+                | "ridge"
+                | "inset"
+                | "outset"
         ) {
             line = part.to_owned();
         } else {
@@ -2083,25 +2147,71 @@ pub fn initial_value(property: &str, tag: Option<&str>) -> Option<&'static str> 
         "direction" => "ltr",
         "transform" | "max-width" | "max-height" | "border-style" => "none",
         "min-width" | "min-height" => "0px",
-        "margin-top" | "margin-right" | "margin-bottom" | "margin-left" | "padding-top"
-        | "padding-right" | "padding-bottom" | "padding-left" | "border-top-width"
-        | "border-right-width" | "border-bottom-width" | "border-left-width" => "0px",
+        "margin-top"
+        | "margin-right"
+        | "margin-bottom"
+        | "margin-left"
+        | "padding-top"
+        | "padding-right"
+        | "padding-bottom"
+        | "padding-left"
+        | "border-top-width"
+        | "border-right-width"
+        | "border-bottom-width"
+        | "border-left-width" => "0px",
         "flex-direction" => "row",
         "flex-wrap" => "nowrap",
         "flex-grow" => "0",
         "flex-shrink" => "1",
         "flex-basis" => "auto",
-        "transition-duration" | "animation-duration" | "transition-delay" | "animation-delay" => "0s",
+        "transition-duration" | "animation-duration" | "transition-delay" | "animation-delay" => {
+            "0s"
+        }
         "animation-name" => "none",
         _ => return None,
     })
 }
 
 const BLOCK_TAGS: &[&str] = &[
-    "html", "body", "div", "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "dl", "dt", "dd",
-    "pre", "blockquote", "section", "article", "aside", "header", "footer", "nav", "main", "form",
-    "fieldset", "figure", "figcaption", "address", "details", "summary", "hr", "legend", "menu",
-    "dialog", "search", "hgroup", "center", "optgroup",
+    "html",
+    "body",
+    "div",
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "ul",
+    "ol",
+    "dl",
+    "dt",
+    "dd",
+    "pre",
+    "blockquote",
+    "section",
+    "article",
+    "aside",
+    "header",
+    "footer",
+    "nav",
+    "main",
+    "form",
+    "fieldset",
+    "figure",
+    "figcaption",
+    "address",
+    "details",
+    "summary",
+    "hr",
+    "legend",
+    "menu",
+    "dialog",
+    "search",
+    "hgroup",
+    "center",
+    "optgroup",
 ];
 
 /// The user agent's own sheet: what an element looks like before any author says otherwise —
@@ -2215,7 +2325,11 @@ pub fn color(text: &str) -> Option<[f32; 4]> {
                 .filter(|p| !p.is_empty())
                 .filter_map(|p| match p.strip_suffix('%') {
                     Some(percent) => percent.parse::<f32>().ok().map(|v| (v, true)),
-                    None => p.trim_end_matches("deg").parse::<f32>().ok().map(|v| (v, false)),
+                    None => p
+                        .trim_end_matches("deg")
+                        .parse::<f32>()
+                        .ok()
+                        .map(|v| (v, false)),
                 })
                 .collect(),
         )
@@ -2228,7 +2342,12 @@ pub fn color(text: &str) -> Option<[f32; 4]> {
         let alpha = parts
             .get(3)
             .map_or(1., |(v, percent)| if *percent { v / 100. } else { *v });
-        return Some([channel(parts[0]), channel(parts[1]), channel(parts[2]), alpha]);
+        return Some([
+            channel(parts[0]),
+            channel(parts[1]),
+            channel(parts[2]),
+            alpha,
+        ]);
     }
     if let Some(parts) = function(&["hsla(", "hsl("]) {
         if parts.len() < 3 {
@@ -2273,52 +2392,154 @@ pub fn color(text: &str) -> Option<[f32; 4]> {
 
 /// CSS's named colours.
 const NAMED_COLORS: &[(&str, u32)] = &[
-    ("aliceblue", 0xf0f8ff), ("antiquewhite", 0xfaebd7), ("aqua", 0x00ffff),
-    ("aquamarine", 0x7fffd4), ("azure", 0xf0ffff), ("beige", 0xf5f5dc), ("bisque", 0xffe4c4),
-    ("black", 0x000000), ("blanchedalmond", 0xffebcd), ("blue", 0x0000ff),
-    ("blueviolet", 0x8a2be2), ("brown", 0xa52a2a), ("burlywood", 0xdeb887),
-    ("cadetblue", 0x5f9ea0), ("chartreuse", 0x7fff00), ("chocolate", 0xd2691e),
-    ("coral", 0xff7f50), ("cornflowerblue", 0x6495ed), ("cornsilk", 0xfff8dc),
-    ("crimson", 0xdc143c), ("cyan", 0x00ffff), ("darkblue", 0x00008b), ("darkcyan", 0x008b8b),
-    ("darkgoldenrod", 0xb8860b), ("darkgray", 0xa9a9a9), ("darkgreen", 0x006400),
-    ("darkgrey", 0xa9a9a9), ("darkkhaki", 0xbdb76b), ("darkmagenta", 0x8b008b),
-    ("darkolivegreen", 0x556b2f), ("darkorange", 0xff8c00), ("darkorchid", 0x9932cc),
-    ("darkred", 0x8b0000), ("darksalmon", 0xe9967a), ("darkseagreen", 0x8fbc8f),
-    ("darkslateblue", 0x483d8b), ("darkslategray", 0x2f4f4f), ("darkslategrey", 0x2f4f4f),
-    ("darkturquoise", 0x00ced1), ("darkviolet", 0x9400d3), ("deeppink", 0xff1493),
-    ("deepskyblue", 0x00bfff), ("dimgray", 0x696969), ("dimgrey", 0x696969),
-    ("dodgerblue", 0x1e90ff), ("firebrick", 0xb22222), ("floralwhite", 0xfffaf0),
-    ("forestgreen", 0x228b22), ("fuchsia", 0xff00ff), ("gainsboro", 0xdcdcdc),
-    ("ghostwhite", 0xf8f8ff), ("gold", 0xffd700), ("goldenrod", 0xdaa520), ("gray", 0x808080),
-    ("green", 0x008000), ("greenyellow", 0xadff2f), ("grey", 0x808080), ("honeydew", 0xf0fff0),
-    ("hotpink", 0xff69b4), ("indianred", 0xcd5c5c), ("indigo", 0x4b0082), ("ivory", 0xfffff0),
-    ("khaki", 0xf0e68c), ("lavender", 0xe6e6fa), ("lavenderblush", 0xfff0f5),
-    ("lawngreen", 0x7cfc00), ("lemonchiffon", 0xfffacd), ("lightblue", 0xadd8e6),
-    ("lightcoral", 0xf08080), ("lightcyan", 0xe0ffff), ("lightgoldenrodyellow", 0xfafad2),
-    ("lightgray", 0xd3d3d3), ("lightgreen", 0x90ee90), ("lightgrey", 0xd3d3d3),
-    ("lightpink", 0xffb6c1), ("lightsalmon", 0xffa07a), ("lightseagreen", 0x20b2aa),
-    ("lightskyblue", 0x87cefa), ("lightslategray", 0x778899), ("lightslategrey", 0x778899),
-    ("lightsteelblue", 0xb0c4de), ("lightyellow", 0xffffe0), ("lime", 0x00ff00),
-    ("limegreen", 0x32cd32), ("linen", 0xfaf0e6), ("magenta", 0xff00ff), ("maroon", 0x800000),
-    ("mediumaquamarine", 0x66cdaa), ("mediumblue", 0x0000cd), ("mediumorchid", 0xba55d3),
-    ("mediumpurple", 0x9370db), ("mediumseagreen", 0x3cb371), ("mediumslateblue", 0x7b68ee),
-    ("mediumspringgreen", 0x00fa9a), ("mediumturquoise", 0x48d1cc),
-    ("mediumvioletred", 0xc71585), ("midnightblue", 0x191970), ("mintcream", 0xf5fffa),
-    ("mistyrose", 0xffe4e1), ("moccasin", 0xffe4b5), ("navajowhite", 0xffdead),
-    ("navy", 0x000080), ("oldlace", 0xfdf5e6), ("olive", 0x808000), ("olivedrab", 0x6b8e23),
-    ("orange", 0xffa500), ("orangered", 0xff4500), ("orchid", 0xda70d6),
-    ("palegoldenrod", 0xeee8aa), ("palegreen", 0x98fb98), ("paleturquoise", 0xafeeee),
-    ("palevioletred", 0xdb7093), ("papayawhip", 0xffefd5), ("peachpuff", 0xffdab9),
-    ("peru", 0xcd853f), ("pink", 0xffc0cb), ("plum", 0xdda0dd), ("powderblue", 0xb0e0e6),
-    ("purple", 0x800080), ("rebeccapurple", 0x663399), ("red", 0xff0000),
-    ("rosybrown", 0xbc8f8f), ("royalblue", 0x4169e1), ("saddlebrown", 0x8b4513),
-    ("salmon", 0xfa8072), ("sandybrown", 0xf4a460), ("seagreen", 0x2e8b57),
-    ("seashell", 0xfff5ee), ("sienna", 0xa0522d), ("silver", 0xc0c0c0), ("skyblue", 0x87ceeb),
-    ("slateblue", 0x6a5acd), ("slategray", 0x708090), ("slategrey", 0x708090),
-    ("snow", 0xfffafa), ("springgreen", 0x00ff7f), ("steelblue", 0x4682b4), ("tan", 0xd2b48c),
-    ("teal", 0x008080), ("thistle", 0xd8bfd8), ("tomato", 0xff6347), ("turquoise", 0x40e0d0),
-    ("violet", 0xee82ee), ("wheat", 0xf5deb3), ("white", 0xffffff), ("whitesmoke", 0xf5f5f5),
-    ("yellow", 0xffff00), ("yellowgreen", 0x9acd32),
+    ("aliceblue", 0xf0f8ff),
+    ("antiquewhite", 0xfaebd7),
+    ("aqua", 0x00ffff),
+    ("aquamarine", 0x7fffd4),
+    ("azure", 0xf0ffff),
+    ("beige", 0xf5f5dc),
+    ("bisque", 0xffe4c4),
+    ("black", 0x000000),
+    ("blanchedalmond", 0xffebcd),
+    ("blue", 0x0000ff),
+    ("blueviolet", 0x8a2be2),
+    ("brown", 0xa52a2a),
+    ("burlywood", 0xdeb887),
+    ("cadetblue", 0x5f9ea0),
+    ("chartreuse", 0x7fff00),
+    ("chocolate", 0xd2691e),
+    ("coral", 0xff7f50),
+    ("cornflowerblue", 0x6495ed),
+    ("cornsilk", 0xfff8dc),
+    ("crimson", 0xdc143c),
+    ("cyan", 0x00ffff),
+    ("darkblue", 0x00008b),
+    ("darkcyan", 0x008b8b),
+    ("darkgoldenrod", 0xb8860b),
+    ("darkgray", 0xa9a9a9),
+    ("darkgreen", 0x006400),
+    ("darkgrey", 0xa9a9a9),
+    ("darkkhaki", 0xbdb76b),
+    ("darkmagenta", 0x8b008b),
+    ("darkolivegreen", 0x556b2f),
+    ("darkorange", 0xff8c00),
+    ("darkorchid", 0x9932cc),
+    ("darkred", 0x8b0000),
+    ("darksalmon", 0xe9967a),
+    ("darkseagreen", 0x8fbc8f),
+    ("darkslateblue", 0x483d8b),
+    ("darkslategray", 0x2f4f4f),
+    ("darkslategrey", 0x2f4f4f),
+    ("darkturquoise", 0x00ced1),
+    ("darkviolet", 0x9400d3),
+    ("deeppink", 0xff1493),
+    ("deepskyblue", 0x00bfff),
+    ("dimgray", 0x696969),
+    ("dimgrey", 0x696969),
+    ("dodgerblue", 0x1e90ff),
+    ("firebrick", 0xb22222),
+    ("floralwhite", 0xfffaf0),
+    ("forestgreen", 0x228b22),
+    ("fuchsia", 0xff00ff),
+    ("gainsboro", 0xdcdcdc),
+    ("ghostwhite", 0xf8f8ff),
+    ("gold", 0xffd700),
+    ("goldenrod", 0xdaa520),
+    ("gray", 0x808080),
+    ("green", 0x008000),
+    ("greenyellow", 0xadff2f),
+    ("grey", 0x808080),
+    ("honeydew", 0xf0fff0),
+    ("hotpink", 0xff69b4),
+    ("indianred", 0xcd5c5c),
+    ("indigo", 0x4b0082),
+    ("ivory", 0xfffff0),
+    ("khaki", 0xf0e68c),
+    ("lavender", 0xe6e6fa),
+    ("lavenderblush", 0xfff0f5),
+    ("lawngreen", 0x7cfc00),
+    ("lemonchiffon", 0xfffacd),
+    ("lightblue", 0xadd8e6),
+    ("lightcoral", 0xf08080),
+    ("lightcyan", 0xe0ffff),
+    ("lightgoldenrodyellow", 0xfafad2),
+    ("lightgray", 0xd3d3d3),
+    ("lightgreen", 0x90ee90),
+    ("lightgrey", 0xd3d3d3),
+    ("lightpink", 0xffb6c1),
+    ("lightsalmon", 0xffa07a),
+    ("lightseagreen", 0x20b2aa),
+    ("lightskyblue", 0x87cefa),
+    ("lightslategray", 0x778899),
+    ("lightslategrey", 0x778899),
+    ("lightsteelblue", 0xb0c4de),
+    ("lightyellow", 0xffffe0),
+    ("lime", 0x00ff00),
+    ("limegreen", 0x32cd32),
+    ("linen", 0xfaf0e6),
+    ("magenta", 0xff00ff),
+    ("maroon", 0x800000),
+    ("mediumaquamarine", 0x66cdaa),
+    ("mediumblue", 0x0000cd),
+    ("mediumorchid", 0xba55d3),
+    ("mediumpurple", 0x9370db),
+    ("mediumseagreen", 0x3cb371),
+    ("mediumslateblue", 0x7b68ee),
+    ("mediumspringgreen", 0x00fa9a),
+    ("mediumturquoise", 0x48d1cc),
+    ("mediumvioletred", 0xc71585),
+    ("midnightblue", 0x191970),
+    ("mintcream", 0xf5fffa),
+    ("mistyrose", 0xffe4e1),
+    ("moccasin", 0xffe4b5),
+    ("navajowhite", 0xffdead),
+    ("navy", 0x000080),
+    ("oldlace", 0xfdf5e6),
+    ("olive", 0x808000),
+    ("olivedrab", 0x6b8e23),
+    ("orange", 0xffa500),
+    ("orangered", 0xff4500),
+    ("orchid", 0xda70d6),
+    ("palegoldenrod", 0xeee8aa),
+    ("palegreen", 0x98fb98),
+    ("paleturquoise", 0xafeeee),
+    ("palevioletred", 0xdb7093),
+    ("papayawhip", 0xffefd5),
+    ("peachpuff", 0xffdab9),
+    ("peru", 0xcd853f),
+    ("pink", 0xffc0cb),
+    ("plum", 0xdda0dd),
+    ("powderblue", 0xb0e0e6),
+    ("purple", 0x800080),
+    ("rebeccapurple", 0x663399),
+    ("red", 0xff0000),
+    ("rosybrown", 0xbc8f8f),
+    ("royalblue", 0x4169e1),
+    ("saddlebrown", 0x8b4513),
+    ("salmon", 0xfa8072),
+    ("sandybrown", 0xf4a460),
+    ("seagreen", 0x2e8b57),
+    ("seashell", 0xfff5ee),
+    ("sienna", 0xa0522d),
+    ("silver", 0xc0c0c0),
+    ("skyblue", 0x87ceeb),
+    ("slateblue", 0x6a5acd),
+    ("slategray", 0x708090),
+    ("slategrey", 0x708090),
+    ("snow", 0xfffafa),
+    ("springgreen", 0x00ff7f),
+    ("steelblue", 0x4682b4),
+    ("tan", 0xd2b48c),
+    ("teal", 0x008080),
+    ("thistle", 0xd8bfd8),
+    ("tomato", 0xff6347),
+    ("turquoise", 0x40e0d0),
+    ("violet", 0xee82ee),
+    ("wheat", 0xf5deb3),
+    ("white", 0xffffff),
+    ("whitesmoke", 0xf5f5f5),
+    ("yellow", 0xffff00),
+    ("yellowgreen", 0x9acd32),
 ];
 
 #[cfg(test)]

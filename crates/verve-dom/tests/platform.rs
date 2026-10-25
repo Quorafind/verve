@@ -133,7 +133,10 @@ fn xml_http_request_is_answered_through_fetch_on_the_hosts_beat() {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let out: Vec<String> = serde_json::from_str(&page.eval("JSON.stringify(out)")).unwrap();
-        assert!(out.contains(&"load 200 GET application/json".to_owned()), "{out:?}");
+        assert!(
+            out.contains(&"load 200 GET application/json".to_owned()),
+            "{out:?}"
+        );
         assert!(out.contains(&"error 0".to_owned()), "{out:?}");
         let first = out.iter().position(|l| l == "state 1").unwrap();
         let done = out.iter().position(|l| l == "state 4").unwrap();

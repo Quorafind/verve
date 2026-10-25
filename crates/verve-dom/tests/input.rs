@@ -60,15 +60,31 @@ fn the_pointer_comes_goes_and_presses() {
         let go = page.find("#go");
         assert!(page.document.hover_sensitive(go));
         // Onto the button: entered from the outside in, `:hover` following.
-        let at = Pointer { x: 20., y: 15., ..Pointer::default() };
+        let at = Pointer {
+            x: 20.,
+            y: 15.,
+            ..Pointer::default()
+        };
         page.document.pointer_move(&mut page.runtime, &at);
-        assert_eq!(log(&mut page), "pointerover pointerenter mouseover panel-enter mouseenter");
-        assert_eq!(page.document.computed().get(go, "color"), Some("rgb(255, 0, 0)"));
+        assert_eq!(
+            log(&mut page),
+            "pointerover pointerenter mouseover panel-enter mouseenter"
+        );
+        assert_eq!(
+            page.document.computed().get(go, "color"),
+            Some("rgb(255, 0, 0)")
+        );
         // A press: `:active` while it is down, the click on the way up.
         page.document.pointer_down(&mut page.runtime, &at);
-        assert_eq!(page.document.computed().get(go, "outline-color"), Some("blue"));
+        assert_eq!(
+            page.document.computed().get(go, "outline-color"),
+            Some("blue")
+        );
         page.document.pointer_up(&mut page.runtime, &at);
-        assert_ne!(page.document.computed().get(go, "outline-color"), Some("blue"));
+        assert_ne!(
+            page.document.computed().get(go, "outline-color"),
+            Some("blue")
+        );
         assert_eq!(log(&mut page), "mousedown mouseup click");
         // The second press of a double click.
         let twice = Pointer { count: 2, ..at };
@@ -81,11 +97,24 @@ fn the_pointer_comes_goes_and_presses() {
             page.document.pointer_down(&mut page.runtime, &other);
             page.document.pointer_up(&mut page.runtime, &other);
         }
-        assert_eq!(log(&mut page), "mousedown mouseup auxclick mousedown mouseup contextmenu");
+        assert_eq!(
+            log(&mut page),
+            "mousedown mouseup auxclick mousedown mouseup contextmenu"
+        );
         // Away again.
-        page.document.pointer_move(&mut page.runtime, &Pointer { x: 300., y: 250., ..Pointer::default() });
+        page.document.pointer_move(
+            &mut page.runtime,
+            &Pointer {
+                x: 300.,
+                y: 250.,
+                ..Pointer::default()
+            },
+        );
         assert_eq!(log(&mut page), "mouseout mouseleave");
-        assert_ne!(page.document.computed().get(go, "color"), Some("rgb(255, 0, 0)"));
+        assert_ne!(
+            page.document.computed().get(go, "color"),
+            Some("rgb(255, 0, 0)")
+        );
         // A click a script makes is not trusted.
         page.eval("document.getElementById('go').click()");
         assert_eq!(log(&mut page), "click?");
@@ -108,21 +137,33 @@ fn painted_boxes_are_what_geometry_answers() {
         assert_eq!(page.eval("document.elementFromPoint(900, 900)"), "null");
         assert_eq!(page.document.hit_test(15., 75.), Some(page.find("#check")));
         // A box not measured answers the box round what of it was.
-        assert_eq!(page.eval("document.getElementById('form').getBoundingClientRect().height"), "50");
+        assert_eq!(
+            page.eval("document.getElementById('form').getBoundingClientRect().height"),
+            "50"
+        );
         // Scrolling asked for from code is the drawer's to do.
         page.document.take_requests();
         page.eval("document.getElementById('panel').scrollTop = 40; window.scrollTo(0, 10)");
         let requests = page.document.take_requests();
         assert_eq!(requests.len(), 2, "{requests:?}");
-        assert!(matches!(&requests[0], Request::Scroll(verve_dom::ScrollRequest::To { top: Some(t), .. }) if *t == 40.));
+        assert!(
+            matches!(&requests[0], Request::Scroll(verve_dom::ScrollRequest::To { top: Some(t), .. }) if *t == 40.)
+        );
         let panel = page.find("#panel");
         page.eval("globalThis.scrolled = 0; document.getElementById('panel').addEventListener('scroll', () => scrolled++)");
         // Where a script scrolled to reads at once, and `scroll` is heard a task later.
         page.settle();
-        assert_eq!(page.eval("scrolled + ' ' + document.getElementById('panel').scrollTop"), "1 40");
+        assert_eq!(
+            page.eval("scrolled + ' ' + document.getElementById('panel').scrollTop"),
+            "1 40"
+        );
         // The person scrolled further.
-        page.document.set_scroll_offsets(&mut page.runtime, [(panel, [0., 80.])]);
-        assert_eq!(page.eval("scrolled + ' ' + document.getElementById('panel').scrollTop"), "2 80");
+        page.document
+            .set_scroll_offsets(&mut page.runtime, [(panel, [0., 80.])]);
+        assert_eq!(
+            page.eval("scrolled + ' ' + document.getElementById('panel').scrollTop"),
+            "2 80"
+        );
     });
 }
 
@@ -141,18 +182,34 @@ fn keys_type_move_the_focus_and_submit() {
         page.document.type_text(&mut page.runtime, "x");
         assert_eq!(page.eval("document.getElementById('name').value"), "Ada");
         // The caret's keys and Backspace.
-        page.document.key_down(&mut page.runtime, &Key::named("ArrowLeft"));
-        page.document.key_down(&mut page.runtime, &Key::named("Backspace"));
+        page.document
+            .key_down(&mut page.runtime, &Key::named("ArrowLeft"));
+        page.document
+            .key_down(&mut page.runtime, &Key::named("Backspace"));
         assert_eq!(page.eval("document.getElementById('name').value"), "Aa");
-        assert_eq!(page.eval("document.getElementById('name').selectionStart"), "1");
-        page.document.key_down(&mut page.runtime, &Key { modifiers: Modifiers { ctrl: true, ..Modifiers::default() }, ..Key::char('a') });
+        assert_eq!(
+            page.eval("document.getElementById('name').selectionStart"),
+            "1"
+        );
+        page.document.key_down(
+            &mut page.runtime,
+            &Key {
+                modifiers: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+                ..Key::char('a')
+            },
+        );
         page.document.type_text(&mut page.runtime, "Grace");
         assert_eq!(page.eval("document.getElementById('name').value"), "Grace");
         // Enter in a form's field submits it.
-        page.document.key_down(&mut page.runtime, &Key::named("Enter"));
+        page.document
+            .key_down(&mut page.runtime, &Key::named("Enter"));
         assert_eq!(log(&mut page), "submit Grace");
         // Tab: on to the next thing that takes the focus.
-        page.document.key_down(&mut page.runtime, &Key::named("Tab"));
+        page.document
+            .key_down(&mut page.runtime, &Key::named("Tab"));
         assert_eq!(page.eval("document.activeElement.id"), "check");
         // Space on a box ticks it; a press on its label does too.
         page.document.key_down(&mut page.runtime, &Key::char(' '));
@@ -165,7 +222,10 @@ fn keys_type_move_the_focus_and_submit() {
         let notes = page.find("#notes");
         page.document.focus(&mut page.runtime, Some(notes));
         page.document.type_text(&mut page.runtime, "a\nb");
-        assert_eq!(page.eval("JSON.stringify(document.getElementById('notes').value)"), "\"a\\nb\"");
+        assert_eq!(
+            page.eval("JSON.stringify(document.getElementById('notes').value)"),
+            "\"a\\nb\""
+        );
         // Focus events, with what the focus came from.
         page.eval("document.getElementById('name').addEventListener('focus', (e) => log.push('focus from ' + e.relatedTarget.id))");
         page.document.focus(&mut page.runtime, Some(name));

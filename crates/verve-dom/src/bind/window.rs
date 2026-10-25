@@ -35,7 +35,9 @@ pub fn navigate(context: &mut Context, href: &str, replace: bool) -> JsResult<()
     let Some(new) = new else {
         return Err(dom_error(
             context,
-            &format!("Failed to set the 'href' property on 'Location': '{href}' is not a valid URL."),
+            &format!(
+                "Failed to set the 'href' property on 'Location': '{href}' is not a valid URL."
+            ),
             "SyntaxError",
         ));
     };
@@ -78,7 +80,11 @@ pub fn navigate(context: &mut Context, href: &str, replace: bool) -> JsResult<()
             &global,
             "HashChangeEvent",
             "hashchange",
-            &[("oldURL", text(old.as_str())), ("newURL", text(new.as_str())), ("bubbles", false.into())],
+            &[
+                ("oldURL", text(old.as_str())),
+                ("newURL", text(new.as_str())),
+                ("bubbles", false.into()),
+            ],
         )?;
     }
     Ok(())
@@ -120,15 +126,37 @@ const LOCATION_ACCESSORS: &[Accessor] = &[
             Ok(JsValue::undefined())
         }),
     ),
-    location_accessor!("protocol", |u, v| { let _ = u.set_scheme(v.trim_end_matches(':')); }),
-    location_accessor!("host", |u, v| { let (h, p) = v.split_once(':').map_or((v, None), |(h, p)| (h, p.parse().ok())); let _ = u.set_host(Some(h)); let _ = u.set_port(p); }),
-    location_accessor!("hostname", |u, v| { let _ = u.set_host(Some(v)); }),
-    location_accessor!("port", |u, v| { let _ = u.set_port(v.parse().ok()); }),
+    location_accessor!("protocol", |u, v| {
+        let _ = u.set_scheme(v.trim_end_matches(':'));
+    }),
+    location_accessor!("host", |u, v| {
+        let (h, p) = v
+            .split_once(':')
+            .map_or((v, None), |(h, p)| (h, p.parse().ok()));
+        let _ = u.set_host(Some(h));
+        let _ = u.set_port(p);
+    }),
+    location_accessor!("hostname", |u, v| {
+        let _ = u.set_host(Some(v));
+    }),
+    location_accessor!("port", |u, v| {
+        let _ = u.set_port(v.parse().ok());
+    }),
     location_accessor!("pathname", |u, v| u.set_path(v)),
-    location_accessor!("search", |u, v| u.set_query(Some(v.trim_start_matches('?')).filter(|q| !q.is_empty()))),
-    location_accessor!("hash", |u, v| u.set_fragment(Some(v.trim_start_matches('#')))),
-    ("origin", Some(|_, _, cx| Ok(text(&location_part("origin", cx)))), None),
-    ("ancestorOrigins", Some(|_, _, cx| Ok(array(Vec::new(), cx))), None),
+    location_accessor!("search", |u, v| u
+        .set_query(Some(v.trim_start_matches('?')).filter(|q| !q.is_empty()))),
+    location_accessor!("hash", |u, v| u
+        .set_fragment(Some(v.trim_start_matches('#')))),
+    (
+        "origin",
+        Some(|_, _, cx| Ok(text(&location_part("origin", cx)))),
+        None,
+    ),
+    (
+        "ancestorOrigins",
+        Some(|_, _, cx| Ok(array(Vec::new(), cx))),
+        None,
+    ),
 ];
 
 const LOCATION_METHODS: &[Method] = &[
@@ -143,10 +171,15 @@ const LOCATION_METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     ("reload", 0, |_, _, cx| {
-        shared(cx).borrow_mut().requests.push(crate::Request::Reload);
+        shared(cx)
+            .borrow_mut()
+            .requests
+            .push(crate::Request::Reload);
         Ok(JsValue::undefined())
     }),
-    ("toString", 0, |_, _, cx| Ok(text(shared(cx).borrow().url.as_str()))),
+    ("toString", 0, |_, _, cx| {
+        Ok(text(shared(cx).borrow().url.as_str()))
+    }),
 ];
 
 fn change_history(context: &mut Context, args: &[JsValue], replace: bool) -> JsResult<JsValue> {
@@ -207,7 +240,13 @@ fn traverse(context: &mut Context, delta: i64) -> JsResult<JsValue> {
             "popstate",
             |_, _, value: &JsValue, cx| {
                 let global: JsValue = cx.global_object().into();
-                super::events::fire(cx, &global, "PopStateEvent", "popstate", &[("state", value.clone()), ("bubbles", false.into())])?;
+                super::events::fire(
+                    cx,
+                    &global,
+                    "PopStateEvent",
+                    "popstate",
+                    &[("state", value.clone()), ("bubbles", false.into())],
+                )?;
                 Ok(JsValue::undefined())
             },
             value,
@@ -218,8 +257,12 @@ fn traverse(context: &mut Context, delta: i64) -> JsResult<JsValue> {
 }
 
 const HISTORY_METHODS: &[Method] = &[
-    ("pushState", 3, |_, args, cx| change_history(cx, args, false)),
-    ("replaceState", 3, |_, args, cx| change_history(cx, args, true)),
+    ("pushState", 3, |_, args, cx| {
+        change_history(cx, args, false)
+    }),
+    ("replaceState", 3, |_, args, cx| {
+        change_history(cx, args, true)
+    }),
     ("back", 0, |_, _, cx| traverse(cx, -1)),
     ("forward", 0, |_, _, cx| traverse(cx, 1)),
     ("go", 1, |_, args, cx| {
@@ -229,7 +272,11 @@ const HISTORY_METHODS: &[Method] = &[
 ];
 
 const HISTORY_ACCESSORS: &[Accessor] = &[
-    ("length", Some(|_, _, cx| Ok(shared(cx).borrow().history.len().into())), None),
+    (
+        "length",
+        Some(|_, _, cx| Ok(shared(cx).borrow().history.len().into())),
+        None,
+    ),
     (
         "state",
         Some(|_, _, cx| {
@@ -239,30 +286,51 @@ const HISTORY_ACCESSORS: &[Accessor] = &[
         }),
         None,
     ),
-    ("scrollRestoration", Some(|_, _, _| Ok(text("auto"))), Some(|_, _, _| Ok(JsValue::undefined()))),
+    (
+        "scrollRestoration",
+        Some(|_, _, _| Ok(text("auto"))),
+        Some(|_, _, _| Ok(JsValue::undefined())),
+    ),
 ];
 
 // ─── Storage ────────────────────────────────────────────────────────────────────────────────
 
 /// Which storage a `Storage` object is: 0 local, 1 session.
 fn storage_of(this: &JsValue) -> JsResult<u32> {
-    handle_of(this, Kind::Plain).ok_or_else(|| super::type_error("Illegal invocation: not a Storage"))
+    handle_of(this, Kind::Plain)
+        .ok_or_else(|| super::type_error("Illegal invocation: not a Storage"))
 }
 
-fn with_storage<R>(context: &Context, which: u32, f: impl FnOnce(&mut std::collections::BTreeMap<String, String>) -> R) -> R {
+fn with_storage<R>(
+    context: &Context,
+    which: u32,
+    f: impl FnOnce(&mut std::collections::BTreeMap<String, String>) -> R,
+) -> R {
     let state = shared(context);
     let mut state = state.borrow_mut();
-    let result = if which == 0 { f(&mut state.local) } else { f(&mut state.session) };
+    let result = if which == 0 {
+        f(&mut state.local)
+    } else {
+        f(&mut state.session)
+    };
     if which == 0 {
         state.persist_storage();
     }
     result
 }
 
-fn read_storage<R>(context: &Context, which: u32, f: impl FnOnce(&std::collections::BTreeMap<String, String>) -> R) -> R {
+fn read_storage<R>(
+    context: &Context,
+    which: u32,
+    f: impl FnOnce(&std::collections::BTreeMap<String, String>) -> R,
+) -> R {
     let state = shared(context);
     let state = state.borrow();
-    if which == 0 { f(&state.local) } else { f(&state.session) }
+    if which == 0 {
+        f(&state.local)
+    } else {
+        f(&state.session)
+    }
 }
 
 const STORAGE_METHODS: &[Method] = &[
@@ -292,7 +360,8 @@ const STORAGE_METHODS: &[Method] = &[
     ("key", 1, |this, args, cx| {
         let which = storage_of(this)?;
         let at = arg(args, 0).to_number(cx)? as usize;
-        Ok(read_storage(cx, which, |s| s.keys().nth(at).cloned()).map_or(JsValue::null(), |k| text(&k)))
+        Ok(read_storage(cx, which, |s| s.keys().nth(at).cloned())
+            .map_or(JsValue::null(), |k| text(&k)))
     }),
 ];
 
@@ -324,7 +393,8 @@ fn storage(context: &mut Context, which: u32) -> JsResult<JsValue> {
             }
             let which = storage_of(&target)?;
             let name = string(&key, cx)?;
-            Ok(read_storage(cx, which, |s| s.get(&name).cloned()).map_or(JsValue::undefined(), |v| text(&v)))
+            Ok(read_storage(cx, which, |s| s.get(&name).cloned())
+                .map_or(JsValue::undefined(), |v| text(&v)))
         })
         .set(|_, args, cx| {
             let target = arg(args, 0);
@@ -338,7 +408,11 @@ fn storage(context: &mut Context, which: u32) -> JsResult<JsValue> {
             let target = arg(args, 0);
             let which = storage_of(&target)?;
             let name = string(&arg(args, 1), cx)?;
-            let known = target.as_object().map(|o| o.has_property(JsString::from(name.as_str()), cx)).transpose()?.unwrap_or(false);
+            let known = target
+                .as_object()
+                .map(|o| o.has_property(JsString::from(name.as_str()), cx))
+                .transpose()?
+                .unwrap_or(false);
             Ok((known || read_storage(cx, which, |s| s.contains_key(&name))).into())
         })
         .delete_property(|_, args, cx| {
@@ -350,7 +424,8 @@ fn storage(context: &mut Context, which: u32) -> JsResult<JsValue> {
         })
         .own_keys(|_, args, cx| {
             let which = storage_of(&arg(args, 0))?;
-            let keys: Vec<JsValue> = read_storage(cx, which, |s| s.keys().map(|k| text(k)).collect());
+            let keys: Vec<JsValue> =
+                read_storage(cx, which, |s| s.keys().map(|k| text(k)).collect());
             Ok(array(keys, cx))
         })
         .get_own_property_descriptor(|_, args, cx| {
@@ -399,7 +474,10 @@ fn schedule_frame(context: &mut Context) {
     };
     if !due {
         if shared(context).borrow().frame_clock == FrameClock::Host {
-            shared(context).borrow_mut().requests.push(crate::Request::Frame);
+            shared(context)
+                .borrow_mut()
+                .requests
+                .push(crate::Request::Frame);
         }
         return;
     }
@@ -419,7 +497,9 @@ const FRAME_FUNCTIONS: &[Method] = &[
     ("requestAnimationFrame", 1, |_, args, cx| {
         let callback = arg(args, 0);
         if !callback.is_callable() {
-            return Err(super::type_error("Failed to execute 'requestAnimationFrame' on 'Window': The callback provided as parameter 1 is not a function."));
+            return Err(super::type_error(
+                "Failed to execute 'requestAnimationFrame' on 'Window': The callback provided as parameter 1 is not a function.",
+            ));
         }
         let id = {
             let state = shared(cx);
@@ -500,7 +580,12 @@ const MEDIA_QUERY_METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     ("removeListener", 1, |this, args, cx| {
-        super::call_method(this, "removeEventListener", &[text("change"), arg(args, 0)], cx)
+        super::call_method(
+            this,
+            "removeEventListener",
+            &[text("change"), arg(args, 0)],
+            cx,
+        )
     }),
 ];
 
@@ -511,18 +596,28 @@ fn match_media(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let (target, list) = {
         let state = shared(context);
         let state = state.borrow();
-        (state.class("EventTarget").expect("made").0, state.class("MediaQueryList").expect("made").0)
+        (
+            state.class("EventTarget").expect("made").0,
+            state.class("MediaQueryList").expect("made").0,
+        )
     };
     let object = target.construct(&[], Some(&list), context)?;
     object.define_property_or_throw(
         js_string!("media"),
-        PropertyDescriptor::builder().value(text(&query)).writable(false).enumerable(true).configurable(true),
+        PropertyDescriptor::builder()
+            .value(text(&query))
+            .writable(false)
+            .enumerable(true)
+            .configurable(true),
         context,
     )?;
     let env = shared(context).borrow().env.clone();
     let media = MediaQuery::new(&query);
     let matches = media.matches(&env);
-    shared(context).borrow_mut().media_lists.push((object.downgrade(), media, matches));
+    shared(context)
+        .borrow_mut()
+        .media_lists
+        .push((object.downgrade(), media, matches));
     Ok(object.into())
 }
 
@@ -552,7 +647,12 @@ pub fn media_changed(context: &mut Context) -> JsResult<()> {
             &list.into(),
             "MediaQueryListEvent",
             "change",
-            &[("media", text(&media)), ("matches", matches.into()), ("bubbles", false.into()), ("cancelable", false.into())],
+            &[
+                ("media", text(&media)),
+                ("matches", matches.into()),
+                ("bubbles", false.into()),
+                ("cancelable", false.into()),
+            ],
         )?;
     }
     Ok(())
@@ -561,7 +661,9 @@ pub fn media_changed(context: &mut Context) -> JsResult<()> {
 // ─── The window's functions ─────────────────────────────────────────────────────────────────
 
 fn post_message(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let clone = context.global_object().get(js_string!("structuredClone"), context)?;
+    let clone = context
+        .global_object()
+        .get(js_string!("structuredClone"), context)?;
     let data = verve::call(context, &clone, &JsValue::undefined(), &[arg(args, 0)])?;
     let origin = location_part("origin", context);
     let deliver = closure(
@@ -572,8 +674,17 @@ fn post_message(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             let event = verve::dom_events::classes(cx)?;
             let _ = event;
             let class = cx.global_object().get(js_string!("MessageEvent"), cx)?;
-            let Some(class) = class.as_object() else { return Ok(JsValue::undefined()) };
-            let init = super::dictionary(cx, &[("data", data.clone()), ("origin", origin.clone().into()), ("source", global.clone())])?;
+            let Some(class) = class.as_object() else {
+                return Ok(JsValue::undefined());
+            };
+            let init = super::dictionary(
+                cx,
+                &[
+                    ("data", data.clone()),
+                    ("origin", origin.clone().into()),
+                    ("source", global.clone()),
+                ],
+            )?;
             let message = class.construct(&[text("message"), init.into()], None, cx)?;
             verve::dom_events::dispatch_value(&global, &message, cx)?;
             Ok(JsValue::undefined())
@@ -606,24 +717,41 @@ const WINDOW_FUNCTIONS: &[Method] = &[
     ("postMessage", 2, post_message),
     ("alert", 1, |_, args, cx| {
         let message = opt_string(args, 0, cx)?.unwrap_or_default();
-        shared(cx).borrow_mut().requests.push(crate::Request::Alert(message));
+        shared(cx)
+            .borrow_mut()
+            .requests
+            .push(crate::Request::Alert(message));
         Ok(JsValue::undefined())
     }),
     // A page nothing can answer for: what a browser that blocked the dialog answers.
     ("confirm", 1, |_, args, cx| {
         let message = opt_string(args, 0, cx)?.unwrap_or_default();
-        shared(cx).borrow_mut().requests.push(crate::Request::Alert(message));
+        shared(cx)
+            .borrow_mut()
+            .requests
+            .push(crate::Request::Alert(message));
         Ok(false.into())
     }),
     ("prompt", 2, |_, args, cx| {
         let message = opt_string(args, 0, cx)?.unwrap_or_default();
-        shared(cx).borrow_mut().requests.push(crate::Request::Alert(message));
+        shared(cx)
+            .borrow_mut()
+            .requests
+            .push(crate::Request::Alert(message));
         Ok(JsValue::null())
     }),
     ("open", 3, |_, args, cx| {
         let url = opt_string(args, 0, cx)?.unwrap_or_default();
-        let resolved = shared(cx).borrow().url.join(&url).map(|u| u.to_string()).unwrap_or(url);
-        shared(cx).borrow_mut().requests.push(crate::Request::Open(resolved));
+        let resolved = shared(cx)
+            .borrow()
+            .url
+            .join(&url)
+            .map(|u| u.to_string())
+            .unwrap_or(url);
+        shared(cx)
+            .borrow_mut()
+            .requests
+            .push(crate::Request::Open(resolved));
         Ok(JsValue::null())
     }),
     ("close", 0, |_, _, _| Ok(JsValue::undefined())),
@@ -641,20 +769,60 @@ const WINDOW_FUNCTIONS: &[Method] = &[
 
 /// The window's sizes and scroll, read from the environment each time.
 const WINDOW_ACCESSORS: &[Accessor] = &[
-    ("innerWidth", Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.width).into())), None),
-    ("innerHeight", Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.height).into())), None),
-    ("outerWidth", Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.width).into())), None),
-    ("outerHeight", Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.height).into())), None),
-    ("devicePixelRatio", Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.device_pixel_ratio).into())), None),
-    ("scrollX", Some(|_, _, cx| Ok(window_scroll(cx, 0).into())), None),
-    ("scrollY", Some(|_, _, cx| Ok(window_scroll(cx, 1).into())), None),
-    ("pageXOffset", Some(|_, _, cx| Ok(window_scroll(cx, 0).into())), None),
-    ("pageYOffset", Some(|_, _, cx| Ok(window_scroll(cx, 1).into())), None),
+    (
+        "innerWidth",
+        Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.width).into())),
+        None,
+    ),
+    (
+        "innerHeight",
+        Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.height).into())),
+        None,
+    ),
+    (
+        "outerWidth",
+        Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.width).into())),
+        None,
+    ),
+    (
+        "outerHeight",
+        Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.height).into())),
+        None,
+    ),
+    (
+        "devicePixelRatio",
+        Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.device_pixel_ratio).into())),
+        None,
+    ),
+    (
+        "scrollX",
+        Some(|_, _, cx| Ok(window_scroll(cx, 0).into())),
+        None,
+    ),
+    (
+        "scrollY",
+        Some(|_, _, cx| Ok(window_scroll(cx, 1).into())),
+        None,
+    ),
+    (
+        "pageXOffset",
+        Some(|_, _, cx| Ok(window_scroll(cx, 0).into())),
+        None,
+    ),
+    (
+        "pageYOffset",
+        Some(|_, _, cx| Ok(window_scroll(cx, 1).into())),
+        None,
+    ),
     ("screenX", Some(|_, _, _| Ok(0.into())), None),
     ("screenY", Some(|_, _, _| Ok(0.into())), None),
     ("screenLeft", Some(|_, _, _| Ok(0.into())), None),
     ("screenTop", Some(|_, _, _| Ok(0.into())), None),
-    ("origin", Some(|_, _, cx| Ok(text(&location_part("origin", cx)))), None),
+    (
+        "origin",
+        Some(|_, _, cx| Ok(text(&location_part("origin", cx)))),
+        None,
+    ),
 ];
 
 fn window_scroll(context: &Context, axis: usize) -> f64 {
@@ -669,7 +837,10 @@ fn install_screen(context: &mut Context) -> JsResult<()> {
     let (width, height) = {
         let state = shared(context);
         let state = state.borrow();
-        (f64::from(state.env.width.max(1920.)), f64::from(state.env.height.max(1080.)))
+        (
+            f64::from(state.env.width.max(1920.)),
+            f64::from(state.env.height.max(1080.)),
+        )
     };
     for (key, value) in [
         ("width", width),
@@ -684,12 +855,19 @@ fn install_screen(context: &mut Context) -> JsResult<()> {
         set(&screen, key, value, context)?;
     }
     set(&screen, "isExtended", false, context)?;
-    let target = shared(context).borrow().class("EventTarget").expect("made").0;
+    let target = shared(context)
+        .borrow()
+        .class("EventTarget")
+        .expect("made")
+        .0;
     let orientation = target.construct(&[], None, context)?;
     set(&orientation, "type", text("landscape-primary"), context)?;
     set(&orientation, "angle", 0, context)?;
     let lock = function(context, "lock", 1, |_, _, cx| {
-        super::rejected(super::type_error("screen.orientation.lock() is not available on this device."), cx)
+        super::rejected(
+            super::type_error("screen.orientation.lock() is not available on this device."),
+            cx,
+        )
     });
     set(&orientation, "lock", lock, context)?;
     let unlock = function(context, "unlock", 0, |_, _, _| Ok(JsValue::undefined()));
@@ -699,12 +877,28 @@ fn install_screen(context: &mut Context) -> JsResult<()> {
     // The visual viewport: the window's, unscaled.
     let viewport = target.construct(&[], None, context)?;
     let accessors: &[Accessor] = &[
-        ("width", Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.width).into())), None),
-        ("height", Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.height).into())), None),
+        (
+            "width",
+            Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.width).into())),
+            None,
+        ),
+        (
+            "height",
+            Some(|_, _, cx| Ok(f64::from(shared(cx).borrow().env.height).into())),
+            None,
+        ),
         ("offsetLeft", Some(|_, _, _| Ok(0.into())), None),
         ("offsetTop", Some(|_, _, _| Ok(0.into())), None),
-        ("pageLeft", Some(|_, _, cx| Ok(window_scroll(cx, 0).into())), None),
-        ("pageTop", Some(|_, _, cx| Ok(window_scroll(cx, 1).into())), None),
+        (
+            "pageLeft",
+            Some(|_, _, cx| Ok(window_scroll(cx, 0).into())),
+            None,
+        ),
+        (
+            "pageTop",
+            Some(|_, _, cx| Ok(window_scroll(cx, 1).into())),
+            None,
+        ),
         ("scale", Some(|_, _, _| Ok(1.into())), None),
     ];
     extend_prototype(context, &viewport, &[], accessors)?;
@@ -715,15 +909,24 @@ fn install_screen(context: &mut Context) -> JsResult<()> {
 /// Makes `navigator` the window's: the user agent and language the embedder gave, and a
 /// clipboard whose writes the embedder carries out.
 fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResult<()> {
-    let navigator = context.global_object().get(js_string!("navigator"), context)?;
+    let navigator = context
+        .global_object()
+        .get(js_string!("navigator"), context)?;
     let Some(navigator) = navigator.as_object() else {
         return Ok(());
     };
     if let Some(agent) = &options.user_agent {
-        for (key, value) in [("userAgent", agent.as_str()), ("appVersion", agent.trim_start_matches("Mozilla/"))] {
+        for (key, value) in [
+            ("userAgent", agent.as_str()),
+            ("appVersion", agent.trim_start_matches("Mozilla/")),
+        ] {
             navigator.define_property_or_throw(
                 JsString::from(key),
-                PropertyDescriptor::builder().value(text(value)).writable(true).enumerable(true).configurable(true),
+                PropertyDescriptor::builder()
+                    .value(text(value))
+                    .writable(true)
+                    .enumerable(true)
+                    .configurable(true),
                 context,
             )?;
         }
@@ -737,11 +940,16 @@ fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResul
     let methods: &[Method] = &[
         ("writeText", 1, |_, args, cx| {
             let content = arg_string(args, 0, cx)?;
-            shared(cx).borrow_mut().requests.push(crate::Request::CopyText(content));
+            shared(cx)
+                .borrow_mut()
+                .requests
+                .push(crate::Request::CopyText(content));
             super::resolved(JsValue::undefined(), cx)
         }),
         ("readText", 0, |_, _, cx| super::resolved(text(""), cx)),
-        ("write", 1, |_, _, cx| super::resolved(JsValue::undefined(), cx)),
+        ("write", 1, |_, _, cx| {
+            super::resolved(JsValue::undefined(), cx)
+        }),
         ("read", 0, |_, _, cx| {
             let empty = array(Vec::new(), cx);
             super::resolved(empty, cx)
@@ -758,13 +966,17 @@ fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResul
 /// `new FormData(form, submitter)`: Verve's `FormData`, filled from the form's controls as a
 /// submission would send them.
 fn install_form_data(context: &mut Context) -> JsResult<()> {
-    let original = context.global_object().get(js_string!("FormData"), context)?;
+    let original = context
+        .global_object()
+        .get(js_string!("FormData"), context)?;
     let Some(original) = original.as_object() else {
         return Ok(());
     };
     let proxy = JsProxyBuilder::new(original)
         .construct(|_, args, cx| {
-            let target = arg(args, 0).as_object().ok_or_else(|| super::type_error("no FormData"))?;
+            let target = arg(args, 0)
+                .as_object()
+                .ok_or_else(|| super::type_error("no FormData"))?;
             let given = super::list(&arg(args, 1), cx)?;
             let new_target = arg(args, 2);
             let form = given.first().and_then(super::node_id);
@@ -772,27 +984,44 @@ fn install_form_data(context: &mut Context) -> JsResult<()> {
             let made = target.construct(&[], new_target.as_object().as_ref(), cx)?;
             if let Some(form) = form {
                 for (name, value) in form_entries(cx, form, submitter) {
-                    super::call_method(&made.clone().into(), "append", &[text(&name), text(&value)], cx)?;
+                    super::call_method(
+                        &made.clone().into(),
+                        "append",
+                        &[text(&name), text(&value)],
+                        cx,
+                    )?;
                 }
             }
             Ok(made.into())
         })
         .build(context)?;
-    context.register_global_property(js_string!("FormData"), JsObject::from(proxy), Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("FormData"),
+        JsObject::from(proxy),
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
     Ok(())
 }
 
 /// What a form submits: each named, enabled control's value — boxes only when ticked, a
 /// select's chosen options, the submitter when it has a name.
-pub fn form_entries(context: &Context, form: crate::dom::NodeId, submitter: Option<crate::dom::NodeId>) -> Vec<(String, String)> {
+pub fn form_entries(
+    context: &Context,
+    form: crate::dom::NodeId,
+    submitter: Option<crate::dom::NodeId>,
+) -> Vec<(String, String)> {
     read_dom(context, |dom| {
         if dom.get(form).and_then(|n| n.tag()) != Some("form") {
             return Vec::new();
         }
         let mut out = Vec::new();
         for control in dom.descendants(form) {
-            let Some(node) = dom.get(control) else { continue };
-            let Some(name) = node.attr("name").filter(|n| !n.is_empty()) else { continue };
+            let Some(node) = dom.get(control) else {
+                continue;
+            };
+            let Some(name) = node.attr("name").filter(|n| !n.is_empty()) else {
+                continue;
+            };
             if node.attr("disabled").is_some() {
                 continue;
             }
@@ -802,7 +1031,10 @@ pub fn form_entries(context: &Context, form: crate::dom::NodeId, submitter: Opti
                     match kind.as_str() {
                         "checkbox" | "radio" => {
                             if node.checked {
-                                out.push((name.to_owned(), node.attr("value").unwrap_or("on").to_owned()));
+                                out.push((
+                                    name.to_owned(),
+                                    node.attr("value").unwrap_or("on").to_owned(),
+                                ));
                             }
                         }
                         "submit" | "image" | "button" | "reset" => {
@@ -857,7 +1089,11 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
     for name in ["window", "self", "top", "parent", "frames"] {
         global.define_property_or_throw(
             JsString::from(name),
-            PropertyDescriptor::builder().value(global.clone()).writable(true).enumerable(true).configurable(true),
+            PropertyDescriptor::builder()
+                .value(global.clone())
+                .writable(true)
+                .enumerable(true)
+                .configurable(true),
             context,
         )?;
     }
@@ -874,7 +1110,11 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
     ] {
         global.define_property_or_throw(
             JsString::from(name),
-            PropertyDescriptor::builder().value(value).writable(true).enumerable(true).configurable(true),
+            PropertyDescriptor::builder()
+                .value(value)
+                .writable(true)
+                .enumerable(true)
+                .configurable(true),
             context,
         )?;
     }
@@ -892,7 +1132,11 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
         },
     )?;
     let location = native_instance(context, "Location", Kind::Plain, 0);
-    context.register_global_property(js_string!("location"), location, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        js_string!("location"),
+        location,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
     class(
         context,
         ClassSpec {

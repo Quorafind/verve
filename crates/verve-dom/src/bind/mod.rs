@@ -221,7 +221,9 @@ pub fn list(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
     let Some(object) = value.as_object() else {
         return Ok(Vec::new());
     };
-    let length = object.get(js_string!("length"), context)?.to_length(context)?;
+    let length = object
+        .get(js_string!("length"), context)?
+        .to_length(context)?;
     let mut out = Vec::with_capacity(length as usize);
     for at in 0..length {
         out.push(object.get(at, context)?);
@@ -264,15 +266,24 @@ pub fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, 
             .class(name)
             .unwrap_or_else(|| panic!("the parent class {name} is made first"))
     });
-    let mut builder =
-        boa_engine::object::ConstructorBuilder::new(context, NativeFunction::from_fn_ptr(spec.construct));
-    builder.name(spec.name).length(spec.length).constructor(true);
+    let mut builder = boa_engine::object::ConstructorBuilder::new(
+        context,
+        NativeFunction::from_fn_ptr(spec.construct),
+    );
+    builder
+        .name(spec.name)
+        .length(spec.length)
+        .constructor(true);
     if let Some((constructor, prototype)) = &parent {
         builder.inherit(prototype.clone());
         builder.custom_prototype(constructor.clone());
     }
     for (name, length, f) in spec.statics {
-        builder.static_method(NativeFunction::from_fn_ptr(*f), JsString::from(*name), *length);
+        builder.static_method(
+            NativeFunction::from_fn_ptr(*f),
+            JsString::from(*name),
+            *length,
+        );
     }
     let built = builder.build();
     let (constructor, prototype) = (built.constructor(), built.prototype());
@@ -343,7 +354,10 @@ pub fn instance(
     context: &mut Context,
 ) -> JsResult<JsObject> {
     let prototype = prototype_of_target(new_target, context)?;
-    Ok(JsObject::from_proto_and_data(prototype, Handle { kind, id }))
+    Ok(JsObject::from_proto_and_data(
+        prototype,
+        Handle { kind, id },
+    ))
 }
 
 /// The prototype an object made with `new` takes: `new.target`'s.

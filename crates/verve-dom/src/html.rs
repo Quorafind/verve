@@ -30,10 +30,42 @@ fn raw_text(tag: &str) -> Option<bool> {
 
 /// The elements whose start closes an open `<p>`.
 const CLOSES_P: &[&str] = &[
-    "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl",
-    "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
-    "header", "hgroup", "hr", "main", "menu", "nav", "ol", "p", "pre", "section", "summary",
-    "table", "ul", "search", "listing",
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "center",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hgroup",
+    "hr",
+    "main",
+    "menu",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "summary",
+    "table",
+    "ul",
+    "search",
+    "listing",
 ];
 
 /// What the parse puts the markup in.
@@ -42,7 +74,11 @@ pub enum Context {
     /// A fragment of a page: `innerHTML`. `<html>`, `<head>` and `<body>` are ignored.
     Fragment,
     /// A whole document's `<html>`: what `DOMParser` and `document.write` read.
-    Document { html: NodeId, head: NodeId, body: NodeId },
+    Document {
+        html: NodeId,
+        head: NodeId,
+        body: NodeId,
+    },
 }
 
 /// Reads `markup` into `parent`, after what is already there, as `innerHTML` does.
@@ -73,11 +109,19 @@ struct Open {
 
 fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
     let parent_namespace = dom.get(parent).map_or(Namespace::Html, |n| {
-        if n.is_element() { n.namespace } else { Namespace::Html }
+        if n.is_element() {
+            n.namespace
+        } else {
+            Namespace::Html
+        }
     });
     let mut stack: Vec<Open> = vec![Open {
         id: parent,
-        tag: dom.get(parent).and_then(|n| n.tag()).unwrap_or("").to_owned(),
+        tag: dom
+            .get(parent)
+            .and_then(|n| n.tag())
+            .unwrap_or("")
+            .to_owned(),
         namespace: parent_namespace,
     }];
     // In a whole document, what comes before `<body>` that belongs in `<head>` goes there.
@@ -129,9 +173,8 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
                     if dom.children(document).iter().all(|c| {
                         !matches!(dom.get(*c).map(|n| &n.kind), Some(NodeKind::Doctype(_)))
                     }) {
-                        let doctype = dom.create_doctype(
-                            name.split_whitespace().next().unwrap_or("html"),
-                        );
+                        let doctype =
+                            dom.create_doctype(name.split_whitespace().next().unwrap_or("html"));
                         let first = dom.children(document).first().copied();
                         dom.insert_before(document, doctype, first);
                     }
@@ -160,7 +203,12 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
         let inside = &rest[1..gt];
         rest = &rest[gt + 1..];
         if let Some(name) = inside.strip_prefix('/') {
-            let name = name.trim().split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+            let name = name
+                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
             close(dom, &mut stack, &name, context, &mut in_body);
             continue;
         }
@@ -198,7 +246,10 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
                 }
                 "head" => continue,
                 tag if !in_body
-                    && matches!(tag, "meta" | "title" | "link" | "style" | "script" | "base" | "noscript") =>
+                    && matches!(
+                        tag,
+                        "meta" | "title" | "link" | "style" | "script" | "base" | "noscript"
+                    ) =>
                 {
                     if stack[0].id != head {
                         stack.truncate(1);
@@ -266,7 +317,11 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
             // Text up to the matching end tag, whatever it holds.
             let end = find_end_tag(rest, &name);
             let content = &rest[..end];
-            let text = if decode_refs { decode(content) } else { content.to_owned() };
+            let text = if decode_refs {
+                decode(content)
+            } else {
+                content.to_owned()
+            };
             // A newline right after `<textarea>` or `<pre>` is not part of its text.
             let text = if name == "textarea" {
                 text.strip_prefix('\n').unwrap_or(&text).to_owned()
@@ -277,9 +332,7 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
                 let node = dom.create_text(&text);
                 dom.append(element, node);
             }
-            rest = rest[end..]
-                .find('>')
-                .map_or("", |gt| &rest[end + gt + 1..]);
+            rest = rest[end..].find('>').map_or("", |gt| &rest[end + gt + 1..]);
             continue;
         }
         stack.push(Open {
@@ -331,8 +384,7 @@ fn imply_end_tags(dom: &Dom, stack: &mut Vec<Open>, tag: &str) {
         None
     };
     let scope_fence: &[&str] = &[
-        "table", "td", "th", "caption", "template", "html", "applet", "marquee", "object",
-        "button",
+        "table", "td", "th", "caption", "template", "html", "applet", "marquee", "object", "button",
     ];
     if CLOSES_P.contains(&tag)
         && let Some(at) = open(stack, &["p"], scope_fence)
@@ -349,16 +401,25 @@ fn imply_end_tags(dom: &Dom, stack: &mut Vec<Open>, tag: &str) {
         "dt" | "dd" => close_nearest(stack, &["dt", "dd"], &["dl", "table", "div"]),
         "option" => close_nearest(stack, &["option"], &["select", "datalist", "optgroup"]),
         "optgroup" => close_nearest(stack, &["option", "optgroup"], &["select"]),
-        "tr" => close_nearest(stack, &["tr", "td", "th"], &["table", "thead", "tbody", "tfoot"]),
+        "tr" => close_nearest(
+            stack,
+            &["tr", "td", "th"],
+            &["table", "thead", "tbody", "tfoot"],
+        ),
         "td" | "th" => close_nearest(stack, &["td", "th"], &["tr", "table"]),
-        "thead" | "tbody" | "tfoot" => {
-            close_nearest(stack, &["thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup"], &["table"])
-        }
+        "thead" | "tbody" | "tfoot" => close_nearest(
+            stack,
+            &[
+                "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup",
+            ],
+            &["table"],
+        ),
         "caption" | "colgroup" => close_nearest(stack, &["caption", "colgroup"], &["table"]),
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-            if stack.last().is_some_and(|o| {
-                matches!(o.tag.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
-            }) {
+            if stack
+                .last()
+                .is_some_and(|o| matches!(o.tag.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6"))
+            {
                 stack.pop();
             }
         }
@@ -386,7 +447,9 @@ fn close(dom: &mut Dom, stack: &mut Vec<Open>, name: &str, context: Context, in_
     }
     let at = stack
         .iter()
-        .rposition(|o| o.tag == name || (o.namespace != Namespace::Html && o.tag.eq_ignore_ascii_case(name)))
+        .rposition(|o| {
+            o.tag == name || (o.namespace != Namespace::Html && o.tag.eq_ignore_ascii_case(name))
+        })
         .filter(|at| *at > 0);
     match at {
         Some(at) => stack.truncate(at),
@@ -506,7 +569,11 @@ fn push_text(
     context: Context,
     in_body: &mut bool,
 ) {
-    let text = if references { decode(raw) } else { raw.to_owned() };
+    let text = if references {
+        decode(raw)
+    } else {
+        raw.to_owned()
+    };
     if text.is_empty() {
         return;
     }
@@ -557,7 +624,11 @@ pub fn decode(text: &str) -> String {
                     Some(hex) => u32::from_str_radix(hex, 16).ok(),
                     None => number.parse().ok(),
                 }?;
-                let code = if code == 0 || code > 0x10ffff { 0xfffd } else { code };
+                let code = if code == 0 || code > 0x10ffff {
+                    0xfffd
+                } else {
+                    code
+                };
                 return char::from_u32(code).map(String::from);
             }
             named(entity).map(str::to_owned)
@@ -774,24 +845,102 @@ fn escape(text: &str, attribute: bool) -> String {
 /// document does, and gives SVG's back their case when written out (the HTML standard's
 /// "adjust SVG attributes" and tag name tables).
 pub(crate) const SVG_TAGS: &[&str] = &[
-    "altGlyph", "altGlyphDef", "altGlyphItem", "animateColor", "animateMotion", "animateTransform",
-    "clipPath", "feBlend", "feColorMatrix", "feComponentTransfer", "feComposite", "feConvolveMatrix",
-    "feDiffuseLighting", "feDisplacementMap", "feDistantLight", "feDropShadow", "feFlood", "feFuncA",
-    "feFuncB", "feFuncG", "feFuncR", "feGaussianBlur", "feImage", "feMerge", "feMergeNode",
-    "feMorphology", "feOffset", "fePointLight", "feSpecularLighting", "feSpotLight", "feTile",
-    "feTurbulence", "foreignObject", "glyphRef", "linearGradient", "radialGradient", "textPath",
+    "altGlyph",
+    "altGlyphDef",
+    "altGlyphItem",
+    "animateColor",
+    "animateMotion",
+    "animateTransform",
+    "clipPath",
+    "feBlend",
+    "feColorMatrix",
+    "feComponentTransfer",
+    "feComposite",
+    "feConvolveMatrix",
+    "feDiffuseLighting",
+    "feDisplacementMap",
+    "feDistantLight",
+    "feDropShadow",
+    "feFlood",
+    "feFuncA",
+    "feFuncB",
+    "feFuncG",
+    "feFuncR",
+    "feGaussianBlur",
+    "feImage",
+    "feMerge",
+    "feMergeNode",
+    "feMorphology",
+    "feOffset",
+    "fePointLight",
+    "feSpecularLighting",
+    "feSpotLight",
+    "feTile",
+    "feTurbulence",
+    "foreignObject",
+    "glyphRef",
+    "linearGradient",
+    "radialGradient",
+    "textPath",
 ];
 const SVG_ATTRIBUTES: &[&str] = &[
-    "attributeName", "attributeType", "baseFrequency", "baseProfile", "calcMode", "clipPathUnits",
-    "diffuseConstant", "edgeMode", "filterUnits", "glyphRef", "gradientTransform", "gradientUnits",
-    "kernelMatrix", "kernelUnitLength", "keyPoints", "keySplines", "keyTimes", "lengthAdjust",
-    "limitingConeAngle", "markerHeight", "markerUnits", "markerWidth", "maskContentUnits",
-    "maskUnits", "numOctaves", "pathLength", "patternContentUnits", "patternTransform",
-    "patternUnits", "pointsAtX", "pointsAtY", "pointsAtZ", "preserveAlpha", "preserveAspectRatio",
-    "primitiveUnits", "refX", "refY", "repeatCount", "repeatDur", "requiredExtensions",
-    "requiredFeatures", "specularConstant", "specularExponent", "spreadMethod", "startOffset",
-    "stdDeviation", "stitchTiles", "surfaceScale", "systemLanguage", "tableValues", "targetX",
-    "targetY", "textLength", "viewBox", "viewTarget", "xChannelSelector", "yChannelSelector",
+    "attributeName",
+    "attributeType",
+    "baseFrequency",
+    "baseProfile",
+    "calcMode",
+    "clipPathUnits",
+    "diffuseConstant",
+    "edgeMode",
+    "filterUnits",
+    "glyphRef",
+    "gradientTransform",
+    "gradientUnits",
+    "kernelMatrix",
+    "kernelUnitLength",
+    "keyPoints",
+    "keySplines",
+    "keyTimes",
+    "lengthAdjust",
+    "limitingConeAngle",
+    "markerHeight",
+    "markerUnits",
+    "markerWidth",
+    "maskContentUnits",
+    "maskUnits",
+    "numOctaves",
+    "pathLength",
+    "patternContentUnits",
+    "patternTransform",
+    "patternUnits",
+    "pointsAtX",
+    "pointsAtY",
+    "pointsAtZ",
+    "preserveAlpha",
+    "preserveAspectRatio",
+    "primitiveUnits",
+    "refX",
+    "refY",
+    "repeatCount",
+    "repeatDur",
+    "requiredExtensions",
+    "requiredFeatures",
+    "specularConstant",
+    "specularExponent",
+    "spreadMethod",
+    "startOffset",
+    "stdDeviation",
+    "stitchTiles",
+    "surfaceScale",
+    "systemLanguage",
+    "tableValues",
+    "targetX",
+    "targetY",
+    "textLength",
+    "viewBox",
+    "viewTarget",
+    "xChannelSelector",
+    "yChannelSelector",
     "zoomAndPan",
 ];
 
@@ -945,7 +1094,10 @@ mod tests {
             "<!DOCTYPE html><html lang=en><head><title>T</title><meta charset=utf-8></head>\
              <body class=b><h1>Hi</h1></body></html>",
         );
-        assert_eq!(inner(&dom, head), "<title>T</title><meta charset=\"utf-8\">");
+        assert_eq!(
+            inner(&dom, head),
+            "<title>T</title><meta charset=\"utf-8\">"
+        );
         assert_eq!(inner(&dom, body), "<h1>Hi</h1>");
         assert_eq!(dom.get_attr(body, "class").as_deref(), Some("b"));
         assert!(outer(&dom, document).starts_with("<!DOCTYPE html><html lang=\"en\">"));

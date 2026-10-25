@@ -221,9 +221,8 @@ impl State {
         if found == self.style_texts && adopted == known_adopted {
             return false;
         }
-        self.sheets.retain(|r| {
-            !matches!(r.owner, SheetOwner::Element(_) | SheetOwner::Adopted(_))
-        });
+        self.sheets
+            .retain(|r| !matches!(r.owner, SheetOwner::Element(_) | SheetOwner::Adopted(_)));
         for (id, text) in &found {
             self.sheets.push(SheetRecord {
                 owner: SheetOwner::Element(*id),

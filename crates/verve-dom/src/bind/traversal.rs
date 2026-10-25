@@ -80,7 +80,11 @@ fn judge(context: &mut Context, walk: &JsValue, id: NodeId) -> JsResult<u32> {
 
 fn what_to_show(walk: &JsValue, context: &mut Context) -> JsResult<u32> {
     let what = get(walk, "whatToShow", context)?;
-    Ok(if what.is_undefined() { SHOW_ALL } else { what.to_u32(context)? })
+    Ok(if what.is_undefined() {
+        SHOW_ALL
+    } else {
+        what.to_u32(context)?
+    })
 }
 
 fn node_at(walk: &JsValue, key: &str, context: &mut Context) -> JsResult<NodeId> {
@@ -100,14 +104,30 @@ pub fn create(args: &[JsValue], context: &mut Context, walker: bool) -> JsResult
     let walk = plain_object(context);
     set(&walk, "root", root.clone(), context)?;
     let what = arg(args, 1);
-    let what = if what.is_undefined() { f64::from(SHOW_ALL) } else { f64::from(what.to_u32(context)?) };
+    let what = if what.is_undefined() {
+        f64::from(SHOW_ALL)
+    } else {
+        f64::from(what.to_u32(context)?)
+    };
     set(&walk, "whatToShow", what, context)?;
     let filter = arg(args, 2);
-    set(&walk, "filter", if filter.is_undefined() { JsValue::null() } else { filter }, context)?;
+    set(
+        &walk,
+        "filter",
+        if filter.is_undefined() {
+            JsValue::null()
+        } else {
+            filter
+        },
+        context,
+    )?;
     if walker {
         set(&walk, "currentNode", root, context)?;
         for (name, f) in [
-            ("nextNode", walker_next as boa_engine::native_function::NativeFunctionPointer),
+            (
+                "nextNode",
+                walker_next as boa_engine::native_function::NativeFunctionPointer,
+            ),
             ("previousNode", walker_previous),
             ("parentNode", walker_parent),
             ("firstChild", walker_first_child),
@@ -122,9 +142,14 @@ pub fn create(args: &[JsValue], context: &mut Context, walker: bool) -> JsResult
         set(&walk, "referenceNode", root, context)?;
         set(&walk, "pointerBeforeReferenceNode", true, context)?;
         for (name, f) in [
-            ("nextNode", iterator_next as boa_engine::native_function::NativeFunctionPointer),
+            (
+                "nextNode",
+                iterator_next as boa_engine::native_function::NativeFunctionPointer,
+            ),
             ("previousNode", iterator_previous),
-            ("detach", |_: &JsValue, _: &[JsValue], _: &mut Context| Ok(JsValue::undefined())),
+            ("detach", |_: &JsValue, _: &[JsValue], _: &mut Context| {
+                Ok(JsValue::undefined())
+            }),
         ] {
             let method = function(context, name, 0, f);
             set(&walk, name, method, context)?;
@@ -170,8 +195,18 @@ fn iterator_step(this: &JsValue, context: &mut Context, forward: bool) -> JsResu
         };
         let id = order[candidate];
         let node = wrap(context, id);
-        set(&this.as_object().expect("an iterator is an object"), "referenceNode", node.clone(), context)?;
-        set(&this.as_object().expect("an iterator is an object"), "pointerBeforeReferenceNode", before, context)?;
+        set(
+            &this.as_object().expect("an iterator is an object"),
+            "referenceNode",
+            node.clone(),
+            context,
+        )?;
+        set(
+            &this.as_object().expect("an iterator is an object"),
+            "pointerBeforeReferenceNode",
+            before,
+            context,
+        )?;
         if judge(context, this, id)? == FILTER_ACCEPT {
             return Ok(node);
         }
@@ -191,13 +226,23 @@ fn iterator_previous(this: &JsValue, _: &[JsValue], context: &mut Context) -> Js
 /// Makes `id` the walker's current node and answers it.
 fn land(this: &JsValue, context: &mut Context, id: NodeId) -> JsResult<JsValue> {
     let node = wrap(context, id);
-    set(&this.as_object().expect("a walker is an object"), "currentNode", node.clone(), context)?;
+    set(
+        &this.as_object().expect("a walker is an object"),
+        "currentNode",
+        node.clone(),
+        context,
+    )?;
     Ok(node)
 }
 
 /// Whether `id` is inside a node under the root that the filter rejected — a rejected node's
 /// subtree is not walked.
-fn under_rejected(context: &mut Context, this: &JsValue, id: NodeId, root: NodeId) -> JsResult<bool> {
+fn under_rejected(
+    context: &mut Context,
+    this: &JsValue,
+    id: NodeId,
+    root: NodeId,
+) -> JsResult<bool> {
     let mut at = read_dom(context, |dom| dom.parent(id));
     while let Some(parent) = at {
         if parent == root {
@@ -271,7 +316,9 @@ fn walker_first_child(this: &JsValue, _: &[JsValue], context: &mut Context) -> J
 
 fn walker_last_child(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let current = node_at(this, "currentNode", context)?;
-    let children = read_dom(context, |dom| dom.children(current).iter().rev().copied().collect());
+    let children = read_dom(context, |dom| {
+        dom.children(current).iter().rev().copied().collect()
+    });
     first_accepted(this, context, children)
 }
 
@@ -282,7 +329,9 @@ fn siblings(context: &mut Context, this: &JsValue, forward: bool) -> JsResult<Ve
         return Ok(Vec::new());
     }
     Ok(read_dom(context, |dom| {
-        let Some(parent) = dom.parent(current) else { return Vec::new() };
+        let Some(parent) = dom.parent(current) else {
+            return Vec::new();
+        };
         let all = dom.children(parent);
         let at = all.iter().position(|id| *id == current).unwrap_or(0);
         match forward {
@@ -297,7 +346,11 @@ fn walker_next_sibling(this: &JsValue, _: &[JsValue], context: &mut Context) -> 
     first_accepted(this, context, ids)
 }
 
-fn walker_previous_sibling(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn walker_previous_sibling(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let ids = siblings(context, this, false)?;
     first_accepted(this, context, ids)
 }

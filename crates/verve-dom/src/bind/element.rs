@@ -97,16 +97,47 @@ pub fn html_class(tag: &str) -> &'static str {
 
 /// The classes under `HTMLElement` with nothing of their own beyond what is reflected.
 const PLAIN_HTML_CLASSES: &[&str] = &[
-    "HTMLDivElement", "HTMLSpanElement", "HTMLParagraphElement", "HTMLHeadingElement",
-    "HTMLUListElement", "HTMLOListElement", "HTMLLIElement", "HTMLDListElement",
-    "HTMLTableCaptionElement", "HTMLTableColElement", "HTMLPreElement", "HTMLBRElement",
-    "HTMLHRElement", "HTMLScriptElement", "HTMLLinkElement", "HTMLMetaElement", "HTMLBaseElement",
-    "HTMLBodyElement", "HTMLHeadElement", "HTMLHtmlElement", "HTMLPictureElement",
-    "HTMLTimeElement", "HTMLDataElement", "HTMLQuoteElement", "HTMLModElement",
-    "HTMLEmbedElement", "HTMLObjectElement", "HTMLMapElement", "HTMLTrackElement",
-    "HTMLMenuElement", "HTMLDataListElement", "HTMLUnknownElement", "HTMLSourceElement",
-    "HTMLOptGroupElement", "HTMLFieldSetElement", "HTMLLegendElement", "HTMLOutputElement",
-    "HTMLMeterElement", "HTMLAreaElement", "HTMLIFrameElement", "HTMLSlotElement",
+    "HTMLDivElement",
+    "HTMLSpanElement",
+    "HTMLParagraphElement",
+    "HTMLHeadingElement",
+    "HTMLUListElement",
+    "HTMLOListElement",
+    "HTMLLIElement",
+    "HTMLDListElement",
+    "HTMLTableCaptionElement",
+    "HTMLTableColElement",
+    "HTMLPreElement",
+    "HTMLBRElement",
+    "HTMLHRElement",
+    "HTMLScriptElement",
+    "HTMLLinkElement",
+    "HTMLMetaElement",
+    "HTMLBaseElement",
+    "HTMLBodyElement",
+    "HTMLHeadElement",
+    "HTMLHtmlElement",
+    "HTMLPictureElement",
+    "HTMLTimeElement",
+    "HTMLDataElement",
+    "HTMLQuoteElement",
+    "HTMLModElement",
+    "HTMLEmbedElement",
+    "HTMLObjectElement",
+    "HTMLMapElement",
+    "HTMLTrackElement",
+    "HTMLMenuElement",
+    "HTMLDataListElement",
+    "HTMLUnknownElement",
+    "HTMLSourceElement",
+    "HTMLOptGroupElement",
+    "HTMLFieldSetElement",
+    "HTMLLegendElement",
+    "HTMLOutputElement",
+    "HTMLMeterElement",
+    "HTMLAreaElement",
+    "HTMLIFrameElement",
+    "HTMLSlotElement",
     "HTMLTitleElement",
 ];
 
@@ -252,7 +283,9 @@ pub fn request_scroll(context: &mut Context, request: crate::ScrollRequest) {
             }
             crate::ScrollRequest::By { node, left, top } => {
                 let at = state.scroll_offsets.get(node).copied().unwrap_or([0., 0.]);
-                state.scroll_offsets.insert(*node, [(at[0] + left).max(0.), (at[1] + top).max(0.)]);
+                state
+                    .scroll_offsets
+                    .insert(*node, [(at[0] + left).max(0.), (at[1] + top).max(0.)]);
                 Some(*node)
             }
             crate::ScrollRequest::Reveal(_) => None,
@@ -268,11 +301,19 @@ pub fn request_scroll(context: &mut Context, request: crate::ScrollRequest) {
             context,
             "scroll",
             |_, _, node: &JsValue, cx| {
-                let Some(id) = node_id(node) else { return Ok(JsValue::undefined()) };
+                let Some(id) = node_id(node) else {
+                    return Ok(JsValue::undefined());
+                };
                 let root = read_dom(cx, |dom| dom.html);
                 if id == root {
                     let document = cx.global_object().get(js_string!("document"), cx)?;
-                    super::events::fire(cx, &document, "Event", "scroll", &[("bubbles", true.into())])?;
+                    super::events::fire(
+                        cx,
+                        &document,
+                        "Event",
+                        "scroll",
+                        &[("bubbles", true.into())],
+                    )?;
                 } else {
                     super::events::fire(cx, node, "Event", "scroll", &[("bubbles", false.into())])?;
                 }
@@ -286,7 +327,12 @@ pub fn request_scroll(context: &mut Context, request: crate::ScrollRequest) {
 
 /// `scrollTo(x, y)`, `scrollTo({ left, top })`, and `scrollBy` the same way, for an element or
 /// (`node` the root) the window.
-pub fn scroll_to(node: NodeId, args: &[JsValue], context: &mut Context, by: bool) -> JsResult<JsValue> {
+pub fn scroll_to(
+    node: NodeId,
+    args: &[JsValue],
+    context: &mut Context,
+    by: bool,
+) -> JsResult<JsValue> {
     let first = arg(args, 0);
     let number = |value: JsValue, context: &mut Context| -> JsResult<Option<f32>> {
         if value.is_undefined() {
@@ -437,7 +483,9 @@ pub fn reflect(
 // ─── Element ────────────────────────────────────────────────────────────────────────────────
 
 fn tag_of(context: &Context, id: NodeId) -> Option<String> {
-    read_dom(context, |dom| dom.get(id).and_then(|n| n.tag()).map(str::to_owned))
+    read_dom(context, |dom| {
+        dom.get(id).and_then(|n| n.tag()).map(str::to_owned)
+    })
 }
 
 fn class_args(args: &[JsValue], context: &mut Context) -> JsResult<Vec<String>> {
@@ -454,7 +502,9 @@ fn class_args(args: &[JsValue], context: &mut Context) -> JsResult<Vec<String>> 
         if class.contains(char::is_whitespace) {
             return Err(dom_error(
                 context,
-                &format!("Failed to execute 'add' on 'DOMTokenList': The token provided ('{class}') contains HTML space characters, which are not valid in tokens."),
+                &format!(
+                    "Failed to execute 'add' on 'DOMTokenList': The token provided ('{class}') contains HTML space characters, which are not valid in tokens."
+                ),
                 "InvalidCharacterError",
             ));
         }
@@ -487,7 +537,10 @@ const CLASS_LIST_METHODS: &[Method] = &[
         let id = list_node(this)?;
         let classes = class_args(args, cx)?;
         with_dom(cx, |dom| {
-            if dom.get(id).is_some_and(|n| classes.iter().any(|c| n.has_class(c))) {
+            if dom
+                .get(id)
+                .is_some_and(|n| classes.iter().any(|c| n.has_class(c)))
+            {
                 dom.change_classes(id, |list| list.retain(|c| !classes.contains(c)));
             }
         });
@@ -500,7 +553,9 @@ const CLASS_LIST_METHODS: &[Method] = &[
     }),
     ("toggle", 2, |this, args, cx| {
         let id = list_node(this)?;
-        let class = class_args(&args[..args.len().min(1)], cx)?.pop().unwrap_or_default();
+        let class = class_args(&args[..args.len().min(1)], cx)?
+            .pop()
+            .unwrap_or_default();
         let force = arg(args, 1);
         let on = with_dom(cx, |dom| {
             let has = dom.get(id).is_some_and(|n| n.has_class(&class));
@@ -540,21 +595,32 @@ const CLASS_LIST_METHODS: &[Method] = &[
     ("item", 1, |this, args, cx| {
         let id = list_node(this)?;
         let index = arg(args, 0).to_number(cx)? as usize;
-        Ok(read_dom(cx, |dom| dom.get(id).and_then(|n| n.classes.get(index).cloned()))
-            .map_or(JsValue::null(), |c| text(&c)))
+        Ok(read_dom(cx, |dom| {
+            dom.get(id).and_then(|n| n.classes.get(index).cloned())
+        })
+        .map_or(JsValue::null(), |c| text(&c)))
     }),
     ("supports", 1, |_, _, _| Ok(true.into())),
     ("forEach", 1, |this, args, cx| {
         let id = list_node(this)?;
-        let classes = read_dom(cx, |dom| dom.get(id).map(|n| n.classes.clone()).unwrap_or_default());
+        let classes = read_dom(cx, |dom| {
+            dom.get(id).map(|n| n.classes.clone()).unwrap_or_default()
+        });
         for (index, class) in classes.iter().enumerate() {
-            verve::call(cx, &arg(args, 0), &arg(args, 1), &[text(class), index.into(), this.clone()])?;
+            verve::call(
+                cx,
+                &arg(args, 0),
+                &arg(args, 1),
+                &[text(class), index.into(), this.clone()],
+            )?;
         }
         Ok(JsValue::undefined())
     }),
     ("toString", 0, |this, _, cx| {
         let id = list_node(this)?;
-        Ok(text(&read_dom(cx, |dom| dom.get(id).map(|n| n.classes.join(" ")).unwrap_or_default())))
+        Ok(text(&read_dom(cx, |dom| {
+            dom.get(id).map(|n| n.classes.join(" ")).unwrap_or_default()
+        })))
     }),
 ];
 
@@ -571,7 +637,9 @@ const CLASS_LIST_ACCESSORS: &[Accessor] = &[
         "value",
         Some(|this, _, cx| {
             let id = list_node(this)?;
-            Ok(text(&read_dom(cx, |dom| dom.get_attr(id, "class").unwrap_or_default())))
+            Ok(text(&read_dom(cx, |dom| {
+                dom.get_attr(id, "class").unwrap_or_default()
+            })))
         }),
         Some(|this, args, cx| {
             let id = list_node(this)?;
@@ -593,8 +661,10 @@ fn class_list(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
                 let name = name.to_std_string_escaped();
                 if let Ok(index) = name.parse::<usize>() {
                     let id = handle_of(&target, Kind::ClassList).unwrap_or_default();
-                    return Ok(read_dom(cx, |dom| dom.get(id).and_then(|n| n.classes.get(index).cloned()))
-                        .map_or(JsValue::undefined(), |c| text(&c)));
+                    return Ok(read_dom(cx, |dom| {
+                        dom.get(id).and_then(|n| n.classes.get(index).cloned())
+                    })
+                    .map_or(JsValue::undefined(), |c| text(&c)));
                 }
             }
             let value = match target.as_object() {
@@ -616,7 +686,9 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "tagName",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| crate::html::qualified_name(dom, id, true))))
+            Ok(text(&read_dom(cx, |dom| {
+                crate::html::qualified_name(dom, id, true)
+            })))
         }),
         None,
     ),
@@ -624,7 +696,9 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "localName",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| crate::html::qualified_name(dom, id, false))))
+            Ok(text(&read_dom(cx, |dom| {
+                crate::html::qualified_name(dom, id, false)
+            })))
         }),
         None,
     ),
@@ -632,8 +706,10 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "namespaceURI",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(read_dom(cx, |dom| dom.get(id).and_then(|n| n.namespace.uri()))
-                .map_or(JsValue::null(), text))
+            Ok(
+                read_dom(cx, |dom| dom.get(id).and_then(|n| n.namespace.uri()))
+                    .map_or(JsValue::null(), text),
+            )
         }),
         None,
     ),
@@ -642,7 +718,9 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "id",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| dom.get_attr(id, "id").unwrap_or_default())))
+            Ok(text(&read_dom(cx, |dom| {
+                dom.get_attr(id, "id").unwrap_or_default()
+            })))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -655,7 +733,9 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "className",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| dom.get_attr(id, "class").unwrap_or_default())))
+            Ok(text(&read_dom(cx, |dom| {
+                dom.get_attr(id, "class").unwrap_or_default()
+            })))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -681,7 +761,9 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "slot",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| dom.get_attr(id, "slot").unwrap_or_default())))
+            Ok(text(&read_dom(cx, |dom| {
+                dom.get_attr(id, "slot").unwrap_or_default()
+            })))
         }),
         None,
     ),
@@ -732,7 +814,14 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         Some(|this, args, cx| {
             let node = node_of(this)?;
             let top = arg(args, 0).to_number(cx)? as f32;
-            request_scroll(cx, crate::ScrollRequest::To { node, left: None, top: Some(top) });
+            request_scroll(
+                cx,
+                crate::ScrollRequest::To {
+                    node,
+                    left: None,
+                    top: Some(top),
+                },
+            );
             Ok(JsValue::undefined())
         }),
     ),
@@ -742,14 +831,37 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         Some(|this, args, cx| {
             let node = node_of(this)?;
             let left = arg(args, 0).to_number(cx)? as f32;
-            request_scroll(cx, crate::ScrollRequest::To { node, left: Some(left), top: None });
+            request_scroll(
+                cx,
+                crate::ScrollRequest::To {
+                    node,
+                    left: Some(left),
+                    top: None,
+                },
+            );
             Ok(JsValue::undefined())
         }),
     ),
-    ("scrollHeight", Some(|this, _, cx| content_size(this, cx, 1)), None),
-    ("scrollWidth", Some(|this, _, cx| content_size(this, cx, 0)), None),
-    ("clientWidth", Some(|this, _, cx| painted_part(this, cx, 2)), None),
-    ("clientHeight", Some(|this, _, cx| painted_part(this, cx, 3)), None),
+    (
+        "scrollHeight",
+        Some(|this, _, cx| content_size(this, cx, 1)),
+        None,
+    ),
+    (
+        "scrollWidth",
+        Some(|this, _, cx| content_size(this, cx, 0)),
+        None,
+    ),
+    (
+        "clientWidth",
+        Some(|this, _, cx| painted_part(this, cx, 2)),
+        None,
+    ),
+    (
+        "clientHeight",
+        Some(|this, _, cx| painted_part(this, cx, 3)),
+        None,
+    ),
     ("clientTop", Some(|_, _, _| Ok(0.into())), None),
     ("clientLeft", Some(|_, _, _| Ok(0.into())), None),
     (
@@ -779,10 +891,18 @@ fn content_size(this: &JsValue, context: &mut Context, axis: usize) -> JsResult<
     let own = painted(context, id);
     let state = shared(context);
     let state = state.borrow();
-    let mut far = if axis == 0 { own.x + own.width } else { own.y + own.height };
+    let mut far = if axis == 0 {
+        own.x + own.width
+    } else {
+        own.y + own.height
+    };
     for (node, rect) in &state.rects {
         if *node != id && state.dom.contains(id, *node) {
-            far = far.max(if axis == 0 { rect.x + rect.width } else { rect.y + rect.height });
+            far = far.max(if axis == 0 {
+                rect.x + rect.width
+            } else {
+                rect.y + rect.height
+            });
         }
     }
     let size = if axis == 0 { far - own.x } else { far - own.y };
@@ -802,12 +922,22 @@ pub fn set_inner_html(context: &mut Context, id: NodeId, markup: &str) {
 }
 
 /// `insertAdjacent…`'s four places: before `id`, as its first child, its last, or after it.
-fn insert_adjacent(context: &mut Context, id: NodeId, place: &str, child: NodeId) -> JsResult<bool> {
+fn insert_adjacent(
+    context: &mut Context,
+    id: NodeId,
+    place: &str,
+    child: NodeId,
+) -> JsResult<bool> {
     let place = place.to_ascii_lowercase();
-    if !matches!(place.as_str(), "beforebegin" | "afterbegin" | "beforeend" | "afterend") {
+    if !matches!(
+        place.as_str(),
+        "beforebegin" | "afterbegin" | "beforeend" | "afterend"
+    ) {
         return Err(dom_error(
             context,
-            &format!("Failed to execute 'insertAdjacent' on 'Element': The value provided ('{place}') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'."),
+            &format!(
+                "Failed to execute 'insertAdjacent' on 'Element': The value provided ('{place}') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'."
+            ),
             "SyntaxError",
         ));
     }
@@ -831,7 +961,11 @@ fn insert_adjacent(context: &mut Context, id: NodeId, place: &str, child: NodeId
     }))
 }
 
-fn selector_list(args: &[JsValue], context: &mut Context, method: &str) -> JsResult<crate::css::SelectorList> {
+fn selector_list(
+    args: &[JsValue],
+    context: &mut Context,
+    method: &str,
+) -> JsResult<crate::css::SelectorList> {
     let selector = arg_string(args, 0, context)?;
     crate::css::SelectorList::parse(&selector).map_err(|error| {
         dom_error(
@@ -852,10 +986,22 @@ const ELEMENT_METHODS: &[Method] = &[
         let id = node_of(this)?;
         let name = arg_string(args, 0, cx)?;
         let value = arg_string(args, 1, cx)?;
-        if name.is_empty() || name.contains(|c: char| c.is_whitespace() || c == '<' || c == '>' || c == '"' || c == '\'' || c == '/' || c == '=') {
+        if name.is_empty()
+            || name.contains(|c: char| {
+                c.is_whitespace()
+                    || c == '<'
+                    || c == '>'
+                    || c == '"'
+                    || c == '\''
+                    || c == '/'
+                    || c == '='
+            })
+        {
             return Err(dom_error(
                 cx,
-                &format!("Failed to execute 'setAttribute' on 'Element': '{name}' is not a valid attribute name."),
+                &format!(
+                    "Failed to execute 'setAttribute' on 'Element': '{name}' is not a valid attribute name."
+                ),
                 "InvalidCharacterError",
             ));
         }
@@ -879,7 +1025,11 @@ const ELEMENT_METHODS: &[Method] = &[
         let force = arg(args, 1);
         let on = with_dom(cx, |dom| {
             let has = dom.get_attr(id, &name).is_some();
-            let on = if force.is_undefined() { !has } else { force.to_boolean() };
+            let on = if force.is_undefined() {
+                !has
+            } else {
+                force.to_boolean()
+            };
             if on && !has {
                 dom.set_attr(id, &name, "")
             } else if !on && has {
@@ -950,7 +1100,11 @@ const ELEMENT_METHODS: &[Method] = &[
     ("getClientRects", 0, |this, _, cx| {
         let id = node_of(this)?;
         let rect = painted(cx, id);
-        let items = if rect == Rect::default() { Vec::new() } else { vec![rect_object(cx, rect)?] };
+        let items = if rect == Rect::default() {
+            Vec::new()
+        } else {
+            vec![rect_object(cx, rect)?]
+        };
         Ok(array(items, cx))
     }),
     ("scrollIntoView", 1, |this, _, cx| {
@@ -958,9 +1112,15 @@ const ELEMENT_METHODS: &[Method] = &[
         request_scroll(cx, crate::ScrollRequest::Reveal(node));
         Ok(JsValue::undefined())
     }),
-    ("scrollTo", 2, |this, args, cx| scroll_to(node_of(this)?, args, cx, false)),
-    ("scroll", 2, |this, args, cx| scroll_to(node_of(this)?, args, cx, false)),
-    ("scrollBy", 2, |this, args, cx| scroll_to(node_of(this)?, args, cx, true)),
+    ("scrollTo", 2, |this, args, cx| {
+        scroll_to(node_of(this)?, args, cx, false)
+    }),
+    ("scroll", 2, |this, args, cx| {
+        scroll_to(node_of(this)?, args, cx, false)
+    }),
+    ("scrollBy", 2, |this, args, cx| {
+        scroll_to(node_of(this)?, args, cx, true)
+    }),
     // The element is what `document.fullscreenElement` answers, and hears `fullscreenchange`;
     // the window itself is the drawer's to make fullscreen, if it wants.
     ("requestFullscreen", 1, |this, _, cx| {
@@ -971,21 +1131,37 @@ const ELEMENT_METHODS: &[Method] = &[
             state.fullscreen = Some(id);
             state.requests.push(crate::Request::Fullscreen(Some(id)));
         }
-        super::events::fire(cx, &this.clone(), "Event", "fullscreenchange", &[("bubbles", true.into())])?;
+        super::events::fire(
+            cx,
+            &this.clone(),
+            "Event",
+            "fullscreenchange",
+            &[("bubbles", true.into())],
+        )?;
         super::resolved(JsValue::undefined(), cx)
     }),
-    ("attachShadow", 1, |this, args, cx| super::platform::attach_shadow(this, args, cx)),
+    ("attachShadow", 1, |this, args, cx| {
+        super::platform::attach_shadow(this, args, cx)
+    }),
     ("setPointerCapture", 1, |_, _, _| Ok(JsValue::undefined())),
-    ("releasePointerCapture", 1, |_, _, _| Ok(JsValue::undefined())),
+    ("releasePointerCapture", 1, |_, _, _| {
+        Ok(JsValue::undefined())
+    }),
     ("hasPointerCapture", 1, |_, _, _| Ok(false.into())),
     ("getAnimations", 0, |_, _, cx| Ok(array(Vec::new(), cx))),
     // An animation that has already finished: what a page with animations off sees.
-    ("animate", 2, |_, _, cx| super::platform::finished_animation(cx)),
+    ("animate", 2, |_, _, cx| {
+        super::platform::finished_animation(cx)
+    }),
     ("checkVisibility", 0, |this, _, cx| {
         let id = node_of(this)?;
         Ok(read_dom(cx, |dom| dom.is_shown(id)).into())
     }),
-    ("computedStyleMap", 0, |_, _, cx| Ok(plain_object(cx).into())),
+    (
+        "computedStyleMap",
+        0,
+        |_, _, cx| Ok(plain_object(cx).into()),
+    ),
 ];
 
 // ─── HTMLElement ────────────────────────────────────────────────────────────────────────────
@@ -999,29 +1175,46 @@ const STYLE_METHODS: &[Method] = &[
     ("setProperty", 3, |this, args, cx| {
         let id = style_node(this)?;
         let name = arg_string(args, 0, cx)?;
-        let name = if name.starts_with("--") { name } else { name.to_ascii_lowercase() };
+        let name = if name.starts_with("--") {
+            name
+        } else {
+            name.to_ascii_lowercase()
+        };
         let value = opt_string(args, 1, cx)?.unwrap_or_default();
-        let important = opt_string(args, 2, cx)?.is_some_and(|p| p.eq_ignore_ascii_case("important"));
-        with_dom(cx, |dom| dom.set_style_important(id, &name, value.trim(), important));
+        let important =
+            opt_string(args, 2, cx)?.is_some_and(|p| p.eq_ignore_ascii_case("important"));
+        with_dom(cx, |dom| {
+            dom.set_style_important(id, &name, value.trim(), important)
+        });
         Ok(JsValue::undefined())
     }),
     ("getPropertyValue", 1, |this, args, cx| {
         let id = style_node(this)?;
         let name = arg_string(args, 0, cx)?;
         Ok(text(&read_dom(cx, |dom| {
-            dom.get(id).and_then(|n| n.style_value(&name)).unwrap_or("").to_owned()
+            dom.get(id)
+                .and_then(|n| n.style_value(&name))
+                .unwrap_or("")
+                .to_owned()
         })))
     }),
     ("getPropertyPriority", 1, |this, args, cx| {
         let id = style_node(this)?;
         let name = arg_string(args, 0, cx)?;
-        let important = read_dom(cx, |dom| dom.get(id).is_some_and(|n| n.important.contains(&name)));
+        let important = read_dom(cx, |dom| {
+            dom.get(id).is_some_and(|n| n.important.contains(&name))
+        });
         Ok(text(if important { "important" } else { "" }))
     }),
     ("removeProperty", 1, |this, args, cx| {
         let id = style_node(this)?;
         let name = arg_string(args, 0, cx)?;
-        let old = read_dom(cx, |dom| dom.get(id).and_then(|n| n.style_value(&name)).unwrap_or("").to_owned());
+        let old = read_dom(cx, |dom| {
+            dom.get(id)
+                .and_then(|n| n.style_value(&name))
+                .unwrap_or("")
+                .to_owned()
+        });
         with_dom(cx, |dom| dom.set_style(id, &name, ""));
         Ok(text(&old))
     }),
@@ -1029,7 +1222,9 @@ const STYLE_METHODS: &[Method] = &[
         let id = style_node(this)?;
         let at = arg(args, 0).to_number(cx)? as usize;
         Ok(text(&read_dom(cx, |dom| {
-            dom.get(id).and_then(|n| n.style.get(at).map(|(k, _)| k.clone())).unwrap_or_default()
+            dom.get(id)
+                .and_then(|n| n.style.get(at).map(|(k, _)| k.clone()))
+                .unwrap_or_default()
         })))
     }),
 ];
@@ -1050,7 +1245,10 @@ pub fn style_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
             };
             let name = name.to_std_string_escaped();
             let id = handle_of(&target, Kind::Style).unwrap_or_default();
-            if STYLE_METHODS.iter().any(|(m, _, _)| *m == name) || name == "constructor" || name == "toString" {
+            if STYLE_METHODS.iter().any(|(m, _, _)| *m == name)
+                || name == "constructor"
+                || name == "toString"
+            {
                 let method = get(&target, &name, cx)?;
                 if name == "constructor" {
                     return Ok(method);
@@ -1059,7 +1257,9 @@ pub fn style_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
             }
             match name.as_str() {
                 "cssText" => {
-                    return Ok(text(&read_dom(cx, |dom| dom.get_attr(id, "style").unwrap_or_default())));
+                    return Ok(text(&read_dom(cx, |dom| {
+                        dom.get_attr(id, "style").unwrap_or_default()
+                    })));
                 }
                 "length" => {
                     return Ok(read_dom(cx, |dom| dom.get(id).map_or(0, |n| n.style.len())).into());
@@ -1068,12 +1268,22 @@ pub fn style_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
                 _ => {}
             }
             if let Ok(index) = name.parse::<usize>() {
-                return Ok(read_dom(cx, |dom| dom.get(id).and_then(|n| n.style.get(index).map(|(k, _)| k.clone())))
-                    .map_or(JsValue::undefined(), |k| text(&k)));
+                return Ok(read_dom(cx, |dom| {
+                    dom.get(id)
+                        .and_then(|n| n.style.get(index).map(|(k, _)| k.clone()))
+                })
+                .map_or(JsValue::undefined(), |k| text(&k)));
             }
-            let property = if name.contains('-') { name } else { css_name(&name) };
+            let property = if name.contains('-') {
+                name
+            } else {
+                css_name(&name)
+            };
             Ok(text(&read_dom(cx, |dom| {
-                dom.get(id).and_then(|n| n.style_value(&property)).unwrap_or("").to_owned()
+                dom.get(id)
+                    .and_then(|n| n.style_value(&property))
+                    .unwrap_or("")
+                    .to_owned()
             })))
         })
         .set(|_, args, cx| {
@@ -1092,7 +1302,11 @@ pub fn style_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
             if name == "cssText" {
                 with_dom(cx, |dom| dom.set_attr(id, "style", &value));
             } else {
-                let property = if name.contains('-') { name } else { css_name(&name) };
+                let property = if name.contains('-') {
+                    name
+                } else {
+                    css_name(&name)
+                };
                 // A value with its own `!important` is not one `style.x` takes.
                 if !value.to_ascii_lowercase().contains("!important") {
                     with_dom(cx, |dom| dom.set_style(id, &property, value.trim()));
@@ -1105,7 +1319,10 @@ pub fn style_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
                 return Ok(false.into());
             };
             let name = name.to_std_string_escaped();
-            Ok((!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).into())
+            Ok(
+                (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+                    .into(),
+            )
         })
         .build(context)?;
     Ok(JsObject::from(proxy).into())
@@ -1122,7 +1339,8 @@ fn dataset_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
             };
             let id = handle_of(&target, Kind::Dataset).unwrap_or_default();
             let attr = format!("data-{}", css_name(&name.to_std_string_escaped()));
-            Ok(read_dom(cx, |dom| dom.get_attr(id, &attr)).map_or(JsValue::undefined(), |v| text(&v)))
+            Ok(read_dom(cx, |dom| dom.get_attr(id, &attr))
+                .map_or(JsValue::undefined(), |v| text(&v)))
         })
         .set(|_, args, cx| {
             let target = arg(args, 0);
@@ -1264,8 +1482,10 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
                     .and_then(|v| v.trim().parse::<i32>().ok())
                     .unwrap_or_else(|| {
                         let natural = node.and_then(|n| n.tag()).is_some_and(|t| {
-                            matches!(t, "input" | "select" | "textarea" | "button" | "iframe" | "summary")
-                                || (t == "a" && node.is_some_and(|n| n.attr("href").is_some()))
+                            matches!(
+                                t,
+                                "input" | "select" | "textarea" | "button" | "iframe" | "summary"
+                            ) || (t == "a" && node.is_some_and(|n| n.attr("href").is_some()))
                         });
                         if natural { 0 } else { -1 }
                     })
@@ -1323,10 +1543,26 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
             Ok(JsValue::undefined())
         }),
     ),
-    ("offsetWidth", Some(|this, _, cx| painted_part(this, cx, 2)), None),
-    ("offsetHeight", Some(|this, _, cx| painted_part(this, cx, 3)), None),
-    ("offsetTop", Some(|this, _, cx| painted_part(this, cx, 1)), None),
-    ("offsetLeft", Some(|this, _, cx| painted_part(this, cx, 0)), None),
+    (
+        "offsetWidth",
+        Some(|this, _, cx| painted_part(this, cx, 2)),
+        None,
+    ),
+    (
+        "offsetHeight",
+        Some(|this, _, cx| painted_part(this, cx, 3)),
+        None,
+    ),
+    (
+        "offsetTop",
+        Some(|this, _, cx| painted_part(this, cx, 1)),
+        None,
+    ),
+    (
+        "offsetLeft",
+        Some(|this, _, cx| painted_part(this, cx, 0)),
+        None,
+    ),
     (
         "offsetParent",
         Some(|this, _, cx| {
@@ -1385,8 +1621,10 @@ fn collect_inner_text(dom: &Dom, id: NodeId, out: &mut String) {
     match &node.kind {
         NodeKind::Text(text) => out.push_str(text),
         NodeKind::Element(tag) => {
-            if matches!(tag.as_str(), "script" | "style" | "template" | "head" | "title")
-                || node.attr("hidden").is_some()
+            if matches!(
+                tag.as_str(),
+                "script" | "style" | "template" | "head" | "title"
+            ) || node.attr("hidden").is_some()
                 || node.style_value("display") == Some("none")
             {
                 return;
@@ -1395,7 +1633,27 @@ fn collect_inner_text(dom: &Dom, id: NodeId, out: &mut String) {
                 out.push('\n');
                 return;
             }
-            let block = matches!(tag.as_str(), "p" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "section" | "article" | "header" | "footer" | "ul" | "ol" | "pre" | "blockquote" | "table");
+            let block = matches!(
+                tag.as_str(),
+                "p" | "div"
+                    | "li"
+                    | "tr"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+                    | "section"
+                    | "article"
+                    | "header"
+                    | "footer"
+                    | "ul"
+                    | "ol"
+                    | "pre"
+                    | "blockquote"
+                    | "table"
+            );
             if block && !out.is_empty() && !out.ends_with('\n') {
                 out.push('\n');
             }
@@ -1464,7 +1722,9 @@ fn set_selection(context: &mut Context, id: NodeId, start: Option<f64>, end: Opt
         if let Some(draft) = dom.get_mut(id).and_then(|n| n.draft.as_mut()) {
             let range = draft.selection();
             let start = start.map_or(range.start, |s| draft.offset_from_utf16(s.max(0.) as usize));
-            let end = end.map_or(range.end, |e| draft.offset_from_utf16(e.max(0.) as usize)).max(start);
+            let end = end
+                .map_or(range.end, |e| draft.offset_from_utf16(e.max(0.) as usize))
+                .max(start);
             draft.place(start);
             draft.extend_to(end);
         }
@@ -1521,24 +1781,40 @@ const FIELD_ACCESSORS: &[Accessor] = &[
             Ok(JsValue::undefined())
         }),
     ),
-    ("selectionStart", Some(|this, _, cx| selection_part(this, cx, false)), Some(|this, args, cx| {
-        let id = node_of(this)?;
-        let start = arg(args, 0).to_number(cx)?;
-        set_selection(cx, id, Some(start), None);
-        Ok(JsValue::undefined())
-    })),
-    ("selectionEnd", Some(|this, _, cx| selection_part(this, cx, true)), Some(|this, args, cx| {
-        let id = node_of(this)?;
-        let end = arg(args, 0).to_number(cx)?;
-        set_selection(cx, id, None, Some(end));
-        Ok(JsValue::undefined())
-    })),
+    (
+        "selectionStart",
+        Some(|this, _, cx| selection_part(this, cx, false)),
+        Some(|this, args, cx| {
+            let id = node_of(this)?;
+            let start = arg(args, 0).to_number(cx)?;
+            set_selection(cx, id, Some(start), None);
+            Ok(JsValue::undefined())
+        }),
+    ),
+    (
+        "selectionEnd",
+        Some(|this, _, cx| selection_part(this, cx, true)),
+        Some(|this, args, cx| {
+            let id = node_of(this)?;
+            let end = arg(args, 0).to_number(cx)?;
+            set_selection(cx, id, None, Some(end));
+            Ok(JsValue::undefined())
+        }),
+    ),
     (
         "selectionDirection",
         Some(|this, _, cx| {
             let id = node_of(this)?;
             Ok(text(read_dom(cx, |dom| {
-                if dom.get(id).and_then(|n| n.draft.as_ref()).is_some_and(|d| d.is_reversed()) { "backward" } else { "forward" }
+                if dom
+                    .get(id)
+                    .and_then(|n| n.draft.as_ref())
+                    .is_some_and(|d| d.is_reversed())
+                {
+                    "backward"
+                } else {
+                    "forward"
+                }
             })))
         }),
         Some(|_, _, _| Ok(JsValue::undefined())),
@@ -1605,8 +1881,16 @@ const FIELD_METHODS: &[Method] = &[
 fn validity(context: &mut Context) -> JsResult<JsValue> {
     let object = plain_object(context);
     for key in [
-        "badInput", "customError", "patternMismatch", "rangeOverflow", "rangeUnderflow",
-        "stepMismatch", "tooLong", "tooShort", "typeMismatch", "valueMissing",
+        "badInput",
+        "customError",
+        "patternMismatch",
+        "rangeOverflow",
+        "rangeUnderflow",
+        "stepMismatch",
+        "tooLong",
+        "tooShort",
+        "typeMismatch",
+        "valueMissing",
     ] {
         set(&object, key, false, context)?;
     }
@@ -1645,7 +1929,8 @@ fn labels_of(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
             .into_iter()
             .filter(|l| {
                 dom.get(*l).and_then(|n| n.tag()) == Some("label")
-                    && (dom.get_attr(*l, "for").is_some_and(|f| Some(f) == own) || dom.contains(*l, id))
+                    && (dom.get_attr(*l, "for").is_some_and(|f| Some(f) == own)
+                        || dom.contains(*l, id))
             })
             .collect()
     });
@@ -1675,7 +1960,13 @@ const INPUT_ACCESSORS: &[Accessor] = &[
         Some(|this, args, cx| {
             let id = node_of(this)?;
             let on = arg(args, 0).to_boolean();
-            with_dom(cx, |dom| if on { dom.set_attr(id, "checked", "") } else { dom.remove_attr(id, "checked") });
+            with_dom(cx, |dom| {
+                if on {
+                    dom.set_attr(id, "checked", "")
+                } else {
+                    dom.remove_attr(id, "checked")
+                }
+            });
             Ok(JsValue::undefined())
         }),
     ),
@@ -1684,7 +1975,12 @@ const INPUT_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| get(this, "__indeterminate", cx).map(|v| v.to_boolean().into())),
         Some(|this, args, cx| {
             if let Some(object) = this.as_object() {
-                super::hidden(&object, js_string!("__indeterminate"), arg(args, 0).to_boolean(), cx)?;
+                super::hidden(
+                    &object,
+                    js_string!("__indeterminate"),
+                    arg(args, 0).to_boolean(),
+                    cx,
+                )?;
             }
             Ok(JsValue::undefined())
         }),
@@ -1706,30 +2002,55 @@ const INPUT_ACCESSORS: &[Accessor] = &[
         "valueAsNumber",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(read_dom(cx, |dom| dom.value(id).trim().parse::<f64>().unwrap_or(f64::NAN)).into())
+            Ok(read_dom(cx, |dom| {
+                dom.value(id).trim().parse::<f64>().unwrap_or(f64::NAN)
+            })
+            .into())
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
             let n = arg(args, 0).to_number(cx)?;
-            with_dom(cx, |dom| dom.set_value(id, &if n.is_nan() { String::new() } else { n.to_string() }));
+            with_dom(cx, |dom| {
+                dom.set_value(
+                    id,
+                    &if n.is_nan() {
+                        String::new()
+                    } else {
+                        n.to_string()
+                    },
+                )
+            });
             Ok(JsValue::undefined())
         }),
     ),
-    ("files", Some(|_, _, cx| Ok(array(Vec::new(), cx))), Some(|_, _, _| Ok(JsValue::undefined()))),
-    ("list", Some(|this, _, cx| {
-        let id = node_of(this)?;
-        let list = read_dom(cx, |dom| {
-            let named = dom.get_attr(id, "list")?;
-            dom.descendants(dom.document).into_iter().find(|n| dom.get_attr(*n, "id").as_deref() == Some(named.as_str()))
-        });
-        Ok(wrap_opt(cx, list))
-    }), None),
+    (
+        "files",
+        Some(|_, _, cx| Ok(array(Vec::new(), cx))),
+        Some(|_, _, _| Ok(JsValue::undefined())),
+    ),
+    (
+        "list",
+        Some(|this, _, cx| {
+            let id = node_of(this)?;
+            let list = read_dom(cx, |dom| {
+                let named = dom.get_attr(id, "list")?;
+                dom.descendants(dom.document)
+                    .into_iter()
+                    .find(|n| dom.get_attr(*n, "id").as_deref() == Some(named.as_str()))
+            });
+            Ok(wrap_opt(cx, list))
+        }),
+        None,
+    ),
 ];
 
 /// An `<input>`'s type, as the `type` property answers it: one of the known, lower-cased; `text`
 /// for any other.
 pub fn input_type(dom: &Dom, id: NodeId) -> String {
-    let declared = dom.get_attr(id, "type").unwrap_or_default().to_ascii_lowercase();
+    let declared = dom
+        .get_attr(id, "type")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     match declared.as_str() {
         "hidden" | "text" | "search" | "tel" | "url" | "email" | "password" | "date" | "month"
         | "week" | "time" | "datetime-local" | "number" | "range" | "color" | "checkbox"
@@ -1765,11 +2086,7 @@ const INPUT_REFLECTED: &[(&str, &str, Reflect)] = &[
     ("height", "height", Reflect::Number(0)),
 ];
 
-const TEXTAREA_ACCESSORS: &[Accessor] = &[(
-    "type",
-    Some(|_, _, _| Ok(text("textarea"))),
-    None,
-)];
+const TEXTAREA_ACCESSORS: &[Accessor] = &[("type", Some(|_, _, _| Ok(text("textarea"))), None)];
 
 const TEXTAREA_REFLECTED: &[(&str, &str, Reflect)] = &[
     ("name", "name", Reflect::Text),
@@ -1806,11 +2123,13 @@ fn is_multiple(dom: &Dom, select: NodeId) -> bool {
 /// Whether `option` is selected.
 pub fn option_selected(dom: &Dom, option: NodeId) -> bool {
     match select_of_option(dom, option) {
-        Some(select) if is_multiple(dom, select) => dom.get(option).is_some_and(|n| {
-            n.checked || (!n.dirty_checked && n.attr("selected").is_some())
-        }),
+        Some(select) if is_multiple(dom, select) => dom
+            .get(option)
+            .is_some_and(|n| n.checked || (!n.dirty_checked && n.attr("selected").is_some())),
         Some(select) => dom.selected_option(select) == Some(option),
-        None => dom.get(option).is_some_and(|n| n.attr("selected").is_some()),
+        None => dom
+            .get(option)
+            .is_some_and(|n| n.attr("selected").is_some()),
     }
 }
 
@@ -1843,7 +2162,11 @@ const SELECT_ACCESSORS: &[Accessor] = &[
             let id = node_of(this)?;
             Ok(text(&read_dom(cx, |dom| {
                 if is_multiple(dom, id) {
-                    dom.options(id).into_iter().find(|o| option_selected(dom, *o)).map(|o| dom.option_value(o)).unwrap_or_default()
+                    dom.options(id)
+                        .into_iter()
+                        .find(|o| option_selected(dom, *o))
+                        .map(|o| dom.option_value(o))
+                        .unwrap_or_default()
                 } else {
                     dom.value(id)
                 }
@@ -1878,7 +2201,12 @@ const SELECT_ACCESSORS: &[Accessor] = &[
         "selectedOptions",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let options = read_dom(cx, |dom| dom.options(id).into_iter().filter(|o| option_selected(dom, *o)).collect());
+            let options = read_dom(cx, |dom| {
+                dom.options(id)
+                    .into_iter()
+                    .filter(|o| option_selected(dom, *o))
+                    .collect()
+            });
             Ok(collection(options, cx))
         }),
         None,
@@ -1897,7 +2225,10 @@ const SELECT_ACCESSORS: &[Accessor] = &[
             let id = node_of(this)?;
             Ok(read_dom(cx, |dom| {
                 let options = dom.options(id);
-                options.iter().position(|o| option_selected(dom, *o)).map_or(-1, |i| i as i32)
+                options
+                    .iter()
+                    .position(|o| option_selected(dom, *o))
+                    .map_or(-1, |i| i as i32)
             })
             .into())
         }),
@@ -1911,7 +2242,8 @@ const SELECT_ACCESSORS: &[Accessor] = &[
                         set_option_selected(dom, *option, index >= 0. && i == index as usize);
                     }
                 } else {
-                    let index = (index >= 0. && (index as usize) < options.len()).then_some(index as usize);
+                    let index =
+                        (index >= 0. && (index as usize) < options.len()).then_some(index as usize);
                     dom.select_index(id, index);
                 }
             });
@@ -1922,7 +2254,11 @@ const SELECT_ACCESSORS: &[Accessor] = &[
         "type",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(if read_dom(cx, |dom| is_multiple(dom, id)) { "select-multiple" } else { "select-one" }))
+            Ok(text(if read_dom(cx, |dom| is_multiple(dom, id)) {
+                "select-multiple"
+            } else {
+                "select-one"
+            }))
         }),
         None,
     ),
@@ -1942,7 +2278,9 @@ const SELECT_METHODS: &[Method] = &[
         let id = node_of(this)?;
         let option = super::node_arg(args, 0, "add", "HTMLSelectElement")?;
         let before = node_id(&arg(args, 1)).or_else(|| {
-            arg(args, 1).as_number().and_then(|i| read_dom(cx, |dom| dom.options(id).get(i as usize).copied()))
+            arg(args, 1)
+                .as_number()
+                .and_then(|i| read_dom(cx, |dom| dom.options(id).get(i as usize).copied()))
         });
         let parent = match before {
             Some(b) => read_dom(cx, |dom| dom.parent(b)).unwrap_or(id),
@@ -1998,7 +2336,12 @@ const OPTION_ACCESSORS: &[Accessor] = &[
         "text",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| dom.text_content(id).split_whitespace().collect::<Vec<_>>().join(" "))))
+            Ok(text(&read_dom(cx, |dom| {
+                dom.text_content(id)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -2011,7 +2354,10 @@ const OPTION_ACCESSORS: &[Accessor] = &[
         "label",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| dom.get_attr(id, "label").unwrap_or_else(|| dom.text_content(id).trim().to_owned()))))
+            Ok(text(&read_dom(cx, |dom| {
+                dom.get_attr(id, "label")
+                    .unwrap_or_else(|| dom.text_content(id).trim().to_owned())
+            })))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -2038,7 +2384,9 @@ const OPTION_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let id = node_of(this)?;
             Ok(read_dom(cx, |dom| {
-                select_of_option(dom, id).and_then(|s| dom.options(s).iter().position(|o| *o == id)).unwrap_or(0)
+                select_of_option(dom, id)
+                    .and_then(|s| dom.options(s).iter().position(|o| *o == id))
+                    .unwrap_or(0)
             })
             .into())
         }),
@@ -2060,7 +2408,11 @@ const BUTTON_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let id = node_of(this)?;
             Ok(text(&read_dom(cx, |dom| {
-                match dom.get_attr(id, "type").map(|t| t.to_ascii_lowercase()).as_deref() {
+                match dom
+                    .get_attr(id, "type")
+                    .map(|t| t.to_ascii_lowercase())
+                    .as_deref()
+                {
                     Some("button") => "button",
                     Some("reset") => "reset",
                     _ => "submit",
@@ -2093,7 +2445,12 @@ const BUTTON_REFLECTED: &[(&str, &str, Reflect)] = &[
 fn form_controls(dom: &Dom, form: NodeId) -> Vec<NodeId> {
     dom.descendants(form)
         .into_iter()
-        .filter(|n| matches!(dom.get(*n).and_then(|x| x.tag()), Some("input" | "select" | "textarea" | "button" | "fieldset" | "output" | "object")))
+        .filter(|n| {
+            matches!(
+                dom.get(*n).and_then(|x| x.tag()),
+                Some("input" | "select" | "textarea" | "button" | "fieldset" | "output" | "object")
+            )
+        })
         .collect()
 }
 
@@ -2121,7 +2478,10 @@ const FORM_METHODS: &[Method] = &[
     // `submit()` sends no `submit` event, as a browser's does not; the drawer hears it.
     ("submit", 0, |this, _, cx| {
         let id = node_of(this)?;
-        shared(cx).borrow_mut().requests.push(crate::Request::Submit(id));
+        shared(cx)
+            .borrow_mut()
+            .requests
+            .push(crate::Request::Submit(id));
         Ok(JsValue::undefined())
     }),
     ("requestSubmit", 1, |this, args, cx| {
@@ -2131,7 +2491,13 @@ const FORM_METHODS: &[Method] = &[
     }),
     ("reset", 0, |this, _, cx| {
         let id = node_of(this)?;
-        let allowed = super::events::fire(cx, this, "Event", "reset", &[("bubbles", true.into()), ("cancelable", true.into())])?;
+        let allowed = super::events::fire(
+            cx,
+            this,
+            "Event",
+            "reset",
+            &[("bubbles", true.into()), ("cancelable", true.into())],
+        )?;
         if allowed {
             with_dom(cx, |dom| {
                 for control in form_controls(dom, id) {
@@ -2159,7 +2525,11 @@ const FORM_REFLECTED: &[(&str, &str, Reflect)] = &[
     ("method", "method", Reflect::Keyword("get")),
     ("name", "name", Reflect::Text),
     ("target", "target", Reflect::Text),
-    ("enctype", "enctype", Reflect::Keyword("application/x-www-form-urlencoded")),
+    (
+        "enctype",
+        "enctype",
+        Reflect::Keyword("application/x-www-form-urlencoded"),
+    ),
     ("noValidate", "novalidate", Reflect::Flag),
     ("autocomplete", "autocomplete", Reflect::Keyword("on")),
     ("acceptCharset", "accept-charset", Reflect::Text),
@@ -2175,7 +2545,10 @@ pub fn label_control(dom: &Dom, label: NodeId) -> Option<NodeId> {
             .find(|n| dom.get_attr(*n, "id").as_deref() == Some(named.as_str()));
     }
     dom.descendants(label).into_iter().find(|n| {
-        matches!(dom.get(*n).and_then(|x| x.tag()), Some("input" | "select" | "textarea" | "button" | "meter" | "output" | "progress"))
+        matches!(
+            dom.get(*n).and_then(|x| x.tag()),
+            Some("input" | "select" | "textarea" | "button" | "meter" | "output" | "progress")
+        )
     })
 }
 
@@ -2203,7 +2576,12 @@ fn anchor_url(this: &JsValue, context: &Context) -> Option<url::Url> {
 }
 
 /// Changes one part of the anchor's URL, as setting `a.pathname` does.
-fn set_anchor_part(this: &JsValue, args: &[JsValue], context: &mut Context, part: fn(&mut url::Url, &str)) -> JsResult<JsValue> {
+fn set_anchor_part(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+    part: fn(&mut url::Url, &str),
+) -> JsResult<JsValue> {
     let id = node_of(this)?;
     let value = arg_string(args, 0, context)?;
     if let Some(mut url) = anchor_url(this, context) {
@@ -2219,7 +2597,9 @@ macro_rules! url_part {
             $name,
             Some(|this, _, cx| {
                 let part: fn(&url::Url) -> String = $get;
-                Ok(text(&anchor_url(this, cx).map(|u| part(&u)).unwrap_or_default()))
+                Ok(text(
+                    &anchor_url(this, cx).map(|u| part(&u)).unwrap_or_default(),
+                ))
             }),
             Some(|this, args, cx| set_anchor_part(this, args, cx, $set)),
         )
@@ -2236,10 +2616,22 @@ pub fn url_parts() -> [(&'static str, fn(&url::Url) -> String); 9] {
             _ => String::new(),
         }),
         ("hostname", |u| u.host_str().unwrap_or("").to_owned()),
-        ("port", |u| u.port().map(|p| p.to_string()).unwrap_or_default()),
+        ("port", |u| {
+            u.port().map(|p| p.to_string()).unwrap_or_default()
+        }),
         ("pathname", |u| u.path().to_owned()),
-        ("search", |u| u.query().filter(|q| !q.is_empty()).map(|q| format!("?{q}")).unwrap_or_default()),
-        ("hash", |u| u.fragment().filter(|f| !f.is_empty()).map(|f| format!("#{f}")).unwrap_or_default()),
+        ("search", |u| {
+            u.query()
+                .filter(|q| !q.is_empty())
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default()
+        }),
+        ("hash", |u| {
+            u.fragment()
+                .filter(|f| !f.is_empty())
+                .map(|f| format!("#{f}"))
+                .unwrap_or_default()
+        }),
         ("origin", |u| u.origin().ascii_serialization()),
         ("href", |u| u.to_string()),
     ]
@@ -2248,13 +2640,13 @@ pub fn url_parts() -> [(&'static str, fn(&url::Url) -> String); 9] {
 const ANCHOR_ACCESSORS: &[Accessor] = &[
     (
         "href",
-        Some(|this, _, cx| {
-            match anchor_url(this, cx) {
-                Some(url) => Ok(text(url.as_str())),
-                None => {
-                    let id = node_of(this)?;
-                    Ok(text(&read_dom(cx, |dom| dom.get_attr(id, "href")).unwrap_or_default()))
-                }
+        Some(|this, _, cx| match anchor_url(this, cx) {
+            Some(url) => Ok(text(url.as_str())),
+            None => {
+                let id = node_of(this)?;
+                Ok(text(
+                    &read_dom(cx, |dom| dom.get_attr(id, "href")).unwrap_or_default(),
+                ))
             }
         }),
         Some(|this, args, cx| {
@@ -2279,7 +2671,13 @@ const ANCHOR_ACCESSORS: &[Accessor] = &[
     url_part!("password" => |u| u.password().unwrap_or("").to_owned(), |u, v| { let _ = u.set_password(Some(v)); }),
     (
         "origin",
-        Some(|this, _, cx| Ok(text(&anchor_url(this, cx).map(|u| u.origin().ascii_serialization()).unwrap_or_default()))),
+        Some(|this, _, cx| {
+            Ok(text(
+                &anchor_url(this, cx)
+                    .map(|u| u.origin().ascii_serialization())
+                    .unwrap_or_default(),
+            ))
+        }),
         None,
     ),
     (
@@ -2298,7 +2696,11 @@ const ANCHOR_ACCESSORS: &[Accessor] = &[
 ];
 
 const ANCHOR_METHODS: &[Method] = &[("toString", 0, |this, _, cx| {
-    Ok(text(&anchor_url(this, cx).map(|u| u.to_string()).unwrap_or_default()))
+    Ok(text(
+        &anchor_url(this, cx)
+            .map(|u| u.to_string())
+            .unwrap_or_default(),
+    ))
 })];
 
 const ANCHOR_REFLECTED: &[(&str, &str, Reflect)] = &[
@@ -2321,13 +2723,17 @@ const IMAGE_ACCESSORS: &[Accessor] = &[
         "currentSrc",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| dom.get_attr(id, "src")).unwrap_or_default()))
+            Ok(text(
+                &read_dom(cx, |dom| dom.get_attr(id, "src")).unwrap_or_default(),
+            ))
         }),
         None,
     ),
 ];
 
-const IMAGE_METHODS: &[Method] = &[("decode", 0, |_, _, cx| super::resolved(JsValue::undefined(), cx))];
+const IMAGE_METHODS: &[Method] = &[("decode", 0, |_, _, cx| {
+    super::resolved(JsValue::undefined(), cx)
+})];
 
 const IMAGE_REFLECTED: &[(&str, &str, Reflect)] = &[
     ("src", "src", Reflect::Url),
@@ -2379,10 +2785,26 @@ const MEDIA_ACCESSORS: &[Accessor] = &[
     ("networkState", Some(|_, _, _| Ok(0.into())), None),
     ("ended", Some(|_, _, _| Ok(false.into())), None),
     ("seeking", Some(|_, _, _| Ok(false.into())), None),
-    ("buffered", Some(|_, _, cx| super::platform::empty_ranges(cx)), None),
-    ("played", Some(|_, _, cx| super::platform::empty_ranges(cx)), None),
-    ("seekable", Some(|_, _, cx| super::platform::empty_ranges(cx)), None),
-    ("textTracks", Some(|_, _, cx| Ok(array(Vec::new(), cx))), None),
+    (
+        "buffered",
+        Some(|_, _, cx| super::platform::empty_ranges(cx)),
+        None,
+    ),
+    (
+        "played",
+        Some(|_, _, cx| super::platform::empty_ranges(cx)),
+        None,
+    ),
+    (
+        "seekable",
+        Some(|_, _, cx| super::platform::empty_ranges(cx)),
+        None,
+    ),
+    (
+        "textTracks",
+        Some(|_, _, cx| Ok(array(Vec::new(), cx))),
+        None,
+    ),
     ("videoWidth", Some(|_, _, _| Ok(0.into())), None),
     ("videoHeight", Some(|_, _, _| Ok(0.into())), None),
 ];
@@ -2425,14 +2847,20 @@ const DIALOG_METHODS: &[Method] = &[
         }
         Ok(JsValue::undefined())
     }),
-    ("requestClose", 1, |this, args, cx| call_method(this, "close", args, cx)),
+    ("requestClose", 1, |this, args, cx| {
+        call_method(this, "close", args, cx)
+    }),
 ];
 
 const DIALOG_ACCESSORS: &[Accessor] = &[(
     "returnValue",
     Some(|this, _, cx| {
         let value = get(this, "__returnValue", cx)?;
-        Ok(if value.is_undefined() { text("") } else { value })
+        Ok(if value.is_undefined() {
+            text("")
+        } else {
+            value
+        })
     }),
     Some(|this, args, cx| {
         if let Some(object) = this.as_object() {
@@ -2450,7 +2878,12 @@ const PROGRESS_ACCESSORS: &[Accessor] = &[
         "value",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(read_dom(cx, |dom| dom.get_attr(id, "value").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.)).into())
+            Ok(read_dom(cx, |dom| {
+                dom.get_attr(id, "value")
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.)
+            })
+            .into())
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -2463,7 +2896,12 @@ const PROGRESS_ACCESSORS: &[Accessor] = &[
         "max",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(read_dom(cx, |dom| dom.get_attr(id, "max").and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.)).into())
+            Ok(read_dom(cx, |dom| {
+                dom.get_attr(id, "max")
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(1.)
+            })
+            .into())
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -2477,8 +2915,13 @@ const PROGRESS_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let id = node_of(this)?;
             Ok(read_dom(cx, |dom| {
-                let value = dom.get_attr(id, "value").and_then(|v| v.parse::<f64>().ok());
-                let max = dom.get_attr(id, "max").and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.);
+                let value = dom
+                    .get_attr(id, "value")
+                    .and_then(|v| v.parse::<f64>().ok());
+                let max = dom
+                    .get_attr(id, "max")
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(1.);
                 value.map_or(-1., |v| v / max)
             })
             .into())
@@ -2493,7 +2936,11 @@ fn children_tagged(dom: &Dom, id: NodeId, tags: &[&str]) -> Vec<NodeId> {
     dom.children(id)
         .iter()
         .copied()
-        .filter(|c| dom.get(*c).and_then(|n| n.tag()).is_some_and(|t| tags.contains(&t)))
+        .filter(|c| {
+            dom.get(*c)
+                .and_then(|n| n.tag())
+                .is_some_and(|t| tags.contains(&t))
+        })
         .collect()
 }
 
@@ -2517,7 +2964,13 @@ fn table_rows(dom: &Dom, table: NodeId) -> Vec<NodeId> {
     rows
 }
 
-fn add_child(context: &mut Context, parent: NodeId, tag: &str, index: Option<i64>, among: &[&str]) -> JsResult<JsValue> {
+fn add_child(
+    context: &mut Context,
+    parent: NodeId,
+    tag: &str,
+    index: Option<i64>,
+    among: &[&str],
+) -> JsResult<JsValue> {
     let id = with_dom(context, |dom| {
         let siblings = children_tagged(dom, parent, among);
         if index.is_some_and(|i| i < -1 || i > siblings.len() as i64) {
@@ -2533,13 +2986,21 @@ fn add_child(context: &mut Context, parent: NodeId, tag: &str, index: Option<i64
     });
     match id {
         Some(id) => Ok(wrap(context, id)),
-        None => Err(dom_error(context, "The index provided is outside the range of the collection.", "IndexSizeError")),
+        None => Err(dom_error(
+            context,
+            "The index provided is outside the range of the collection.",
+            "IndexSizeError",
+        )),
     }
 }
 
 fn index_arg(args: &[JsValue], context: &mut Context) -> JsResult<Option<i64>> {
     let given = arg(args, 0);
-    Ok(if given.is_undefined() { None } else { Some(given.to_number(context)? as i64) })
+    Ok(if given.is_undefined() {
+        None
+    } else {
+        Some(given.to_number(context)? as i64)
+    })
 }
 
 const TABLE_ACCESSORS: &[Accessor] = &[
@@ -2565,7 +3026,9 @@ const TABLE_ACCESSORS: &[Accessor] = &[
         "tHead",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let head = read_dom(cx, |dom| children_tagged(dom, id, &["thead"]).first().copied());
+            let head = read_dom(cx, |dom| {
+                children_tagged(dom, id, &["thead"]).first().copied()
+            });
             Ok(wrap_opt(cx, head))
         }),
         None,
@@ -2574,7 +3037,9 @@ const TABLE_ACCESSORS: &[Accessor] = &[
         "tFoot",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let foot = read_dom(cx, |dom| children_tagged(dom, id, &["tfoot"]).first().copied());
+            let foot = read_dom(cx, |dom| {
+                children_tagged(dom, id, &["tfoot"]).first().copied()
+            });
             Ok(wrap_opt(cx, foot))
         }),
         None,
@@ -2583,7 +3048,9 @@ const TABLE_ACCESSORS: &[Accessor] = &[
         "caption",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let caption = read_dom(cx, |dom| children_tagged(dom, id, &["caption"]).first().copied());
+            let caption = read_dom(cx, |dom| {
+                children_tagged(dom, id, &["caption"]).first().copied()
+            });
             Ok(wrap_opt(cx, caption))
         }),
         None,
@@ -2591,13 +3058,19 @@ const TABLE_ACCESSORS: &[Accessor] = &[
 ];
 
 fn first_or_new(context: &mut Context, table: NodeId, tag: &str, first: bool) -> JsResult<JsValue> {
-    let found = read_dom(context, |dom| children_tagged(dom, table, &[tag]).first().copied());
+    let found = read_dom(context, |dom| {
+        children_tagged(dom, table, &[tag]).first().copied()
+    });
     if let Some(found) = found {
         return Ok(wrap(context, found));
     }
     let id = with_dom(context, |dom| {
         let id = dom.create_element(tag);
-        let before = if first { dom.children(table).first().copied() } else { None };
+        let before = if first {
+            dom.children(table).first().copied()
+        } else {
+            None
+        };
         dom.insert_before(table, id, before);
         id
     });
@@ -2609,28 +3082,48 @@ const TABLE_METHODS: &[Method] = &[
         let table = node_of(this)?;
         add_child(cx, table, "tbody", None, &["tbody"])
     }),
-    ("createTHead", 0, |this, _, cx| first_or_new(cx, node_of(this)?, "thead", true)),
-    ("createTFoot", 0, |this, _, cx| first_or_new(cx, node_of(this)?, "tfoot", false)),
-    ("createCaption", 0, |this, _, cx| first_or_new(cx, node_of(this)?, "caption", true)),
+    ("createTHead", 0, |this, _, cx| {
+        first_or_new(cx, node_of(this)?, "thead", true)
+    }),
+    ("createTFoot", 0, |this, _, cx| {
+        first_or_new(cx, node_of(this)?, "tfoot", false)
+    }),
+    ("createCaption", 0, |this, _, cx| {
+        first_or_new(cx, node_of(this)?, "caption", true)
+    }),
     ("deleteTHead", 0, |this, _, cx| {
         let table = node_of(this)?;
-        with_dom(cx, |dom| children_tagged(dom, table, &["thead"]).into_iter().for_each(|n| dom.detach(n)));
+        with_dom(cx, |dom| {
+            children_tagged(dom, table, &["thead"])
+                .into_iter()
+                .for_each(|n| dom.detach(n))
+        });
         Ok(JsValue::undefined())
     }),
     ("deleteTFoot", 0, |this, _, cx| {
         let table = node_of(this)?;
-        with_dom(cx, |dom| children_tagged(dom, table, &["tfoot"]).into_iter().for_each(|n| dom.detach(n)));
+        with_dom(cx, |dom| {
+            children_tagged(dom, table, &["tfoot"])
+                .into_iter()
+                .for_each(|n| dom.detach(n))
+        });
         Ok(JsValue::undefined())
     }),
     ("deleteCaption", 0, |this, _, cx| {
         let table = node_of(this)?;
-        with_dom(cx, |dom| children_tagged(dom, table, &["caption"]).into_iter().for_each(|n| dom.detach(n)));
+        with_dom(cx, |dom| {
+            children_tagged(dom, table, &["caption"])
+                .into_iter()
+                .for_each(|n| dom.detach(n))
+        });
         Ok(JsValue::undefined())
     }),
     ("insertRow", 1, |this, args, cx| {
         let table = node_of(this)?;
         let index = index_arg(args, cx)?;
-        let body = read_dom(cx, |dom| children_tagged(dom, table, &["tbody"]).last().copied());
+        let body = read_dom(cx, |dom| {
+            children_tagged(dom, table, &["tbody"]).last().copied()
+        });
         let body = match body {
             Some(body) => body,
             None => node_of(&add_child(cx, table, "tbody", None, &[])?)?,
@@ -2642,7 +3135,11 @@ const TABLE_METHODS: &[Method] = &[
         let index = arg(args, 0).to_number(cx)? as i64;
         with_dom(cx, |dom| {
             let rows = table_rows(dom, table);
-            let at = if index < 0 { rows.len() as i64 - 1 } else { index };
+            let at = if index < 0 {
+                rows.len() as i64 - 1
+            } else {
+                index
+            };
             if let Some(row) = rows.get(at as usize) {
                 dom.detach(*row);
             }
@@ -2672,7 +3169,11 @@ const SECTION_METHODS: &[Method] = &[
         let index = arg(args, 0).to_number(cx)? as i64;
         with_dom(cx, |dom| {
             let rows = children_tagged(dom, section, &["tr"]);
-            let at = if index < 0 { rows.len() as i64 - 1 } else { index };
+            let at = if index < 0 {
+                rows.len() as i64 - 1
+            } else {
+                index
+            };
             if let Some(row) = rows.get(at as usize) {
                 dom.detach(*row);
             }
@@ -2713,7 +3214,13 @@ const ROW_ACCESSORS: &[Accessor] = &[
         "sectionRowIndex",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let index = read_dom(cx, |dom| dom.parent(id).and_then(|p| children_tagged(dom, p, &["tr"]).iter().position(|r| *r == id)));
+            let index = read_dom(cx, |dom| {
+                dom.parent(id).and_then(|p| {
+                    children_tagged(dom, p, &["tr"])
+                        .iter()
+                        .position(|r| *r == id)
+                })
+            });
             Ok(index.map_or(-1., |i| i as f64).into())
         }),
         None,
@@ -2731,7 +3238,11 @@ const ROW_METHODS: &[Method] = &[
         let index = arg(args, 0).to_number(cx)? as i64;
         with_dom(cx, |dom| {
             let cells = children_tagged(dom, row, &["td", "th"]);
-            let at = if index < 0 { cells.len() as i64 - 1 } else { index };
+            let at = if index < 0 {
+                cells.len() as i64 - 1
+            } else {
+                index
+            };
             if let Some(cell) = cells.get(at as usize) {
                 dom.detach(*cell);
             }
@@ -2744,7 +3255,13 @@ const CELL_ACCESSORS: &[Accessor] = &[(
     "cellIndex",
     Some(|this, _, cx| {
         let id = node_of(this)?;
-        let index = read_dom(cx, |dom| dom.parent(id).and_then(|row| children_tagged(dom, row, &["td", "th"]).iter().position(|c| *c == id)));
+        let index = read_dom(cx, |dom| {
+            dom.parent(id).and_then(|row| {
+                children_tagged(dom, row, &["td", "th"])
+                    .iter()
+                    .position(|c| *c == id)
+            })
+        });
         Ok(index.map_or(-1., |i| i as f64).into())
     }),
     None,
@@ -2768,7 +3285,10 @@ const SVG_ACCESSORS: &[Accessor] = &[
             let owner = read_dom(cx, |dom| {
                 let mut at = dom.parent(id);
                 while let Some(node) = at {
-                    if dom.get(node).is_some_and(|n| n.tag() == Some("svg") && n.namespace == Namespace::Svg) {
+                    if dom
+                        .get(node)
+                        .is_some_and(|n| n.tag() == Some("svg") && n.namespace == Namespace::Svg)
+                    {
                         return Some(node);
                     }
                     at = dom.parent(node);
@@ -2786,10 +3306,19 @@ const SVG_GRAPHICS_METHODS: &[Method] = &[
     ("getBBox", 0, |this, _, cx| {
         let id = node_of(this)?;
         let rect = painted(cx, id);
-        rect_object(cx, Rect { x: 0., y: 0., ..rect })
+        rect_object(
+            cx,
+            Rect {
+                x: 0.,
+                y: 0.,
+                ..rect
+            },
+        )
     }),
     ("getCTM", 0, |_, _, cx| super::platform::identity_matrix(cx)),
-    ("getScreenCTM", 0, |_, _, cx| super::platform::identity_matrix(cx)),
+    ("getScreenCTM", 0, |_, _, cx| {
+        super::platform::identity_matrix(cx)
+    }),
     ("getTotalLength", 0, |_, _, _| Ok(0.into())),
     ("getPointAtLength", 1, |_, _, cx| {
         let point = plain_object(cx);
@@ -2800,8 +3329,12 @@ const SVG_GRAPHICS_METHODS: &[Method] = &[
 ];
 
 const SVG_SVG_METHODS: &[Method] = &[
-    ("createSVGPoint", 0, |_, _, cx| super::platform::new_point(cx)),
-    ("createSVGMatrix", 0, |_, _, cx| super::platform::identity_matrix(cx)),
+    ("createSVGPoint", 0, |_, _, cx| {
+        super::platform::new_point(cx)
+    }),
+    ("createSVGMatrix", 0, |_, _, cx| {
+        super::platform::identity_matrix(cx)
+    }),
     ("suspendRedraw", 1, |_, _, _| Ok(0.into())),
     ("unsuspendRedraw", 1, |_, _, _| Ok(JsValue::undefined())),
     ("forceRedraw", 0, |_, _, _| Ok(JsValue::undefined())),
@@ -2852,8 +3385,20 @@ fn full_class(
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let element = full_class(context, "Element", "Node", ELEMENT_METHODS, ELEMENT_ACCESSORS, &[])?;
-    extend_prototype(context, &element, PARENT_NODE_METHODS, PARENT_NODE_ACCESSORS)?;
+    let element = full_class(
+        context,
+        "Element",
+        "Node",
+        ELEMENT_METHODS,
+        ELEMENT_ACCESSORS,
+        &[],
+    )?;
+    extend_prototype(
+        context,
+        &element,
+        PARENT_NODE_METHODS,
+        PARENT_NODE_ACCESSORS,
+    )?;
     extend_prototype(context, &element, CHILD_NODE_METHODS, CHILD_NODE_ACCESSORS)?;
     // `HTMLElement` is constructed only as the `super()` of a custom element's class.
     let (_, html) = class(
@@ -2874,105 +3419,438 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     for name in PLAIN_HTML_CLASSES {
         plain_class(context, name, "HTMLElement")?;
     }
-    full_class(context, "HTMLInputElement", "HTMLElement", FIELD_METHODS, FIELD_ACCESSORS, INPUT_REFLECTED)
-        .and_then(|p| extend_prototype(context, &p, &[
-            ("stepUp", 1, |_, _, _| Ok(JsValue::undefined())),
-            ("stepDown", 1, |_, _, _| Ok(JsValue::undefined())),
-            ("showPicker", 0, |_, _, _| Ok(JsValue::undefined())),
-        ], INPUT_ACCESSORS).map(|_| p))?;
-    full_class(context, "HTMLTextAreaElement", "HTMLElement", FIELD_METHODS, FIELD_ACCESSORS, TEXTAREA_REFLECTED)
-        .and_then(|p| extend_prototype(context, &p, &[], TEXTAREA_ACCESSORS).map(|_| p))?;
-    full_class(context, "HTMLSelectElement", "HTMLElement", SELECT_METHODS, SELECT_ACCESSORS, SELECT_REFLECTED)?;
-    full_class(context, "HTMLOptionElement", "HTMLElement", &[], OPTION_ACCESSORS, OPTION_REFLECTED)?;
-    full_class(context, "HTMLButtonElement", "HTMLElement", &[
-        ("checkValidity", 0, |_, _, _| Ok(true.into())),
-        ("reportValidity", 0, |_, _, _| Ok(true.into())),
-        ("setCustomValidity", 1, |_, _, _| Ok(JsValue::undefined())),
-    ], BUTTON_ACCESSORS, BUTTON_REFLECTED)?;
-    full_class(context, "HTMLFormElement", "HTMLElement", FORM_METHODS, FORM_ACCESSORS, FORM_REFLECTED)?;
-    full_class(context, "HTMLLabelElement", "HTMLElement", &[], LABEL_ACCESSORS, &[("htmlFor", "for", Reflect::Text)])?;
-    full_class(context, "HTMLAnchorElement", "HTMLElement", ANCHOR_METHODS, ANCHOR_ACCESSORS, ANCHOR_REFLECTED)?;
+    full_class(
+        context,
+        "HTMLInputElement",
+        "HTMLElement",
+        FIELD_METHODS,
+        FIELD_ACCESSORS,
+        INPUT_REFLECTED,
+    )
+    .and_then(|p| {
+        extend_prototype(
+            context,
+            &p,
+            &[
+                ("stepUp", 1, |_, _, _| Ok(JsValue::undefined())),
+                ("stepDown", 1, |_, _, _| Ok(JsValue::undefined())),
+                ("showPicker", 0, |_, _, _| Ok(JsValue::undefined())),
+            ],
+            INPUT_ACCESSORS,
+        )
+        .map(|_| p)
+    })?;
+    full_class(
+        context,
+        "HTMLTextAreaElement",
+        "HTMLElement",
+        FIELD_METHODS,
+        FIELD_ACCESSORS,
+        TEXTAREA_REFLECTED,
+    )
+    .and_then(|p| extend_prototype(context, &p, &[], TEXTAREA_ACCESSORS).map(|_| p))?;
+    full_class(
+        context,
+        "HTMLSelectElement",
+        "HTMLElement",
+        SELECT_METHODS,
+        SELECT_ACCESSORS,
+        SELECT_REFLECTED,
+    )?;
+    full_class(
+        context,
+        "HTMLOptionElement",
+        "HTMLElement",
+        &[],
+        OPTION_ACCESSORS,
+        OPTION_REFLECTED,
+    )?;
+    full_class(
+        context,
+        "HTMLButtonElement",
+        "HTMLElement",
+        &[
+            ("checkValidity", 0, |_, _, _| Ok(true.into())),
+            ("reportValidity", 0, |_, _, _| Ok(true.into())),
+            ("setCustomValidity", 1, |_, _, _| Ok(JsValue::undefined())),
+        ],
+        BUTTON_ACCESSORS,
+        BUTTON_REFLECTED,
+    )?;
+    full_class(
+        context,
+        "HTMLFormElement",
+        "HTMLElement",
+        FORM_METHODS,
+        FORM_ACCESSORS,
+        FORM_REFLECTED,
+    )?;
+    full_class(
+        context,
+        "HTMLLabelElement",
+        "HTMLElement",
+        &[],
+        LABEL_ACCESSORS,
+        &[("htmlFor", "for", Reflect::Text)],
+    )?;
+    full_class(
+        context,
+        "HTMLAnchorElement",
+        "HTMLElement",
+        ANCHOR_METHODS,
+        ANCHOR_ACCESSORS,
+        ANCHOR_REFLECTED,
+    )?;
     {
-        let (_, area) = shared(context).borrow().class("HTMLAreaElement").expect("made");
+        let (_, area) = shared(context)
+            .borrow()
+            .class("HTMLAreaElement")
+            .expect("made");
         extend_prototype(context, &area, ANCHOR_METHODS, ANCHOR_ACCESSORS)?;
-        reflect(context, &area, &[("alt", "alt", Reflect::Text), ("coords", "coords", Reflect::Text), ("shape", "shape", Reflect::Text)])?;
+        reflect(
+            context,
+            &area,
+            &[
+                ("alt", "alt", Reflect::Text),
+                ("coords", "coords", Reflect::Text),
+                ("shape", "shape", Reflect::Text),
+            ],
+        )?;
     }
-    full_class(context, "HTMLImageElement", "HTMLElement", IMAGE_METHODS, IMAGE_ACCESSORS, IMAGE_REFLECTED)?;
-    full_class(context, "HTMLMediaElement", "HTMLElement", MEDIA_METHODS, MEDIA_ACCESSORS, MEDIA_REFLECTED)?;
+    full_class(
+        context,
+        "HTMLImageElement",
+        "HTMLElement",
+        IMAGE_METHODS,
+        IMAGE_ACCESSORS,
+        IMAGE_REFLECTED,
+    )?;
+    full_class(
+        context,
+        "HTMLMediaElement",
+        "HTMLElement",
+        MEDIA_METHODS,
+        MEDIA_ACCESSORS,
+        MEDIA_REFLECTED,
+    )?;
     let media = shared(context).borrow().prototype("HTMLMediaElement");
-    for (name, value) in [("currentTime", JsValue::from(0)), ("volume", 1.into()), ("playbackRate", 1.into()), ("defaultPlaybackRate", 1.into())] {
+    for (name, value) in [
+        ("currentTime", JsValue::from(0)),
+        ("volume", 1.into()),
+        ("playbackRate", 1.into()),
+        ("defaultPlaybackRate", 1.into()),
+    ] {
         media.set(JsString::from(name), value, false, context)?;
     }
-    full_class(context, "HTMLVideoElement", "HTMLMediaElement", &[], &[], &[("width", "width", Reflect::Number(0)), ("height", "height", Reflect::Number(0))])?;
+    full_class(
+        context,
+        "HTMLVideoElement",
+        "HTMLMediaElement",
+        &[],
+        &[],
+        &[
+            ("width", "width", Reflect::Number(0)),
+            ("height", "height", Reflect::Number(0)),
+        ],
+    )?;
     plain_class(context, "HTMLAudioElement", "HTMLMediaElement")?;
-    full_class(context, "HTMLDialogElement", "HTMLElement", DIALOG_METHODS, DIALOG_ACCESSORS, OPEN_REFLECTED)?;
-    full_class(context, "HTMLDetailsElement", "HTMLElement", &[], &[], OPEN_REFLECTED)?;
-    full_class(context, "HTMLProgressElement", "HTMLElement", &[], PROGRESS_ACCESSORS, &[])?;
-    full_class(context, "HTMLTableElement", "HTMLElement", TABLE_METHODS, TABLE_ACCESSORS, &[])?;
-    full_class(context, "HTMLTableSectionElement", "HTMLElement", SECTION_METHODS, SECTION_ACCESSORS, &[])?;
-    full_class(context, "HTMLTableRowElement", "HTMLElement", ROW_METHODS, ROW_ACCESSORS, &[])?;
-    full_class(context, "HTMLTableCellElement", "HTMLElement", &[], CELL_ACCESSORS, CELL_REFLECTED)?;
-    full_class(context, "HTMLTemplateElement", "HTMLElement", &[], super::platform::TEMPLATE_ACCESSORS, &[])?;
-    full_class(context, "HTMLStyleElement", "HTMLElement", &[], super::platform::STYLE_ELEMENT_ACCESSORS, &[("media", "media", Reflect::Text), ("disabled", "disabled", Reflect::Flag)])?;
-    full_class(context, "HTMLCanvasElement", "HTMLElement", super::platform::CANVAS_METHODS, super::platform::CANVAS_ACCESSORS, &[])?;
+    full_class(
+        context,
+        "HTMLDialogElement",
+        "HTMLElement",
+        DIALOG_METHODS,
+        DIALOG_ACCESSORS,
+        OPEN_REFLECTED,
+    )?;
+    full_class(
+        context,
+        "HTMLDetailsElement",
+        "HTMLElement",
+        &[],
+        &[],
+        OPEN_REFLECTED,
+    )?;
+    full_class(
+        context,
+        "HTMLProgressElement",
+        "HTMLElement",
+        &[],
+        PROGRESS_ACCESSORS,
+        &[],
+    )?;
+    full_class(
+        context,
+        "HTMLTableElement",
+        "HTMLElement",
+        TABLE_METHODS,
+        TABLE_ACCESSORS,
+        &[],
+    )?;
+    full_class(
+        context,
+        "HTMLTableSectionElement",
+        "HTMLElement",
+        SECTION_METHODS,
+        SECTION_ACCESSORS,
+        &[],
+    )?;
+    full_class(
+        context,
+        "HTMLTableRowElement",
+        "HTMLElement",
+        ROW_METHODS,
+        ROW_ACCESSORS,
+        &[],
+    )?;
+    full_class(
+        context,
+        "HTMLTableCellElement",
+        "HTMLElement",
+        &[],
+        CELL_ACCESSORS,
+        CELL_REFLECTED,
+    )?;
+    full_class(
+        context,
+        "HTMLTemplateElement",
+        "HTMLElement",
+        &[],
+        super::platform::TEMPLATE_ACCESSORS,
+        &[],
+    )?;
+    full_class(
+        context,
+        "HTMLStyleElement",
+        "HTMLElement",
+        &[],
+        super::platform::STYLE_ELEMENT_ACCESSORS,
+        &[
+            ("media", "media", Reflect::Text),
+            ("disabled", "disabled", Reflect::Flag),
+        ],
+    )?;
+    full_class(
+        context,
+        "HTMLCanvasElement",
+        "HTMLElement",
+        super::platform::CANVAS_METHODS,
+        super::platform::CANVAS_ACCESSORS,
+        &[],
+    )?;
     // The rest's own reflected attributes.
     for (name, reflected) in [
-        ("HTMLScriptElement", &[("src", "src", Reflect::Url), ("type", "type", Reflect::Text), ("async", "async", Reflect::Flag), ("defer", "defer", Reflect::Flag), ("noModule", "nomodule", Reflect::Flag), ("crossOrigin", "crossorigin", Reflect::Text), ("integrity", "integrity", Reflect::Text)][..]),
-        ("HTMLLinkElement", &[("href", "href", Reflect::Url), ("rel", "rel", Reflect::Text), ("media", "media", Reflect::Text), ("type", "type", Reflect::Text), ("as", "as", Reflect::Text), ("crossOrigin", "crossorigin", Reflect::Text), ("hreflang", "hreflang", Reflect::Text)][..]),
-        ("HTMLMetaElement", &[("name", "name", Reflect::Text), ("content", "content", Reflect::Text), ("httpEquiv", "http-equiv", Reflect::Text), ("charset", "charset", Reflect::Text)][..]),
-        ("HTMLIFrameElement", &[("src", "src", Reflect::Url), ("srcdoc", "srcdoc", Reflect::Text), ("name", "name", Reflect::Text), ("width", "width", Reflect::Text), ("height", "height", Reflect::Text), ("allow", "allow", Reflect::Text), ("loading", "loading", Reflect::Keyword("eager"))][..]),
-        ("HTMLSourceElement", &[("src", "src", Reflect::Url), ("type", "type", Reflect::Text), ("srcset", "srcset", Reflect::Text), ("media", "media", Reflect::Text)][..]),
-        ("HTMLOptGroupElement", &[("label", "label", Reflect::Text), ("disabled", "disabled", Reflect::Flag)][..]),
-        ("HTMLFieldSetElement", &[("disabled", "disabled", Reflect::Flag), ("name", "name", Reflect::Text)][..]),
-        ("HTMLOListElement", &[("start", "start", Reflect::Number(1)), ("reversed", "reversed", Reflect::Flag), ("type", "type", Reflect::Text)][..]),
-        ("HTMLLIElement", &[("value", "value", Reflect::Number(0))][..]),
-        ("HTMLTableColElement", &[("span", "span", Reflect::Number(1))][..]),
-        ("HTMLTimeElement", &[("dateTime", "datetime", Reflect::Text)][..]),
+        (
+            "HTMLScriptElement",
+            &[
+                ("src", "src", Reflect::Url),
+                ("type", "type", Reflect::Text),
+                ("async", "async", Reflect::Flag),
+                ("defer", "defer", Reflect::Flag),
+                ("noModule", "nomodule", Reflect::Flag),
+                ("crossOrigin", "crossorigin", Reflect::Text),
+                ("integrity", "integrity", Reflect::Text),
+            ][..],
+        ),
+        (
+            "HTMLLinkElement",
+            &[
+                ("href", "href", Reflect::Url),
+                ("rel", "rel", Reflect::Text),
+                ("media", "media", Reflect::Text),
+                ("type", "type", Reflect::Text),
+                ("as", "as", Reflect::Text),
+                ("crossOrigin", "crossorigin", Reflect::Text),
+                ("hreflang", "hreflang", Reflect::Text),
+            ][..],
+        ),
+        (
+            "HTMLMetaElement",
+            &[
+                ("name", "name", Reflect::Text),
+                ("content", "content", Reflect::Text),
+                ("httpEquiv", "http-equiv", Reflect::Text),
+                ("charset", "charset", Reflect::Text),
+            ][..],
+        ),
+        (
+            "HTMLIFrameElement",
+            &[
+                ("src", "src", Reflect::Url),
+                ("srcdoc", "srcdoc", Reflect::Text),
+                ("name", "name", Reflect::Text),
+                ("width", "width", Reflect::Text),
+                ("height", "height", Reflect::Text),
+                ("allow", "allow", Reflect::Text),
+                ("loading", "loading", Reflect::Keyword("eager")),
+            ][..],
+        ),
+        (
+            "HTMLSourceElement",
+            &[
+                ("src", "src", Reflect::Url),
+                ("type", "type", Reflect::Text),
+                ("srcset", "srcset", Reflect::Text),
+                ("media", "media", Reflect::Text),
+            ][..],
+        ),
+        (
+            "HTMLOptGroupElement",
+            &[
+                ("label", "label", Reflect::Text),
+                ("disabled", "disabled", Reflect::Flag),
+            ][..],
+        ),
+        (
+            "HTMLFieldSetElement",
+            &[
+                ("disabled", "disabled", Reflect::Flag),
+                ("name", "name", Reflect::Text),
+            ][..],
+        ),
+        (
+            "HTMLOListElement",
+            &[
+                ("start", "start", Reflect::Number(1)),
+                ("reversed", "reversed", Reflect::Flag),
+                ("type", "type", Reflect::Text),
+            ][..],
+        ),
+        (
+            "HTMLLIElement",
+            &[("value", "value", Reflect::Number(0))][..],
+        ),
+        (
+            "HTMLTableColElement",
+            &[("span", "span", Reflect::Number(1))][..],
+        ),
+        (
+            "HTMLTimeElement",
+            &[("dateTime", "datetime", Reflect::Text)][..],
+        ),
         ("HTMLDataElement", &[("value", "value", Reflect::Text)][..]),
         ("HTMLQuoteElement", &[("cite", "cite", Reflect::Url)][..]),
-        ("HTMLModElement", &[("cite", "cite", Reflect::Url), ("dateTime", "datetime", Reflect::Text)][..]),
-        ("HTMLBaseElement", &[("href", "href", Reflect::Url), ("target", "target", Reflect::Text)][..]),
+        (
+            "HTMLModElement",
+            &[
+                ("cite", "cite", Reflect::Url),
+                ("dateTime", "datetime", Reflect::Text),
+            ][..],
+        ),
+        (
+            "HTMLBaseElement",
+            &[
+                ("href", "href", Reflect::Url),
+                ("target", "target", Reflect::Text),
+            ][..],
+        ),
         ("HTMLSlotElement", &[("name", "name", Reflect::Text)][..]),
         ("HTMLOutputElement", &[("name", "name", Reflect::Text)][..]),
-        ("HTMLMeterElement", &[("min", "min", Reflect::Text), ("max", "max", Reflect::Text), ("low", "low", Reflect::Text), ("high", "high", Reflect::Text), ("optimum", "optimum", Reflect::Text)][..]),
-        ("HTMLEmbedElement", &[("src", "src", Reflect::Url), ("type", "type", Reflect::Text), ("width", "width", Reflect::Text), ("height", "height", Reflect::Text)][..]),
-        ("HTMLObjectElement", &[("data", "data", Reflect::Url), ("type", "type", Reflect::Text), ("name", "name", Reflect::Text), ("width", "width", Reflect::Text), ("height", "height", Reflect::Text)][..]),
+        (
+            "HTMLMeterElement",
+            &[
+                ("min", "min", Reflect::Text),
+                ("max", "max", Reflect::Text),
+                ("low", "low", Reflect::Text),
+                ("high", "high", Reflect::Text),
+                ("optimum", "optimum", Reflect::Text),
+            ][..],
+        ),
+        (
+            "HTMLEmbedElement",
+            &[
+                ("src", "src", Reflect::Url),
+                ("type", "type", Reflect::Text),
+                ("width", "width", Reflect::Text),
+                ("height", "height", Reflect::Text),
+            ][..],
+        ),
+        (
+            "HTMLObjectElement",
+            &[
+                ("data", "data", Reflect::Url),
+                ("type", "type", Reflect::Text),
+                ("name", "name", Reflect::Text),
+                ("width", "width", Reflect::Text),
+                ("height", "height", Reflect::Text),
+            ][..],
+        ),
     ] {
         let prototype = shared(context).borrow().prototype(name);
         reflect(context, &prototype, reflected)?;
     }
     for (name, accessors) in [
-        ("HTMLTitleElement", &[(
-            "text",
-            Some((|this, _, cx| {
-                let id = node_of(this)?;
-                Ok(text(&read_dom(cx, |dom| dom.text_content(id))))
-            }) as boa_engine::native_function::NativeFunctionPointer),
-            Some((|this, args, cx| {
-                let id = node_of(this)?;
-                let value = arg_string(args, 0, cx)?;
-                with_dom(cx, |dom| dom.set_text(id, &value));
-                Ok(JsValue::undefined())
-            }) as boa_engine::native_function::NativeFunctionPointer),
-        )][..]),
-        ("HTMLScriptElement", &[(
-            "text",
-            Some((|this, _, cx| {
-                let id = node_of(this)?;
-                Ok(text(&read_dom(cx, |dom| dom.text_content(id))))
-            }) as boa_engine::native_function::NativeFunctionPointer),
-            Some((|this, args, cx| {
-                let id = node_of(this)?;
-                let value = arg_string(args, 0, cx)?;
-                with_dom(cx, |dom| dom.set_text(id, &value));
-                Ok(JsValue::undefined())
-            }) as boa_engine::native_function::NativeFunctionPointer),
-        )][..]),
-        ("HTMLIFrameElement", &[
-            ("contentWindow", Some((|_, _, _| Ok(JsValue::null())) as boa_engine::native_function::NativeFunctionPointer), None),
-            ("contentDocument", Some((|_, _, _| Ok(JsValue::null())) as boa_engine::native_function::NativeFunctionPointer), None),
-        ][..]),
-        ("HTMLLinkElement", &[("sheet", Some((|_, _, _| Ok(JsValue::null())) as boa_engine::native_function::NativeFunctionPointer), None)][..]),
+        (
+            "HTMLTitleElement",
+            &[(
+                "text",
+                Some(
+                    (|this, _, cx| {
+                        let id = node_of(this)?;
+                        Ok(text(&read_dom(cx, |dom| dom.text_content(id))))
+                    }) as boa_engine::native_function::NativeFunctionPointer,
+                ),
+                Some(
+                    (|this, args, cx| {
+                        let id = node_of(this)?;
+                        let value = arg_string(args, 0, cx)?;
+                        with_dom(cx, |dom| dom.set_text(id, &value));
+                        Ok(JsValue::undefined())
+                    }) as boa_engine::native_function::NativeFunctionPointer,
+                ),
+            )][..],
+        ),
+        (
+            "HTMLScriptElement",
+            &[(
+                "text",
+                Some(
+                    (|this, _, cx| {
+                        let id = node_of(this)?;
+                        Ok(text(&read_dom(cx, |dom| dom.text_content(id))))
+                    }) as boa_engine::native_function::NativeFunctionPointer,
+                ),
+                Some(
+                    (|this, args, cx| {
+                        let id = node_of(this)?;
+                        let value = arg_string(args, 0, cx)?;
+                        with_dom(cx, |dom| dom.set_text(id, &value));
+                        Ok(JsValue::undefined())
+                    }) as boa_engine::native_function::NativeFunctionPointer,
+                ),
+            )][..],
+        ),
+        (
+            "HTMLIFrameElement",
+            &[
+                (
+                    "contentWindow",
+                    Some(
+                        (|_, _, _| Ok(JsValue::null()))
+                            as boa_engine::native_function::NativeFunctionPointer,
+                    ),
+                    None,
+                ),
+                (
+                    "contentDocument",
+                    Some(
+                        (|_, _, _| Ok(JsValue::null()))
+                            as boa_engine::native_function::NativeFunctionPointer,
+                    ),
+                    None,
+                ),
+            ][..],
+        ),
+        (
+            "HTMLLinkElement",
+            &[(
+                "sheet",
+                Some(
+                    (|_, _, _| Ok(JsValue::null()))
+                        as boa_engine::native_function::NativeFunctionPointer,
+                ),
+                None,
+            )][..],
+        ),
         ("HTMLSlotElement", &[][..]),
     ] {
         let prototype = shared(context).borrow().prototype(name);
@@ -2980,18 +3858,34 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     }
     {
         let slot = shared(context).borrow().prototype("HTMLSlotElement");
-        extend_prototype(context, &slot, &[
-            ("assignedNodes", 1, |_, _, cx| Ok(array(Vec::new(), cx))),
-            ("assignedElements", 1, |_, _, cx| Ok(array(Vec::new(), cx))),
-            ("assign", 0, |_, _, _| Ok(JsValue::undefined())),
-        ], &[])?;
+        extend_prototype(
+            context,
+            &slot,
+            &[
+                ("assignedNodes", 1, |_, _, cx| Ok(array(Vec::new(), cx))),
+                ("assignedElements", 1, |_, _, cx| Ok(array(Vec::new(), cx))),
+                ("assign", 0, |_, _, _| Ok(JsValue::undefined())),
+            ],
+            &[],
+        )?;
     }
     // SVG's classes, under one that shapes share.
     let svg = full_class(context, "SVGElement", "Element", &[], SVG_ACCESSORS, &[])?;
     extend_prototype(context, &svg, FOCUS_METHODS, STYLED_ACCESSORS)?;
-    full_class(context, "SVGGraphicsElement", "SVGElement", SVG_GRAPHICS_METHODS, &[], &[])?;
+    full_class(
+        context,
+        "SVGGraphicsElement",
+        "SVGElement",
+        SVG_GRAPHICS_METHODS,
+        &[],
+        &[],
+    )?;
     for (_, name) in SVG_CLASSES {
-        let parent = if *name == "SVGSVGElement" { "SVGGraphicsElement" } else { "SVGGraphicsElement" };
+        let parent = if *name == "SVGSVGElement" {
+            "SVGGraphicsElement"
+        } else {
+            "SVGGraphicsElement"
+        };
         plain_class(context, name, parent)?;
     }
     let svg_svg = shared(context).borrow().prototype("SVGSVGElement");
@@ -3019,17 +3913,26 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             "values",
             |this, _, _: &(), cx| {
                 let id = list_node(this)?;
-                let classes = read_dom(cx, |dom| dom.get(id).map(|n| n.classes.clone()).unwrap_or_default());
+                let classes = read_dom(cx, |dom| {
+                    dom.get(id).map(|n| n.classes.clone()).unwrap_or_default()
+                });
                 let items: Vec<JsValue> = classes.iter().map(|c| text(c)).collect();
                 let list = array(items, cx);
                 call_method(&list, "values", &[], cx)
             },
             (),
         );
-        for key in [PropertyKey::from(boa_engine::JsSymbol::iterator()), PropertyKey::from(js_string!("values"))] {
+        for key in [
+            PropertyKey::from(boa_engine::JsSymbol::iterator()),
+            PropertyKey::from(js_string!("values")),
+        ] {
             prototype.define_property_or_throw(
                 key,
-                PropertyDescriptor::builder().value(values.clone()).writable(true).enumerable(false).configurable(true),
+                PropertyDescriptor::builder()
+                    .value(values.clone())
+                    .writable(true)
+                    .enumerable(false)
+                    .configurable(true),
                 context,
             )?;
         }

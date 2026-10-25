@@ -89,6 +89,9 @@ fn markup_is_read_into_the_document_and_dom_parser_makes_documents() {
              made.body.firstChild.tagName, doc.doctype.name, new XMLSerializer().serializeToString(doc.body)].join('|')
             "#,
         );
-        assert_eq!(out, "T|<p>Hello <em>there</em></p>|there|HTML|SPAN|html|<body><p>Hello <em>there</em></p></body>");
+        assert_eq!(
+            out,
+            "T|<p>Hello <em>there</em></p>|there|HTML|SPAN|html|<body><p>Hello <em>there</em></p></body>"
+        );
     });
 }

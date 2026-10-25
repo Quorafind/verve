@@ -33,12 +33,16 @@ fn convert(build: &str, setup: &str) -> String {
         .runtime
         .load_module(&path, &source)
         .unwrap_or_else(|e| panic!("turndown failed to load: {e}"));
-    page.runtime.context().global_object().set(
-        verve::boa_engine::js_string!("TurndownService"),
-        exports,
-        false,
-        page.runtime.context(),
-    ).unwrap();
+    page.runtime
+        .context()
+        .global_object()
+        .set(
+            verve::boa_engine::js_string!("TurndownService"),
+            exports,
+            false,
+            page.runtime.context(),
+        )
+        .unwrap();
     let html = serde_json::to_string(HTML).unwrap();
     page.eval(&format!(
         "const service = new TurndownService({{ codeBlockStyle: 'indented' }}); service.remove('script'); service.turndown({html})"
@@ -57,7 +61,10 @@ fn turndown_converts_through_create_html_document_without_dom_parser() {
     on_page(|| {
         // The browser build, on a window without `DOMParser`: its other way in.
         assert_eq!(
-            convert("turndown.browser.cjs.js", "delete globalThis.DOMParser; typeof DOMParser"),
+            convert(
+                "turndown.browser.cjs.js",
+                "delete globalThis.DOMParser; typeof DOMParser"
+            ),
             MARKDOWN
         );
     });
@@ -71,12 +78,16 @@ fn turndown_converts_a_node_it_is_handed() {
             .join("tests/fixtures/node_modules/turndown/lib/turndown.cjs.js");
         let source = std::fs::read_to_string(&path).unwrap();
         let exports = page.runtime.load_module(&path, &source).unwrap();
-        page.runtime.context().global_object().set(
-            verve::boa_engine::js_string!("TurndownService"),
-            exports,
-            false,
-            page.runtime.context(),
-        ).unwrap();
+        page.runtime
+            .context()
+            .global_object()
+            .set(
+                verve::boa_engine::js_string!("TurndownService"),
+                exports,
+                false,
+                page.runtime.context(),
+            )
+            .unwrap();
         let out = page.eval(
             r#"
             const div = document.createElement('div');

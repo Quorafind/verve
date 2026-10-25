@@ -78,23 +78,41 @@ fn resize_and_intersection_observers_follow_the_painted_boxes() {
         // Painted: each heard.
         page.document.set_layout(
             &mut page.runtime,
-            [(panel, Rect::new(0., 0., 200., 100.)), (below, Rect::new(0., 700., 100., 100.))],
+            [
+                (panel, Rect::new(0., 0., 200., 100.)),
+                (below, Rect::new(0., 700., 100., 100.)),
+            ],
         );
         assert_eq!(page.eval("sizes.join(',')"), "panel 200x100 200");
         assert_eq!(page.eval("sights.join(',')"), "panel true 1,below false 0");
         // Painted the same: nothing new. Then bigger, and scrolled half into sight.
         page.document.set_layout(
             &mut page.runtime,
-            [(panel, Rect::new(0., 0., 200., 100.)), (below, Rect::new(0., 700., 100., 100.))],
+            [
+                (panel, Rect::new(0., 0., 200., 100.)),
+                (below, Rect::new(0., 700., 100., 100.)),
+            ],
         );
         page.document.set_layout(
             &mut page.runtime,
-            [(panel, Rect::new(0., 0., 300., 120.)), (below, Rect::new(0., 550., 100., 100.))],
+            [
+                (panel, Rect::new(0., 0., 300., 120.)),
+                (below, Rect::new(0., 550., 100., 100.)),
+            ],
         );
-        assert_eq!(page.eval("sizes.join(',')"), "panel 200x100 200,panel 300x120 300");
-        assert_eq!(page.eval("sights.join(',')"), "panel true 1,below false 0,below true 0.5");
+        assert_eq!(
+            page.eval("sizes.join(',')"),
+            "panel 200x100 200,panel 300x120 300"
+        );
+        assert_eq!(
+            page.eval("sights.join(',')"),
+            "panel true 1,below false 0,below true 0.5"
+        );
         // getBoundingClientRect reads the same boxes.
-        assert_eq!(page.eval("document.getElementById('below').getBoundingClientRect().top"), "550");
+        assert_eq!(
+            page.eval("document.getElementById('below').getBoundingClientRect().top"),
+            "550"
+        );
         assert_eq!(page.console(), "");
     });
 }

@@ -9,7 +9,9 @@ use common::{Page, on_page};
 use verve_dom::{Key, Options};
 
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
 }
 
 /// A page with React's production builds and the app in `react-app.js` rendered.
@@ -35,7 +37,10 @@ fn create_root_renders_state_effects_lists_and_conditions() {
     on_page(|| {
         let mut page = app();
         assert_eq!(text(&page, "#inc"), "count: 0");
-        assert_eq!(page.eval("document.querySelectorAll('#list > li.todo').length"), "2");
+        assert_eq!(
+            page.eval("document.querySelectorAll('#list > li.todo').length"),
+            "2"
+        );
         assert_eq!(page.eval("document.title"), "count 0");
         assert_eq!(page.eval("log.join(',')"), "layout true,mount a,mount b");
         // The inline style React set, as the cascade reads it.
@@ -79,7 +84,9 @@ fn a_press_updates_state_and_renders_again() {
         page.document.press(&mut page.runtime, add);
         page.settle();
         assert_eq!(
-            page.eval("[...document.querySelectorAll('.todo .label')].map(l => l.textContent).join(',')"),
+            page.eval(
+                "[...document.querySelectorAll('.todo .label')].map(l => l.textContent).join(',')"
+            ),
             "b,c1"
         );
         assert_eq!(page.eval("log.slice(3).join(',')"), "unmount a,mount c1");
@@ -87,8 +94,14 @@ fn a_press_updates_state_and_renders_again() {
         let check = page.find("#check");
         page.document.press(&mut page.runtime, check);
         page.settle();
-        assert_eq!(page.eval("document.getElementById('check').checked"), "true");
-        assert_eq!(page.eval("document.getElementById('check').parentNode.textContent"), "on");
+        assert_eq!(
+            page.eval("document.getElementById('check').checked"),
+            "true"
+        );
+        assert_eq!(
+            page.eval("document.getElementById('check').parentNode.textContent"),
+            "on"
+        );
         assert_eq!(page.console(), "");
     });
 }
@@ -105,7 +118,8 @@ fn typing_into_a_controlled_input_goes_through_react() {
         // The app makes what is typed upper case: the field shows what React says.
         assert_eq!(page.eval("document.getElementById('field').value"), "HI");
         assert_eq!(text(&page, "#echo"), "HI");
-        page.document.key_down(&mut page.runtime, &Key::named("Backspace"));
+        page.document
+            .key_down(&mut page.runtime, &Key::named("Backspace"));
         page.settle();
         assert_eq!(page.eval("document.getElementById('field').value"), "H");
         assert_eq!(text(&page, "#echo"), "H");
@@ -124,8 +138,14 @@ fn unmounting_cleans_up() {
         let mut page = app();
         page.eval("unmount()");
         page.settle();
-        assert_eq!(page.eval("document.getElementById('root').childNodes.length"), "0");
-        assert_eq!(page.eval("log.slice(3).sort().join(',')"), "unmount a,unmount b");
+        assert_eq!(
+            page.eval("document.getElementById('root').childNodes.length"),
+            "0"
+        );
+        assert_eq!(
+            page.eval("log.slice(3).sort().join(',')"),
+            "unmount a,unmount b"
+        );
         // What React made is let go of, and reclaimed.
         let before = page.document.dom().len();
         let freed = page.document.sweep(&mut page.runtime);

@@ -25,39 +25,39 @@ fn prepared() -> PathBuf {
     // The primitives and the page, and what the packages import but leave to the web client
     // to bundle: their own devDependencies, at the versions they name.
     let package = serde_json::json!({
-            "name": "verve-dom-dsh-check",
-            "private": true,
-            "dependencies": {
-                "@deepseek-ai/dsh-client-ui-primitives": PRIMITIVES,
-                "@deepseek-ai/dsh-client-ui-settings-web-search": "0.1.7-alpha.1",
-                "@deepseek-ai/dsh-client-store": "0.1.7-alpha.1",
-                "@deepseek-ai/dsh-util-workspace-path": "0.1.7-alpha.1",
-                "@deepseek-ai/cordis": "^4.0.3",
-                "react": "18.3.1",
-                "react-dom": "18.3.1",
-                "clsx": "^2.0.0",
-                "diff": "^9.0.0",
-                "anser": "^2.3.5",
-                "katex": "^0.16.47",
-                "micromark-core-commonmark": "^2.0.3",
-                "micromark-util-character": "^2.1.1",
-                "micromark-util-classify-character": "^2.0.1",
-                "micromark-util-symbol": "^2.0.1",
-                "micromark-util-types": "^2.0.2",
-                "micromark-factory-space": "^2.0.1",
-                "micromark-extension-math": "^3.1.0",
-                "micromark-extension-gfm": "^3.0.0",
-                "micromark-util-sanitize-uri": "^2.0.1",
-                "mdast-util-from-markdown": "^2.0.3",
-                "mdast-util-gfm": "^3.1.0",
-                "mdast-util-math": "^3.0.0",
-                "shiki": "^4.3.1",
-                "@shikijs/langs": "^4.3.1",
-                "simple-icons": "16.31.0",
-                "zustand": "~4.4.7",
-                "immer": "^10.1.1"
-            }
-        });
+        "name": "verve-dom-dsh-check",
+        "private": true,
+        "dependencies": {
+            "@deepseek-ai/dsh-client-ui-primitives": PRIMITIVES,
+            "@deepseek-ai/dsh-client-ui-settings-web-search": "0.1.7-alpha.1",
+            "@deepseek-ai/dsh-client-store": "0.1.7-alpha.1",
+            "@deepseek-ai/dsh-util-workspace-path": "0.1.7-alpha.1",
+            "@deepseek-ai/cordis": "^4.0.3",
+            "react": "18.3.1",
+            "react-dom": "18.3.1",
+            "clsx": "^2.0.0",
+            "diff": "^9.0.0",
+            "anser": "^2.3.5",
+            "katex": "^0.16.47",
+            "micromark-core-commonmark": "^2.0.3",
+            "micromark-util-character": "^2.1.1",
+            "micromark-util-classify-character": "^2.0.1",
+            "micromark-util-symbol": "^2.0.1",
+            "micromark-util-types": "^2.0.2",
+            "micromark-factory-space": "^2.0.1",
+            "micromark-extension-math": "^3.1.0",
+            "micromark-extension-gfm": "^3.0.0",
+            "micromark-util-sanitize-uri": "^2.0.1",
+            "mdast-util-from-markdown": "^2.0.3",
+            "mdast-util-gfm": "^3.1.0",
+            "mdast-util-math": "^3.0.0",
+            "shiki": "^4.3.1",
+            "@shikijs/langs": "^4.3.1",
+            "simple-icons": "16.31.0",
+            "zustand": "~4.4.7",
+            "immer": "^10.1.1"
+        }
+    });
     let manifest = serde_json::to_string_pretty(&package).unwrap();
     let installed = std::fs::read_to_string(dir.join("package.json")).ok();
     let marker = dir.join("node_modules/@deepseek-ai/dsh-client-ui-primitives/package.json");
@@ -100,12 +100,16 @@ require('module').registerHooks({
 fn page(dir: &Path) -> Page {
     let mut page = Page::new(Options::default());
     let require = page.runtime.global_require();
-    page.runtime.context().global_object().set(
-        verve::boa_engine::js_string!("__require"),
-        require,
-        false,
-        page.runtime.context(),
-    ).unwrap();
+    page.runtime
+        .context()
+        .global_object()
+        .set(
+            verve::boa_engine::js_string!("__require"),
+            require,
+            false,
+            page.runtime.context(),
+        )
+        .unwrap();
     page.eval(CSS_MODULES);
     let started = std::time::Instant::now();
     let promise = page
@@ -114,7 +118,11 @@ fn page(dir: &Path) -> Page {
         .unwrap_or_else(|e| panic!("the page failed: {e}"));
     page.settle();
     if let verve::boa_engine::builtins::promise::PromiseState::Rejected(error) = promise.state() {
-        panic!("the page failed: {}\n{}", verve::print(&error), page.console());
+        panic!(
+            "the page failed: {}\n{}",
+            verve::print(&error),
+            page.console()
+        );
     }
     eprintln!("the primitives loaded in {:?}", started.elapsed());
     page
@@ -145,20 +153,44 @@ fn the_primitives_render_and_answer_presses() {
         let button = page.find("#save");
         assert_eq!(page.document.dom().text_content(button), "Pressed 0");
         // The Button's CSS module, in the document's cascade.
-        assert!(page.eval("document.querySelectorAll('style').length").parse::<u32>().unwrap() > 0);
-        assert!(page.eval("document.getElementById('save').className").contains("button"), "{}", page.eval("document.getElementById('save').outerHTML"));
+        assert!(
+            page.eval("document.querySelectorAll('style').length")
+                .parse::<u32>()
+                .unwrap()
+                > 0
+        );
+        assert!(
+            page.eval("document.getElementById('save').className")
+                .contains("button"),
+            "{}",
+            page.eval("document.getElementById('save').outerHTML")
+        );
         page.document.press(&mut page.runtime, button);
         page.settle();
         assert_eq!(page.document.dom().text_content(button), "Pressed 1");
         // The settings field: its label for its input, typed into.
-        assert_eq!(page.eval("document.querySelector('label[for=endpoint]').textContent"), "Endpoint");
+        assert_eq!(
+            page.eval("document.querySelector('label[for=endpoint]').textContent"),
+            "Endpoint"
+        );
         let field = page.find("#endpoint");
         page.document.press(&mut page.runtime, field);
         page.document.type_text(&mut page.runtime, "https://x");
         page.settle();
-        assert_eq!(page.eval("document.getElementById('endpoint').value"), "https://x");
-        assert!(page.eval("document.getElementById('demo').textContent").contains("Overridden"));
-        let errors: Vec<String> = page.console().lines().filter(|l| l.starts_with("Error")).map(str::to_owned).collect();
+        assert_eq!(
+            page.eval("document.getElementById('endpoint').value"),
+            "https://x"
+        );
+        assert!(
+            page.eval("document.getElementById('demo').textContent")
+                .contains("Overridden")
+        );
+        let errors: Vec<String> = page
+            .console()
+            .lines()
+            .filter(|l| l.starts_with("Error"))
+            .map(str::to_owned)
+            .collect();
         assert!(errors.is_empty(), "{errors:?}");
     });
 }
@@ -174,35 +206,65 @@ fn the_web_search_settings_page_runs_through_the_module_loader() {
         page.settle();
         assert_eq!(page.eval("pages"), "web-search");
         // Its one-liner, as the Plugins page lists it, and the form itself.
-        page.eval("dsh.renderPage('web-search', 'summary'); dsh.renderPage('web-search', 'detail')");
+        page.eval(
+            "dsh.renderPage('web-search', 'summary'); dsh.renderPage('web-search', 'detail')",
+        );
         page.settle();
-        assert!(page.eval("document.body.textContent").contains("Set up the DeepSeek search provider."));
+        assert!(
+            page.eval("document.body.textContent")
+                .contains("Set up the DeepSeek search provider.")
+        );
         assert_eq!(
-            page.eval("[...document.querySelectorAll('label')].map(l => l.textContent).join(' | ')"),
+            page.eval(
+                "[...document.querySelectorAll('label')].map(l => l.textContent).join(' | ')"
+            ),
             "API key | Endpoint | Max searches per request"
         );
-        assert_eq!(page.eval("document.getElementById('plugin-config-web-search-max-uses').value"), "5");
-        assert_eq!(page.eval("document.querySelector('button[disabled]') !== null"), "true");
+        assert_eq!(
+            page.eval("document.getElementById('plugin-config-web-search-max-uses').value"),
+            "5"
+        );
+        assert_eq!(
+            page.eval("document.querySelector('button[disabled]') !== null"),
+            "true"
+        );
         // Staging an endpoint: the form is dirty, and Save writes it.
         let endpoint = page.find("#plugin-config-web-search-endpoint");
-        page.document.set_layout(&mut page.runtime, [(endpoint, Rect::new(0., 0., 200., 20.))]);
+        page.document.set_layout(
+            &mut page.runtime,
+            [(endpoint, Rect::new(0., 0., 200., 20.))],
+        );
         page.document.press(&mut page.runtime, endpoint);
-        page.document.type_text(&mut page.runtime, "https://search.test");
+        page.document
+            .type_text(&mut page.runtime, "https://search.test");
         page.settle();
-        assert_eq!(page.eval("document.getElementById('plugin-config-web-search-endpoint').value"), "https://search.test");
+        assert_eq!(
+            page.eval("document.getElementById('plugin-config-web-search-endpoint').value"),
+            "https://search.test"
+        );
         let save = page.eval("(() => { const b = [...document.querySelectorAll('button')].find(b => b.textContent === 'Save'); b.id = 'save'; return b.disabled })()");
         assert_eq!(save, "false");
         let save = page.find("#save");
         page.document.press(&mut page.runtime, save);
         page.settle();
         assert!(
-            page.eval("log.join('\\n')").contains(r#"mutate [{"op":"set","path":["baseURL"],"value":"https://search.test"}] at 1"#),
+            page.eval("log.join('\\n')").contains(
+                r#"mutate [{"op":"set","path":["baseURL"],"value":"https://search.test"}] at 1"#
+            ),
             "{}",
             page.eval("log.join('\\n')")
         );
         // Written and read back: overridden now, with its reset.
-        assert!(page.eval("document.body.textContent").contains("Overridden"));
-        let errors: Vec<String> = page.console().lines().filter(|l| l.starts_with("Error")).map(str::to_owned).collect();
+        assert!(
+            page.eval("document.body.textContent")
+                .contains("Overridden")
+        );
+        let errors: Vec<String> = page
+            .console()
+            .lines()
+            .filter(|l| l.starts_with("Error"))
+            .map(str::to_owned)
+            .collect();
         assert!(errors.is_empty(), "{errors:?}");
     });
 }

@@ -74,7 +74,10 @@ fn a_node_left_in_the_document_keeps_its_listeners_without_a_reference() {
         );
         page.document.sweep(&mut page.runtime);
         page.eval("document.querySelector('.go').click()");
-        assert_eq!(page.eval("heard + ' ' + document.querySelector('.go').expando"), "1 still");
+        assert_eq!(
+            page.eval("heard + ' ' + document.querySelector('.go').expando"),
+            "1 still"
+        );
     });
 }
 

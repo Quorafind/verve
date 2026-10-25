@@ -76,13 +76,26 @@ fn hover_from_the_pointer_and_media_from_the_viewport_restyle() {
         assert_eq!(update.snapshot.style(para, "color"), Some("rgb(0, 128, 0)"));
         assert!(page.document.hover_sensitive(para));
         // The pointer onto it: `:hover` applies, and only what changed is restyled.
-        page.document
-            .pointer_move(&mut page.runtime, &Pointer { x: 10., y: 110., ..Pointer::default() });
+        page.document.pointer_move(
+            &mut page.runtime,
+            &Pointer {
+                x: 10.,
+                y: 110.,
+                ..Pointer::default()
+            },
+        );
         let update = page.document.update();
         assert_eq!(update.snapshot.style(para, "color"), Some("rgb(255, 0, 0)"));
-        assert!(update.changes.restyled.contains(&para), "{:?}", update.changes);
+        assert!(
+            update.changes.restyled.contains(&para),
+            "{:?}",
+            update.changes
+        );
         assert!(!update.changes.restyled_all);
-        assert_eq!(page.eval("getComputedStyle(document.getElementById('para')).color"), "rgb(255, 0, 0)");
+        assert_eq!(
+            page.eval("getComputedStyle(document.getElementById('para')).color"),
+            "rgb(255, 0, 0)"
+        );
         page.document.pointer_leave(&mut page.runtime);
         let update = page.document.update();
         assert_eq!(update.snapshot.style(para, "color"), Some("rgb(0, 128, 0)"));
@@ -96,12 +109,21 @@ fn hover_from_the_pointer_and_media_from_the_viewport_restyle() {
         // A sheet added later restyles what it matches.
         page.eval("const s = document.createElement('style'); s.textContent = '#para { text-decoration: underline }'; document.head.append(s)");
         let update = page.document.update();
-        assert_eq!(update.snapshot.style(para, "text-decoration"), Some("underline"));
+        assert_eq!(
+            update.snapshot.style(para, "text-decoration"),
+            Some("underline")
+        );
         // And one the embedder adds, under the page's: what the page says too stays the page's.
-        page.document.set_stylesheet("theme", ":root { --accent: rgb(1, 2, 3) } #para { text-decoration: none; letter-spacing: 1px }");
+        page.document.set_stylesheet(
+            "theme",
+            ":root { --accent: rgb(1, 2, 3) } #para { text-decoration: none; letter-spacing: 1px }",
+        );
         let update = page.document.update();
         assert_eq!(update.snapshot.style(para, "color"), Some("rgb(0, 128, 0)"));
-        assert_eq!(update.snapshot.style(para, "text-decoration"), Some("underline"));
+        assert_eq!(
+            update.snapshot.style(para, "text-decoration"),
+            Some("underline")
+        );
         assert_eq!(update.snapshot.style(para, "letter-spacing"), Some("1px"));
         assert_eq!(page.console(), "");
     });
@@ -112,7 +134,9 @@ fn a_change_dirties_only_its_partition_and_restyles_only_its_subtree() {
     on_page(|| {
         let mut page = Page::new(Options::default());
         page.eval(PAGE);
-        page.eval("document.body.insertAdjacentHTML('beforeend', '<aside id=side><b>x</b></aside>')");
+        page.eval(
+            "document.body.insertAdjacentHTML('beforeend', '<aside id=side><b>x</b></aside>')",
+        );
         let main = page.find("#main");
         let side = page.find("#side");
         page.document.set_partition(main, true);

@@ -40,7 +40,11 @@ pub fn with_dom<R>(context: &mut Context, f: impl FnOnce(&mut Dom) -> R) -> R {
         let mutated = state.dom.has_mutations() && !state.mutation_queued;
         let moved = state.dom.take_moved();
         // Only custom elements hear their subtrees come and go.
-        let moved = if state.custom_nodes.is_empty() { Vec::new() } else { moved };
+        let moved = if state.custom_nodes.is_empty() {
+            Vec::new()
+        } else {
+            moved
+        };
         (result, state.dom.has_relinked(), mutated, moved)
     };
     if relink_due {
@@ -70,7 +74,14 @@ pub fn existing_wrapper(context: &Context, id: NodeId) -> Option<JsObject> {
 fn class_name(dom: &Dom, id: NodeId) -> Option<&'static str> {
     let node = dom.get(id)?;
     Some(match &node.kind {
-        NodeKind::Document if dom.children(id).iter().any(|c| dom.get(*c).and_then(|n| n.tag()) == Some("html")) => "HTMLDocument",
+        NodeKind::Document
+            if dom
+                .children(id)
+                .iter()
+                .any(|c| dom.get(*c).and_then(|n| n.tag()) == Some("html")) =>
+        {
+            "HTMLDocument"
+        }
         NodeKind::Document => "Document",
         NodeKind::Text(_) => "Text",
         NodeKind::Comment(_) => "Comment",
@@ -244,14 +255,18 @@ pub fn insert(
     if !reference_ok {
         return Err(dom_error(
             context,
-            &format!("Failed to execute '{method}' on 'Node': The node before which the new node is to be inserted is not a child of this node."),
+            &format!(
+                "Failed to execute '{method}' on 'Node': The node before which the new node is to be inserted is not a child of this node."
+            ),
             "NotFoundError",
         ));
     }
     if !allowed {
         return Err(dom_error(
             context,
-            &format!("Failed to execute '{method}' on 'Node': The new child element contains the parent."),
+            &format!(
+                "Failed to execute '{method}' on 'Node': The new child element contains the parent."
+            ),
             "HierarchyRequestError",
         ));
     }
@@ -280,13 +295,15 @@ const NODE_ACCESSORS: &[Accessor] = &[
         "nodeName",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| match dom.get(id).map(|n| &n.kind) {
-                Some(NodeKind::Element(_)) => crate::html::qualified_name(dom, id, true),
-                Some(NodeKind::Text(_)) => "#text".into(),
-                Some(NodeKind::Comment(_)) => "#comment".into(),
-                Some(NodeKind::Document) => "#document".into(),
-                Some(NodeKind::Doctype(name)) => name.clone(),
-                _ => "#document-fragment".into(),
+            Ok(text(&read_dom(cx, |dom| {
+                match dom.get(id).map(|n| &n.kind) {
+                    Some(NodeKind::Element(_)) => crate::html::qualified_name(dom, id, true),
+                    Some(NodeKind::Text(_)) => "#text".into(),
+                    Some(NodeKind::Comment(_)) => "#comment".into(),
+                    Some(NodeKind::Document) => "#document".into(),
+                    Some(NodeKind::Doctype(name)) => name.clone(),
+                    _ => "#document-fragment".into(),
+                }
             })))
         }),
         None,
@@ -367,7 +384,10 @@ const NODE_ACCESSORS: &[Accessor] = &[
             let id = node_of(this)?;
             let value = opt_string(args, 0, cx)?.unwrap_or_default();
             with_dom(cx, |dom| {
-                if !matches!(dom.get(id).map(|n| &n.kind), Some(NodeKind::Document | NodeKind::Doctype(_))) {
+                if !matches!(
+                    dom.get(id).map(|n| &n.kind),
+                    Some(NodeKind::Document | NodeKind::Doctype(_))
+                ) {
                     dom.set_text(id, &value)
                 }
             });
@@ -555,14 +575,19 @@ const NODE_METHODS: &[Method] = &[
         if prefix.is_some() {
             return Ok(JsValue::null());
         }
-        Ok(read_dom(cx, |dom| dom.get(id).and_then(|n| n.namespace.uri()))
-            .map_or(JsValue::null(), text))
+        Ok(
+            read_dom(cx, |dom| dom.get(id).and_then(|n| n.namespace.uri()))
+                .map_or(JsValue::null(), text),
+        )
     }),
     ("lookupPrefix", 1, |_, _, _| Ok(JsValue::null())),
     ("isDefaultNamespace", 1, |this, args, cx| {
         let id = node_of(this)?;
         let uri = opt_string(args, 0, cx)?;
-        Ok((read_dom(cx, |dom| dom.get(id).and_then(|n| n.namespace.uri())) == uri.as_deref()).into())
+        Ok(
+            (read_dom(cx, |dom| dom.get(id).and_then(|n| n.namespace.uri())) == uri.as_deref())
+                .into(),
+        )
     }),
 ];
 
@@ -687,7 +712,10 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
             }
             dom.descendants(id)
                 .into_iter()
-                .filter(|n| dom.get(*n).is_some_and(|n| wanted.iter().all(|c| n.has_class(c))))
+                .filter(|n| {
+                    dom.get(*n)
+                        .is_some_and(|n| wanted.iter().all(|c| n.has_class(c)))
+                })
                 .collect()
         });
         Ok(collection(found, cx))
@@ -725,7 +753,10 @@ pub fn query_selector(
     crate::css::SelectorList::parse(&selector).map_err(|error| {
         dom_error(
             context,
-            &format!("Failed to execute 'querySelector' on 'Document': {}", error.0),
+            &format!(
+                "Failed to execute 'querySelector' on 'Document': {}",
+                error.0
+            ),
             "SyntaxError",
         )
     })
@@ -799,7 +830,11 @@ pub const CHILD_NODE_METHODS: &[Method] = &[
         };
         let node = convert_nodes(args, cx)?;
         let next = read_dom(cx, |dom| dom.sibling(id, 1, false));
-        let next = if next == Some(node) { read_dom(cx, |dom| dom.sibling(node, 1, false)) } else { next };
+        let next = if next == Some(node) {
+            read_dom(cx, |dom| dom.sibling(node, 1, false))
+        } else {
+            next
+        };
         insert(cx, parent, node, next, "after")?;
         Ok(JsValue::undefined())
     }),
@@ -843,7 +878,9 @@ pub const CHILD_NODE_ACCESSORS: &[Accessor] = &[
 
 fn data_of(this: &JsValue, context: &Context) -> JsResult<(NodeId, String)> {
     let id = node_of(this)?;
-    let data = read_dom(context, |dom| dom.get(id).and_then(|n| n.data()).map(str::to_owned));
+    let data = read_dom(context, |dom| {
+        dom.get(id).and_then(|n| n.data()).map(str::to_owned)
+    });
     data.map(|d| (id, d))
         .ok_or_else(|| type_error("Illegal invocation: not CharacterData"))
 }
@@ -967,7 +1004,10 @@ const TEXT_ACCESSORS: &[Accessor] = &[
             let id = node_of(this)?;
             Ok(text(&read_dom(cx, |dom| {
                 let mut start = id;
-                while let Some(previous) = dom.sibling(start, -1, false).filter(|p| dom.get(*p).is_some_and(|n| n.is_text())) {
+                while let Some(previous) = dom
+                    .sibling(start, -1, false)
+                    .filter(|p| dom.get(*p).is_some_and(|n| n.is_text()))
+                {
                     start = previous;
                 }
                 let mut out = String::new();
@@ -1003,9 +1043,11 @@ const DOCTYPE_ACCESSORS: &[Accessor] = &[
         "name",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| match dom.get(id).map(|n| &n.kind) {
-                Some(NodeKind::Doctype(name)) => name.clone(),
-                _ => String::new(),
+            Ok(text(&read_dom(cx, |dom| {
+                match dom.get(id).map(|n| &n.kind) {
+                    Some(NodeKind::Doctype(name)) => name.clone(),
+                    _ => String::new(),
+                }
             })))
         }),
         None,
@@ -1074,8 +1116,16 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    let (_, character_data) = shared(context).borrow().class("CharacterData").expect("made");
-    super::extend_prototype(context, &character_data, CHILD_NODE_METHODS, CHILD_NODE_ACCESSORS)?;
+    let (_, character_data) = shared(context)
+        .borrow()
+        .class("CharacterData")
+        .expect("made");
+    super::extend_prototype(
+        context,
+        &character_data,
+        CHILD_NODE_METHODS,
+        CHILD_NODE_ACCESSORS,
+    )?;
     class(
         context,
         ClassSpec {
@@ -1134,7 +1184,10 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    let (_, fragment) = shared(context).borrow().class("DocumentFragment").expect("made");
+    let (_, fragment) = shared(context)
+        .borrow()
+        .class("DocumentFragment")
+        .expect("made");
     super::extend_prototype(
         context,
         &fragment,
@@ -1193,7 +1246,11 @@ const LIST_METHODS: &[Method] = &[("item", 1, |this, args, cx| {
         Some(list) if at >= 0. => list.get(at as u32, cx)?,
         _ => JsValue::undefined(),
     };
-    Ok(if found.is_undefined() { JsValue::null() } else { found })
+    Ok(if found.is_undefined() {
+        JsValue::null()
+    } else {
+        found
+    })
 })];
 
 const COLLECTION_METHODS: &[Method] = &[
@@ -1203,7 +1260,11 @@ const COLLECTION_METHODS: &[Method] = &[
             Some(list) if at >= 0. => list.get(at as u32, cx)?,
             _ => JsValue::undefined(),
         };
-        Ok(if found.is_undefined() { JsValue::null() } else { found })
+        Ok(if found.is_undefined() {
+            JsValue::null()
+        } else {
+            found
+        })
     }),
     ("namedItem", 1, |this, args, cx| {
         let name = arg_string(args, 0, cx)?;

@@ -81,7 +81,10 @@ pub(crate) enum Kind {
     /// A host's own target — a node of its document — by the number the host knows it by, with
     /// the objects the host keeps alive with it: a node's parent and children, so a tree a
     /// script holds any part of stays whole.
-    Host { id: u64, held: Vec<JsObject> },
+    Host {
+        id: u64,
+        held: Vec<JsObject>,
+    },
 }
 
 #[derive(Trace, Finalize, JsData)]
@@ -1302,9 +1305,15 @@ pub fn classes(context: &mut Context) -> JsResult<Classes> {
             .ok_or_else(|| type_error("a class without a prototype"))
     };
     Ok(Classes {
-        event_target: (dom.event_target.clone(), prototype(&dom.event_target, context)?),
+        event_target: (
+            dom.event_target.clone(),
+            prototype(&dom.event_target, context)?,
+        ),
         event: (dom.event.clone(), prototype(&dom.event, context)?),
-        custom_event: (dom.custom_event.clone(), prototype(&dom.custom_event, context)?),
+        custom_event: (
+            dom.custom_event.clone(),
+            prototype(&dom.custom_event, context)?,
+        ),
     })
 }
 

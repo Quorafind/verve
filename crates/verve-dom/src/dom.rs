@@ -429,7 +429,11 @@ impl Dom {
             let mut out = Vec::new();
             let mut at = id;
             while let Some(parent) = self.parent(at) {
-                let index = self.children(parent).iter().position(|c| *c == at).unwrap_or(0);
+                let index = self
+                    .children(parent)
+                    .iter()
+                    .position(|c| *c == at)
+                    .unwrap_or(0);
                 out.push(index);
                 at = parent;
             }
@@ -658,7 +662,10 @@ impl Dom {
         if let Some(node) = self.node_mut(id) {
             node.parent = None;
         }
-        if self.focused.is_some_and(|focused| self.contains(id, focused)) {
+        if self
+            .focused
+            .is_some_and(|focused| self.contains(id, focused))
+        {
             self.focused = None;
         }
         if self.active.is_some_and(|active| self.contains(id, active)) {
@@ -693,8 +700,10 @@ impl Dom {
         }
         let parent_kind = &self.get(parent).expect("checked").kind;
         let child_kind = &self.get(child).expect("checked").kind;
-        !matches!(parent_kind, NodeKind::Text(_) | NodeKind::Comment(_) | NodeKind::Doctype(_))
-            && !matches!(child_kind, NodeKind::Document)
+        !matches!(
+            parent_kind,
+            NodeKind::Text(_) | NodeKind::Comment(_) | NodeKind::Doctype(_)
+        ) && !matches!(child_kind, NodeKind::Document)
     }
 
     /// Puts `child` in `parent` before `before`, or last. Refuses what would make a loop.
@@ -962,7 +971,13 @@ impl Dom {
         self.set_style_important(id, property, value, false);
     }
 
-    pub fn set_style_important(&mut self, id: NodeId, property: &str, value: &str, important: bool) {
+    pub fn set_style_important(
+        &mut self,
+        id: NodeId,
+        property: &str,
+        value: &str,
+        important: bool,
+    ) {
         let old = self.get_attr(id, "style");
         let Some(node) = self.node_mut(id) else {
             return;
@@ -1074,9 +1089,10 @@ impl Dom {
 
     /// An option's value: its `value` attribute, or its text.
     pub fn option_value(&self, option: NodeId) -> String {
-        self.get(option)
-            .and_then(|n| n.attr("value"))
-            .map_or_else(|| self.text_content(option).trim().to_owned(), str::to_owned)
+        self.get(option).and_then(|n| n.attr("value")).map_or_else(
+            || self.text_content(option).trim().to_owned(),
+            str::to_owned,
+        )
     }
 
     /// The option a `<select>` has chosen.
@@ -1179,7 +1195,6 @@ impl Dom {
                 }
             }
         }
-        self.relinked.clear();
         Some(copy)
     }
 

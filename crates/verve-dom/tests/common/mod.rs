@@ -21,7 +21,11 @@ impl Page {
         let time = clock.clone();
         let mut runtime = Runtime::with_clock(move || time.get());
         let document = verve_dom::install(&mut runtime, options).expect("the document installs");
-        Page { runtime, document, clock }
+        Page {
+            runtime,
+            document,
+            clock,
+        }
     }
 
     /// Evaluates `source` as a script and answers its value as `console.log` would print it;
@@ -43,7 +47,9 @@ impl Page {
         let start = self.clock.get();
         self.runtime.run_microtasks();
         for _ in 0..100_000 {
-            let Some(due) = self.runtime.next_due() else { break };
+            let Some(due) = self.runtime.next_due() else {
+                break;
+            };
             if due > start + limit {
                 break;
             }

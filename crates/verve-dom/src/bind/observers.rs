@@ -14,24 +14,52 @@
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 
 use super::node::{node_list, read_dom, wrap, wrap_opt};
-use super::{ClassSpec, Kind, Method, arg, array, class, get, handle_of, instance, list, node_of, plain_object, set, string, text, type_error};
+use super::{
+    ClassSpec, Kind, Method, arg, array, class, get, handle_of, instance, list, node_of,
+    plain_object, set, string, text, type_error,
+};
 use crate::Rect;
 use crate::dom::{Mutation, NodeId};
 use crate::state::{MutationOptions, ObservedTarget, ObserverRecord, Watch, shared};
 
-fn construct(new_target: &JsValue, args: &[JsValue], context: &mut Context, watch: Watch) -> JsResult<JsValue> {
+fn construct(
+    new_target: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+    watch: Watch,
+) -> JsResult<JsValue> {
     let callback = arg(args, 0);
     if !callback.is_callable() {
-        return Err(type_error("Failed to construct an observer: The callback provided as parameter 1 is not a function."));
+        return Err(type_error(
+            "Failed to construct an observer: The callback provided as parameter 1 is not a function.",
+        ));
     }
     let id = shared(context).borrow_mut().id();
     let object = instance(new_target, Kind::Plain, id, context)?;
     if watch == Watch::Intersection {
         let options = arg(args, 1);
         let root = get(&options, "root", context)?;
-        set(&object, "root", if root.is_undefined() { JsValue::null() } else { root }, context)?;
+        set(
+            &object,
+            "root",
+            if root.is_undefined() {
+                JsValue::null()
+            } else {
+                root
+            },
+            context,
+        )?;
         let margin = get(&options, "rootMargin", context)?;
-        set(&object, "rootMargin", if margin.is_undefined() { text("0px 0px 0px 0px") } else { margin }, context)?;
+        set(
+            &object,
+            "rootMargin",
+            if margin.is_undefined() {
+                text("0px 0px 0px 0px")
+            } else {
+                margin
+            },
+            context,
+        )?;
         let threshold = get(&options, "threshold", context)?;
         let thresholds = if threshold.is_undefined() {
             array(vec![0.into()], context)
@@ -59,8 +87,13 @@ fn watch_of(code: u32) -> Watch {
 
 /// The observer's record, made again if the host let go of it while it watched nothing.
 fn record_id(this: &JsValue, context: &mut Context) -> JsResult<u32> {
-    let id = handle_of(this, Kind::Plain).ok_or_else(|| type_error("Illegal invocation: not an observer"))?;
-    let known = shared(context).borrow().observers.iter().any(|o| o.id == id);
+    let id = handle_of(this, Kind::Plain)
+        .ok_or_else(|| type_error("Illegal invocation: not an observer"))?;
+    let known = shared(context)
+        .borrow()
+        .observers
+        .iter()
+        .any(|o| o.id == id);
     if !known {
         let callback = get(this, "__callback", context)?;
         let watch = watch_of(get(this, "__watch", context)?.to_u32(context)?);
@@ -77,7 +110,11 @@ fn record_id(this: &JsValue, context: &mut Context) -> JsResult<u32> {
     Ok(id)
 }
 
-fn with_record<R>(id: u32, context: &Context, f: impl FnOnce(&mut ObserverRecord) -> R) -> Option<R> {
+fn with_record<R>(
+    id: u32,
+    context: &Context,
+    f: impl FnOnce(&mut ObserverRecord) -> R,
+) -> Option<R> {
     let state = shared(context);
     let mut state = state.borrow_mut();
     state.observers.iter_mut().find(|o| o.id == id).map(f)
@@ -88,8 +125,13 @@ fn with_record<R>(id: u32, context: &Context, f: impl FnOnce(&mut ObserverRecord
 fn let_go_if_idle(id: u32, context: &Context) {
     let state = shared(context);
     let mut state = state.borrow_mut();
-    state.observers.retain(|o| o.id != id || !o.targets.is_empty() || !o.records.is_empty());
-    let recording = state.observers.iter().any(|o| o.watch == Watch::Mutation && !o.targets.is_empty());
+    state
+        .observers
+        .retain(|o| o.id != id || !o.targets.is_empty() || !o.records.is_empty());
+    let recording = state
+        .observers
+        .iter()
+        .any(|o| o.watch == Watch::Mutation && !o.targets.is_empty());
     state.dom.record_mutations = recording;
 }
 
@@ -103,7 +145,12 @@ fn mutation_options(options: &JsValue, context: &mut Context) -> JsResult<Mutati
     let filter = if filter.is_undefined() {
         None
     } else {
-        Some(list(&filter, context)?.iter().map(|v| string(v, context)).collect::<JsResult<Vec<_>>>()?)
+        Some(
+            list(&filter, context)?
+                .iter()
+                .map(|v| string(v, context))
+                .collect::<JsResult<Vec<_>>>()?,
+        )
     };
     let old_attributes = flag(options, "attributeOldValue", context)?;
     let old_data = flag(options, "characterDataOldValue", context)?;
@@ -112,7 +159,9 @@ fn mutation_options(options: &JsValue, context: &mut Context) -> JsResult<Mutati
     let character_data = flag(options, "characterData", context)?.unwrap_or(old_data == Some(true));
     let child_list = flag(options, "childList", context)?.unwrap_or(false);
     if !child_list && !attributes && !character_data {
-        return Err(type_error("Failed to execute 'observe' on 'MutationObserver': The options object must set at least one of 'attributes', 'characterData', or 'childList' to true."));
+        return Err(type_error(
+            "Failed to execute 'observe' on 'MutationObserver': The options object must set at least one of 'attributes', 'characterData', or 'childList' to true.",
+        ));
     }
     Ok(MutationOptions {
         child_list,
@@ -130,7 +179,11 @@ const OBSERVER_METHODS: &[Method] = &[
         let node = super::node_arg(args, 0, "observe", "Observer")?;
         let id = record_id(this, cx)?;
         let watch = watch_of(get(this, "__watch", cx)?.to_u32(cx)?);
-        let options = if watch == Watch::Mutation { mutation_options(&arg(args, 1), cx)? } else { MutationOptions::default() };
+        let options = if watch == Watch::Mutation {
+            mutation_options(&arg(args, 1), cx)?
+        } else {
+            MutationOptions::default()
+        };
         with_record(id, cx, |record| {
             record.targets.retain(|t| t.node != node);
             record.targets.push(ObservedTarget {
@@ -170,7 +223,8 @@ const OBSERVER_METHODS: &[Method] = &[
         let id = record_id(this, cx)?;
         // What the document recorded and has not yet handed out is this observer's too.
         distribute(cx);
-        let records = with_record(id, cx, |record| std::mem::take(&mut record.records)).unwrap_or_default();
+        let records =
+            with_record(id, cx, |record| std::mem::take(&mut record.records)).unwrap_or_default();
         let mut out = Vec::new();
         for mutation in records {
             out.push(mutation_record(cx, &mutation)?);
@@ -188,14 +242,21 @@ pub fn queue_delivery(context: &mut Context) {
         deliver_mutations(cx)?;
         Ok(JsValue::undefined())
     });
-    let queue = context.global_object().get(js_string!("queueMicrotask"), context);
+    let queue = context
+        .global_object()
+        .get(js_string!("queueMicrotask"), context);
     if let Ok(queue) = queue {
         let _ = verve::call(context, &queue, &JsValue::undefined(), &[deliver.into()]);
     }
 }
 
 /// Whether `observer` (with `options` on `target`) hears `mutation`.
-fn hears(dom: &crate::dom::Dom, target: NodeId, options: &MutationOptions, mutation: &Mutation) -> bool {
+fn hears(
+    dom: &crate::dom::Dom,
+    target: NodeId,
+    options: &MutationOptions,
+    mutation: &Mutation,
+) -> bool {
     let at = mutation.target();
     let reaches = at == target || (options.subtree && dom.contains(target, at));
     if !reaches {
@@ -205,7 +266,10 @@ fn hears(dom: &crate::dom::Dom, target: NodeId, options: &MutationOptions, mutat
         Mutation::ChildList { .. } => options.child_list,
         Mutation::Attributes { name, .. } => {
             options.attributes
-                && options.attribute_filter.as_ref().is_none_or(|f| f.iter().any(|n| n == name))
+                && options
+                    .attribute_filter
+                    .as_ref()
+                    .is_none_or(|f| f.iter().any(|n| n == name))
         }
         Mutation::CharacterData { .. } => options.character_data,
     }
@@ -220,15 +284,28 @@ fn distribute(context: &mut Context) {
         return;
     }
     let state = &mut *state;
-    for observer in state.observers.iter_mut().filter(|o| o.watch == Watch::Mutation) {
+    for observer in state
+        .observers
+        .iter_mut()
+        .filter(|o| o.watch == Watch::Mutation)
+    {
         for mutation in &mutations {
-            let heard = observer.targets.iter().find(|t| hears(&state.dom, t.node, &t.options, mutation));
+            let heard = observer
+                .targets
+                .iter()
+                .find(|t| hears(&state.dom, t.node, &t.options, mutation));
             if let Some(target) = heard {
                 let mut kept = mutation.clone();
                 // Old values only for whoever asked for them.
                 match &mut kept {
-                    Mutation::Attributes { old, .. } if !target.options.attribute_old_value => *old = None,
-                    Mutation::CharacterData { old, .. } if !target.options.character_data_old_value => old.clear(),
+                    Mutation::Attributes { old, .. } if !target.options.attribute_old_value => {
+                        *old = None
+                    }
+                    Mutation::CharacterData { old, .. }
+                        if !target.options.character_data_old_value =>
+                    {
+                        old.clear()
+                    }
                     _ => {}
                 }
                 observer.records.push(kept);
@@ -245,7 +322,13 @@ fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsVal
     set(&record, "target", target, context)?;
     let empty = node_list(Vec::new(), context);
     match mutation {
-        Mutation::ChildList { added, removed, previous, next, .. } => {
+        Mutation::ChildList {
+            added,
+            removed,
+            previous,
+            next,
+            ..
+        } => {
             set(&record, "type", text("childList"), context)?;
             let added = node_list(added.clone(), context);
             set(&record, "addedNodes", added, context)?;
@@ -265,7 +348,12 @@ fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsVal
             set(&record, "previousSibling", JsValue::null(), context)?;
             set(&record, "nextSibling", JsValue::null(), context)?;
             set(&record, "attributeName", text(name), context)?;
-            set(&record, "oldValue", old.as_deref().map_or(JsValue::null(), text), context)?;
+            set(
+                &record,
+                "oldValue",
+                old.as_deref().map_or(JsValue::null(), text),
+                context,
+            )?;
         }
         Mutation::CharacterData { old, .. } => {
             set(&record, "type", text("characterData"), context)?;
@@ -274,7 +362,16 @@ fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsVal
             set(&record, "previousSibling", JsValue::null(), context)?;
             set(&record, "nextSibling", JsValue::null(), context)?;
             set(&record, "attributeName", JsValue::null(), context)?;
-            set(&record, "oldValue", if old.is_empty() { JsValue::null() } else { text(old) }, context)?;
+            set(
+                &record,
+                "oldValue",
+                if old.is_empty() {
+                    JsValue::null()
+                } else {
+                    text(old)
+                },
+                context,
+            )?;
         }
     }
     set(&record, "attributeNamespace", JsValue::null(), context)?;
@@ -293,7 +390,13 @@ pub fn deliver_mutations(context: &mut Context) -> JsResult<()> {
             .observers
             .iter_mut()
             .filter(|o| o.watch == Watch::Mutation && !o.records.is_empty())
-            .map(|o| (o.callback.clone(), o.object.clone(), std::mem::take(&mut o.records)))
+            .map(|o| {
+                (
+                    o.callback.clone(),
+                    o.object.clone(),
+                    std::mem::take(&mut o.records),
+                )
+            })
             .collect()
     };
     for (callback, observer, mutations) in due {
@@ -308,7 +411,12 @@ pub fn deliver_mutations(context: &mut Context) -> JsResult<()> {
             continue;
         }
         let list = array(records, context);
-        if let Err(error) = verve::call(context, &callback, &observer.clone().into(), &[list, observer.into()]) {
+        if let Err(error) = verve::call(
+            context,
+            &callback,
+            &observer.clone().into(),
+            &[list, observer.into()],
+        ) {
             verve::report(context, &error);
         }
     }
@@ -330,7 +438,15 @@ fn schedule_layout_delivery(context: &mut Context) {
 }
 
 fn rect_object(context: &mut Context, rect: Rect) -> JsResult<JsValue> {
-    super::platform::make_rect(context, [f64::from(rect.x), f64::from(rect.y), f64::from(rect.width), f64::from(rect.height)])
+    super::platform::make_rect(
+        context,
+        [
+            f64::from(rect.x),
+            f64::from(rect.y),
+            f64::from(rect.width),
+            f64::from(rect.height),
+        ],
+    )
 }
 
 fn size_object(context: &mut Context, width: f32, height: f32) -> JsResult<JsValue> {
@@ -363,7 +479,12 @@ pub fn deliver_layout(context: &mut Context) -> JsResult<bool> {
         if let Some((callback, object)) = found {
             told = true;
             let list = array(entries, context);
-            if let Err(error) = verve::call(context, &callback, &object.clone().into(), &[list, object.into()]) {
+            if let Err(error) = verve::call(
+                context,
+                &callback,
+                &object.clone().into(),
+                &[list, object.into()],
+            ) {
                 verve::report(context, &error);
             }
         }
@@ -372,7 +493,10 @@ pub fn deliver_layout(context: &mut Context) -> JsResult<bool> {
 }
 
 fn resize_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>> {
-    let targets: Vec<(NodeId, Option<[f32; 4]>)> = with_record(id, context, |o| o.targets.iter().map(|t| (t.node, t.last)).collect()).unwrap_or_default();
+    let targets: Vec<(NodeId, Option<[f32; 4]>)> = with_record(id, context, |o| {
+        o.targets.iter().map(|t| (t.node, t.last)).collect()
+    })
+    .unwrap_or_default();
     let mut out = Vec::new();
     for (node, last) in targets {
         if !read_dom(context, |dom| dom.exists(node)) {
@@ -392,9 +516,21 @@ fn resize_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>> {
         entry.set_prototype(Some(prototype));
         let target = wrap(context, node);
         set(&entry, "target", target, context)?;
-        let rect = rect_object(context, Rect { x: 0., y: 0., width: now.width, height: now.height })?;
+        let rect = rect_object(
+            context,
+            Rect {
+                x: 0.,
+                y: 0.,
+                width: now.width,
+                height: now.height,
+            },
+        )?;
         set(&entry, "contentRect", rect, context)?;
-        for key in ["borderBoxSize", "contentBoxSize", "devicePixelContentBoxSize"] {
+        for key in [
+            "borderBoxSize",
+            "contentBoxSize",
+            "devicePixelContentBoxSize",
+        ] {
             let size = size_object(context, now.width, now.height)?;
             let sizes = array(vec![size], context);
             set(&entry, key, sizes, context)?;
@@ -405,10 +541,14 @@ fn resize_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>> {
 }
 
 fn intersection_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>> {
-    let (targets, object): (Vec<(NodeId, Option<bool>)>, Option<JsObject>) = with_record(id, context, |o| {
-        (o.targets.iter().map(|t| (t.node, t.intersecting)).collect(), Some(o.object.clone()))
-    })
-    .unwrap_or_default();
+    let (targets, object): (Vec<(NodeId, Option<bool>)>, Option<JsObject>) =
+        with_record(id, context, |o| {
+            (
+                o.targets.iter().map(|t| (t.node, t.intersecting)).collect(),
+                Some(o.object.clone()),
+            )
+        })
+        .unwrap_or_default();
     let root = match &object {
         Some(object) => super::node_id(&object.get(js_string!("root"), context)?),
         None => None,
@@ -417,7 +557,12 @@ fn intersection_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>
         Some(root) => super::element::painted(context, root),
         None => {
             let env = shared(context).borrow().env.clone();
-            Rect { x: 0., y: 0., width: env.width, height: env.height }
+            Rect {
+                x: 0.,
+                y: 0.,
+                width: env.width,
+                height: env.height,
+            }
         }
     };
     let mut out = Vec::new();
@@ -447,7 +592,9 @@ fn intersection_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>
             1.
         };
         let entry = plain_object(context);
-        let prototype = shared(context).borrow().prototype("IntersectionObserverEntry");
+        let prototype = shared(context)
+            .borrow()
+            .prototype("IntersectionObserverEntry");
         entry.set_prototype(Some(prototype));
         let target = wrap(context, node);
         set(&entry, "target", target, context)?;
@@ -468,24 +615,69 @@ fn intersection_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>
 
 /// Whether any observer of the layout is watching anything.
 pub fn watching_layout(context: &Context) -> bool {
-    shared(context).borrow().observers.iter().any(|o| o.watch != Watch::Mutation && !o.targets.is_empty())
+    shared(context)
+        .borrow()
+        .observers
+        .iter()
+        .any(|o| o.watch != Watch::Mutation && !o.targets.is_empty())
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
     for (name, construct_fn) in [
-        ("ResizeObserver", (|t, a, c| construct(t, a, c, Watch::Resize)) as boa_engine::native_function::NativeFunctionPointer),
-        ("MutationObserver", |t, a, c| construct(t, a, c, Watch::Mutation)),
-        ("IntersectionObserver", |t, a, c| construct(t, a, c, Watch::Intersection)),
+        (
+            "ResizeObserver",
+            (|t, a, c| construct(t, a, c, Watch::Resize))
+                as boa_engine::native_function::NativeFunctionPointer,
+        ),
+        ("MutationObserver", |t, a, c| {
+            construct(t, a, c, Watch::Mutation)
+        }),
+        ("IntersectionObserver", |t, a, c| {
+            construct(t, a, c, Watch::Intersection)
+        }),
     ] {
-        class(context, ClassSpec { name, length: 1, construct: construct_fn, parent: None, methods: OBSERVER_METHODS, accessors: &[], statics: &[], global: true })?;
+        class(
+            context,
+            ClassSpec {
+                name,
+                length: 1,
+                construct: construct_fn,
+                parent: None,
+                methods: OBSERVER_METHODS,
+                accessors: &[],
+                statics: &[],
+                global: true,
+            },
+        )?;
     }
     context.register_global_property(
         js_string!("WebKitMutationObserver"),
-        shared(context).borrow().class("MutationObserver").expect("made").0,
+        shared(context)
+            .borrow()
+            .class("MutationObserver")
+            .expect("made")
+            .0,
         boa_engine::property::Attribute::WRITABLE | boa_engine::property::Attribute::CONFIGURABLE,
     )?;
-    for name in ["MutationRecord", "ResizeObserverEntry", "IntersectionObserverEntry", "ResizeObserverSize"] {
-        class(context, ClassSpec { name, length: 0, construct: super::illegal_constructor, parent: None, methods: &[], accessors: &[], statics: &[], global: true })?;
+    for name in [
+        "MutationRecord",
+        "ResizeObserverEntry",
+        "IntersectionObserverEntry",
+        "ResizeObserverSize",
+    ] {
+        class(
+            context,
+            ClassSpec {
+                name,
+                length: 0,
+                construct: super::illegal_constructor,
+                parent: None,
+                methods: &[],
+                accessors: &[],
+                statics: &[],
+                global: true,
+            },
+        )?;
     }
     let _ = JsString::from("");
     Ok(())

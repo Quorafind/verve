@@ -58,5 +58,8 @@ fn verve_dom_run_runs_a_script_with_a_document() {
         .output()
         .expect("verve-dom runs");
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hi object about:blank");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "hi object about:blank"
+    );
 }

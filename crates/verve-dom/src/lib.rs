@@ -44,7 +44,7 @@ pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
 pub use field::Draft;
 pub use state::FrameClock;
 
-use state::{SheetOwner, SheetRecord, Shared, State, shared};
+use state::{Shared, SheetOwner, SheetRecord, State, shared};
 
 /// A box, in CSS pixels from the viewport's top left.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -57,7 +57,12 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn contains(&self, x: f32, y: f32) -> bool {
@@ -80,8 +85,15 @@ impl Rect {
         let y = self.y.max(other.y);
         let right = (self.x + self.width).min(other.x + other.width);
         let bottom = (self.y + self.height).min(other.y + other.height);
-        (right >= x && bottom >= y && (right > x || bottom > y || self.width == 0. || self.height == 0.))
-            .then(|| Rect { x, y, width: right - x, height: bottom - y })
+        (right >= x
+            && bottom >= y
+            && (right > x || bottom > y || self.width == 0. || self.height == 0.))
+            .then(|| Rect {
+                x,
+                y,
+                width: right - x,
+                height: bottom - y,
+            })
     }
 }
 
@@ -91,7 +103,11 @@ impl Rect {
 pub enum ScrollRequest {
     /// `scrollTo`, or `scrollTop`/`scrollLeft` set: to this offset, on the axes given. The
     /// document's root element stands for the window.
-    To { node: NodeId, left: Option<f32>, top: Option<f32> },
+    To {
+        node: NodeId,
+        left: Option<f32>,
+        top: Option<f32>,
+    },
     /// `scrollBy`: this much further.
     By { node: NodeId, left: f32, top: f32 },
     /// `scrollIntoView`: whatever scrolls `node`'s box, until `node` is in sight.
@@ -103,7 +119,10 @@ pub enum ScrollRequest {
 pub enum Request {
     /// Go to another page (`location.href = …`, a link pressed); in-page fragments are the
     /// document's own and never asked for.
-    Navigate { url: String, replace: bool },
+    Navigate {
+        url: String,
+        replace: bool,
+    },
     /// `location.reload()`.
     Reload,
     /// `window.open(url)`.
@@ -273,7 +292,10 @@ pub(crate) fn hit_test(state: &State, x: f32, y: f32) -> Vec<NodeId> {
     // The deepest painted box holding the point; of two as deep, the later in document order.
     let mut best: Option<(usize, NodeId)> = None;
     for (node, rect) in &state.rects {
-        if !rect.contains(x, y) || !dom.is_connected(*node) || !dom.get(*node).is_some_and(|n| n.is_element()) {
+        if !rect.contains(x, y)
+            || !dom.is_connected(*node)
+            || !dom.get(*node).is_some_and(|n| n.is_element())
+        {
             continue;
         }
         if !dom.is_shown(*node) {
@@ -362,7 +384,10 @@ pub struct Changes {
 
 impl Changes {
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty() && self.restyled.is_empty() && self.removed.is_empty() && !self.restyled_all
+        self.nodes.is_empty()
+            && self.restyled.is_empty()
+            && self.removed.is_empty()
+            && !self.restyled_all
     }
 }
 
@@ -470,10 +495,7 @@ impl Document {
     /// The document installed in `runtime`, if one is.
     pub fn of(runtime: &mut verve::Runtime) -> Option<Document> {
         let state = state::try_shared(runtime.context())?;
-        let view = runtime
-            .context()
-            .get_data::<Rc<RefCell<View>>>()
-            .cloned();
+        let view = runtime.context().get_data::<Rc<RefCell<View>>>().cloned();
         let document = match view {
             Some(view) => Document { state, view },
             None => {
@@ -554,7 +576,8 @@ impl Document {
             return;
         }
         let before = view.computed.clone();
-        view.computed.refresh(&state.dom, &styler, key, &changes.nodes);
+        view.computed
+            .refresh(&state.dom, &styler, key, &changes.nodes);
         let dom = &state.dom;
         let mut restyled = Vec::new();
         if full {
@@ -640,7 +663,9 @@ impl Document {
                 let at = state
                     .sheets
                     .iter()
-                    .position(|r| matches!(r.owner, SheetOwner::Element(_) | SheetOwner::Adopted(_)))
+                    .position(|r| {
+                        matches!(r.owner, SheetOwner::Element(_) | SheetOwner::Adopted(_))
+                    })
                     .unwrap_or(state.sheets.len());
                 state.sheets.insert(at, SheetRecord { owner, sheet });
             }
@@ -671,7 +696,13 @@ impl Document {
         }
         let context = runtime.context();
         let global: JsValue = context.global_object().into();
-        let _ = bind::events::fire(context, &global, "UIEvent", "resize", &[("bubbles", false.into()), ("cancelable", false.into())]);
+        let _ = bind::events::fire(
+            context,
+            &global,
+            "UIEvent",
+            "resize",
+            &[("bubbles", false.into()), ("cancelable", false.into())],
+        );
         if let Err(error) = bind::window::media_changed(context) {
             verve::report(context, &error);
         }
@@ -699,7 +730,11 @@ impl Document {
     /// coordinates: what `getBoundingClientRect` and the sizes answer from now on, replacing
     /// what was reported before. The resize and intersection observers whose targets moved
     /// hear it.
-    pub fn set_layout(&self, runtime: &mut verve::Runtime, rects: impl IntoIterator<Item = (NodeId, Rect)>) {
+    pub fn set_layout(
+        &self,
+        runtime: &mut verve::Runtime,
+        rects: impl IntoIterator<Item = (NodeId, Rect)>,
+    ) {
         {
             let mut state = self.state.borrow_mut();
             state.rects.clear();
@@ -709,7 +744,11 @@ impl Document {
     }
 
     /// [`Document::set_layout`] for some nodes only, the others kept.
-    pub fn update_layout(&self, runtime: &mut verve::Runtime, rects: impl IntoIterator<Item = (NodeId, Rect)>) {
+    pub fn update_layout(
+        &self,
+        runtime: &mut verve::Runtime,
+        rects: impl IntoIterator<Item = (NodeId, Rect)>,
+    ) {
         self.state.borrow_mut().rects.extend(rects);
         self.deliver_layout(runtime);
     }
@@ -727,7 +766,11 @@ impl Document {
     /// The scrolling the drawer did (by the person, or for a [`Request::Scroll`]): each box's
     /// offset `[left, top]`, the document's root element for the window's. Every box whose
     /// offset moved hears `scroll`.
-    pub fn set_scroll_offsets(&self, runtime: &mut verve::Runtime, offsets: impl IntoIterator<Item = (NodeId, [f32; 2])>) {
+    pub fn set_scroll_offsets(
+        &self,
+        runtime: &mut verve::Runtime,
+        offsets: impl IntoIterator<Item = (NodeId, [f32; 2])>,
+    ) {
         let moved: Vec<NodeId> = {
             let mut state = self.state.borrow_mut();
             let mut moved = Vec::new();
@@ -744,9 +787,22 @@ impl Document {
         for node in moved {
             let result = if node == root {
                 let document = bind::node::wrap(context, shared(context).borrow().dom.document);
-                bind::events::fire(context, &document, "Event", "scroll", &[("bubbles", true.into())])
+                bind::events::fire(
+                    context,
+                    &document,
+                    "Event",
+                    "scroll",
+                    &[("bubbles", true.into())],
+                )
             } else {
-                bind::events::fire_at(context, node, "Event", "scroll", &[("bubbles", false.into())], true)
+                bind::events::fire_at(
+                    context,
+                    node,
+                    "Event",
+                    "scroll",
+                    &[("bubbles", false.into())],
+                    true,
+                )
             };
             if let Err(error) = result {
                 verve::report(context, &error);
@@ -810,7 +866,9 @@ impl Document {
                 state.scroll_offsets.remove(id);
                 state.custom_nodes.remove(id);
             }
-            state.template_contents.retain(|t, f| !gone.contains(t) && !gone.contains(f));
+            state
+                .template_contents
+                .retain(|t, f| !gone.contains(t) && !gone.contains(f));
             for observer in &mut state.observers {
                 observer.targets.retain(|t| !gone.contains(&t.node));
             }
@@ -858,7 +916,14 @@ impl Document {
         ]
     }
 
-    fn fire(&self, runtime: &mut verve::Runtime, node: NodeId, class: &str, kind: &str, init: &[(&str, JsValue)]) -> bool {
+    fn fire(
+        &self,
+        runtime: &mut verve::Runtime,
+        node: NodeId,
+        class: &str,
+        kind: &str,
+        init: &[(&str, JsValue)],
+    ) -> bool {
         let context = runtime.context();
         match bind::events::fire_at(context, node, class, kind, init, true) {
             Ok(allowed) => allowed,
@@ -918,7 +983,9 @@ impl Document {
         };
         let (left, entered) = self.state.borrow_mut().dom.set_hovered(path);
         let context = runtime.context();
-        let related = |n: Option<NodeId>, cx: &mut Context| n.map_or(JsValue::null(), |n| bind::node::wrap(cx, n));
+        let related = |n: Option<NodeId>, cx: &mut Context| {
+            n.map_or(JsValue::null(), |n| bind::node::wrap(cx, n))
+        };
         // The pointer's events, then the mouse's, as UI Events orders them: out of the old
         // element and each element left (innermost first), over the new and each element
         // entered (outermost first).
@@ -926,7 +993,10 @@ impl Document {
         if let Some(previous) = previous.filter(|p| self.state.borrow().dom.exists(*p)) {
             let to = related(node, context);
             init.push(("relatedTarget", to));
-            for (class, out, leave) in [("PointerEvent", "pointerout", "pointerleave"), ("MouseEvent", "mouseout", "mouseleave")] {
+            for (class, out, leave) in [
+                ("PointerEvent", "pointerout", "pointerleave"),
+                ("MouseEvent", "mouseout", "mouseleave"),
+            ] {
                 self.fire(runtime, previous, class, out, &init);
                 for id in &left {
                     self.fire(runtime, *id, class, leave, &init);
@@ -937,7 +1007,10 @@ impl Document {
         if let Some(node) = node {
             let from = related(previous, runtime.context());
             init.push(("relatedTarget", from));
-            for (class, over, enter) in [("PointerEvent", "pointerover", "pointerenter"), ("MouseEvent", "mouseover", "mouseenter")] {
+            for (class, over, enter) in [
+                ("PointerEvent", "pointerover", "pointerenter"),
+                ("MouseEvent", "mouseover", "mouseenter"),
+            ] {
                 self.fire(runtime, node, class, over, &init);
                 for id in entered.iter().rev() {
                     self.fire(runtime, *id, class, enter, &init);
@@ -955,7 +1028,12 @@ impl Document {
     }
 
     /// [`Document::pointer_down`] on `node`, without hit testing.
-    pub fn pointer_down_on(&self, runtime: &mut verve::Runtime, node: NodeId, pointer: &Pointer) -> bool {
+    pub fn pointer_down_on(
+        &self,
+        runtime: &mut verve::Runtime,
+        node: NodeId,
+        pointer: &Pointer,
+    ) -> bool {
         self.press_down(runtime, node, pointer)
     }
 
@@ -968,7 +1046,8 @@ impl Document {
         };
         let init = Self::pointer_init(pointer, buttons);
         let pointer_allowed = self.fire(runtime, target, "PointerEvent", "pointerdown", &init);
-        let allowed = pointer_allowed && self.fire(runtime, target, "MouseEvent", "mousedown", &init);
+        let allowed =
+            pointer_allowed && self.fire(runtime, target, "MouseEvent", "mousedown", &init);
         {
             let mut state = self.state.borrow_mut();
             state.dom.active = Some(target);
@@ -993,9 +1072,16 @@ impl Document {
                 verve::report(context, &error);
             }
             if let Some(focus) = focus {
-                let field = self.state.borrow().dom.get(focus).is_some_and(|n| n.draft.is_some());
+                let field = self
+                    .state
+                    .borrow()
+                    .dom
+                    .get(focus)
+                    .is_some_and(|n| n.draft.is_some());
                 if field {
-                    bind::node::with_dom(runtime.context(), |dom| bind::element::ensure_draft(dom, focus));
+                    bind::node::with_dom(runtime.context(), |dom| {
+                        bind::element::ensure_draft(dom, focus)
+                    });
                 }
             }
         }
@@ -1014,7 +1100,12 @@ impl Document {
     }
 
     /// [`Document::pointer_up`] on `node`, without hit testing.
-    pub fn pointer_up_on(&self, runtime: &mut verve::Runtime, node: NodeId, pointer: &Pointer) -> bool {
+    pub fn pointer_up_on(
+        &self,
+        runtime: &mut verve::Runtime,
+        node: NodeId,
+        pointer: &Pointer,
+    ) -> bool {
         self.release(runtime, node, pointer)
     }
 
@@ -1051,10 +1142,12 @@ impl Document {
             match pointer.button {
                 0 => {
                     let context = runtime.context();
-                    allowed = bind::events::click(context, clicked, &init, true).unwrap_or_else(|error| {
-                        verve::report(context, &error);
-                        true
-                    });
+                    allowed = bind::events::click(context, clicked, &init, true).unwrap_or_else(
+                        |error| {
+                            verve::report(context, &error);
+                            true
+                        },
+                    );
                     if pointer.count == 2 {
                         self.fire(runtime, clicked, "MouseEvent", "dblclick", &init);
                     }
@@ -1074,7 +1167,13 @@ impl Document {
     /// A press on `node` from start to end — down, up, click — as a pointer at its painted
     /// box's middle: for a drawer that hit tests itself, and for tests.
     pub fn press(&self, runtime: &mut verve::Runtime, node: NodeId) -> bool {
-        let rect = self.state.borrow().rects.get(&node).copied().unwrap_or_default();
+        let rect = self
+            .state
+            .borrow()
+            .rects
+            .get(&node)
+            .copied()
+            .unwrap_or_default();
         let pointer = Pointer {
             x: rect.x + rect.width / 2.,
             y: rect.y + rect.height / 2.,
@@ -1087,7 +1186,13 @@ impl Document {
 
     /// The wheel turned at `pointer`: `wheel` at the element under it. Answers whether nothing
     /// prevented it — whether the drawer should scroll.
-    pub fn wheel(&self, runtime: &mut verve::Runtime, pointer: &Pointer, delta_x: f32, delta_y: f32) -> bool {
+    pub fn wheel(
+        &self,
+        runtime: &mut verve::Runtime,
+        pointer: &Pointer,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> bool {
         let target = self.pointer_target(pointer);
         let mut init = Self::pointer_init(pointer, 0);
         init.push(("deltaX", f64::from(delta_x).into()));
@@ -1117,7 +1222,10 @@ impl Document {
             ("key", bind::text(&key.key)),
             ("code", bind::text(&key.code)),
             ("keyCode", code.into()),
-            ("which", (if char_code != 0 { char_code } else { code }).into()),
+            (
+                "which",
+                (if char_code != 0 { char_code } else { code }).into(),
+            ),
             ("charCode", char_code.into()),
             ("repeat", key.repeat.into()),
             ("ctrlKey", key.modifiers.ctrl.into()),
@@ -1142,7 +1250,13 @@ impl Document {
     /// button, Tab moving the focus. Answers whether nothing prevented it.
     pub fn key_down(&self, runtime: &mut verve::Runtime, key: &Key) -> bool {
         let target = self.key_target();
-        let allowed = self.fire(runtime, target, "KeyboardEvent", "keydown", &Self::key_init(key, 0));
+        let allowed = self.fire(
+            runtime,
+            target,
+            "KeyboardEvent",
+            "keydown",
+            &Self::key_init(key, 0),
+        );
         if allowed {
             self.key_default(runtime, target, key);
         }
@@ -1154,7 +1268,13 @@ impl Document {
     /// go in a browser.
     pub fn key_up(&self, runtime: &mut verve::Runtime, key: &Key) -> bool {
         let target = self.key_target();
-        let allowed = self.fire(runtime, target, "KeyboardEvent", "keyup", &Self::key_init(key, 0));
+        let allowed = self.fire(
+            runtime,
+            target,
+            "KeyboardEvent",
+            "keyup",
+            &Self::key_init(key, 0),
+        );
         if allowed && key.key == " " && self.is_button_like(target) {
             let context = runtime.context();
             let _ = bind::events::click(context, target, &[], true);
@@ -1179,7 +1299,9 @@ impl Document {
     fn is_text_field(&self, id: NodeId) -> bool {
         let state = self.state.borrow();
         let dom = &state.dom;
-        let Some(node) = dom.get(id) else { return false };
+        let Some(node) = dom.get(id) else {
+            return false;
+        };
         if node.attr("readonly").is_some() || node.attr("disabled").is_some() {
             return false;
         }
@@ -1187,7 +1309,16 @@ impl Document {
             Some("textarea") => true,
             Some("input") => !matches!(
                 bind::element::input_type(dom, id).as_str(),
-                "checkbox" | "radio" | "button" | "submit" | "reset" | "image" | "file" | "hidden" | "range" | "color"
+                "checkbox"
+                    | "radio"
+                    | "button"
+                    | "submit"
+                    | "reset"
+                    | "image"
+                    | "file"
+                    | "hidden"
+                    | "range"
+                    | "color"
             ),
             _ => false,
         }
@@ -1199,18 +1330,36 @@ impl Document {
         let printable = key.key.chars().count() == 1 && !chord;
         if printable {
             let char_code = key.key.chars().next().map_or(0, |c| c as u32);
-            let allowed = self.fire(runtime, target, "KeyboardEvent", "keypress", &Self::key_init(key, char_code));
+            let allowed = self.fire(
+                runtime,
+                target,
+                "KeyboardEvent",
+                "keypress",
+                &Self::key_init(key, char_code),
+            );
             if allowed && field {
                 self.insert_into(runtime, target, &key.key, "insertText");
             }
             return;
         }
-        let textarea = self.state.borrow().dom.get(target).and_then(|n| n.tag()) == Some("textarea");
+        let textarea =
+            self.state.borrow().dom.get(target).and_then(|n| n.tag()) == Some("textarea");
         match key.key.as_str() {
-            "Enter" if field && textarea => self.insert_into(runtime, target, "\n", "insertLineBreak"),
+            "Enter" if field && textarea => {
+                self.insert_into(runtime, target, "\n", "insertLineBreak")
+            }
             "Enter" if field => self.implicit_submit(runtime, target),
-            "Enter" if self.is_button_like(target) || self.state.borrow().dom.get(target).is_some_and(|n| n.tag() == Some("a") && n.attr("href").is_some()) => {
-                let checkbox = self.state.borrow().dom.get(target).and_then(|n| n.tag()) == Some("input");
+            "Enter"
+                if self.is_button_like(target)
+                    || self
+                        .state
+                        .borrow()
+                        .dom
+                        .get(target)
+                        .is_some_and(|n| n.tag() == Some("a") && n.attr("href").is_some()) =>
+            {
+                let checkbox =
+                    self.state.borrow().dom.get(target).and_then(|n| n.tag()) == Some("input");
                 if !checkbox {
                     let context = runtime.context();
                     let _ = bind::events::click(context, target, &[], true);
@@ -1273,11 +1422,21 @@ impl Document {
                 at = dom.parent(node);
             }
             let button = form.and_then(|f| {
-                dom.descendants(f).into_iter().find(|n| match dom.get(*n).and_then(|x| x.tag()) {
-                    Some("button") => !matches!(dom.get_attr(*n, "type").map(|t| t.to_ascii_lowercase()).as_deref(), Some("button" | "reset")),
-                    Some("input") => matches!(bind::element::input_type(dom, *n).as_str(), "submit" | "image"),
-                    _ => false,
-                })
+                dom.descendants(f)
+                    .into_iter()
+                    .find(|n| match dom.get(*n).and_then(|x| x.tag()) {
+                        Some("button") => !matches!(
+                            dom.get_attr(*n, "type")
+                                .map(|t| t.to_ascii_lowercase())
+                                .as_deref(),
+                            Some("button" | "reset")
+                        ),
+                        Some("input") => matches!(
+                            bind::element::input_type(dom, *n).as_str(),
+                            "submit" | "image"
+                        ),
+                        _ => false,
+                    })
             });
             (form, button)
         };
@@ -1301,10 +1460,17 @@ impl Document {
             let dom = &state.dom;
             dom.descendants(dom.document)
                 .into_iter()
-                .filter(|n| dom.get_attr(*n, "tabindex").and_then(|t| t.parse::<i32>().ok()).is_none_or(|t| t >= 0))
+                .filter(|n| {
+                    dom.get_attr(*n, "tabindex")
+                        .and_then(|t| t.parse::<i32>().ok())
+                        .is_none_or(|t| t >= 0)
+                })
                 .collect()
         };
-        let candidates: Vec<NodeId> = candidates.into_iter().filter(|n| bind::events::focusable(context, *n)).collect();
+        let candidates: Vec<NodeId> = candidates
+            .into_iter()
+            .filter(|n| bind::events::focusable(context, *n))
+            .collect();
         if candidates.is_empty() {
             return;
         }
@@ -1314,7 +1480,11 @@ impl Document {
                 .iter()
                 .enumerate()
                 .map(|(i, n)| {
-                    let index = state.dom.get_attr(*n, "tabindex").and_then(|t| t.parse::<i32>().ok()).unwrap_or(0);
+                    let index = state
+                        .dom
+                        .get_attr(*n, "tabindex")
+                        .and_then(|t| t.parse::<i32>().ok())
+                        .unwrap_or(0);
                     (if index > 0 { index } else { i32::MAX }, i, *n)
                 })
                 .collect()
@@ -1323,7 +1493,13 @@ impl Document {
         let at = ordered.iter().position(|(_, _, n)| *n == from);
         let next = match (at, backward) {
             (Some(at), false) => ordered.get(at + 1).or(ordered.first()),
-            (Some(at), true) => if at == 0 { ordered.last() } else { ordered.get(at - 1) },
+            (Some(at), true) => {
+                if at == 0 {
+                    ordered.last()
+                } else {
+                    ordered.get(at - 1)
+                }
+            }
             (None, false) => ordered.first(),
             (None, true) => ordered.last(),
         };
@@ -1334,7 +1510,13 @@ impl Document {
         }
     }
 
-    fn insert_into(&self, runtime: &mut verve::Runtime, field: NodeId, text: &str, input_type: &str) {
+    fn insert_into(
+        &self,
+        runtime: &mut verve::Runtime,
+        field: NodeId,
+        text: &str,
+        input_type: &str,
+    ) {
         let init = [
             ("data", bind::text(text)),
             ("inputType", bind::text(input_type)),
@@ -1345,17 +1527,33 @@ impl Document {
         }
         let changed = bind::node::with_dom(runtime.context(), |dom| {
             bind::element::ensure_draft(dom, field);
-            let max = dom.get_attr(field, "maxlength").and_then(|m| m.parse::<usize>().ok());
+            let max = dom
+                .get_attr(field, "maxlength")
+                .and_then(|m| m.parse::<usize>().ok());
             let single_line = dom.get(field).and_then(|n| n.tag()) == Some("input");
-            let Some(node) = dom.get_mut(field) else { return false };
-            let Some(draft) = node.draft.as_mut() else { return false };
-            let mut text = if single_line { text.replace(['\r', '\n'], "") } else { text.to_owned() };
+            let Some(node) = dom.get_mut(field) else {
+                return false;
+            };
+            let Some(draft) = node.draft.as_mut() else {
+                return false;
+            };
+            let mut text = if single_line {
+                text.replace(['\r', '\n'], "")
+            } else {
+                text.to_owned()
+            };
             if let Some(max) = max {
-                let room = max.saturating_sub(draft.text().encode_utf16().count() - draft.selected_text().encode_utf16().count());
-                let fits: String = text.chars().scan(0, |used, c| {
-                    *used += c.len_utf16();
-                    (*used <= room).then_some(c)
-                }).collect();
+                let room = max.saturating_sub(
+                    draft.text().encode_utf16().count()
+                        - draft.selected_text().encode_utf16().count(),
+                );
+                let fits: String = text
+                    .chars()
+                    .scan(0, |used, c| {
+                        *used += c.len_utf16();
+                        (*used <= room).then_some(c)
+                    })
+                    .collect();
                 text = fits;
             }
             if text.is_empty() && !draft.has_selection() {
@@ -1376,13 +1574,18 @@ impl Document {
             (false, false) => "deleteContentForward",
             (false, true) => "deleteWordForward",
         };
-        let init = [("inputType", bind::text(input_type)), ("data", JsValue::null())];
+        let init = [
+            ("inputType", bind::text(input_type)),
+            ("data", JsValue::null()),
+        ];
         if !self.fire(runtime, field, "InputEvent", "beforeinput", &init) {
             return;
         }
         let changed = bind::node::with_dom(runtime.context(), |dom| {
             bind::element::ensure_draft(dom, field);
-            let Some(draft) = dom.get_mut(field).and_then(|n| n.draft.as_mut()) else { return false };
+            let Some(draft) = dom.get_mut(field).and_then(|n| n.draft.as_mut()) else {
+                return false;
+            };
             match (backward, word) {
                 (true, false) => draft.backspace(),
                 (true, true) => draft.backspace_word(),
@@ -1398,7 +1601,11 @@ impl Document {
     /// `keypress`, `beforeinput`, `input` and `keyup`, as a person's typing makes them.
     pub fn type_text(&self, runtime: &mut verve::Runtime, text: &str) {
         for c in text.chars() {
-            let key = if c == '\n' { Key::named("Enter") } else { Key::char(c) };
+            let key = if c == '\n' {
+                Key::named("Enter")
+            } else {
+                Key::char(c)
+            };
             self.key_down(runtime, &key);
             self.key_up(runtime, &key);
         }
@@ -1417,7 +1624,12 @@ impl Document {
     /// Does `edit` to a field's text — a drawer that edits fields itself (its own caret, its
     /// own input method) — and, when the text changed, dispatches the `input` event scripts
     /// hear (`onChange`, in React).
-    pub fn edit_field(&self, runtime: &mut verve::Runtime, node: NodeId, edit: impl FnOnce(&mut Draft)) {
+    pub fn edit_field(
+        &self,
+        runtime: &mut verve::Runtime,
+        node: NodeId,
+        edit: impl FnOnce(&mut Draft),
+    ) {
         let changed = bind::node::with_dom(runtime.context(), |dom| {
             bind::element::ensure_draft(dom, node);
             let Some(draft) = dom.get_mut(node).and_then(|n| n.draft.as_mut()) else {
@@ -1428,7 +1640,13 @@ impl Document {
             draft.text() != before
         });
         if changed {
-            self.fire(runtime, node, "InputEvent", "input", &[("inputType", bind::text("insertText"))]);
+            self.fire(
+                runtime,
+                node,
+                "InputEvent",
+                "input",
+                &[("inputType", bind::text("insertText"))],
+            );
         }
         runtime.run_microtasks();
     }
@@ -1532,7 +1750,12 @@ pub mod host {
     /// Lays `methods` and `accessors` over the class named (`"Element"`, `"Node"`,
     /// `"HTMLElement"`, `"Document"`, `"Window"`…), after [`crate::install`]. A class this
     /// document does not have is an error.
-    pub fn extend(context: &mut Context, class: &str, methods: &[Method], accessors: &[Accessor]) -> JsResult<()> {
+    pub fn extend(
+        context: &mut Context,
+        class: &str,
+        methods: &[Method],
+        accessors: &[Accessor],
+    ) -> JsResult<()> {
         let prototype = crate::state::shared(context)
             .borrow()
             .class(class)
@@ -1562,7 +1785,13 @@ pub mod host {
 
     /// Dispatches a fresh event of `class` (`"MouseEvent"`, `"Event"`…) at `node`, its
     /// `init`'s fields over the kind's defaults. Answers whether nothing prevented it.
-    pub fn fire(context: &mut Context, node: NodeId, class: &str, kind: &str, init: &[(&str, JsValue)]) -> JsResult<bool> {
+    pub fn fire(
+        context: &mut Context,
+        node: NodeId,
+        class: &str,
+        kind: &str,
+        init: &[(&str, JsValue)],
+    ) -> JsResult<bool> {
         crate::bind::events::fire_at(context, node, class, kind, init, true)
     }
 }

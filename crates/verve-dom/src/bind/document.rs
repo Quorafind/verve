@@ -8,8 +8,8 @@ use super::node::{
 };
 use super::{
     Accessor, ClassSpec, Kind, Method, arg, arg_string, class, constructor_of, dom_error,
-    extend_prototype, illegal_constructor, instance, native_instance, node_id, node_of,
-    opt_string, string, text, type_error,
+    extend_prototype, illegal_constructor, instance, native_instance, node_id, node_of, opt_string,
+    string, text, type_error,
 };
 use crate::dom::{Dom, Namespace, NodeId, NodeKind};
 use crate::state::shared;
@@ -41,10 +41,18 @@ fn child_tagged(dom: &Dom, doc: NodeId, tag: &str) -> Option<NodeId> {
 /// The element `createElement` makes: one of a custom element's class when its tag was
 /// defined.
 pub fn create_element(context: &mut Context, tag: &str, namespace: Namespace) -> JsResult<JsValue> {
-    if tag.is_empty() || !tag.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == ':') || tag.contains(|c: char| c.is_whitespace() || c == '<' || c == '>') {
+    if tag.is_empty()
+        || !tag
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == ':')
+        || tag.contains(|c: char| c.is_whitespace() || c == '<' || c == '>')
+    {
         return Err(dom_error(
             context,
-            &format!("Failed to execute 'createElement' on 'Document': The tag name provided ('{tag}') is not a valid name."),
+            &format!(
+                "Failed to execute 'createElement' on 'Document': The tag name provided ('{tag}') is not a valid name."
+            ),
             "InvalidCharacterError",
         ));
     }
@@ -116,7 +124,9 @@ const DOCUMENT_METHODS: &[Method] = &[
             _ => {
                 return Err(dom_error(
                     cx,
-                    &format!("Failed to execute 'createEvent' on 'Document': The provided event type ('{named}') is invalid."),
+                    &format!(
+                        "Failed to execute 'createEvent' on 'Document': The provided event type ('{named}') is invalid."
+                    ),
                     "NotSupportedError",
                 ));
             }
@@ -129,8 +139,12 @@ const DOCUMENT_METHODS: &[Method] = &[
         Ok(constructor.construct(&[text("")], None, cx)?.into())
     }),
     ("createRange", 0, |_, _, cx| super::platform::new_range(cx)),
-    ("createNodeIterator", 3, |_, args, cx| super::traversal::create(args, cx, false)),
-    ("createTreeWalker", 3, |_, args, cx| super::traversal::create(args, cx, true)),
+    ("createNodeIterator", 3, |_, args, cx| {
+        super::traversal::create(args, cx, false)
+    }),
+    ("createTreeWalker", 3, |_, args, cx| {
+        super::traversal::create(args, cx, true)
+    }),
     ("getElementById", 1, |this, args, cx| {
         let wanted = arg_string(args, 0, cx)?;
         let doc = document_of(this, cx);
@@ -189,7 +203,14 @@ const DOCUMENT_METHODS: &[Method] = &[
             was
         };
         if let Some(id) = was {
-            super::events::fire_at(cx, id, "Event", "fullscreenchange", &[("bubbles", true.into())], false)?;
+            super::events::fire_at(
+                cx,
+                id,
+                "Event",
+                "fullscreenchange",
+                &[("bubbles", true.into())],
+                false,
+            )?;
         }
         super::resolved(JsValue::undefined(), cx)
     }),
@@ -225,10 +246,14 @@ const DOCUMENT_METHODS: &[Method] = &[
     ("execCommand", 3, |_, args, cx| {
         let command = arg_string(args, 0, cx)?.to_ascii_lowercase();
         if command == "copy" {
-            let selected = super::call_method(&super::platform::selection(cx)?, "toString", &[], cx)?;
+            let selected =
+                super::call_method(&super::platform::selection(cx)?, "toString", &[], cx)?;
             let selected = string(&selected, cx)?;
             if !selected.is_empty() {
-                shared(cx).borrow_mut().requests.push(crate::Request::CopyText(selected));
+                shared(cx)
+                    .borrow_mut()
+                    .requests
+                    .push(crate::Request::CopyText(selected));
                 return Ok(true.into());
             }
         }
@@ -236,7 +261,11 @@ const DOCUMENT_METHODS: &[Method] = &[
     }),
     ("queryCommandSupported", 1, |_, args, cx| {
         let command = arg_string(args, 0, cx)?.to_ascii_lowercase();
-        Ok(matches!(command.as_str(), "copy" | "cut" | "paste" | "inserttext" | "delete" | "selectall" | "undo" | "redo").into())
+        Ok(matches!(
+            command.as_str(),
+            "copy" | "cut" | "paste" | "inserttext" | "delete" | "selectall" | "undo" | "redo"
+        )
+        .into())
     }),
     ("queryCommandEnabled", 1, |_, _, _| Ok(true.into())),
     ("queryCommandState", 1, |_, _, _| Ok(false.into())),
@@ -307,7 +336,9 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
                 if doc != dom.document {
                     return None;
                 }
-                dom.focused.filter(|f| dom.is_connected(*f)).or(Some(dom.body))
+                dom.focused
+                    .filter(|f| dom.is_connected(*f))
+                    .or(Some(dom.body))
             });
             Ok(wrap_opt(cx, id))
         }),
@@ -318,7 +349,11 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let doc = document_of(this, cx);
             let window = read_dom(cx, |dom| doc == dom.document);
-            Ok(if window { cx.global_object().into() } else { JsValue::null() })
+            Ok(if window {
+                cx.global_object().into()
+            } else {
+                JsValue::null()
+            })
         }),
         None,
     ),
@@ -329,16 +364,30 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
             let title = read_dom(cx, |dom| {
                 dom.descendants(doc)
                     .into_iter()
-                    .find(|n| dom.get(*n).is_some_and(|x| x.tag() == Some("title") && x.namespace == Namespace::Html))
-                    .map(|t| dom.text_content(t).split_whitespace().collect::<Vec<_>>().join(" "))
+                    .find(|n| {
+                        dom.get(*n).is_some_and(|x| {
+                            x.tag() == Some("title") && x.namespace == Namespace::Html
+                        })
+                    })
+                    .map(|t| {
+                        dom.text_content(t)
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
             });
-            Ok(text(&title.unwrap_or_else(|| shared(cx).borrow().title_fallback.clone())))
+            Ok(text(&title.unwrap_or_else(|| {
+                shared(cx).borrow().title_fallback.clone()
+            })))
         }),
         Some(|this, args, cx| {
             let doc = document_of(this, cx);
             let value = arg_string(args, 0, cx)?;
             with_dom(cx, |dom| {
-                let found = dom.descendants(doc).into_iter().find(|n| dom.get(*n).and_then(|x| x.tag()) == Some("title"));
+                let found = dom
+                    .descendants(doc)
+                    .into_iter()
+                    .find(|n| dom.get(*n).and_then(|x| x.tag()) == Some("title"));
                 let title = match found {
                     Some(t) => t,
                     None => {
@@ -373,9 +422,21 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
             Ok(JsValue::undefined())
         }),
     ),
-    ("URL", Some(|_, _, cx| Ok(text(shared(cx).borrow().url.as_str()))), None),
-    ("documentURI", Some(|_, _, cx| Ok(text(shared(cx).borrow().url.as_str()))), None),
-    ("domain", Some(|_, _, cx| Ok(text(shared(cx).borrow().url.host_str().unwrap_or("")))), Some(|_, _, _| Ok(JsValue::undefined()))),
+    (
+        "URL",
+        Some(|_, _, cx| Ok(text(shared(cx).borrow().url.as_str()))),
+        None,
+    ),
+    (
+        "documentURI",
+        Some(|_, _, cx| Ok(text(shared(cx).borrow().url.as_str()))),
+        None,
+    ),
+    (
+        "domain",
+        Some(|_, _, cx| Ok(text(shared(cx).borrow().url.host_str().unwrap_or("")))),
+        Some(|_, _, _| Ok(JsValue::undefined())),
+    ),
     ("referrer", Some(|_, _, _| Ok(text(""))), None),
     (
         "cookie",
@@ -387,12 +448,25 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
         Some(|_, args, cx| {
             let given = arg_string(args, 0, cx)?;
             let pair = given.split(';').next().unwrap_or("").trim().to_owned();
-            let Some((name, _)) = pair.split_once('=') else { return Ok(JsValue::undefined()) };
+            let Some((name, _)) = pair.split_once('=') else {
+                return Ok(JsValue::undefined());
+            };
             let global = cx.global_object();
             let jar = global.get(js_string!("__cookies"), cx)?;
-            let jar = if jar.is_undefined() { String::new() } else { string(&jar, cx)? };
-            let expired = given.to_ascii_lowercase().contains("max-age=0") || given.to_ascii_lowercase().contains("expires=thu, 01 jan 1970");
-            let mut kept: Vec<String> = jar.split("; ").filter(|c| !c.is_empty() && !c.starts_with(&format!("{}=", name.trim()))).map(str::to_owned).collect();
+            let jar = if jar.is_undefined() {
+                String::new()
+            } else {
+                string(&jar, cx)?
+            };
+            let expired = given.to_ascii_lowercase().contains("max-age=0")
+                || given
+                    .to_ascii_lowercase()
+                    .contains("expires=thu, 01 jan 1970");
+            let mut kept: Vec<String> = jar
+                .split("; ")
+                .filter(|c| !c.is_empty() && !c.starts_with(&format!("{}=", name.trim())))
+                .map(str::to_owned)
+                .collect();
             if !expired {
                 kept.push(pair);
             }
@@ -408,11 +482,23 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
     ("charset", Some(|_, _, _| Ok(text("UTF-8"))), None),
     ("inputEncoding", Some(|_, _, _| Ok(text("UTF-8"))), None),
     ("contentType", Some(|_, _, _| Ok(text("text/html"))), None),
-    ("designMode", Some(|_, _, _| Ok(text("off"))), Some(|_, _, _| Ok(JsValue::undefined()))),
-    ("dir", Some(|_, _, _| Ok(text(""))), Some(|_, _, _| Ok(JsValue::undefined()))),
+    (
+        "designMode",
+        Some(|_, _, _| Ok(text("off"))),
+        Some(|_, _, _| Ok(JsValue::undefined())),
+    ),
+    (
+        "dir",
+        Some(|_, _, _| Ok(text(""))),
+        Some(|_, _, _| Ok(JsValue::undefined())),
+    ),
     ("currentScript", Some(|_, _, _| Ok(JsValue::null())), None),
     ("fullscreenEnabled", Some(|_, _, _| Ok(true.into())), None),
-    ("pictureInPictureEnabled", Some(|_, _, _| Ok(false.into())), None),
+    (
+        "pictureInPictureEnabled",
+        Some(|_, _, _| Ok(false.into())),
+        None,
+    ),
     (
         "fullscreenElement",
         Some(|_, _, cx| {
@@ -421,7 +507,11 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
         }),
         None,
     ),
-    ("pointerLockElement", Some(|_, _, _| Ok(JsValue::null())), None),
+    (
+        "pointerLockElement",
+        Some(|_, _, _| Ok(JsValue::null())),
+        None,
+    ),
     (
         "scrollingElement",
         Some(|this, _, cx| {
@@ -435,7 +525,12 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
         "doctype",
         Some(|this, _, cx| {
             let doc = document_of(this, cx);
-            let id = read_dom(cx, |dom| dom.children(doc).iter().copied().find(|c| matches!(dom.get(*c).map(|n| &n.kind), Some(NodeKind::Doctype(_)))));
+            let id = read_dom(cx, |dom| {
+                dom.children(doc)
+                    .iter()
+                    .copied()
+                    .find(|c| matches!(dom.get(*c).map(|n| &n.kind), Some(NodeKind::Doctype(_))))
+            });
             Ok(wrap_opt(cx, id))
         }),
         None,
@@ -465,7 +560,13 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let doc = document_of(this, cx);
             let found = read_dom(cx, |dom| {
-                dom.descendants(doc).into_iter().filter(|n| matches!(dom.get(*n).and_then(|x| x.tag()), Some("a" | "area")) && dom.get_attr(*n, "href").is_some()).collect()
+                dom.descendants(doc)
+                    .into_iter()
+                    .filter(|n| {
+                        matches!(dom.get(*n).and_then(|x| x.tag()), Some("a" | "area"))
+                            && dom.get_attr(*n, "href").is_some()
+                    })
+                    .collect()
             });
             Ok(collection(found, cx))
         }),
@@ -481,13 +582,21 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
         Some(|_, _, cx| super::platform::adopted_sheets(cx)),
         Some(|_, args, cx| super::platform::set_adopted_sheets(&arg(args, 0), cx)),
     ),
-    ("fonts", Some(|_, _, cx| super::platform::font_faces(cx)), None),
-    ("timeline", Some(|_, _, cx| {
-        let timeline = super::plain_object(cx);
-        let now = verve::now(cx);
-        super::set(&timeline, "currentTime", now, cx)?;
-        Ok(timeline.into())
-    }), None),
+    (
+        "fonts",
+        Some(|_, _, cx| super::platform::font_faces(cx)),
+        None,
+    ),
+    (
+        "timeline",
+        Some(|_, _, cx| {
+            let timeline = super::plain_object(cx);
+            let now = verve::now(cx);
+            super::set(&timeline, "currentTime", now, cx)?;
+            Ok(timeline.into())
+        }),
+        None,
+    ),
 ];
 
 fn tagged_collection(this: &JsValue, context: &mut Context, tags: &[&str]) -> JsResult<JsValue> {
@@ -495,7 +604,11 @@ fn tagged_collection(this: &JsValue, context: &mut Context, tags: &[&str]) -> Js
     let found = read_dom(context, |dom| {
         dom.descendants(doc)
             .into_iter()
-            .filter(|n| dom.get(*n).and_then(|x| x.tag()).is_some_and(|t| tags.contains(&t)))
+            .filter(|n| {
+                dom.get(*n)
+                    .and_then(|x| x.tag())
+                    .is_some_and(|t| tags.contains(&t))
+            })
             .collect()
     });
     Ok(collection(found, context))
@@ -517,7 +630,9 @@ const DOM_PARSER_METHODS: &[Method] = &[
                 let doc = dom.create_document();
                 let stripped = markup.trim_start();
                 let stripped = if stripped.starts_with("<?xml") {
-                    stripped.find("?>").map_or(stripped, |end| &stripped[end + 2..])
+                    stripped
+                        .find("?>")
+                        .map_or(stripped, |end| &stripped[end + 2..])
                 } else {
                     stripped
                 };
@@ -533,10 +648,12 @@ const DOM_PARSER_METHODS: &[Method] = &[
 
 const SERIALIZER_METHODS: &[Method] = &[("serializeToString", 1, |_, args, cx| {
     let id = node_of(&arg(args, 0))?;
-    Ok(text(&read_dom(cx, |dom| match dom.get(id).map(|n| &n.kind) {
-        Some(NodeKind::Document | NodeKind::Fragment) => crate::html::inner(dom, id),
-        Some(_) => crate::html::outer(dom, id),
-        None => String::new(),
+    Ok(text(&read_dom(cx, |dom| {
+        match dom.get(id).map(|n| &n.kind) {
+            Some(NodeKind::Document | NodeKind::Fragment) => crate::html::inner(dom, id),
+            Some(_) => crate::html::outer(dom, id),
+            None => String::new(),
+        }
     })))
 })];
 
@@ -604,7 +721,12 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    extend_prototype(context, &document, PARENT_NODE_METHODS, PARENT_NODE_ACCESSORS)?;
+    extend_prototype(
+        context,
+        &document,
+        PARENT_NODE_METHODS,
+        PARENT_NODE_ACCESSORS,
+    )?;
     for name in ["HTMLDocument", "XMLDocument"] {
         class(
             context,

@@ -405,11 +405,20 @@ fn a_host_tree_carries_an_event_down_and_back_up_its_path() {
     for (name, node) in ["a", "b", "c"].iter().zip(&nodes) {
         context
             .global_object()
-            .set(verve::boa_engine::JsString::from(*name), node.clone(), false, context)
+            .set(
+                verve::boa_engine::JsString::from(*name),
+                node.clone(),
+                false,
+                context,
+            )
             .unwrap();
     }
     events::install_window_target(context).unwrap();
-    fn parent(target: &JsValue, _: &JsObject, context: &mut verve::boa_engine::Context) -> JsResult<Option<JsValue>> {
+    fn parent(
+        target: &JsValue,
+        _: &JsObject,
+        context: &mut verve::boa_engine::Context,
+    ) -> JsResult<Option<JsValue>> {
         let Some(id) = target.as_object().and_then(|o| events::host_id(&o)) else {
             return Ok(None);
         };

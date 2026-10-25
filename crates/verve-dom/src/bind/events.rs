@@ -17,7 +17,11 @@ use crate::state::shared;
 
 /// The next target on an event's path from `target`: a node's parent, the window from its
 /// document, a shadow root's host.
-pub fn parent(target: &JsValue, _event: &JsObject, context: &mut Context) -> JsResult<Option<JsValue>> {
+pub fn parent(
+    target: &JsValue,
+    _event: &JsObject,
+    context: &mut Context,
+) -> JsResult<Option<JsValue>> {
     let Some(id) = node_id(target) else {
         return Ok(None);
     };
@@ -35,7 +39,11 @@ pub fn parent(target: &JsValue, _event: &JsObject, context: &mut Context) -> JsR
     Ok(next.map(|n| wrap(context, n)))
 }
 
-const UI: &[(&str, F)] = &[("view", F::Null), ("detail", F::Number(0.)), ("which", F::Number(0.))];
+const UI: &[(&str, F)] = &[
+    ("view", F::Null),
+    ("detail", F::Number(0.)),
+    ("which", F::Number(0.)),
+];
 
 const MODIFIERS: &[(&str, F)] = &[
     ("ctrlKey", F::Bool(false)),
@@ -169,7 +177,11 @@ const KEYBOARD: &[(&str, F)] = &[
     ("keyCode", F::Number(0.)),
 ];
 
-const FOCUS: &[(&str, F)] = &[("view", F::Null), ("detail", F::Number(0.)), ("relatedTarget", F::Null)];
+const FOCUS: &[(&str, F)] = &[
+    ("view", F::Null),
+    ("detail", F::Number(0.)),
+    ("relatedTarget", F::Null),
+];
 
 const INPUT: &[(&str, F)] = &[
     ("view", F::Null),
@@ -180,7 +192,11 @@ const INPUT: &[(&str, F)] = &[
     ("dataTransfer", F::Null),
 ];
 
-const COMPOSITION: &[(&str, F)] = &[("view", F::Null), ("detail", F::Number(0.)), ("data", F::Text(""))];
+const COMPOSITION: &[(&str, F)] = &[
+    ("view", F::Null),
+    ("detail", F::Number(0.)),
+    ("data", F::Text("")),
+];
 
 const TOUCH: &[(&str, F)] = &[
     ("view", F::Null),
@@ -206,19 +222,75 @@ const CLASSES: &[(&str, &str, &[(&str, F)])] = &[
     ("InputEvent", "UIEvent", INPUT),
     ("CompositionEvent", "UIEvent", COMPOSITION),
     ("TouchEvent", "UIEvent", TOUCH),
-    ("AnimationEvent", "Event", &[("animationName", F::Text("")), ("elapsedTime", F::Number(0.)), ("pseudoElement", F::Text(""))]),
-    ("TransitionEvent", "Event", &[("propertyName", F::Text("")), ("elapsedTime", F::Number(0.)), ("pseudoElement", F::Text(""))]),
+    (
+        "AnimationEvent",
+        "Event",
+        &[
+            ("animationName", F::Text("")),
+            ("elapsedTime", F::Number(0.)),
+            ("pseudoElement", F::Text("")),
+        ],
+    ),
+    (
+        "TransitionEvent",
+        "Event",
+        &[
+            ("propertyName", F::Text("")),
+            ("elapsedTime", F::Number(0.)),
+            ("pseudoElement", F::Text("")),
+        ],
+    ),
     ("ClipboardEvent", "Event", &[("clipboardData", F::Null)]),
     ("SubmitEvent", "Event", &[("submitter", F::Null)]),
     ("FormDataEvent", "Event", &[("formData", F::Null)]),
-    ("HashChangeEvent", "Event", &[("oldURL", F::Text("")), ("newURL", F::Text(""))]),
-    ("PopStateEvent", "Event", &[("state", F::Null), ("hasUAVisualTransition", F::Bool(false))]),
-    ("PageTransitionEvent", "Event", &[("persisted", F::Bool(false))]),
+    (
+        "HashChangeEvent",
+        "Event",
+        &[("oldURL", F::Text("")), ("newURL", F::Text(""))],
+    ),
+    (
+        "PopStateEvent",
+        "Event",
+        &[
+            ("state", F::Null),
+            ("hasUAVisualTransition", F::Bool(false)),
+        ],
+    ),
+    (
+        "PageTransitionEvent",
+        "Event",
+        &[("persisted", F::Bool(false))],
+    ),
     ("BeforeUnloadEvent", "Event", &[]),
-    ("StorageEvent", "Event", &[("key", F::Null), ("oldValue", F::Null), ("newValue", F::Null), ("url", F::Text("")), ("storageArea", F::Null)]),
-    ("ToggleEvent", "Event", &[("oldState", F::Text("")), ("newState", F::Text(""))]),
-    ("MediaQueryListEvent", "Event", &[("media", F::Text("")), ("matches", F::Bool(false))]),
-    ("SecurityPolicyViolationEvent", "Event", &[("violatedDirective", F::Text("")), ("blockedURI", F::Text(""))]),
+    (
+        "StorageEvent",
+        "Event",
+        &[
+            ("key", F::Null),
+            ("oldValue", F::Null),
+            ("newValue", F::Null),
+            ("url", F::Text("")),
+            ("storageArea", F::Null),
+        ],
+    ),
+    (
+        "ToggleEvent",
+        "Event",
+        &[("oldState", F::Text("")), ("newState", F::Text(""))],
+    ),
+    (
+        "MediaQueryListEvent",
+        "Event",
+        &[("media", F::Text("")), ("matches", F::Bool(false))],
+    ),
+    (
+        "SecurityPolicyViolationEvent",
+        "Event",
+        &[
+            ("violatedDirective", F::Text("")),
+            ("blockedURI", F::Text("")),
+        ],
+    ),
 ];
 
 const MODIFIER_METHODS: &[Method] = &[("getModifierState", 1, |this, args, cx| {
@@ -230,7 +302,9 @@ const MODIFIER_METHODS: &[Method] = &[("getModifierState", 1, |this, args, cx| {
         "Meta" | "OS" => "metaKey",
         _ => return Ok(false.into()),
     };
-    Ok(verve::dom_events::field_value(this, field)?.to_boolean().into())
+    Ok(verve::dom_events::field_value(this, field)?
+        .to_boolean()
+        .into())
 })];
 
 pub fn install(context: &mut Context) -> JsResult<()> {
@@ -238,17 +312,32 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     {
         let state = shared(context);
         let mut state = state.borrow_mut();
-        state.classes.insert("EventTarget", classes.event_target.clone());
+        state
+            .classes
+            .insert("EventTarget", classes.event_target.clone());
         state.classes.insert("Event", classes.event.clone());
-        state.classes.insert("CustomEvent", classes.custom_event.clone());
+        state
+            .classes
+            .insert("CustomEvent", classes.custom_event.clone());
     }
     // The runtime's own events beside those, for the document to fire too.
-    for name in ["ProgressEvent", "MessageEvent", "ErrorEvent", "CloseEvent", "PromiseRejectionEvent"] {
+    for name in [
+        "ProgressEvent",
+        "MessageEvent",
+        "ErrorEvent",
+        "CloseEvent",
+        "PromiseRejectionEvent",
+    ] {
         let constructor = context.global_object().get(JsString::from(name), context)?;
         if let Some(constructor) = constructor.as_object() {
-            let prototype = constructor.get(js_string!("prototype"), context)?.as_object();
+            let prototype = constructor
+                .get(js_string!("prototype"), context)?
+                .as_object();
             if let Some(prototype) = prototype {
-                shared(context).borrow_mut().classes.insert(name, (constructor, prototype));
+                shared(context)
+                    .borrow_mut()
+                    .classes
+                    .insert(name, (constructor, prototype));
             }
         }
     }
@@ -259,12 +348,22 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         } else {
             &[]
         };
-        let made = verve::dom_events::define_event_class(context, name, (&parent.0, &parent.1), fields, methods)?;
-        shared(context).borrow_mut().classes.insert(name, made.clone());
+        let made = verve::dom_events::define_event_class(
+            context,
+            name,
+            (&parent.0, &parent.1),
+            fields,
+            methods,
+        )?;
+        shared(context)
+            .borrow_mut()
+            .classes
+            .insert(name, made.clone());
         context.register_global_property(
             JsString::from(*name),
             made.0,
-            boa_engine::property::Attribute::WRITABLE | boa_engine::property::Attribute::CONFIGURABLE,
+            boa_engine::property::Attribute::WRITABLE
+                | boa_engine::property::Attribute::CONFIGURABLE,
         )?;
     }
     // `event.x` and `event.y` are `clientX` and `clientY`.
@@ -272,24 +371,44 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     super::extend_prototype(
         context,
         &mouse,
-        &[(
-            "initMouseEvent",
-            15,
-            |this, args, cx| {
-                super::call_method(this, "initEvent", &args[..args.len().min(3)], cx)?;
-                for (index, field) in [(5, "screenX"), (6, "screenY"), (7, "clientX"), (8, "clientY"), (9, "ctrlKey"), (10, "altKey"), (11, "shiftKey"), (12, "metaKey"), (13, "button"), (14, "relatedTarget")] {
-                    verve::dom_events::set_field_value(this, field, arg(args, index))?;
-                }
-                Ok(JsValue::undefined())
-            },
-        )],
+        &[("initMouseEvent", 15, |this, args, cx| {
+            super::call_method(this, "initEvent", &args[..args.len().min(3)], cx)?;
+            for (index, field) in [
+                (5, "screenX"),
+                (6, "screenY"),
+                (7, "clientX"),
+                (8, "clientY"),
+                (9, "ctrlKey"),
+                (10, "altKey"),
+                (11, "shiftKey"),
+                (12, "metaKey"),
+                (13, "button"),
+                (14, "relatedTarget"),
+            ] {
+                verve::dom_events::set_field_value(this, field, arg(args, index))?;
+            }
+            Ok(JsValue::undefined())
+        })],
         &[
-            ("x", Some(|this, _, _| verve::dom_events::field_value(this, "clientX")), None),
-            ("y", Some(|this, _, _| verve::dom_events::field_value(this, "clientY")), None),
+            (
+                "x",
+                Some(|this, _, _| verve::dom_events::field_value(this, "clientX")),
+                None,
+            ),
+            (
+                "y",
+                Some(|this, _, _| verve::dom_events::field_value(this, "clientY")),
+                None,
+            ),
         ],
     )?;
     let keyboard = shared(context).borrow().prototype("KeyboardEvent");
-    for (key, value) in [("DOM_KEY_LOCATION_STANDARD", 0), ("DOM_KEY_LOCATION_LEFT", 1), ("DOM_KEY_LOCATION_RIGHT", 2), ("DOM_KEY_LOCATION_NUMPAD", 3)] {
+    for (key, value) in [
+        ("DOM_KEY_LOCATION_STANDARD", 0),
+        ("DOM_KEY_LOCATION_LEFT", 1),
+        ("DOM_KEY_LOCATION_RIGHT", 2),
+        ("DOM_KEY_LOCATION_NUMPAD", 3),
+    ] {
         keyboard.set(JsString::from(key), value, false, context)?;
     }
     let ui = shared(context).borrow().prototype("UIEvent");
@@ -312,8 +431,8 @@ pub fn install(context: &mut Context) -> JsResult<()> {
 fn defaults(kind: &str) -> (bool, bool) {
     match kind {
         "mouseenter" | "mouseleave" | "pointerenter" | "pointerleave" | "focus" | "blur"
-        | "load" | "unload" | "scroll" | "scrollend" | "resize" | "toggle" | "close"
-        | "play" | "pause" | "invalid" => (false, false),
+        | "load" | "unload" | "scroll" | "scrollend" | "resize" | "toggle" | "close" | "play"
+        | "pause" | "invalid" => (false, false),
         "input" | "change" | "focusin" | "focusout" | "select" | "selectionchange"
         | "compositionend" | "pointercancel" | "gotpointercapture" | "lostpointercapture" => {
             (true, false)
@@ -372,7 +491,14 @@ pub fn fire_event(
 }
 
 /// [`fire`] at a node.
-pub fn fire_at(context: &mut Context, node: NodeId, class: &str, kind: &str, init: &[(&str, JsValue)], trusted: bool) -> JsResult<bool> {
+pub fn fire_at(
+    context: &mut Context,
+    node: NodeId,
+    class: &str,
+    kind: &str,
+    init: &[(&str, JsValue)],
+    trusted: bool,
+) -> JsResult<bool> {
     let target = wrap(context, node);
     fire_event(context, &target, class, kind, init, trusted).map(|(allowed, _)| allowed)
 }
@@ -381,15 +507,23 @@ pub fn fire_at(context: &mut Context, node: NodeId, class: &str, kind: &str, ini
 /// region — enabled, and in the document.
 pub fn focusable(context: &Context, id: NodeId) -> bool {
     read_dom(context, |dom| {
-        let Some(node) = dom.get(id) else { return false };
+        let Some(node) = dom.get(id) else {
+            return false;
+        };
         if !dom.is_connected(id) || !node.is_element() {
             return false;
         }
-        if node.attr("tabindex").is_some() || node.attr("contenteditable").is_some_and(|v| v != "false") {
+        if node.attr("tabindex").is_some()
+            || node.attr("contenteditable").is_some_and(|v| v != "false")
+        {
             return true;
         }
         match node.tag() {
-            Some("input") => node.attr("type").is_none_or(|t| !t.eq_ignore_ascii_case("hidden")) && node.attr("disabled").is_none(),
+            Some("input") => {
+                node.attr("type")
+                    .is_none_or(|t| !t.eq_ignore_ascii_case("hidden"))
+                    && node.attr("disabled").is_none()
+            }
             Some("select" | "textarea" | "button") => node.attr("disabled").is_none(),
             Some("a" | "area") => node.attr("href").is_some(),
             Some("iframe" | "summary") => true,
@@ -417,16 +551,45 @@ pub fn set_focus_from(context: &mut Context, id: Option<NodeId>, trusted: bool) 
             }
         }
     });
-    let related = |other: Option<NodeId>, cx: &mut Context| other.map_or(JsValue::null(), |o| wrap(cx, o));
+    let related =
+        |other: Option<NodeId>, cx: &mut Context| other.map_or(JsValue::null(), |o| wrap(cx, o));
     if let Some(before) = before.filter(|b| read_dom(context, |dom| dom.exists(*b))) {
         let other = related(id, context);
-        fire_at(context, before, "FocusEvent", "blur", &[("relatedTarget", other.clone())], trusted)?;
-        fire_at(context, before, "FocusEvent", "focusout", &[("relatedTarget", other)], trusted)?;
+        fire_at(
+            context,
+            before,
+            "FocusEvent",
+            "blur",
+            &[("relatedTarget", other.clone())],
+            trusted,
+        )?;
+        fire_at(
+            context,
+            before,
+            "FocusEvent",
+            "focusout",
+            &[("relatedTarget", other)],
+            trusted,
+        )?;
     }
     if let Some(id) = id {
         let other = related(before, context);
-        fire_at(context, id, "FocusEvent", "focus", &[("relatedTarget", other.clone())], trusted)?;
-        fire_at(context, id, "FocusEvent", "focusin", &[("relatedTarget", other)], trusted)?;
+        fire_at(
+            context,
+            id,
+            "FocusEvent",
+            "focus",
+            &[("relatedTarget", other.clone())],
+            trusted,
+        )?;
+        fire_at(
+            context,
+            id,
+            "FocusEvent",
+            "focusin",
+            &[("relatedTarget", other)],
+            trusted,
+        )?;
     }
     Ok(())
 }
@@ -434,7 +597,10 @@ pub fn set_focus_from(context: &mut Context, id: Option<NodeId>, trusted: bool) 
 /// Sets a checkbox's or radio button's `checked`, the others of a radio's group unchecked.
 pub fn set_checked(context: &mut Context, id: NodeId, on: bool) {
     with_dom(context, |dom| {
-        let radio = dom.get(id).is_some_and(|n| n.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("radio")));
+        let radio = dom.get(id).is_some_and(|n| {
+            n.attr("type")
+                .is_some_and(|t| t.eq_ignore_ascii_case("radio"))
+        });
         if let Some(node) = dom.get_mut(id) {
             node.checked = on;
             node.dirty_checked = true;
@@ -474,7 +640,8 @@ fn radio_group(dom: &crate::dom::Dom, id: NodeId) -> Vec<NodeId> {
         .filter(|n| {
             dom.get(*n).is_some_and(|x| {
                 x.tag() == Some("input")
-                    && x.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("radio"))
+                    && x.attr("type")
+                        .is_some_and(|t| t.eq_ignore_ascii_case("radio"))
                     && x.attr("name") == Some(name.as_str())
             }) && form(*n) == own_form
         })
@@ -485,10 +652,16 @@ fn radio_group(dom: &crate::dom::Dom, id: NodeId) -> Vec<NodeId> {
 /// ticked first (and untouched again if the click was prevented), then its `input` and
 /// `change`; a label pressing its control; a submit button submitting its form; a `<summary>`
 /// opening its `<details>`.
-pub fn click(context: &mut Context, id: NodeId, props: &[(&str, JsValue)], trusted: bool) -> JsResult<bool> {
+pub fn click(
+    context: &mut Context,
+    id: NodeId,
+    props: &[(&str, JsValue)],
+    trusted: bool,
+) -> JsResult<bool> {
     let disabled = read_dom(context, |dom| {
         dom.get(id).is_some_and(|n| {
-            matches!(n.tag(), Some("input" | "button" | "select" | "textarea")) && n.attr("disabled").is_some()
+            matches!(n.tag(), Some("input" | "button" | "select" | "textarea"))
+                && n.attr("disabled").is_some()
         })
     });
     if disabled {
@@ -507,7 +680,11 @@ pub fn click(context: &mut Context, id: NodeId, props: &[(&str, JsValue)], trust
                     "reset" => Some("reset"),
                     _ => None,
                 },
-                Some("button") => match dom.get_attr(node, "type").map(|t| t.to_ascii_lowercase()).as_deref() {
+                Some("button") => match dom
+                    .get_attr(node, "type")
+                    .map(|t| t.to_ascii_lowercase())
+                    .as_deref()
+                {
                     Some("button") => None,
                     Some("reset") => Some("reset"),
                     _ => Some("submit"),
@@ -530,13 +707,22 @@ pub fn click(context: &mut Context, id: NodeId, props: &[(&str, JsValue)], trust
             let node = activator.expect("found");
             let was = read_dom(context, |dom| {
                 let group: Vec<(NodeId, bool)> = if kind == Some("radio") {
-                    radio_group(dom, node).into_iter().map(|n| (n, dom.get(n).is_some_and(|x| x.checked))).collect()
+                    radio_group(dom, node)
+                        .into_iter()
+                        .map(|n| (n, dom.get(n).is_some_and(|x| x.checked)))
+                        .collect()
                 } else {
                     vec![(node, dom.get(node).is_some_and(|x| x.checked))]
                 };
                 group
             });
-            let on = if kind == Some("radio") { true } else { !was.iter().find(|(n, _)| *n == node).is_some_and(|(_, c)| *c) };
+            let on = if kind == Some("radio") {
+                true
+            } else {
+                !was.iter()
+                    .find(|(n, _)| *n == node)
+                    .is_some_and(|(_, c)| *c)
+            };
             set_checked(context, node, on);
             Some(was)
         }
@@ -561,7 +747,13 @@ pub fn click(context: &mut Context, id: NodeId, props: &[(&str, JsValue)], trust
                     }
                 });
             } else {
-                let changed = read_dom(context, |dom| dom.get(activator).is_some_and(|n| was.iter().find(|(x, _)| *x == activator).is_none_or(|(_, c)| *c != n.checked)));
+                let changed = read_dom(context, |dom| {
+                    dom.get(activator).is_some_and(|n| {
+                        was.iter()
+                            .find(|(x, _)| *x == activator)
+                            .is_none_or(|(_, c)| *c != n.checked)
+                    })
+                });
                 if changed {
                     fire_at(context, activator, "Event", "input", &[], trusted)?;
                     fire_at(context, activator, "Event", "change", &[], trusted)?;
@@ -584,9 +776,13 @@ pub fn click(context: &mut Context, id: NodeId, props: &[(&str, JsValue)], trust
             }
         }
         Some("label") => {
-            let control = read_dom(context, |dom| crate::bind::element::label_control(dom, activator));
+            let control = read_dom(context, |dom| {
+                crate::bind::element::label_control(dom, activator)
+            });
             // A click already on the control (or inside it) is the control's own.
-            if let Some(control) = control.filter(|c| !read_dom(context, |dom| dom.contains(*c, id))) {
+            if let Some(control) =
+                control.filter(|c| !read_dom(context, |dom| dom.contains(*c, id)))
+            {
                 if focusable(context, control) {
                     set_focus_from(context, Some(control), trusted)?;
                 }
@@ -594,7 +790,10 @@ pub fn click(context: &mut Context, id: NodeId, props: &[(&str, JsValue)], trust
             }
         }
         Some("summary") => {
-            let details = read_dom(context, |dom| dom.parent(activator).filter(|p| dom.get(*p).and_then(|n| n.tag()) == Some("details")));
+            let details = read_dom(context, |dom| {
+                dom.parent(activator)
+                    .filter(|p| dom.get(*p).and_then(|n| n.tag()) == Some("details"))
+            });
             if let Some(details) = details {
                 with_dom(context, |dom| {
                     if dom.get_attr(details, "open").is_some() {
@@ -608,7 +807,12 @@ pub fn click(context: &mut Context, id: NodeId, props: &[(&str, JsValue)], trust
         }
         Some("link") => {
             let href = read_dom(context, |dom| dom.get_attr(activator, "href")).unwrap_or_default();
-            let resolved = shared(context).borrow().url.join(&href).map(|u| u.to_string()).unwrap_or(href);
+            let resolved = shared(context)
+                .borrow()
+                .url
+                .join(&href)
+                .map(|u| u.to_string())
+                .unwrap_or(href);
             super::window::navigate(context, &resolved, false)?;
         }
         _ => {}
@@ -619,7 +823,10 @@ pub fn click(context: &mut Context, id: NodeId, props: &[(&str, JsValue)], trust
 fn form_of(context: &Context, id: NodeId) -> Option<NodeId> {
     read_dom(context, |dom| {
         if let Some(named) = dom.get_attr(id, "form") {
-            return dom.descendants(dom.document).into_iter().find(|n| dom.get_attr(*n, "id").as_deref() == Some(named.as_str()));
+            return dom
+                .descendants(dom.document)
+                .into_iter()
+                .find(|n| dom.get_attr(*n, "id").as_deref() == Some(named.as_str()));
         }
         let mut at = Some(id);
         while let Some(node) = at {
@@ -636,37 +843,143 @@ fn form_of(context: &Context, id: NodeId) -> Option<NodeId> {
 /// which the drawer hears as a [`crate::Request::Submit`].
 pub fn submit(context: &mut Context, form: NodeId, submitter: Option<NodeId>) -> JsResult<()> {
     let submitter = submitter.map_or(JsValue::null(), |s| wrap(context, s));
-    let allowed = fire_at(context, form, "SubmitEvent", "submit", &[("submitter", submitter)], false)?;
+    let allowed = fire_at(
+        context,
+        form,
+        "SubmitEvent",
+        "submit",
+        &[("submitter", submitter)],
+        false,
+    )?;
     if allowed {
-        shared(context).borrow_mut().requests.push(crate::Request::Submit(form));
+        shared(context)
+            .borrow_mut()
+            .requests
+            .push(crate::Request::Submit(form));
     }
     Ok(())
 }
 
 /// The events with an `on…` property on elements, the document and the window.
 pub const HANDLER_EVENTS: &[&str] = &[
-    "abort", "animationcancel", "animationend", "animationiteration", "animationstart",
-    "auxclick", "beforeinput", "beforetoggle", "blur", "cancel", "canplay", "canplaythrough",
-    "change", "click", "close", "contextmenu", "copy", "cuechange", "cut", "dblclick", "drag",
-    "dragend", "dragenter", "dragleave", "dragover", "dragstart", "drop", "durationchange",
-    "emptied", "ended", "error", "focus", "focusin", "focusout", "formdata",
-    "fullscreenchange", "gotpointercapture", "input", "invalid", "keydown", "keypress", "keyup",
-    "load", "loadeddata", "loadedmetadata", "loadstart", "lostpointercapture", "mousedown",
-    "mouseenter", "mouseleave", "mousemove", "mouseout", "mouseover", "mouseup", "paste",
-    "pause", "play", "playing", "pointercancel", "pointerdown", "pointerenter", "pointerleave",
-    "pointermove", "pointerout", "pointerover", "pointerup", "progress", "ratechange", "reset",
-    "resize", "scroll", "scrollend", "securitypolicyviolation", "seeked", "seeking", "select",
-    "selectionchange", "selectstart", "slotchange", "stalled", "submit", "suspend",
-    "timeupdate", "toggle", "touchcancel", "touchend", "touchmove", "touchstart",
-    "transitioncancel", "transitionend", "transitionrun", "transitionstart", "volumechange",
-    "waiting", "wheel", "compositionstart", "compositionupdate", "compositionend",
+    "abort",
+    "animationcancel",
+    "animationend",
+    "animationiteration",
+    "animationstart",
+    "auxclick",
+    "beforeinput",
+    "beforetoggle",
+    "blur",
+    "cancel",
+    "canplay",
+    "canplaythrough",
+    "change",
+    "click",
+    "close",
+    "contextmenu",
+    "copy",
+    "cuechange",
+    "cut",
+    "dblclick",
+    "drag",
+    "dragend",
+    "dragenter",
+    "dragleave",
+    "dragover",
+    "dragstart",
+    "drop",
+    "durationchange",
+    "emptied",
+    "ended",
+    "error",
+    "focus",
+    "focusin",
+    "focusout",
+    "formdata",
+    "fullscreenchange",
+    "gotpointercapture",
+    "input",
+    "invalid",
+    "keydown",
+    "keypress",
+    "keyup",
+    "load",
+    "loadeddata",
+    "loadedmetadata",
+    "loadstart",
+    "lostpointercapture",
+    "mousedown",
+    "mouseenter",
+    "mouseleave",
+    "mousemove",
+    "mouseout",
+    "mouseover",
+    "mouseup",
+    "paste",
+    "pause",
+    "play",
+    "playing",
+    "pointercancel",
+    "pointerdown",
+    "pointerenter",
+    "pointerleave",
+    "pointermove",
+    "pointerout",
+    "pointerover",
+    "pointerup",
+    "progress",
+    "ratechange",
+    "reset",
+    "resize",
+    "scroll",
+    "scrollend",
+    "securitypolicyviolation",
+    "seeked",
+    "seeking",
+    "select",
+    "selectionchange",
+    "selectstart",
+    "slotchange",
+    "stalled",
+    "submit",
+    "suspend",
+    "timeupdate",
+    "toggle",
+    "touchcancel",
+    "touchend",
+    "touchmove",
+    "touchstart",
+    "transitioncancel",
+    "transitionend",
+    "transitionrun",
+    "transitionstart",
+    "volumechange",
+    "waiting",
+    "wheel",
+    "compositionstart",
+    "compositionupdate",
+    "compositionend",
 ];
 
 /// What the window has beyond the elements' handlers.
 pub const WINDOW_EVENTS: &[&str] = &[
-    "afterprint", "beforeprint", "beforeunload", "hashchange", "languagechange", "message",
-    "messageerror", "offline", "online", "pagehide", "pageshow", "popstate",
-    "rejectionhandled", "storage", "unhandledrejection", "unload",
+    "afterprint",
+    "beforeprint",
+    "beforeunload",
+    "hashchange",
+    "languagechange",
+    "message",
+    "messageerror",
+    "offline",
+    "online",
+    "pagehide",
+    "pageshow",
+    "popstate",
+    "rejectionhandled",
+    "storage",
+    "unhandledrejection",
+    "unload",
 ];
 
 /// Puts the handler properties on the element and document prototypes and the window.

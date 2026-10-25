@@ -17,7 +17,10 @@ fn prepared() -> PathBuf {
     let dir = std::env::var_os("VERVE_DOM_REACT_DEV")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("react-dev"));
-    if !dir.join("node_modules/react-dom/cjs/react-dom.development.js").exists() {
+    if !dir
+        .join("node_modules/react-dom/cjs/react-dom.development.js")
+        .exists()
+    {
         std::fs::create_dir_all(&dir).unwrap();
         let package = r#"{ "name": "verve-dom-react-dev", "private": true, "dependencies": { "react": "18.3.1", "react-dom": "18.3.1" } }"#;
         std::fs::write(dir.join("package.json"), package).unwrap();
@@ -45,24 +48,40 @@ fn the_development_builds_render_type_and_unmount_without_a_warning() {
             panic!("the app failed to load: {error}\n{}", page.console());
         }
         page.settle();
-        assert_eq!(page.eval("document.getElementById('inc').textContent"), "count: 0");
+        assert_eq!(
+            page.eval("document.getElementById('inc').textContent"),
+            "count: 0"
+        );
         let inc = page.find("#inc");
         page.document.press(&mut page.runtime, inc);
         page.settle();
-        assert_eq!(page.eval("document.getElementById('inc').textContent"), "count: 1");
+        assert_eq!(
+            page.eval("document.getElementById('inc').textContent"),
+            "count: 1"
+        );
         let field = page.find("#field");
         page.document.press(&mut page.runtime, field);
         page.document.type_text(&mut page.runtime, "dev");
-        page.document.key_down(&mut page.runtime, &Key::named("Backspace"));
+        page.document
+            .key_down(&mut page.runtime, &Key::named("Backspace"));
         page.settle();
-        assert_eq!(page.eval("document.getElementById('echo').textContent"), "DE");
+        assert_eq!(
+            page.eval("document.getElementById('echo').textContent"),
+            "DE"
+        );
         let check = page.find("#check");
         page.document.press(&mut page.runtime, check);
         page.settle();
-        assert_eq!(page.eval("document.getElementById('check').checked"), "true");
+        assert_eq!(
+            page.eval("document.getElementById('check').checked"),
+            "true"
+        );
         page.eval("unmount()");
         page.settle();
-        assert_eq!(page.eval("document.getElementById('root').childNodes.length"), "0");
+        assert_eq!(
+            page.eval("document.getElementById('root').childNodes.length"),
+            "0"
+        );
         // React's development build says on the console what it finds wrong with the DOM.
         let console = page.console();
         let complaints: Vec<&str> = console

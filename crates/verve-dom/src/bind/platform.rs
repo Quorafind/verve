@@ -24,8 +24,8 @@ use boa_engine::{
 use super::node::{ancestry, read_dom, with_dom, wrap, wrap_opt};
 use super::{
     Accessor, ClassSpec, Kind, Method, arg, arg_string, array, class, constructor_of, function,
-    get, handle_of, illegal_constructor, instance, native_instance, node_id, node_of,
-    opt_string, plain_object, set, string, text, type_error,
+    get, handle_of, illegal_constructor, instance, native_instance, node_id, node_of, opt_string,
+    plain_object, set, string, text, type_error,
 };
 use crate::dom::{Dom, NodeId, NodeKind};
 use crate::state::shared;
@@ -33,7 +33,13 @@ use crate::state::shared;
 // ─── Attributes ─────────────────────────────────────────────────────────────────────────────
 
 /// An `Attr`: its name and value as they were when it was asked for, and its element.
-pub fn attr_object(context: &mut Context, owner: &JsValue, name: &str, value: &str, _document: &JsValue) -> JsResult<JsValue> {
+pub fn attr_object(
+    context: &mut Context,
+    owner: &JsValue,
+    name: &str,
+    value: &str,
+    _document: &JsValue,
+) -> JsResult<JsValue> {
     let attr = native_instance(context, "Attr", Kind::Plain, 0);
     let (prefix, local) = match name.split_once(':') {
         Some((prefix, local)) => (text(prefix), local),
@@ -54,7 +60,11 @@ pub fn attr_object(context: &mut Context, owner: &JsValue, name: &str, value: &s
     ] {
         attr.define_property_or_throw(
             JsString::from(key),
-            PropertyDescriptor::builder().value(value).writable(true).enumerable(true).configurable(true),
+            PropertyDescriptor::builder()
+                .value(value)
+                .writable(true)
+                .enumerable(true)
+                .configurable(true),
             context,
         )?;
     }
@@ -68,7 +78,13 @@ pub fn attributes(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
     let pairs = read_dom(context, |dom| dom.attributes(id));
     let mut items = Vec::new();
     for (name, value) in &pairs {
-        items.push(attr_object(context, this, name, value, &JsValue::undefined())?);
+        items.push(attr_object(
+            context,
+            this,
+            name,
+            value,
+            &JsValue::undefined(),
+        )?);
     }
     let list = array(items.clone(), context);
     if let Some(object) = list.as_object() {
@@ -76,7 +92,9 @@ pub fn attributes(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
         object.set_prototype(Some(prototype));
         super::hidden(&object, js_string!("__owner"), this.clone(), context)?;
         for ((name, _), attr) in pairs.iter().zip(items) {
-            if name.parse::<u32>().is_ok() || object.has_own_property(JsString::from(name.as_str()), context)? {
+            if name.parse::<u32>().is_ok()
+                || object.has_own_property(JsString::from(name.as_str()), context)?
+            {
                 continue;
             }
             super::hidden(&object, JsString::from(name.as_str()), attr, context)?;
@@ -92,7 +110,11 @@ const NAMED_NODE_MAP_METHODS: &[Method] = &[
             Some(list) => list.get(at, cx)?,
             None => JsValue::undefined(),
         };
-        Ok(if found.is_undefined() { JsValue::null() } else { found })
+        Ok(if found.is_undefined() {
+            JsValue::null()
+        } else {
+            found
+        })
     }),
     ("getNamedItem", 1, |this, args, cx| {
         let name = arg_string(args, 0, cx)?;
@@ -103,7 +125,9 @@ const NAMED_NODE_MAP_METHODS: &[Method] = &[
         }
         Ok(JsValue::null())
     }),
-    ("getNamedItemNS", 2, |this, args, cx| super::call_method(this, "getNamedItem", &[arg(args, 1)], cx)),
+    ("getNamedItemNS", 2, |this, args, cx| {
+        super::call_method(this, "getNamedItem", &[arg(args, 1)], cx)
+    }),
     ("removeNamedItem", 1, |this, args, cx| {
         let owner = get(this, "__owner", cx)?;
         super::call_method(&owner, "removeAttribute", &[arg(args, 0)], cx)
@@ -121,7 +145,10 @@ const NAMED_NODE_MAP_METHODS: &[Method] = &[
 const ATTRIBUTE_METHODS: &[Method] = &[
     ("getAttributeNames", 0, |this, _, cx| {
         let id = node_of(this)?;
-        let names: Vec<JsValue> = read_dom(cx, |dom| dom.attributes(id)).into_iter().map(|(n, _)| text(&n)).collect();
+        let names: Vec<JsValue> = read_dom(cx, |dom| dom.attributes(id))
+            .into_iter()
+            .map(|(n, _)| text(&n))
+            .collect();
         Ok(array(names, cx))
     }),
     ("hasAttributes", 0, |this, _, cx| {
@@ -150,7 +177,10 @@ const ATTRIBUTE_METHODS: &[Method] = &[
         let name = arg_string(args, 1, cx)?;
         let found = read_dom(cx, |dom| {
             dom.get_attr(id, &name).or_else(|| {
-                dom.attributes(id).into_iter().find(|(k, _)| k.rsplit(':').next() == Some(name.as_str())).map(|(_, v)| v)
+                dom.attributes(id)
+                    .into_iter()
+                    .find(|(k, _)| k.rsplit(':').next() == Some(name.as_str()))
+                    .map(|(_, v)| v)
             })
         });
         Ok(found.map_or(JsValue::null(), |v| text(&v)))
@@ -166,7 +196,10 @@ const ATTRIBUTE_METHODS: &[Method] = &[
         let id = node_of(this)?;
         let name = arg_string(args, 1, cx)?;
         let qualified = read_dom(cx, |dom| {
-            dom.attributes(id).into_iter().find(|(k, _)| *k == name || k.rsplit(':').next() == Some(name.as_str())).map(|(k, _)| k)
+            dom.attributes(id)
+                .into_iter()
+                .find(|(k, _)| *k == name || k.rsplit(':').next() == Some(name.as_str()))
+                .map(|(k, _)| k)
         });
         let name = qualified.unwrap_or(name);
         with_dom(cx, |dom| dom.remove_attr(id, &name));
@@ -177,7 +210,10 @@ const ATTRIBUTE_METHODS: &[Method] = &[
         let name = arg_string(args, 1, cx)?;
         Ok(read_dom(cx, |dom| {
             dom.get_attr(id, &name).is_some()
-                || dom.attributes(id).iter().any(|(k, _)| k.rsplit(':').next() == Some(name.as_str()))
+                || dom
+                    .attributes(id)
+                    .iter()
+                    .any(|(k, _)| k.rsplit(':').next() == Some(name.as_str()))
         })
         .into())
     }),
@@ -197,7 +233,11 @@ pub fn attach_shadow(this: &JsValue, args: &[JsValue], context: &mut Context) ->
         ));
     }
     let mode = get(&arg(args, 0), "mode", context)?;
-    let mode = if mode.is_undefined() { "open".to_owned() } else { string(&mode, context)? };
+    let mode = if mode.is_undefined() {
+        "open".to_owned()
+    } else {
+        string(&mode, context)?
+    };
     let root = with_dom(context, Dom::create_fragment);
     {
         let state = shared(context);
@@ -215,7 +255,12 @@ pub fn attach_shadow(this: &JsValue, args: &[JsValue], context: &mut Context) ->
     set(&root_object, "mode", text(&mode), context)?;
     let sheets = array(Vec::new(), context);
     set(&root_object, "adoptedStyleSheets", sheets, context)?;
-    set(&root_object, "delegatesFocus", get(&arg(args, 0), "delegatesFocus", context)?.to_boolean(), context)?;
+    set(
+        &root_object,
+        "delegatesFocus",
+        get(&arg(args, 0), "delegatesFocus", context)?.to_boolean(),
+        context,
+    )?;
     Ok(object)
 }
 
@@ -270,7 +315,11 @@ pub fn custom_class(context: &Context, tag: &str) -> Option<JsObject> {
 
 /// `HTMLElement` constructed: only as `super()` of a class `customElements.define` was given,
 /// making an element of that class's tag.
-pub fn construct_html_element(new_target: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+pub fn construct_html_element(
+    new_target: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let Some(target) = new_target.as_object() else {
         return Err(type_error("Illegal constructor"));
     };
@@ -295,20 +344,39 @@ const CUSTOM_ELEMENTS_METHODS: &[Method] = &[
     ("define", 3, |_, args, cx| {
         let name = arg_string(args, 0, cx)?;
         let Some(class) = arg(args, 1).as_object().filter(|c| c.is_constructor()) else {
-            return Err(type_error("Failed to execute 'define' on 'CustomElementRegistry': parameter 2 is not a constructor."));
+            return Err(type_error(
+                "Failed to execute 'define' on 'CustomElementRegistry': parameter 2 is not a constructor.",
+            ));
         };
         if !name.contains('-') || name.chars().next().is_none_or(|c| !c.is_ascii_lowercase()) {
-            return Err(super::dom_error(cx, &format!("Failed to execute 'define' on 'CustomElementRegistry': \"{name}\" is not a valid custom element name"), "SyntaxError"));
+            return Err(super::dom_error(
+                cx,
+                &format!(
+                    "Failed to execute 'define' on 'CustomElementRegistry': \"{name}\" is not a valid custom element name"
+                ),
+                "SyntaxError",
+            ));
         }
         if custom_class(cx, &name).is_some() {
-            return Err(super::dom_error(cx, &format!("Failed to execute 'define' on 'CustomElementRegistry': the name \"{name}\" has already been used with this registry"), "NotSupportedError"));
+            return Err(super::dom_error(
+                cx,
+                &format!(
+                    "Failed to execute 'define' on 'CustomElementRegistry': the name \"{name}\" has already been used with this registry"
+                ),
+                "NotSupportedError",
+            ));
         }
-        shared(cx).borrow_mut().custom_elements.push((name.clone(), class.clone()));
+        shared(cx)
+            .borrow_mut()
+            .custom_elements
+            .push((name.clone(), class.clone()));
         // Whoever waited for it hears now.
         let waiting: Vec<JsValue> = {
             let state = shared(cx);
             let mut state = state.borrow_mut();
-            let (ready, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.custom_waiting).into_iter().partition(|(n, _)| *n == name);
+            let (ready, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.custom_waiting)
+                .into_iter()
+                .partition(|(n, _)| *n == name);
             state.custom_waiting = rest;
             ready.into_iter().map(|(_, resolve)| resolve).collect()
         };
@@ -322,8 +390,15 @@ const CUSTOM_ELEMENTS_METHODS: &[Method] = &[
         Ok(custom_class(cx, &name).map_or(JsValue::undefined(), JsValue::from))
     }),
     ("getName", 1, |_, args, cx| {
-        let Some(class) = arg(args, 0).as_object() else { return Ok(JsValue::null()) };
-        let name = shared(cx).borrow().custom_elements.iter().find(|(_, c)| JsObject::equals(c, &class)).map(|(n, _)| n.clone());
+        let Some(class) = arg(args, 0).as_object() else {
+            return Ok(JsValue::null());
+        };
+        let name = shared(cx)
+            .borrow()
+            .custom_elements
+            .iter()
+            .find(|(_, c)| JsObject::equals(c, &class))
+            .map(|(n, _)| n.clone());
         Ok(name.map_or(JsValue::null(), |n| text(&n)))
     }),
     ("whenDefined", 1, |_, args, cx| {
@@ -332,7 +407,10 @@ const CUSTOM_ELEMENTS_METHODS: &[Method] = &[
             return super::resolved(class.into(), cx);
         }
         let (promise, resolvers) = boa_engine::object::builtins::JsPromise::new_pending(cx);
-        shared(cx).borrow_mut().custom_waiting.push((name, resolvers.resolve.into()));
+        shared(cx)
+            .borrow_mut()
+            .custom_waiting
+            .push((name, resolvers.resolve.into()));
         Ok(promise.into())
     }),
     ("upgrade", 1, |_, _, _| Ok(JsValue::undefined())),
@@ -345,12 +423,25 @@ pub fn custom_moved(context: &mut Context, moved: Vec<(NodeId, bool)>) {
         let ids: Vec<NodeId> = {
             let state = shared(context);
             let state = state.borrow();
-            state.dom.subtree(root).into_iter().filter(|id| state.custom_nodes.contains(id)).collect()
+            state
+                .dom
+                .subtree(root)
+                .into_iter()
+                .filter(|id| state.custom_nodes.contains(id))
+                .collect()
         };
         for id in ids {
-            let Some(object) = super::node::existing_wrapper(context, id) else { continue };
-            let name = if connected { "connectedCallback" } else { "disconnectedCallback" };
-            let callback = object.get(JsString::from(name), context).unwrap_or_default();
+            let Some(object) = super::node::existing_wrapper(context, id) else {
+                continue;
+            };
+            let name = if connected {
+                "connectedCallback"
+            } else {
+                "disconnectedCallback"
+            };
+            let callback = object
+                .get(JsString::from(name), context)
+                .unwrap_or_default();
             if callback.is_callable()
                 && let Err(error) = verve::call(context, &callback, &object.clone().into(), &[])
             {
@@ -365,13 +456,19 @@ pub fn custom_moved(context: &mut Context, moved: Vec<(NodeId, bool)>) {
 /// A `<template>`'s content fragment, made the first time it is asked for, holding what was
 /// put in the template since; `None` for anything else.
 pub fn template_target(context: &mut Context, id: NodeId) -> Option<NodeId> {
-    if read_dom(context, |dom| dom.get(id).and_then(|n| n.tag()) != Some("template")) {
+    if read_dom(context, |dom| {
+        dom.get(id).and_then(|n| n.tag()) != Some("template")
+    }) {
         return None;
     }
     let (fragment, fresh) = {
         let state = shared(context);
         let mut state = state.borrow_mut();
-        let existing = state.template_contents.get(&id).copied().filter(|f| state.dom.exists(*f));
+        let existing = state
+            .template_contents
+            .get(&id)
+            .copied()
+            .filter(|f| state.dom.exists(*f));
         match existing {
             Some(fragment) => (fragment, false),
             None => {
@@ -425,17 +522,37 @@ fn rule_object(context: &mut Context, rule: &str, sheet: &JsValue) -> JsResult<J
         let get_value = function(context, "getPropertyValue", 1, |this, args, cx| {
             let name = arg_string(args, 0, cx)?;
             let value = get(this, &name, cx)?;
-            Ok(if value.is_undefined() { text("") } else { value })
+            Ok(if value.is_undefined() {
+                text("")
+            } else {
+                value
+            })
         });
         set(&style, "getPropertyValue", get_value, context)?;
         set(&object, "style", style, context)?;
-        let kind = if selector.starts_with("@media") { 4 } else if selector.starts_with('@') { 0 } else { 1 };
+        let kind = if selector.starts_with("@media") {
+            4
+        } else if selector.starts_with('@') {
+            0
+        } else {
+            1
+        };
         set(&object, "type", kind, context)?;
         if kind == 4 {
-            set(&object, "conditionText", text(selector.trim_start_matches("@media").trim()), context)?;
+            set(
+                &object,
+                "conditionText",
+                text(selector.trim_start_matches("@media").trim()),
+                context,
+            )?;
         }
     } else {
-        set(&object, "type", if rule.starts_with("@import") { 3 } else { 0 }, context)?;
+        set(
+            &object,
+            "type",
+            if rule.starts_with("@import") { 3 } else { 0 },
+            context,
+        )?;
     }
     set(&object, "parentStyleSheet", sheet.clone(), context)?;
     Ok(object.into())
@@ -452,17 +569,31 @@ fn change_element_rules(context: &mut Context, id: NodeId, f: impl FnOnce(&mut V
 
 fn sheet_rules(this: &JsValue, context: &mut Context) -> JsResult<Vec<String>> {
     if let Some(id) = handle_of(this, Kind::Sheet) {
-        return Ok(crate::css::split_rules(&read_dom(context, |dom| dom.text_content(id))));
+        return Ok(crate::css::split_rules(&read_dom(context, |dom| {
+            dom.text_content(id)
+        })));
     }
     if let Some(id) = handle_of(this, Kind::Constructed) {
-        let rules = shared(context).borrow().constructed_sheets.get(&id).cloned().unwrap_or_default();
-        return Ok(rules.iter().flat_map(|r| crate::css::split_rules(r)).collect());
+        let rules = shared(context)
+            .borrow()
+            .constructed_sheets
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        return Ok(rules
+            .iter()
+            .flat_map(|r| crate::css::split_rules(r))
+            .collect());
     }
     Err(type_error("Illegal invocation: not a CSSStyleSheet"))
 }
 
 /// Changes a sheet's rules: a `<style>`'s text, or a made sheet's list.
-fn change_rules(this: &JsValue, context: &mut Context, f: impl FnOnce(&mut Vec<String>)) -> JsResult<()> {
+fn change_rules(
+    this: &JsValue,
+    context: &mut Context,
+    f: impl FnOnce(&mut Vec<String>),
+) -> JsResult<()> {
     if let Some(id) = handle_of(this, Kind::Sheet) {
         change_element_rules(context, id, f);
         return Ok(());
@@ -471,7 +602,10 @@ fn change_rules(this: &JsValue, context: &mut Context, f: impl FnOnce(&mut Vec<S
         let state = shared(context);
         let mut state = state.borrow_mut();
         if let Some(rules) = state.constructed_sheets.get_mut(&id) {
-            let mut split: Vec<String> = rules.iter().flat_map(|r| crate::css::split_rules(r)).collect();
+            let mut split: Vec<String> = rules
+                .iter()
+                .flat_map(|r| crate::css::split_rules(r))
+                .collect();
             f(&mut split);
             *rules = split;
         }
@@ -517,9 +651,17 @@ const SHEET_ACCESSORS: &[Accessor] = &[
     ("href", Some(|_, _, _| Ok(JsValue::null())), None),
     ("type", Some(|_, _, _| Ok(text("text/css"))), None),
     ("title", Some(|_, _, _| Ok(JsValue::null())), None),
-    ("parentStyleSheet", Some(|_, _, _| Ok(JsValue::null())), None),
+    (
+        "parentStyleSheet",
+        Some(|_, _, _| Ok(JsValue::null())),
+        None,
+    ),
     ("ownerRule", Some(|_, _, _| Ok(JsValue::null())), None),
-    ("disabled", Some(|_, _, _| Ok(false.into())), Some(|_, _, _| Ok(JsValue::undefined()))),
+    (
+        "disabled",
+        Some(|_, _, _| Ok(false.into())),
+        Some(|_, _, _| Ok(JsValue::undefined())),
+    ),
     (
         "media",
         Some(|_, _, cx| {
@@ -559,10 +701,14 @@ const SHEET_METHODS: &[Method] = &[
     ("addRule", 2, |this, args, cx| {
         let selector = arg_string(args, 0, cx)?;
         let body = arg_string(args, 1, cx)?;
-        change_rules(this, cx, |rules| rules.push(format!("{selector} {{ {body} }}")))?;
+        change_rules(this, cx, |rules| {
+            rules.push(format!("{selector} {{ {body} }}"))
+        })?;
         Ok((-1).into())
     }),
-    ("removeRule", 1, |this, args, cx| super::call_method(this, "deleteRule", args, cx)),
+    ("removeRule", 1, |this, args, cx| {
+        super::call_method(this, "deleteRule", args, cx)
+    }),
     ("replaceSync", 1, |this, args, cx| {
         let css = arg_string(args, 0, cx)?;
         change_rules(this, cx, |rules| *rules = crate::css::split_rules(&css))?;
@@ -578,7 +724,9 @@ const SHEET_METHODS: &[Method] = &[
 /// The sheet of a `<style>` element: the same object each time it is asked for.
 fn element_sheet(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
     let element = wrap(context, id);
-    let Some(element_object) = element.as_object() else { return Ok(JsValue::null()) };
+    let Some(element_object) = element.as_object() else {
+        return Ok(JsValue::null());
+    };
     let key = js_string!("__sheet");
     let known = element_object.get(key.clone(), context)?;
     if known.is_object() {
@@ -604,7 +752,9 @@ pub const STYLE_ELEMENT_ACCESSORS: &[Accessor] = &[(
 
 /// `document.styleSheets`: every `<style>` in the document's, in order.
 pub fn style_sheets(context: &mut Context) -> JsResult<JsValue> {
-    let ids: Vec<NodeId> = read_dom(context, |dom| dom.style_sheets().into_iter().map(|(id, _)| id).collect());
+    let ids: Vec<NodeId> = read_dom(context, |dom| {
+        dom.style_sheets().into_iter().map(|(id, _)| id).collect()
+    });
     let mut out = Vec::new();
     for id in ids {
         out.push(element_sheet(context, id)?);
@@ -624,7 +774,12 @@ pub fn style_sheets(context: &mut Context) -> JsResult<JsValue> {
 }
 
 pub fn adopted_sheets(context: &mut Context) -> JsResult<JsValue> {
-    let sheets: Vec<JsValue> = shared(context).borrow().adopted_sheets.iter().map(|(_, s)| s.clone().into()).collect();
+    let sheets: Vec<JsValue> = shared(context)
+        .borrow()
+        .adopted_sheets
+        .iter()
+        .map(|(_, s)| s.clone().into())
+        .collect();
     Ok(array(sheets, context))
 }
 
@@ -634,7 +789,9 @@ pub fn set_adopted_sheets(given: &JsValue, context: &mut Context) -> JsResult<Js
         match (handle_of(&sheet, Kind::Constructed), sheet.as_object()) {
             (Some(id), Some(object)) => adopted.push((id, object)),
             _ => {
-                return Err(type_error("Failed to set the 'adoptedStyleSheets' property on 'Document': Failed to convert value to 'CSSStyleSheet'."));
+                return Err(type_error(
+                    "Failed to set the 'adoptedStyleSheets' property on 'Document': Failed to convert value to 'CSSStyleSheet'.",
+                ));
             }
         }
     }
@@ -645,7 +802,11 @@ pub fn set_adopted_sheets(given: &JsValue, context: &mut Context) -> JsResult<Js
     Ok(JsValue::undefined())
 }
 
-fn construct_sheet(new_target: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn construct_sheet(
+    new_target: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let id = {
         let state = shared(context);
         let mut state = state.borrow_mut();
@@ -669,7 +830,9 @@ pub fn computed_value(context: &Context, id: NodeId, property: &str) -> String {
         return value.clone();
     }
     let tag = state.dom.get(id).and_then(|n| n.tag()).map(str::to_owned);
-    crate::css::initial_value(property, tag.as_deref()).unwrap_or("").to_owned()
+    crate::css::initial_value(property, tag.as_deref())
+        .unwrap_or("")
+        .to_owned()
 }
 
 const COMPUTED_METHODS: &[Method] = &[
@@ -691,10 +854,18 @@ const COMPUTED_METHODS: &[Method] = &[
         Ok(names.get(at).map_or(text(""), |n| text(n)))
     }),
     ("setProperty", 2, |_, _, cx| {
-        Err(super::dom_error(cx, "Failed to execute 'setProperty' on 'CSSStyleDeclaration': These styles are computed, and therefore read-only.", "NoModificationAllowedError"))
+        Err(super::dom_error(
+            cx,
+            "Failed to execute 'setProperty' on 'CSSStyleDeclaration': These styles are computed, and therefore read-only.",
+            "NoModificationAllowedError",
+        ))
     }),
     ("removeProperty", 1, |_, _, cx| {
-        Err(super::dom_error(cx, "Failed to execute 'removeProperty' on 'CSSStyleDeclaration': These styles are computed, and therefore read-only.", "NoModificationAllowedError"))
+        Err(super::dom_error(
+            cx,
+            "Failed to execute 'removeProperty' on 'CSSStyleDeclaration': These styles are computed, and therefore read-only.",
+            "NoModificationAllowedError",
+        ))
     }),
 ];
 
@@ -726,7 +897,11 @@ pub fn computed_style(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
                 "parentRule" => return Ok(JsValue::null()),
                 _ => {}
             }
-            let property = if name.contains('-') { name } else { crate::dom::css_name(&name) };
+            let property = if name.contains('-') {
+                name
+            } else {
+                crate::dom::css_name(&name)
+            };
             Ok(text(computed_value(cx, id, &property).trim()))
         })
         .set(|_, _, _| Ok(true.into()))
@@ -744,7 +919,8 @@ const CSS_FUNCTIONS: &[Method] = &[
             let code = c as u32;
             if code == 0 {
                 out.push('\u{FFFD}');
-            } else if (0x1..=0x1f).contains(&code) || code == 0x7f
+            } else if (0x1..=0x1f).contains(&code)
+                || code == 0x7f
                 || (i == 0 && c.is_ascii_digit())
                 || (i == 1 && c.is_ascii_digit() && chars[0] == '-')
             {
@@ -763,7 +939,11 @@ const CSS_FUNCTIONS: &[Method] = &[
     ("supports", 2, |_, args, cx| {
         // A selector is supported when it parses; a declaration, always.
         let first = arg_string(args, 0, cx)?;
-        if let Some(selector) = first.trim().strip_prefix("selector(").and_then(|s| s.strip_suffix(')')) {
+        if let Some(selector) = first
+            .trim()
+            .strip_prefix("selector(")
+            .and_then(|s| s.strip_suffix(')'))
+        {
             return Ok(crate::css::SelectorList::parse(selector).is_ok().into());
         }
         Ok(true.into())
@@ -778,7 +958,11 @@ pub fn font_faces(context: &mut Context) -> JsResult<JsValue> {
     if known.is_object() {
         return Ok(known);
     }
-    let target = shared(context).borrow().class("EventTarget").expect("made").0;
+    let target = shared(context)
+        .borrow()
+        .class("EventTarget")
+        .expect("made")
+        .0;
     let fonts = target.construct(&[], None, context)?;
     let ready = super::resolved(fonts.clone().into(), context)?;
     set(&fonts, "ready", ready, context)?;
@@ -806,9 +990,15 @@ pub fn font_faces(context: &mut Context) -> JsResult<JsValue> {
 
 // ─── Range and Selection ────────────────────────────────────────────────────────────────────
 
-fn construct_range(new_target: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn construct_range(
+    new_target: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let range = instance(new_target, Kind::Plain, 0, context)?;
-    let document = context.global_object().get(js_string!("document"), context)?;
+    let document = context
+        .global_object()
+        .get(js_string!("document"), context)?;
     for key in ["startContainer", "endContainer"] {
         set(&range, key, document.clone(), context)?;
     }
@@ -818,7 +1008,8 @@ fn construct_range(new_target: &JsValue, _: &[JsValue], context: &mut Context) -
 }
 
 pub fn new_range(context: &mut Context) -> JsResult<JsValue> {
-    let constructor = constructor_of(context, "Range").ok_or_else(|| type_error("Range is not installed"))?;
+    let constructor =
+        constructor_of(context, "Range").ok_or_else(|| type_error("Range is not installed"))?;
     Ok(constructor.construct(&[], None, context)?.into())
 }
 
@@ -831,8 +1022,16 @@ fn node_length(dom: &Dom, id: NodeId) -> usize {
     }
 }
 
-fn set_boundary(this: &JsValue, context: &mut Context, which: &str, node: JsValue, offset: u32) -> JsResult<()> {
-    let Some(range) = this.as_object() else { return Ok(()) };
+fn set_boundary(
+    this: &JsValue,
+    context: &mut Context,
+    which: &str,
+    node: JsValue,
+    offset: u32,
+) -> JsResult<()> {
+    let Some(range) = this.as_object() else {
+        return Ok(());
+    };
     set(&range, &format!("{which}Container"), node, context)?;
     set(&range, &format!("{which}Offset"), offset, context)?;
     Ok(())
@@ -873,10 +1072,15 @@ const RANGE_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let (start, _) = boundary(this, cx, "start")?;
             let (end, _) = boundary(this, cx, "end")?;
-            let (Some(a), Some(b)) = (node_id(&start), node_id(&end)) else { return Ok(start) };
+            let (Some(a), Some(b)) = (node_id(&start), node_id(&end)) else {
+                return Ok(start);
+            };
             let common = read_dom(cx, |dom| {
                 let chain = ancestry(dom, a);
-                ancestry(dom, b).into_iter().rev().find(|n| chain.contains(n))
+                ancestry(dom, b)
+                    .into_iter()
+                    .rev()
+                    .find(|n| chain.contains(n))
             });
             Ok(common.map_or(start, |c| wrap(cx, c)))
         }),
@@ -886,7 +1090,13 @@ const RANGE_ACCESSORS: &[Accessor] = &[
 
 fn split_text_units(content: &str, start: u32, end: u32) -> (String, String, String) {
     let units: Vec<u16> = content.encode_utf16().collect();
-    let (a, b) = ((start as usize).min(units.len()), (end as usize).min(units.len()).max(start as usize).min(units.len()));
+    let (a, b) = (
+        (start as usize).min(units.len()),
+        (end as usize)
+            .min(units.len())
+            .max(start as usize)
+            .min(units.len()),
+    );
     (
         String::from_utf16_lossy(&units[..a]),
         String::from_utf16_lossy(&units[a..b]),
@@ -1000,7 +1210,13 @@ const RANGE_METHODS: &[Method] = &[
         let (_, end) = boundary(this, cx, "end")?;
         let parent = node_of(&container)?;
         with_dom(cx, |dom| {
-            let children: Vec<NodeId> = dom.children(parent).iter().skip(start as usize).take(end.saturating_sub(start) as usize).copied().collect();
+            let children: Vec<NodeId> = dom
+                .children(parent)
+                .iter()
+                .skip(start as usize)
+                .take(end.saturating_sub(start) as usize)
+                .copied()
+                .collect();
             let before = dom.children(parent).get(start as usize).copied();
             dom.insert_before(parent, wrapper, before);
             for child in children {
@@ -1012,7 +1228,10 @@ const RANGE_METHODS: &[Method] = &[
     ("deleteContents", 0, |this, _, cx| {
         let (container, start) = boundary(this, cx, "start")?;
         let (end_container, end) = boundary(this, cx, "end")?;
-        let (Some(parent), Some(end_parent)) = (node_id(&container), node_id(&end_container)) else { return Ok(JsValue::undefined()) };
+        let (Some(parent), Some(end_parent)) = (node_id(&container), node_id(&end_container))
+        else {
+            return Ok(JsValue::undefined());
+        };
         if parent != end_parent {
             return Ok(JsValue::undefined());
         }
@@ -1021,7 +1240,13 @@ const RANGE_METHODS: &[Method] = &[
                 let (head, _, tail) = split_text_units(&content, start, end);
                 dom.set_text(parent, &format!("{head}{tail}"));
             } else {
-                let doomed: Vec<NodeId> = dom.children(parent).iter().skip(start as usize).take(end.saturating_sub(start) as usize).copied().collect();
+                let doomed: Vec<NodeId> = dom
+                    .children(parent)
+                    .iter()
+                    .skip(start as usize)
+                    .take(end.saturating_sub(start) as usize)
+                    .copied()
+                    .collect();
                 for child in doomed {
                     dom.detach(child);
                 }
@@ -1041,7 +1266,13 @@ const RANGE_METHODS: &[Method] = &[
                 let piece = dom.create_text(&piece);
                 dom.append(fragment, piece);
             } else {
-                let picked: Vec<NodeId> = dom.children(parent).iter().skip(start as usize).take(end.saturating_sub(start) as usize).copied().collect();
+                let picked: Vec<NodeId> = dom
+                    .children(parent)
+                    .iter()
+                    .skip(start as usize)
+                    .take(end.saturating_sub(start) as usize)
+                    .copied()
+                    .collect();
                 for child in picked {
                     if let Some(copy) = dom.clone_node(child, true) {
                         dom.append(fragment, copy);
@@ -1060,20 +1291,36 @@ const RANGE_METHODS: &[Method] = &[
     ("toString", 0, |this, _, cx| {
         let (container, start) = boundary(this, cx, "start")?;
         let (end_container, end) = boundary(this, cx, "end")?;
-        let (Some(a), Some(b)) = (node_id(&container), node_id(&end_container)) else { return Ok(text("")) };
+        let (Some(a), Some(b)) = (node_id(&container), node_id(&end_container)) else {
+            return Ok(text(""));
+        };
         Ok(text(&read_dom(cx, |dom| {
             if a == b {
                 if let Some(NodeKind::Text(content)) = dom.get(a).map(|n| &n.kind) {
                     return split_text_units(content, start, end).1;
                 }
-                return dom.children(a).iter().skip(start as usize).take(end.saturating_sub(start) as usize).map(|c| dom.text_content(*c)).collect();
+                return dom
+                    .children(a)
+                    .iter()
+                    .skip(start as usize)
+                    .take(end.saturating_sub(start) as usize)
+                    .map(|c| dom.text_content(*c))
+                    .collect();
             }
             dom.text_content(a)
         })))
     }),
     ("getBoundingClientRect", 0, |this, _, cx| {
         let (container, _) = boundary(this, cx, "start")?;
-        let element = read_dom(cx, |dom| node_id(&container).map(|id| if dom.get(id).is_some_and(|n| n.is_element()) { id } else { dom.parent(id).unwrap_or(id) }));
+        let element = read_dom(cx, |dom| {
+            node_id(&container).map(|id| {
+                if dom.get(id).is_some_and(|n| n.is_element()) {
+                    id
+                } else {
+                    dom.parent(id).unwrap_or(id)
+                }
+            })
+        });
         match element {
             Some(id) => {
                 let rect = super::element::painted(cx, id);
@@ -1113,18 +1360,34 @@ fn selection_ranges(this: &JsValue, context: &mut Context) -> JsResult<Vec<JsVal
     super::list(&ranges, context)
 }
 
-fn set_selection_ranges(this: &JsValue, context: &mut Context, ranges: Vec<JsValue>) -> JsResult<()> {
+fn set_selection_ranges(
+    this: &JsValue,
+    context: &mut Context,
+    ranges: Vec<JsValue>,
+) -> JsResult<()> {
     let list = array(ranges, context);
     if let Some(object) = this.as_object() {
         set(&object, "__ranges", list, context)?;
     }
-    let document = context.global_object().get(js_string!("document"), context)?;
-    super::events::fire(context, &document, "Event", "selectionchange", &[("bubbles", false.into())])?;
+    let document = context
+        .global_object()
+        .get(js_string!("document"), context)?;
+    super::events::fire(
+        context,
+        &document,
+        "Event",
+        "selectionchange",
+        &[("bubbles", false.into())],
+    )?;
     Ok(())
 }
 
 const SELECTION_ACCESSORS: &[Accessor] = &[
-    ("rangeCount", Some(|this, _, cx| Ok((selection_ranges(this, cx)?.len() as u32).into())), None),
+    (
+        "rangeCount",
+        Some(|this, _, cx| Ok((selection_ranges(this, cx)?.len() as u32).into())),
+        None,
+    ),
     (
         "isCollapsed",
         Some(|this, _, cx| match selection_ranges(this, cx)?.first() {
@@ -1184,7 +1447,11 @@ const SELECTION_METHODS: &[Method] = &[
         let at = arg(args, 0).to_u32(cx)? as usize;
         match selection_ranges(this, cx)?.get(at).cloned() {
             Some(range) => Ok(range),
-            None => Err(super::dom_error(cx, "Failed to execute 'getRangeAt' on 'Selection': The index provided is out of range.", "IndexSizeError")),
+            None => Err(super::dom_error(
+                cx,
+                "Failed to execute 'getRangeAt' on 'Selection': The index provided is out of range.",
+                "IndexSizeError",
+            )),
         }
     }),
     ("addRange", 1, |this, args, cx| {
@@ -1216,7 +1483,9 @@ const SELECTION_METHODS: &[Method] = &[
         set_selection_ranges(this, cx, vec![range])?;
         Ok(JsValue::undefined())
     }),
-    ("setPosition", 2, |this, args, cx| super::call_method(this, "collapse", args, cx)),
+    ("setPosition", 2, |this, args, cx| {
+        super::call_method(this, "collapse", args, cx)
+    }),
     ("setBaseAndExtent", 4, |this, args, cx| {
         let range = new_range(cx)?;
         let (a, b) = (arg(args, 1).to_u32(cx)?, arg(args, 3).to_u32(cx)?);
@@ -1237,9 +1506,11 @@ const SELECTION_METHODS: &[Method] = &[
     ("modify", 3, |_, _, _| Ok(JsValue::undefined())),
     ("deleteFromDocument", 0, |_, _, _| Ok(JsValue::undefined())),
     ("containsNode", 2, |_, _, _| Ok(false.into())),
-    ("toString", 0, |this, _, cx| match selection_ranges(this, cx)?.first() {
-        Some(range) => super::call_method(range, "toString", &[], cx),
-        None => Ok(text("")),
+    ("toString", 0, |this, _, cx| {
+        match selection_ranges(this, cx)?.first() {
+            Some(range) => super::call_method(range, "toString", &[], cx),
+            None => Ok(text("")),
+        }
     }),
 ];
 
@@ -1257,7 +1528,15 @@ fn font_size(font: &str) -> f64 {
 fn text_width(text: &str, font: &str) -> f64 {
     let size = font_size(font);
     text.chars()
-        .map(|c| if (c as u32) >= 0x2E80 { size } else if c == ' ' { size * 0.28 } else { size * 0.55 })
+        .map(|c| {
+            if (c as u32) >= 0x2E80 {
+                size
+            } else if c == ' ' {
+                size * 0.28
+            } else {
+                size * 0.55
+            }
+        })
         .sum()
 }
 
@@ -1290,16 +1569,46 @@ const CONTEXT_NUMBERS: &[(&str, f64)] = &[
 ];
 
 const CONTEXT_NOOPS: &[&str] = &[
-    "save", "restore", "scale", "rotate", "translate", "transform", "setTransform",
-    "resetTransform", "clearRect", "fillRect", "strokeRect", "beginPath", "closePath", "moveTo",
-    "lineTo", "bezierCurveTo", "quadraticCurveTo", "arc", "arcTo", "ellipse", "rect", "roundRect",
-    "fill", "stroke", "clip", "fillText", "strokeText", "drawImage", "putImageData",
-    "setLineDash", "drawFocusIfNeeded", "reset",
+    "save",
+    "restore",
+    "scale",
+    "rotate",
+    "translate",
+    "transform",
+    "setTransform",
+    "resetTransform",
+    "clearRect",
+    "fillRect",
+    "strokeRect",
+    "beginPath",
+    "closePath",
+    "moveTo",
+    "lineTo",
+    "bezierCurveTo",
+    "quadraticCurveTo",
+    "arc",
+    "arcTo",
+    "ellipse",
+    "rect",
+    "roundRect",
+    "fill",
+    "stroke",
+    "clip",
+    "fillText",
+    "strokeText",
+    "drawImage",
+    "putImageData",
+    "setLineDash",
+    "drawFocusIfNeeded",
+    "reset",
 ];
 
 fn image_data(context: &mut Context, width: u32, height: u32) -> JsResult<JsValue> {
     let object = native_instance(context, "ImageData", Kind::Plain, 0);
-    let bytes = JsUint8ClampedArray::from_iter(std::iter::repeat_n(0u8, (width * height * 4) as usize), context)?;
+    let bytes = JsUint8ClampedArray::from_iter(
+        std::iter::repeat_n(0u8, (width * height * 4) as usize),
+        context,
+    )?;
     set(&object, "width", width, context)?;
     set(&object, "height", height, context)?;
     set(&object, "data", bytes, context)?;
@@ -1307,7 +1616,11 @@ fn image_data(context: &mut Context, width: u32, height: u32) -> JsResult<JsValu
     Ok(object.into())
 }
 
-fn construct_image_data(new_target: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn construct_image_data(
+    new_target: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let first = arg(args, 0);
     let (data, width, height) = if first.is_object() {
         let width = arg(args, 1).to_u32(context)?;
@@ -1325,7 +1638,11 @@ fn construct_image_data(new_target: &JsValue, args: &[JsValue], context: &mut Co
     let object = instance(new_target, Kind::Plain, 0, context)?;
     let data = match data {
         Some(data) => data,
-        None => JsUint8ClampedArray::from_iter(std::iter::repeat_n(0u8, (width * height * 4) as usize), context)?.into(),
+        None => JsUint8ClampedArray::from_iter(
+            std::iter::repeat_n(0u8, (width * height * 4) as usize),
+            context,
+        )?
+        .into(),
     };
     set(&object, "width", width, context)?;
     set(&object, "height", height, context)?;
@@ -1336,7 +1653,9 @@ fn construct_image_data(new_target: &JsValue, args: &[JsValue], context: &mut Co
 
 fn gradient(context: &mut Context) -> JsValue {
     let object = native_instance(context, "CanvasGradient", Kind::Plain, 0);
-    let add = function(context, "addColorStop", 2, |_, _, _| Ok(JsValue::undefined()));
+    let add = function(context, "addColorStop", 2, |_, _, _| {
+        Ok(JsValue::undefined())
+    });
     let _ = set(&object, "addColorStop", add, context);
     object.into()
 }
@@ -1387,7 +1706,10 @@ const CONTEXT_METHODS: &[Method] = &[
     ("createImageData", 2, |_, args, cx| {
         let first = arg(args, 0);
         let (width, height) = if first.is_object() {
-            (get(&first, "width", cx)?.to_u32(cx)?, get(&first, "height", cx)?.to_u32(cx)?)
+            (
+                get(&first, "width", cx)?.to_u32(cx)?,
+                get(&first, "height", cx)?.to_u32(cx)?,
+            )
         } else {
             (first.to_u32(cx)?, arg(args, 1).to_u32(cx)?)
         };
@@ -1396,7 +1718,9 @@ const CONTEXT_METHODS: &[Method] = &[
     ("createLinearGradient", 4, |_, _, cx| Ok(gradient(cx))),
     ("createRadialGradient", 6, |_, _, cx| Ok(gradient(cx))),
     ("createConicGradient", 3, |_, _, cx| Ok(gradient(cx))),
-    ("createPattern", 2, |_, _, cx| Ok(native_instance(cx, "CanvasPattern", Kind::Plain, 0).into())),
+    ("createPattern", 2, |_, _, cx| {
+        Ok(native_instance(cx, "CanvasPattern", Kind::Plain, 0).into())
+    }),
     ("getLineDash", 0, |_, _, cx| Ok(array(Vec::new(), cx))),
     ("isPointInPath", 2, |_, _, _| Ok(false.into())),
     ("isPointInStroke", 2, |_, _, _| Ok(false.into())),
@@ -1414,13 +1738,25 @@ const CONTEXT_METHODS: &[Method] = &[
 /// A transparent pixel, as a PNG: what a canvas that paints nothing turns into.
 const BLANK_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
-fn canvas_size(this: &JsValue, context: &mut Context, name: &str, default: u32) -> JsResult<JsValue> {
+fn canvas_size(
+    this: &JsValue,
+    context: &mut Context,
+    name: &str,
+    default: u32,
+) -> JsResult<JsValue> {
     let id = node_of(this)?;
-    let value = read_dom(context, |dom| dom.get_attr(id, name)).and_then(|v| v.parse::<u32>().ok()).unwrap_or(default);
+    let value = read_dom(context, |dom| dom.get_attr(id, name))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(default);
     Ok(value.into())
 }
 
-fn set_canvas_size(this: &JsValue, args: &[JsValue], context: &mut Context, name: &str) -> JsResult<JsValue> {
+fn set_canvas_size(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+    name: &str,
+) -> JsResult<JsValue> {
     let id = node_of(this)?;
     let value = arg(args, 0).to_u32(context)?;
     with_dom(context, |dom| dom.set_attr(id, name, &value.to_string()));
@@ -1447,7 +1783,9 @@ pub const CANVAS_METHODS: &[Method] = &[
             // No WebGL, as on a machine without the GPU for it: libraries fall back.
             return Ok(JsValue::null());
         }
-        let Some(canvas) = this.as_object() else { return Ok(JsValue::null()) };
+        let Some(canvas) = this.as_object() else {
+            return Ok(JsValue::null());
+        };
         let key = js_string!("__context2d");
         let known = canvas.get(key.clone(), cx)?;
         if known.is_object() {
@@ -1476,7 +1814,9 @@ pub const CANVAS_METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     ("captureStream", 0, |_, _, cx| Ok(plain_object(cx).into())),
-    ("transferControlToOffscreen", 0, |_, _, _| Err(type_error("OffscreenCanvas is not supported"))),
+    ("transferControlToOffscreen", 0, |_, _, _| {
+        Err(type_error("OffscreenCanvas is not supported"))
+    }),
 ];
 
 // ─── Geometry ───────────────────────────────────────────────────────────────────────────────
@@ -1484,7 +1824,9 @@ pub const CANVAS_METHODS: &[Method] = &[
 /// A matrix's sixteen numbers, column by column as CSS writes them (`m11`, `m12`, … `m44`).
 type Matrix = [f64; 16];
 
-const IDENTITY: Matrix = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
+const IDENTITY: Matrix = [
+    1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+];
 
 const MATRIX_NAMES: [&str; 16] = [
     "m11", "m12", "m13", "m14", "m21", "m22", "m23", "m24", "m31", "m32", "m33", "m34", "m41",
@@ -1504,22 +1846,70 @@ fn multiply(a: &Matrix, b: &Matrix) -> Matrix {
 
 fn invert(m: &Matrix) -> Option<Matrix> {
     let mut inv = [0.; 16];
-    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
-    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
-    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
-    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
-    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
-    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
-    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
-    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
-    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
-    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
-    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
-    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
-    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
-    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
-    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
-    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15]
+        + m[9] * m[7] * m[14]
+        + m[13] * m[6] * m[11]
+        - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15]
+        - m[8] * m[7] * m[14]
+        - m[12] * m[6] * m[11]
+        + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15]
+        + m[8] * m[7] * m[13]
+        + m[12] * m[5] * m[11]
+        - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14]
+        - m[8] * m[6] * m[13]
+        - m[12] * m[5] * m[10]
+        + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15]
+        - m[9] * m[3] * m[14]
+        - m[13] * m[2] * m[11]
+        + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15]
+        + m[8] * m[3] * m[14]
+        + m[12] * m[2] * m[11]
+        - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15]
+        - m[8] * m[3] * m[13]
+        - m[12] * m[1] * m[11]
+        + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14]
+        + m[8] * m[2] * m[13]
+        + m[12] * m[1] * m[10]
+        - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15]
+        + m[5] * m[3] * m[14]
+        + m[13] * m[2] * m[7]
+        - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15]
+        - m[4] * m[3] * m[14]
+        - m[12] * m[2] * m[7]
+        + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15]
+        + m[4] * m[3] * m[13]
+        + m[12] * m[1] * m[7]
+        - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14]
+        - m[4] * m[2] * m[13]
+        - m[12] * m[1] * m[6]
+        + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11]
+        - m[5] * m[3] * m[10]
+        - m[9] * m[2] * m[7]
+        + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11]
+        + m[4] * m[3] * m[10]
+        + m[8] * m[2] * m[7]
+        - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11]
+        - m[4] * m[3] * m[9]
+        - m[8] * m[1] * m[7]
+        + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10]
+        + m[4] * m[2] * m[9]
+        + m[8] * m[1] * m[6]
+        - m[8] * m[2] * m[5];
     let det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
     if det.abs() < f64::EPSILON {
         return None;
@@ -1553,13 +1943,19 @@ fn matrix_from_init(init: &JsValue, context: &mut Context) -> JsResult<Matrix> {
         .map(|v| v.to_number(context))
         .collect::<JsResult<_>>()?;
     Ok(match numbers.len() {
-        6 => from_2d(numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5]),
+        6 => from_2d(
+            numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5],
+        ),
         16 => {
             let mut out = [0.; 16];
             out.copy_from_slice(&numbers);
             out
         }
-        _ => return Err(type_error("Failed to construct 'DOMMatrix': The sequence must contain 6 elements for a 2D matrix or 16 elements for a 3D matrix.")),
+        _ => {
+            return Err(type_error(
+                "Failed to construct 'DOMMatrix': The sequence must contain 6 elements for a 2D matrix or 16 elements for a 3D matrix.",
+            ));
+        }
     })
 }
 
@@ -1583,15 +1979,24 @@ fn rotation_z(degrees: f64) -> Matrix {
 fn parse_transform(text: &str) -> Matrix {
     let mut out = IDENTITY;
     for part in text.split(')') {
-        let Some((name, arguments)) = part.split_once('(') else { continue };
+        let Some((name, arguments)) = part.split_once('(') else {
+            continue;
+        };
         let numbers: Vec<f64> = arguments
             .split([',', ' '])
             .filter(|n| !n.is_empty())
-            .filter_map(|n| n.trim_end_matches("px").trim_end_matches("deg").parse().ok())
+            .filter_map(|n| {
+                n.trim_end_matches("px")
+                    .trim_end_matches("deg")
+                    .parse()
+                    .ok()
+            })
             .collect();
         let n = |i: usize, default: f64| numbers.get(i).copied().unwrap_or(default);
         let step = match name.trim() {
-            "matrix" if numbers.len() == 6 => from_2d(n(0, 1.), n(1, 0.), n(2, 0.), n(3, 1.), n(4, 0.), n(5, 0.)),
+            "matrix" if numbers.len() == 6 => {
+                from_2d(n(0, 1.), n(1, 0.), n(2, 0.), n(3, 1.), n(4, 0.), n(5, 0.))
+            }
             "translate" => translation(n(0, 0.), n(1, 0.), 0.),
             "translateX" => translation(n(0, 0.), 0., 0.),
             "translateY" => translation(0., n(0, 0.), 0.),
@@ -1613,7 +2018,16 @@ fn set_matrix(object: &JsObject, m: &Matrix, context: &mut Context) -> JsResult<
     for (name, i) in [("a", 0), ("b", 1), ("c", 4), ("d", 5), ("e", 12), ("f", 13)] {
         set(object, name, m[i], context)?;
     }
-    let is_2d = m[2] == 0. && m[3] == 0. && m[6] == 0. && m[7] == 0. && m[8] == 0. && m[9] == 0. && m[10] == 1. && m[11] == 0. && m[14] == 0. && m[15] == 1.;
+    let is_2d = m[2] == 0.
+        && m[3] == 0.
+        && m[6] == 0.
+        && m[7] == 0.
+        && m[8] == 0.
+        && m[9] == 0.
+        && m[10] == 1.
+        && m[11] == 0.
+        && m[14] == 0.
+        && m[15] == 1.;
     set(object, "is2D", is_2d, context)?;
     set(object, "isIdentity", *m == IDENTITY, context)?;
     Ok(())
@@ -1629,36 +2043,75 @@ pub fn identity_matrix(context: &mut Context) -> JsResult<JsValue> {
     make_matrix(context, &IDENTITY)
 }
 
-fn construct_matrix(new_target: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn construct_matrix(
+    new_target: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let m = matrix_from_init(&arg(args, 0), context)?;
     let object = instance(new_target, Kind::Plain, 0, context)?;
     set_matrix(&object, &m, context)?;
     Ok(object.into())
 }
 
-fn number_arg(args: &[JsValue], index: usize, default: f64, context: &mut Context) -> JsResult<f64> {
+fn number_arg(
+    args: &[JsValue],
+    index: usize,
+    default: f64,
+    context: &mut Context,
+) -> JsResult<f64> {
     let value = arg(args, index);
-    if value.is_undefined() { Ok(default) } else { value.to_number(context) }
+    if value.is_undefined() {
+        Ok(default)
+    } else {
+        value.to_number(context)
+    }
 }
 
-fn matrix_step(this: &JsValue, args: &[JsValue], context: &mut Context, name: &str) -> JsResult<Matrix> {
+fn matrix_step(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+    name: &str,
+) -> JsResult<Matrix> {
     let m = matrix_of(this, context)?;
     Ok(match name {
         "multiply" => multiply(&m, &matrix_from_init(&arg(args, 0), context)?),
         "preMultiply" => multiply(&matrix_from_init(&arg(args, 0), context)?, &m),
-        "translate" => multiply(&m, &translation(number_arg(args, 0, 0., context)?, number_arg(args, 1, 0., context)?, number_arg(args, 2, 0., context)?)),
+        "translate" => multiply(
+            &m,
+            &translation(
+                number_arg(args, 0, 0., context)?,
+                number_arg(args, 1, 0., context)?,
+                number_arg(args, 2, 0., context)?,
+            ),
+        ),
         "scale" => {
             let x = number_arg(args, 0, 1., context)?;
             let y = number_arg(args, 1, x, context)?;
             let z = number_arg(args, 2, 1., context)?;
-            let (ox, oy) = (number_arg(args, 3, 0., context)?, number_arg(args, 4, 0., context)?);
+            let (ox, oy) = (
+                number_arg(args, 3, 0., context)?,
+                number_arg(args, 4, 0., context)?,
+            );
             let moved = multiply(&m, &translation(ox, oy, 0.));
             let scaled = multiply(&moved, &scaling(x, y, z));
             multiply(&scaled, &translation(-ox, -oy, 0.))
         }
-        "scaleNonUniform" => multiply(&m, &scaling(number_arg(args, 0, 1., context)?, number_arg(args, 1, 1., context)?, 1.)),
+        "scaleNonUniform" => multiply(
+            &m,
+            &scaling(
+                number_arg(args, 0, 1., context)?,
+                number_arg(args, 1, 1., context)?,
+                1.,
+            ),
+        ),
         "rotate" => {
-            let angle = if arg(args, 1).is_undefined() { number_arg(args, 0, 0., context)? } else { number_arg(args, 2, 0., context)? };
+            let angle = if arg(args, 1).is_undefined() {
+                number_arg(args, 0, 0., context)?
+            } else {
+                number_arg(args, 2, 0., context)?
+            };
             multiply(&m, &rotation_z(angle))
         }
         "skewX" => {
@@ -1676,15 +2129,64 @@ fn matrix_step(this: &JsValue, args: &[JsValue], context: &mut Context, name: &s
     })
 }
 
-const MATRIX_STEPS: &[&str] = &["multiply", "preMultiply", "translate", "scale", "scaleNonUniform", "rotate", "skewX", "skewY", "flipX", "flipY", "inverse"];
+const MATRIX_STEPS: &[&str] = &[
+    "multiply",
+    "preMultiply",
+    "translate",
+    "scale",
+    "scaleNonUniform",
+    "rotate",
+    "skewX",
+    "skewY",
+    "flipX",
+    "flipY",
+    "inverse",
+];
 
-fn simple_class(context: &mut Context, name: &'static str, construct: boa_engine::native_function::NativeFunctionPointer, parent: Option<&str>, methods: &[Method], accessors: &[Accessor], global: bool) -> JsResult<JsObject> {
-    Ok(class(context, ClassSpec { name, length: 0, construct, parent, methods, accessors, statics: &[], global })?.1)
+fn simple_class(
+    context: &mut Context,
+    name: &'static str,
+    construct: boa_engine::native_function::NativeFunctionPointer,
+    parent: Option<&str>,
+    methods: &[Method],
+    accessors: &[Accessor],
+    global: bool,
+) -> JsResult<JsObject> {
+    Ok(class(
+        context,
+        ClassSpec {
+            name,
+            length: 0,
+            construct,
+            parent,
+            methods,
+            accessors,
+            statics: &[],
+            global,
+        },
+    )?
+    .1)
 }
 
 fn install_geometry(context: &mut Context) -> JsResult<()> {
-    let prototype = simple_class(context, "DOMMatrixReadOnly", construct_matrix, None, &[], &[], true)?;
-    let own = simple_class(context, "DOMMatrix", construct_matrix, Some("DOMMatrixReadOnly"), &[], &[], true)?;
+    let prototype = simple_class(
+        context,
+        "DOMMatrixReadOnly",
+        construct_matrix,
+        None,
+        &[],
+        &[],
+        true,
+    )?;
+    let own = simple_class(
+        context,
+        "DOMMatrix",
+        construct_matrix,
+        Some("DOMMatrixReadOnly"),
+        &[],
+        &[],
+        true,
+    )?;
     for name in MATRIX_STEPS {
         let name: &'static str = name;
         let answer = FunctionObjectBuilder::new(
@@ -1718,9 +2220,18 @@ fn install_geometry(context: &mut Context) -> JsResult<()> {
             let point = arg(args, 0);
             let read = |key: &str, default: f64, cx: &mut Context| -> JsResult<f64> {
                 let v = get(&point, key, cx)?;
-                if v.is_undefined() { Ok(default) } else { v.to_number(cx) }
+                if v.is_undefined() {
+                    Ok(default)
+                } else {
+                    v.to_number(cx)
+                }
             };
-            let (x, y, z, w) = (read("x", 0., cx)?, read("y", 0., cx)?, read("z", 0., cx)?, read("w", 1., cx)?);
+            let (x, y, z, w) = (
+                read("x", 0., cx)?,
+                read("y", 0., cx)?,
+                read("z", 0., cx)?,
+                read("w", 1., cx)?,
+            );
             let out = [
                 m[0] * x + m[4] * y + m[8] * z + m[12] * w,
                 m[1] * x + m[5] * y + m[9] * z + m[13] * w,
@@ -1731,7 +2242,10 @@ fn install_geometry(context: &mut Context) -> JsResult<()> {
         }),
         ("toFloat32Array", 0, |this, _, cx| {
             let m = matrix_of(this, cx)?;
-            Ok(boa_engine::object::builtins::JsFloat32Array::from_iter(m.map(|v| v as f32), cx)?.into())
+            Ok(
+                boa_engine::object::builtins::JsFloat32Array::from_iter(m.map(|v| v as f32), cx)?
+                    .into(),
+            )
         }),
         ("toFloat64Array", 0, |this, _, cx| {
             let m = matrix_of(this, cx)?;
@@ -1741,9 +2255,15 @@ fn install_geometry(context: &mut Context) -> JsResult<()> {
             let m = matrix_of(this, cx)?;
             let is_2d = get(this, "is2D", cx)?.to_boolean();
             Ok(text(&if is_2d {
-                format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[4], m[5], m[12], m[13])
+                format!(
+                    "matrix({}, {}, {}, {}, {}, {})",
+                    m[0], m[1], m[4], m[5], m[12], m[13]
+                )
             } else {
-                format!("matrix3d({})", m.iter().map(f64::to_string).collect::<Vec<_>>().join(", "))
+                format!(
+                    "matrix3d({})",
+                    m.iter().map(f64::to_string).collect::<Vec<_>>().join(", ")
+                )
             }))
         }),
         ("toJSON", 0, |this, _, cx| {
@@ -1769,42 +2289,111 @@ fn install_geometry(context: &mut Context) -> JsResult<()> {
         }
     }
     let matrix = constructor_of(context, "DOMMatrix").map_or(JsValue::undefined(), JsValue::from);
-    context.register_global_property(js_string!("WebKitCSSMatrix"), matrix, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
-    simple_class(context, "DOMPointReadOnly", construct_point, None, &[
-        ("matrixTransform", 1, |this, args, cx| super::call_method(&arg(args, 0), "transformPoint", std::slice::from_ref(this), cx)),
-        ("toJSON", 0, |this, _, cx| {
+    context.register_global_property(
+        js_string!("WebKitCSSMatrix"),
+        matrix,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
+    simple_class(
+        context,
+        "DOMPointReadOnly",
+        construct_point,
+        None,
+        &[
+            ("matrixTransform", 1, |this, args, cx| {
+                super::call_method(
+                    &arg(args, 0),
+                    "transformPoint",
+                    std::slice::from_ref(this),
+                    cx,
+                )
+            }),
+            ("toJSON", 0, |this, _, cx| {
+                let out = plain_object(cx);
+                for key in ["x", "y", "z", "w"] {
+                    let value = get(this, key, cx)?;
+                    set(&out, key, value, cx)?;
+                }
+                Ok(out.into())
+            }),
+        ],
+        &[],
+        true,
+    )?;
+    simple_class(
+        context,
+        "DOMPoint",
+        construct_point,
+        Some("DOMPointReadOnly"),
+        &[],
+        &[],
+        true,
+    )?;
+    simple_class(
+        context,
+        "DOMRectReadOnly",
+        construct_rect,
+        None,
+        &[("toJSON", 0, |this, _, cx| {
             let out = plain_object(cx);
-            for key in ["x", "y", "z", "w"] {
+            for key in [
+                "x", "y", "width", "height", "top", "right", "bottom", "left",
+            ] {
                 let value = get(this, key, cx)?;
                 set(&out, key, value, cx)?;
             }
             Ok(out.into())
-        }),
-    ], &[], true)?;
-    simple_class(context, "DOMPoint", construct_point, Some("DOMPointReadOnly"), &[], &[], true)?;
-    simple_class(context, "DOMRectReadOnly", construct_rect, None, &[("toJSON", 0, |this, _, cx| {
-        let out = plain_object(cx);
-        for key in ["x", "y", "width", "height", "top", "right", "bottom", "left"] {
-            let value = get(this, key, cx)?;
-            set(&out, key, value, cx)?;
-        }
-        Ok(out.into())
-    })], &[], true)?;
-    simple_class(context, "DOMRect", construct_rect, Some("DOMRectReadOnly"), &[], &[], true)?;
+        })],
+        &[],
+        true,
+    )?;
+    simple_class(
+        context,
+        "DOMRect",
+        construct_rect,
+        Some("DOMRectReadOnly"),
+        &[],
+        &[],
+        true,
+    )?;
     if let Some(constructor) = constructor_of(context, "DOMRect") {
         let from = function(context, "fromRect", 1, |_, args, cx| {
             let given = arg(args, 0);
             let mut numbers = [0.; 4];
             for (i, key) in ["x", "y", "width", "height"].iter().enumerate() {
                 let v = get(&given, key, cx)?;
-                numbers[i] = if v.is_undefined() { 0. } else { v.to_number(cx)? };
+                numbers[i] = if v.is_undefined() {
+                    0.
+                } else {
+                    v.to_number(cx)?
+                };
             }
             make_rect(cx, numbers)
         });
         set(&constructor, "fromRect", from, context)?;
     }
-    let path = simple_class(context, "Path2D", |t, _, c| Ok(instance(t, Kind::Plain, 0, c)?.into()), None, &[], &[], true)?;
-    for name in ["addPath", "closePath", "moveTo", "lineTo", "bezierCurveTo", "quadraticCurveTo", "arc", "arcTo", "ellipse", "rect", "roundRect"] {
+    let path = simple_class(
+        context,
+        "Path2D",
+        |t, _, c| Ok(instance(t, Kind::Plain, 0, c)?.into()),
+        None,
+        &[],
+        &[],
+        true,
+    )?;
+    for name in [
+        "addPath",
+        "closePath",
+        "moveTo",
+        "lineTo",
+        "bezierCurveTo",
+        "quadraticCurveTo",
+        "arc",
+        "arcTo",
+        "ellipse",
+        "rect",
+        "roundRect",
+    ] {
         let noop = function(context, name, 0, |_, _, _| Ok(JsValue::undefined()));
         set(&path, name, noop, context)?;
     }
@@ -1823,16 +2412,27 @@ pub fn new_point(context: &mut Context) -> JsResult<JsValue> {
     make_point(context, [0., 0., 0., 1.])
 }
 
-fn construct_point(new_target: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn construct_point(
+    new_target: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let object = instance(new_target, Kind::Plain, 0, context)?;
-    for (i, (key, default)) in [("x", 0.), ("y", 0.), ("z", 0.), ("w", 1.)].into_iter().enumerate() {
+    for (i, (key, default)) in [("x", 0.), ("y", 0.), ("z", 0.), ("w", 1.)]
+        .into_iter()
+        .enumerate()
+    {
         let value = number_arg(args, i, default, context)?;
         set(&object, key, value, context)?;
     }
     Ok(object.into())
 }
 
-fn set_rect(object: &JsObject, [x, y, width, height]: [f64; 4], context: &mut Context) -> JsResult<()> {
+fn set_rect(
+    object: &JsObject,
+    [x, y, width, height]: [f64; 4],
+    context: &mut Context,
+) -> JsResult<()> {
     for (key, value) in [
         ("x", x),
         ("y", y),
@@ -1854,7 +2454,11 @@ pub fn make_rect(context: &mut Context, numbers: [f64; 4]) -> JsResult<JsValue> 
     Ok(object.into())
 }
 
-fn construct_rect(new_target: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn construct_rect(
+    new_target: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let object = instance(new_target, Kind::Plain, 0, context)?;
     let mut numbers = [0.; 4];
     for (i, slot) in numbers.iter_mut().enumerate() {
@@ -1871,7 +2475,13 @@ pub fn empty_ranges(context: &mut Context) -> JsResult<JsValue> {
     let ranges = plain_object(context);
     set(&ranges, "length", 0, context)?;
     for name in ["start", "end"] {
-        let f = function(context, name, 1, |_, _, cx| Err(super::dom_error(cx, "The index provided is out of range.", "IndexSizeError")));
+        let f = function(context, name, 1, |_, _, cx| {
+            Err(super::dom_error(
+                cx,
+                "The index provided is out of range.",
+                "IndexSizeError",
+            ))
+        });
         set(&ranges, name, f, context)?;
     }
     Ok(ranges.into())
@@ -1879,7 +2489,11 @@ pub fn empty_ranges(context: &mut Context) -> JsResult<JsValue> {
 
 /// `element.animate(…)`: an animation already finished, as a page with animations off has.
 pub fn finished_animation(context: &mut Context) -> JsResult<JsValue> {
-    let target = shared(context).borrow().class("EventTarget").expect("made").0;
+    let target = shared(context)
+        .borrow()
+        .class("EventTarget")
+        .expect("made")
+        .0;
     let animation = target.construct(&[], None, context)?;
     let done = super::resolved(animation.clone().into(), context)?;
     set(&animation, "finished", done.clone(), context)?;
@@ -1889,14 +2503,27 @@ pub fn finished_animation(context: &mut Context) -> JsResult<JsValue> {
     set(&animation, "playbackRate", 1, context)?;
     set(&animation, "onfinish", JsValue::null(), context)?;
     set(&animation, "oncancel", JsValue::null(), context)?;
-    for name in ["play", "pause", "cancel", "finish", "reverse", "persist", "commitStyles", "updatePlaybackRate"] {
+    for name in [
+        "play",
+        "pause",
+        "cancel",
+        "finish",
+        "reverse",
+        "persist",
+        "commitStyles",
+        "updatePlaybackRate",
+    ] {
         let f = function(context, name, 0, |_, _, _| Ok(JsValue::undefined()));
         set(&animation, name, f, context)?;
     }
     Ok(animation.into())
 }
 
-fn construct_data_transfer(new_target: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn construct_data_transfer(
+    new_target: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let transfer = instance(new_target, Kind::Plain, 0, context)?;
     let data = plain_object(context);
     super::hidden(&transfer, js_string!("__data"), data, context)?;
@@ -1913,7 +2540,11 @@ const DATA_TRANSFER_METHODS: &[Method] = &[
     ("setData", 2, |this, args, cx| {
         let data = get(this, "__data", cx)?;
         let format = arg_string(args, 0, cx)?.to_ascii_lowercase();
-        let format = if format == "text" { "text/plain".to_owned() } else { format };
+        let format = if format == "text" {
+            "text/plain".to_owned()
+        } else {
+            format
+        };
         let value = arg_string(args, 1, cx)?;
         if let Some(data) = data.as_object() {
             set(&data, &format, text(&value), cx)?;
@@ -1923,9 +2554,17 @@ const DATA_TRANSFER_METHODS: &[Method] = &[
     ("getData", 1, |this, args, cx| {
         let data = get(this, "__data", cx)?;
         let format = arg_string(args, 0, cx)?.to_ascii_lowercase();
-        let format = if format == "text" { "text/plain".to_owned() } else { format };
+        let format = if format == "text" {
+            "text/plain".to_owned()
+        } else {
+            format
+        };
         let value = get(&data, &format, cx)?;
-        Ok(if value.is_undefined() { text("") } else { value })
+        Ok(if value.is_undefined() {
+            text("")
+        } else {
+            value
+        })
     }),
     ("clearData", 1, |this, args, cx| {
         let format = arg(args, 0);
@@ -1951,7 +2590,11 @@ const DATA_TRANSFER_ACCESSORS: &[Accessor] = &[(
     Some(|this, _, cx| {
         let data = get(this, "__data", cx)?;
         let keys = match data.as_object() {
-            Some(data) => data.own_property_keys(cx)?.into_iter().map(|k| text(&k.to_string())).collect(),
+            Some(data) => data
+                .own_property_keys(cx)?
+                .into_iter()
+                .map(|k| text(&k.to_string()))
+                .collect(),
             None => Vec::new(),
         };
         Ok(array(keys, cx))
@@ -1963,20 +2606,34 @@ const DATA_TRANSFER_ACCESSORS: &[Accessor] = &[(
 
 /// A constructor that makes an element of `tag`, whose prototype is its class's: `Image` is
 /// `HTMLImageElement`'s, as in a browser.
-fn element_constructor(context: &mut Context, name: &str, class: &str, make: boa_engine::native_function::NativeFunctionPointer) -> JsResult<()> {
+fn element_constructor(
+    context: &mut Context,
+    name: &str,
+    class: &str,
+    make: boa_engine::native_function::NativeFunctionPointer,
+) -> JsResult<()> {
     let prototype = shared(context).borrow().prototype(class);
-    let constructor: JsObject = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(make))
-        .name(JsString::from(name))
-        .length(0)
-        .constructor(true)
-        .build()
-        .into();
+    let constructor: JsObject =
+        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(make))
+            .name(JsString::from(name))
+            .length(0)
+            .constructor(true)
+            .build()
+            .into();
     constructor.define_property_or_throw(
         js_string!("prototype"),
-        PropertyDescriptor::builder().value(prototype).writable(false).enumerable(false).configurable(false),
+        PropertyDescriptor::builder()
+            .value(prototype)
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
         context,
     )?;
-    context.register_global_property(JsString::from(name), constructor, Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    context.register_global_property(
+        JsString::from(name),
+        constructor,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
     Ok(())
 }
 
@@ -2027,17 +2684,72 @@ fn construct_option(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
 pub fn install(context: &mut Context) -> JsResult<()> {
     let element = shared(context).borrow().prototype("Element");
     super::extend_prototype(context, &element, ATTRIBUTE_METHODS, &[])?;
-    simple_class(context, "Attr", illegal_constructor, Some("Node"), &[], &[], true)?;
-    let map = simple_class(context, "NamedNodeMap", illegal_constructor, None, NAMED_NODE_MAP_METHODS, &[], true)?;
+    simple_class(
+        context,
+        "Attr",
+        illegal_constructor,
+        Some("Node"),
+        &[],
+        &[],
+        true,
+    )?;
+    let map = simple_class(
+        context,
+        "NamedNodeMap",
+        illegal_constructor,
+        None,
+        NAMED_NODE_MAP_METHODS,
+        &[],
+        true,
+    )?;
     let array_prototype = context.intrinsics().constructors().array().prototype();
     map.set_prototype(Some(array_prototype));
-    simple_class(context, "ShadowRoot", illegal_constructor, Some("DocumentFragment"), &[], SHADOW_ROOT_ACCESSORS, true)?;
-    simple_class(context, "CustomElementRegistry", illegal_constructor, None, CUSTOM_ELEMENTS_METHODS, &[], true)?;
+    simple_class(
+        context,
+        "ShadowRoot",
+        illegal_constructor,
+        Some("DocumentFragment"),
+        &[],
+        SHADOW_ROOT_ACCESSORS,
+        true,
+    )?;
+    simple_class(
+        context,
+        "CustomElementRegistry",
+        illegal_constructor,
+        None,
+        CUSTOM_ELEMENTS_METHODS,
+        &[],
+        true,
+    )?;
     let registry = native_instance(context, "CustomElementRegistry", Kind::Plain, 0);
     context.register_global_property(js_string!("customElements"), registry, Attribute::all())?;
-    simple_class(context, "StyleSheet", illegal_constructor, None, &[], &[], true)?;
-    simple_class(context, "CSSStyleSheet", construct_sheet, Some("StyleSheet"), SHEET_METHODS, SHEET_ACCESSORS, true)?;
-    for name in ["CSSRule", "CSSStyleRule", "CSSMediaRule", "StyleSheetList", "CSSRuleList", "MediaList"] {
+    simple_class(
+        context,
+        "StyleSheet",
+        illegal_constructor,
+        None,
+        &[],
+        &[],
+        true,
+    )?;
+    simple_class(
+        context,
+        "CSSStyleSheet",
+        construct_sheet,
+        Some("StyleSheet"),
+        SHEET_METHODS,
+        SHEET_ACCESSORS,
+        true,
+    )?;
+    for name in [
+        "CSSRule",
+        "CSSStyleRule",
+        "CSSMediaRule",
+        "StyleSheetList",
+        "CSSRuleList",
+        "MediaList",
+    ] {
         simple_class(context, name, illegal_constructor, None, &[], &[], true)?;
     }
     let css = plain_object(context);
@@ -2046,10 +2758,42 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         set(&css, name, made, context)?;
     }
     context.register_global_property(js_string!("CSS"), css, Attribute::all())?;
-    simple_class(context, "Range", construct_range, None, RANGE_METHODS, RANGE_ACCESSORS, true)?;
-    simple_class(context, "StaticRange", construct_range, None, &[], &[], true)?;
-    simple_class(context, "Selection", illegal_constructor, None, SELECTION_METHODS, SELECTION_ACCESSORS, true)?;
-    let canvas_context = simple_class(context, "CanvasRenderingContext2D", illegal_constructor, None, CONTEXT_METHODS, &[], true)?;
+    simple_class(
+        context,
+        "Range",
+        construct_range,
+        None,
+        RANGE_METHODS,
+        RANGE_ACCESSORS,
+        true,
+    )?;
+    simple_class(
+        context,
+        "StaticRange",
+        construct_range,
+        None,
+        &[],
+        &[],
+        true,
+    )?;
+    simple_class(
+        context,
+        "Selection",
+        illegal_constructor,
+        None,
+        SELECTION_METHODS,
+        SELECTION_ACCESSORS,
+        true,
+    )?;
+    let canvas_context = simple_class(
+        context,
+        "CanvasRenderingContext2D",
+        illegal_constructor,
+        None,
+        CONTEXT_METHODS,
+        &[],
+        true,
+    )?;
     for name in CONTEXT_NOOPS {
         let noop = function(context, name, 0, |_, _, _| Ok(JsValue::undefined()));
         set(&canvas_context, name, noop, context)?;
@@ -2057,8 +2801,24 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     for name in ["CanvasGradient", "CanvasPattern", "TextMetrics"] {
         simple_class(context, name, illegal_constructor, None, &[], &[], true)?;
     }
-    simple_class(context, "ImageData", construct_image_data, None, &[], &[], true)?;
-    simple_class(context, "DataTransfer", construct_data_transfer, None, DATA_TRANSFER_METHODS, DATA_TRANSFER_ACCESSORS, true)?;
+    simple_class(
+        context,
+        "ImageData",
+        construct_image_data,
+        None,
+        &[],
+        &[],
+        true,
+    )?;
+    simple_class(
+        context,
+        "DataTransfer",
+        construct_data_transfer,
+        None,
+        DATA_TRANSFER_METHODS,
+        DATA_TRANSFER_ACCESSORS,
+        true,
+    )?;
     install_geometry(context)?;
     element_constructor(context, "Image", "HTMLImageElement", construct_image)?;
     element_constructor(context, "Audio", "HTMLAudioElement", construct_audio)?;
