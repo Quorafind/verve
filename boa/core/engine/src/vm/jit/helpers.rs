@@ -190,33 +190,58 @@ pub(crate) unsafe extern "C" fn jit_get_name(
     _: u32,
 ) -> u32 {
     guarded(state, |context, code_block, rp| {
-        let locator = code_block.bindings.get(index as usize)?;
-        // As `find_runtime_binding` decides it may leave the binding where it is.
-        if context.is_deleted_binding(locator) {
-            return None;
-        }
-        let frame = context.vm.frame();
-        let global = frame.realm.environment();
-        let current = frame.environments.current_declarative_ref(global)?;
-        if current.with() || current.poisoned() {
-            return None;
-        }
-        // As `get_binding` reads it.
-        let value = match locator.scope() {
-            BindingLocatorScope::GlobalDeclarative => global.get(locator.binding_index())?,
-            BindingLocatorScope::Stack(environment) => {
-                match context.environment_expect(environment) {
-                    Environment::Declarative(environment) => {
-                        environment.get(locator.binding_index())?
-                    }
-                    Environment::Object(_) => return None,
-                }
-            }
-            BindingLocatorScope::GlobalObject => return None,
-        };
+        let value = binding_value(context, code_block, index, None)?;
         set_register(context, rp, dst, value);
         Some(())
     })
+}
+
+/// `GetNameGlobal`: as `GetName`, and a binding on the global object is read through the
+/// instruction's inline cache, as the interpreter reads it, when it is a data property.
+pub(crate) unsafe extern "C" fn jit_get_name_global(
+    state: *mut JitState,
+    dst: u32,
+    index: u32,
+    ic: u32,
+) -> u32 {
+    guarded(state, |context, code_block, rp| {
+        let value = binding_value(context, code_block, index, Some(ic))?;
+        set_register(context, rp, dst, value);
+        Some(())
+    })
+}
+
+/// The value of binding `index` where `find_runtime_binding` leaves it and `get_binding`
+/// reads it, when nothing can have moved it: the frame's current environment is declarative,
+/// with no `with` and no binding an `eval` may have added, and the binding is not deleted. A
+/// binding on the global object is read only through `ic` (for `GetNameGlobal`).
+fn binding_value(
+    context: &Context,
+    code_block: &CodeBlock,
+    index: u32,
+    ic: Option<u32>,
+) -> Option<JsValue> {
+    let locator = code_block.bindings.get(index as usize)?;
+    if context.is_deleted_binding(locator) {
+        return None;
+    }
+    let frame = context.vm.frame();
+    let global = frame.realm.environment();
+    let current = frame.environments.current_declarative_ref(global)?;
+    if current.with() || current.poisoned() {
+        return None;
+    }
+    match locator.scope() {
+        BindingLocatorScope::GlobalDeclarative => global.get(locator.binding_index()),
+        BindingLocatorScope::Stack(environment) => match context.environment_expect(environment) {
+            Environment::Declarative(environment) => environment.get(locator.binding_index()),
+            Environment::Object(_) => None,
+        },
+        BindingLocatorScope::GlobalObject => {
+            let global_object = JsValue::from(frame.realm.global_object().clone());
+            cached_data_property(&global_object, code_block, ic?, None)
+        }
+    }
 }
 
 /// The value of the data property `ic` caches for `object`, if the cache has its shape.

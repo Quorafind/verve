@@ -8,9 +8,13 @@
 
 use std::{cell::Cell, cell::OnceCell, mem::offset_of, ptr};
 
+use thin_vec::ThinVec;
+
 use crate::{
     JsObject, JsValue,
-    object::{ErasedObject, ErasedVTableObject, PropertyMap, VTABLE_OBJECT_OFFSETS},
+    object::{
+        ErasedObject, ErasedVTableObject, IndexedProperties, PropertyMap, VTABLE_OBJECT_OFFSETS,
+    },
 };
 
 /// Byte offsets from the address an object value holds (its `GcBox`).
@@ -25,6 +29,15 @@ pub(crate) struct ObjectLayout {
     /// The pointer and the length of the property storage, a `Vec<JsValue>`.
     pub(crate) storage_ptr: i32,
     pub(crate) storage_len: i32,
+    /// The object's `extensible` flag, a `bool`.
+    pub(crate) extensible: i32,
+    /// The elements: an `IndexedProperties`, a tag word ([`DENSE_I32`](Self::DENSE_I32), …)
+    /// then the word of a `ThinVec` (the address of its header) for the dense kinds.
+    pub(crate) indexed: i32,
+    /// In a `ThinVec`'s header, where its length (a `usize`) is; its elements follow the
+    /// header at `thin_data`, for `i32`, `f64` and `JsValue` alike.
+    pub(crate) thin_len: i32,
+    pub(crate) thin_data: i32,
     /// This thread's count of garbage collections (`boa_gc::raw::collections`).
     pub(crate) collections: *const Cell<u64>,
 }
@@ -36,6 +49,13 @@ thread_local! {
 /// The object layout, if it checked out on this thread.
 pub(crate) fn object_layout() -> Option<ObjectLayout> {
     LAYOUT.with(|layout| *layout.get_or_init(compute))
+}
+
+impl ObjectLayout {
+    /// The tags of the dense kinds of `IndexedProperties`.
+    pub(crate) const DENSE_I32: i64 = 0;
+    pub(crate) const DENSE_F64: i64 = 1;
+    pub(crate) const DENSE_ELEMENT: i64 = 2;
 }
 
 fn offset(bytes: usize) -> Option<i32> {
@@ -68,6 +88,32 @@ fn vec_words() -> Option<(usize, usize)> {
     (pointer != len).then_some((pointer, len))
 }
 
+/// Where a `ThinVec<T>` keeps its length in its header, and how far from the header its elements
+/// start, for each of the element types arrays use; `None` unless they agree.
+fn thin_vec_words() -> Option<(usize, usize)> {
+    fn probe<T: Clone>(value: T) -> Option<(usize, usize)> {
+        if size_of::<ThinVec<T>>() != size_of::<usize>() {
+            return None;
+        }
+        let mut vec: ThinVec<T> = ThinVec::with_capacity(9);
+        vec.extend([value.clone(), value.clone(), value]);
+        // SAFETY: a `ThinVec` is the address of its header.
+        let header = unsafe { ptr::from_ref(&vec).cast::<usize>().read() };
+        // The header is two words, length and capacity in some order.
+        // SAFETY: the header is at least two initialized words.
+        let words = unsafe { (header as *const [usize; 2]).read() };
+        let len = match words {
+            [3, capacity] if capacity >= 9 => 0,
+            [capacity, 3] if capacity >= 9 => size_of::<usize>(),
+            _ => return None,
+        };
+        let data = (vec.as_ptr() as usize).checked_sub(header)?;
+        Some((len, data))
+    }
+    let words = probe(7i32)?;
+    (probe(0.5f64)? == words && probe(JsValue::undefined())? == words).then_some(words)
+}
+
 fn compute() -> Option<ObjectLayout> {
     let (vtable, cell) = VTABLE_OBJECT_OFFSETS;
     let base = boa_gc::raw::gc_box_value_offset::<ErasedVTableObject>();
@@ -76,12 +122,17 @@ fn compute() -> Option<ObjectLayout> {
     let properties = object + offset_of!(ErasedObject, properties);
     let storage = properties + offset_of!(PropertyMap, storage);
     let (vec_pointer, vec_len) = vec_words()?;
+    let (thin_len, thin_data) = thin_vec_words()?;
     let layout = ObjectLayout {
         flag: offset(cell + boa_gc::raw::ref_cell_flag_offset::<ErasedObject>())?,
         vtable: offset(base + vtable)?,
         shape: offset(properties + offset_of!(PropertyMap, shape))?,
         storage_ptr: offset(storage + vec_pointer)?,
         storage_len: offset(storage + vec_len)?,
+        extensible: offset(object + offset_of!(ErasedObject, extensible))?,
+        indexed: offset(properties + offset_of!(PropertyMap, indexed_properties))?,
+        thin_len: offset(thin_len)?,
+        thin_data: offset(thin_data)?,
         collections: boa_gc::raw::collections(),
     };
     check(&layout).then_some(layout)
@@ -97,6 +148,18 @@ unsafe fn word(object: &JsObject, offset: i32) -> u64 {
         + offset as usize;
     // SAFETY: guaranteed by the caller.
     unsafe { (address as *const u64).read() }
+}
+
+/// Reads a byte at `offset` from an object's allocation.
+///
+/// # Safety
+///
+/// `offset` must be within the object's allocation, at an initialized byte.
+unsafe fn byte(object: &JsObject, offset: i32) -> u8 {
+    let address = (JsValue::from(object.clone()).raw_bits() & 0x0000_FFFF_FFFF_FFFF) as usize
+        + offset as usize;
+    // SAFETY: guaranteed by the caller.
+    unsafe { (address as *const u8).read() }
 }
 
 /// Whether `layout` reads what Rust says is in a real object.
@@ -125,8 +188,56 @@ fn check(layout: &ObjectLayout) -> bool {
         let storage = word(&object, layout.storage_ptr) == properties.storage.as_ptr() as u64
             && word(&object, layout.storage_len) == 2;
         let vtable = word(&object, layout.vtable) == ptr::from_ref(object.vtable()) as u64;
-        unused && reading && writing && shape && storage && vtable
+        let extensible = byte(&object, layout.extensible) == 1;
+        drop(borrowed);
+        let elements = check_elements(&object, layout);
+        unused && reading && writing && shape && storage && vtable && extensible && elements
     }
+}
+
+/// Whether `layout` finds each dense kind of elements where Rust puts them.
+///
+/// # Safety
+///
+/// As [`word`].
+unsafe fn check_elements(object: &JsObject, layout: &ObjectLayout) -> bool {
+    let kinds = [
+        (
+            ObjectLayout::DENSE_I32,
+            IndexedProperties::DenseI32(ThinVec::from([4, 5])),
+            u64::from(5u32),
+        ),
+        (
+            ObjectLayout::DENSE_F64,
+            IndexedProperties::DenseF64(ThinVec::from([0.25, 2.5])),
+            2.5f64.to_bits(),
+        ),
+        (
+            ObjectLayout::DENSE_ELEMENT,
+            IndexedProperties::DenseElement(ThinVec::from([JsValue::null(), JsValue::from(9)])),
+            JsValue::from(9).raw_bits(),
+        ),
+    ];
+    let mut ok = true;
+    for (tag, elements, second) in kinds {
+        object.borrow_mut().properties_mut().indexed_properties = elements;
+        // SAFETY: as the caller guarantees; the header and elements are read as Rust made them.
+        unsafe {
+            let header = word(object, layout.indexed + 8) as usize;
+            let len = (header as *const u64)
+                .byte_add(layout.thin_len as usize)
+                .read();
+            let data = (header as *const u8).byte_add(layout.thin_data as usize);
+            let value = if tag == ObjectLayout::DENSE_I32 {
+                u64::from(data.byte_add(4).cast::<u32>().read_unaligned())
+            } else {
+                data.byte_add(8).cast::<u64>().read_unaligned()
+            };
+            ok &= word(object, layout.indexed) == tag as u64 && len == 2 && value == second;
+        }
+    }
+    object.borrow_mut().properties_mut().indexed_properties = IndexedProperties::default();
+    ok
 }
 
 /// What compiled code remembers about one property access: the shape of the last object whose

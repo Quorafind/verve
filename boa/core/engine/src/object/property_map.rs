@@ -33,7 +33,11 @@ use thin_vec::ThinVec;
 ///
 /// This method uses more space, since we also have to store the property descriptors, not just the value.
 /// It is also slower because we need to do a hash lookup.
+///
+/// `repr(u64)`: a tag word (the variants in order from 0) and the payload's word, which the
+/// JIT reads.
 #[derive(Debug, Trace, Finalize)]
+#[repr(u64)]
 pub enum IndexedProperties {
     /// Dense [`i32`] storage.
     DenseI32(ThinVec<i32>),

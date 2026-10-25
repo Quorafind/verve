@@ -236,6 +236,7 @@ fn kind(instruction: &Instruction) -> Kind {
         | Instruction::Add { .. }
         | Instruction::Sub { .. }
         | Instruction::Mul { .. }
+        | Instruction::Mod { .. }
         | Instruction::BitAnd { .. }
         | Instruction::BitOr { .. }
         | Instruction::BitXor { .. }
@@ -258,6 +259,7 @@ fn kind(instruction: &Instruction) -> Kind {
         | Instruction::SetAccumulator { .. }
         | Instruction::GetArgument { .. }
         | Instruction::GetName { .. }
+        | Instruction::GetNameGlobal { .. }
         | Instruction::CheckReturn
         | Instruction::GetPropertyByName { .. }
         | Instruction::GetLengthProperty { .. }
@@ -307,7 +309,8 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
         | Instruction::StoreUndefined { dst }
         | Instruction::PopIntoRegister { dst }
         | Instruction::GetArgument { dst, .. }
-        | Instruction::GetName { dst, .. } => vec![dst.into()],
+        | Instruction::GetName { dst, .. }
+        | Instruction::GetNameGlobal { dst, .. } => vec![dst.into()],
         Instruction::PushFromRegister { src } | Instruction::SetAccumulator { src } => {
             vec![src.into()]
         }
@@ -326,6 +329,7 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
         Instruction::Add { dst, lhs, rhs }
         | Instruction::Sub { dst, lhs, rhs }
         | Instruction::Mul { dst, lhs, rhs }
+        | Instruction::Mod { dst, lhs, rhs }
         | Instruction::BitAnd { dst, lhs, rhs }
         | Instruction::BitOr { dst, lhs, rhs }
         | Instruction::BitXor { dst, lhs, rhs }
@@ -543,7 +547,10 @@ struct Translator<'a> {
     /// Where objects keep their shape and properties, if it checked out on this thread.
     layout: Option<ObjectLayout>,
     /// The caches of the property accesses compiled inline; the code keeps them.
-    #[allow(clippy::vec_box, reason = "each cache keeps its address, which the code holds")]
+    #[allow(
+        clippy::vec_box,
+        reason = "each cache keeps its address, which the code holds"
+    )]
     sites: Vec<Box<SiteCache>>,
     lookup_sig: SigRef,
     /// Blocks that run an instruction with [`jit_step`], emitted after the instructions (a
@@ -551,7 +558,10 @@ struct Translator<'a> {
     slow: Vec<(Block, u32, Vec<u32>)>,
 }
 
-#[allow(clippy::vec_box, reason = "each cache keeps its address, which the code holds")]
+#[allow(
+    clippy::vec_box,
+    reason = "each cache keeps its address, which the code holds"
+)]
 fn translate(
     code_block: &CodeBlock,
     block_pcs: &[u32],
@@ -1098,6 +1108,20 @@ impl Translator<'_> {
                 let operands = [dst.into(), binding_index.into(), 0];
                 self.fast(helpers::jit_get_name, operands, Fast::MaySlow, pc, next);
             }
+            Instruction::GetNameGlobal {
+                dst,
+                binding_index,
+                ic_index,
+            } => {
+                let operands = [dst.into(), binding_index.into(), ic_index.into()];
+                self.fast(
+                    helpers::jit_get_name_global,
+                    operands,
+                    Fast::MaySlow,
+                    pc,
+                    next,
+                );
+            }
             Instruction::CheckReturn => {
                 self.fast(helpers::jit_check_return, [0; 3], Fast::MaySlow, pc, next);
             }
@@ -1128,14 +1152,12 @@ impl Translator<'_> {
             Instruction::GetPropertyByValue {
                 dst, key, object, ..
             } => {
-                let operands = [dst.into(), key.into(), object.into()];
-                self.fast(helpers::jit_get_element, operands, Fast::MaySlow, pc, next);
+                self.get_element([dst.into(), key.into(), object.into()], pc, next);
             }
             Instruction::SetPropertyByValue {
                 value, key, object, ..
             } => {
-                let operands = [value.into(), key.into(), object.into()];
-                self.fast(helpers::jit_set_element, operands, Fast::MaySlow, pc, next);
+                self.set_element([value.into(), key.into(), object.into()], pc, next);
             }
             Instruction::Add { dst, lhs, rhs } => {
                 self.arithmetic(Arith::Add, dst.into(), lhs.into(), rhs.into(), pc, next);
@@ -1145,6 +1167,9 @@ impl Translator<'_> {
             }
             Instruction::Mul { dst, lhs, rhs } => {
                 self.arithmetic(Arith::Mul, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::Mod { dst, lhs, rhs } => {
+                self.remainder(dst.into(), lhs.into(), rhs.into(), pc, next);
             }
             Instruction::BitAnd { dst, lhs, rhs } => {
                 self.bitwise(Bitwise::And, dst.into(), lhs.into(), rhs.into(), pc, next);
@@ -1577,59 +1602,7 @@ impl Translator<'_> {
             self.b.ins().brif(flag, miss, &[], unused, &[]);
             self.b.switch_to_block(unused);
             let slot = self.cached_slot(layout, address, site, miss);
-            let old = self.load_at(I64, slot, 0);
-            // The old value: dropped inline only if it owns nothing or is an object.
-            let old_pointer = self.b.create_block();
-            let old_checked = self.b.create_block();
-            self.b.append_block_param(old_checked, I8);
-            let no = self.b.ins().iconst(I8, 0);
-            let top = self.b.ins().ushr_imm_s(old, 50);
-            let is_pointer = self
-                .b
-                .ins()
-                .icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
-            self.b.ins().brif(
-                is_pointer,
-                old_pointer,
-                &[],
-                old_checked,
-                &[BlockArg::Value(no)],
-            );
-            self.b.switch_to_block(old_pointer);
-            let top = self.b.ins().ushr_imm_s(old, 48);
-            let is_object = self
-                .b
-                .ins()
-                .icmp_imm_s(IntCC::Equal, top, bits::TOP16_OBJECT);
-            let yes = self.b.ins().iconst(I8, 1);
-            self.b
-                .ins()
-                .brif(is_object, old_checked, &[BlockArg::Value(yes)], miss, &[]);
-            self.b.switch_to_block(old_checked);
-            let old_is_object = self.b.block_params(old_checked)[0];
-            // The new value: one more reference if it is an object.
-            let new_pointer = self.b.create_block();
-            let write = self.b.create_block();
-            self.branch_pointer(new, new_pointer, write);
-            self.b.switch_to_block(new_pointer);
-            self.count_reference(new, miss);
-            self.b.ins().jump(write, &[]);
-            self.b.switch_to_block(write);
-            let drop_old = self.b.create_block();
-            let written = self.b.create_block();
-            self.b
-                .ins()
-                .brif(old_is_object, drop_old, &[], written, &[]);
-            self.b.switch_to_block(drop_old);
-            let old_address = self.b.ins().band_imm_s(old, bits::POINTER_MASK);
-            let references = self.load_at(I32, old_address, 0);
-            let fewer = self.b.ins().iadd_imm_s(references, -1);
-            self.b
-                .ins()
-                .store(MemFlagsData::trusted(), fewer, old_address, 0);
-            self.b.ins().jump(written, &[]);
-            self.b.switch_to_block(written);
-            self.b.ins().store(MemFlagsData::trusted(), new, slot, 0);
+            self.replace_value(slot, new, miss);
             self.b.ins().jump(done, &[]);
         } else {
             self.b.ins().jump(miss, &[]);
@@ -1644,6 +1617,281 @@ impl Translator<'_> {
             done,
         );
         self.b.switch_to_block(done);
+    }
+
+    /// The address of the array that register `object` holds, and the index register `key`
+    /// holds, when the key is a non-negative `int32`; `miss` otherwise. Leaves the builder in a
+    /// new block.
+    fn array_and_index(
+        &mut self,
+        layout: ObjectLayout,
+        object: u32,
+        key: u32,
+        miss: Block,
+    ) -> (Value, Value) {
+        let key = self.load(key);
+        let is_int = self.is_int(key);
+        let index = self.b.ins().ireduce(I32, key);
+        let negative = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, index, 0);
+        let not_negative = self.b.ins().bxor_imm_s(negative, 1);
+        let is_index = self.b.ins().band(is_int, not_negative);
+        let indexed = self.b.create_block();
+        self.b.ins().brif(is_index, indexed, &[], miss, &[]);
+        self.b.switch_to_block(indexed);
+        let value = self.load(object);
+        let address = self.object_address(value, miss);
+        let vtable = self.load_at(I64, address, layout.vtable);
+        let array_vtable =
+            std::ptr::from_ref(&crate::builtins::array::ARRAY_EXOTIC_INTERNAL_METHODS) as i64;
+        let is_array = self.b.ins().icmp_imm_s(IntCC::Equal, vtable, array_vtable);
+        let array = self.b.create_block();
+        self.b.ins().brif(is_array, array, &[], miss, &[]);
+        self.b.switch_to_block(array);
+        let index = self.b.ins().uextend(I64, index);
+        (address, index)
+    }
+
+    /// The tag of an array's elements, and the address of element `index` of a dense kind
+    /// (`miss` if `index` is past the end). Leaves the builder in a new block.
+    fn element_address(
+        &mut self,
+        layout: ObjectLayout,
+        address: Value,
+        index: Value,
+        miss: Block,
+    ) -> (Value, Value) {
+        let tag = self.load_at(I64, address, layout.indexed);
+        let dense = self.b.ins().icmp_imm_s(
+            IntCC::UnsignedLessThanOrEqual,
+            tag,
+            ObjectLayout::DENSE_ELEMENT,
+        );
+        let in_dense = self.b.create_block();
+        self.b.ins().brif(dense, in_dense, &[], miss, &[]);
+        self.b.switch_to_block(in_dense);
+        let header = self.load_at(I64, address, layout.indexed + 8);
+        let len = self.load_at(I64, header, layout.thin_len);
+        let inside = self.b.ins().icmp(IntCC::UnsignedLessThan, index, len);
+        let found = self.b.create_block();
+        self.b.ins().brif(inside, found, &[], miss, &[]);
+        self.b.switch_to_block(found);
+        // `i32`s are 4 bytes, `f64`s and values 8.
+        let is_i32 = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, tag, ObjectLayout::DENSE_I32);
+        let four = self.b.ins().ishl_imm_u(index, 2);
+        let eight = self.b.ins().ishl_imm_u(index, 3);
+        let offset = self.b.ins().select(is_i32, four, eight);
+        let data = self.b.ins().iadd_imm_s(header, i64::from(layout.thin_data));
+        (tag, self.b.ins().iadd(data, offset))
+    }
+
+    /// `GetPropertyByValue`: an element of a dense array by an `int32` index, read inline as
+    /// `get_dense_property` makes it; anything else through the helper.
+    fn get_element(&mut self, [dst, key, object]: [u32; 3], pc: u32, next: u32) {
+        let done = self.b.create_block();
+        let miss = self.b.create_block();
+        if let Some(layout) = self.layout {
+            let (address, index) = self.array_and_index(layout, object, key, miss);
+            let flag = self.load_at(I64, address, layout.flag);
+            let writing = self.b.ins().icmp_imm_s(IntCC::Equal, flag, -1);
+            let readable = self.b.create_block();
+            self.b.ins().brif(writing, miss, &[], readable, &[]);
+            self.b.switch_to_block(readable);
+            let (tag, element) = self.element_address(layout, address, index, miss);
+            let store = self.b.create_block();
+            self.b.append_block_param(store, I64);
+            let int = self.b.create_block();
+            let not_int = self.b.create_block();
+            let float = self.b.create_block();
+            let value = self.b.create_block();
+            let is_i32 = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, tag, ObjectLayout::DENSE_I32);
+            self.b.ins().brif(is_i32, int, &[], not_int, &[]);
+            self.b.switch_to_block(int);
+            let number = self.load_at(I32, element, 0);
+            let boxed = self.box_int(number);
+            self.b.ins().jump(store, &[BlockArg::Value(boxed)]);
+            self.b.switch_to_block(not_int);
+            let is_floats = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, tag, ObjectLayout::DENSE_F64);
+            self.b.ins().brif(is_floats, float, &[], value, &[]);
+            self.b.switch_to_block(float);
+            let number = self.load_at(F64, element, 0);
+            let boxed = self.box_f64(number);
+            self.b.ins().jump(store, &[BlockArg::Value(boxed)]);
+            self.b.switch_to_block(value);
+            let element = self.load_at(I64, element, 0);
+            let pointer = self.b.create_block();
+            let top = self.b.ins().ushr_imm_s(element, 50);
+            let is_pointer = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
+            self.b
+                .ins()
+                .brif(is_pointer, pointer, &[], store, &[BlockArg::Value(element)]);
+            self.b.switch_to_block(pointer);
+            self.count_reference(element, miss);
+            self.b.ins().jump(store, &[BlockArg::Value(element)]);
+            self.b.switch_to_block(store);
+            let result = self.b.block_params(store)[0];
+            self.store(dst, result);
+            self.b.ins().jump(done, &[]);
+        } else {
+            self.b.ins().jump(miss, &[]);
+        }
+        self.b.switch_to_block(miss);
+        let operands =
+            [dst, key, object].map(|operand| self.b.ins().iconst(I32, i64::from(operand)));
+        let status = self.call(
+            self.helper_sig,
+            helpers::jit_get_element as *const () as i64,
+            &operands,
+        );
+        let slow = self.slow_block(pc, &[next]);
+        self.b.ins().brif(status, slow, &[], done, &[]);
+        self.b.switch_to_block(done);
+    }
+
+    /// `SetPropertyByValue`: an existing element of a dense, extensible array by an `int32`
+    /// index, written inline when `set_dense_property` keeps the kind of the elements (an
+    /// `int32` into `i32`s, a number into `f64`s, and into values a value that owns nothing or
+    /// is an object, over one of those); anything else through the helper.
+    fn set_element(&mut self, [value, key, object]: [u32; 3], pc: u32, next: u32) {
+        let done = self.b.create_block();
+        let miss = self.b.create_block();
+        if let Some(layout) = self.layout {
+            let new = self.load(value);
+            let (address, index) = self.array_and_index(layout, object, key, miss);
+            // Not borrowed at all, as `borrow_mut` requires, and extensible.
+            let flag = self.load_at(I64, address, layout.flag);
+            let unused = self.b.create_block();
+            self.b.ins().brif(flag, miss, &[], unused, &[]);
+            self.b.switch_to_block(unused);
+            let extensible = self.load_at(I8, address, layout.extensible);
+            let open = self.b.create_block();
+            self.b.ins().brif(extensible, open, &[], miss, &[]);
+            self.b.switch_to_block(open);
+            let (tag, element) = self.element_address(layout, address, index, miss);
+            let int = self.b.create_block();
+            let not_int = self.b.create_block();
+            let float = self.b.create_block();
+            let values = self.b.create_block();
+            let is_i32 = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, tag, ObjectLayout::DENSE_I32);
+            self.b.ins().brif(is_i32, int, &[], not_int, &[]);
+            // `i32`s: an `int32`.
+            self.b.switch_to_block(int);
+            let is_int = self.is_int(new);
+            let write_int = self.b.create_block();
+            self.b.ins().brif(is_int, write_int, &[], miss, &[]);
+            self.b.switch_to_block(write_int);
+            let number = self.b.ins().ireduce(I32, new);
+            self.b
+                .ins()
+                .store(MemFlagsData::trusted(), number, element, 0);
+            self.b.ins().jump(done, &[]);
+            // `f64`s: a number.
+            self.b.switch_to_block(not_int);
+            let is_floats = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, tag, ObjectLayout::DENSE_F64);
+            self.b.ins().brif(is_floats, float, &[], values, &[]);
+            self.b.switch_to_block(float);
+            let is_number = self.is_number(new);
+            let write_float = self.b.create_block();
+            self.b.ins().brif(is_number, write_float, &[], miss, &[]);
+            self.b.switch_to_block(write_float);
+            let number = self.as_f64(new);
+            self.b
+                .ins()
+                .store(MemFlagsData::trusted(), number, element, 0);
+            self.b.ins().jump(done, &[]);
+            // Values.
+            self.b.switch_to_block(values);
+            self.replace_value(element, new, miss);
+            self.b.ins().jump(done, &[]);
+        } else {
+            self.b.ins().jump(miss, &[]);
+        }
+        self.b.switch_to_block(miss);
+        let operands =
+            [value, key, object].map(|operand| self.b.ins().iconst(I32, i64::from(operand)));
+        let status = self.call(
+            self.helper_sig,
+            helpers::jit_set_element as *const () as i64,
+            &operands,
+        );
+        let slow = self.slow_block(pc, &[next]);
+        self.b.ins().brif(status, slow, &[], done, &[]);
+        self.b.switch_to_block(done);
+    }
+
+    /// Replaces the value at `slot` with `new`, as `*slot = new.clone()` does, when the old
+    /// value owns nothing or is an object and the new one owns nothing or is an object whose
+    /// count can grow; `miss`, having changed nothing, otherwise. Leaves the builder in a new
+    /// block.
+    fn replace_value(&mut self, slot: Value, new: Value, miss: Block) {
+        let old = self.load_at(I64, slot, 0);
+        let old_pointer = self.b.create_block();
+        let old_checked = self.b.create_block();
+        self.b.append_block_param(old_checked, I8);
+        let no = self.b.ins().iconst(I8, 0);
+        let top = self.b.ins().ushr_imm_s(old, 50);
+        let is_pointer = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
+        self.b.ins().brif(
+            is_pointer,
+            old_pointer,
+            &[],
+            old_checked,
+            &[BlockArg::Value(no)],
+        );
+        self.b.switch_to_block(old_pointer);
+        let top = self.b.ins().ushr_imm_s(old, 48);
+        let is_object = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, top, bits::TOP16_OBJECT);
+        let yes = self.b.ins().iconst(I8, 1);
+        self.b
+            .ins()
+            .brif(is_object, old_checked, &[BlockArg::Value(yes)], miss, &[]);
+        self.b.switch_to_block(old_checked);
+        let old_is_object = self.b.block_params(old_checked)[0];
+        let new_pointer = self.b.create_block();
+        let write = self.b.create_block();
+        self.branch_pointer(new, new_pointer, write);
+        self.b.switch_to_block(new_pointer);
+        self.count_reference(new, miss);
+        self.b.ins().jump(write, &[]);
+        self.b.switch_to_block(write);
+        let drop_old = self.b.create_block();
+        let written = self.b.create_block();
+        self.b
+            .ins()
+            .brif(old_is_object, drop_old, &[], written, &[]);
+        self.b.switch_to_block(drop_old);
+        let old_address = self.b.ins().band_imm_s(old, bits::POINTER_MASK);
+        let references = self.load_at(I32, old_address, 0);
+        let fewer = self.b.ins().iadd_imm_s(references, -1);
+        self.b
+            .ins()
+            .store(MemFlagsData::trusted(), fewer, old_address, 0);
+        self.b.ins().jump(written, &[]);
+        self.b.switch_to_block(written);
+        self.b.ins().store(MemFlagsData::trusted(), new, slot, 0);
     }
 
     /// Goes on to the next instruction from the current block.
@@ -1718,6 +1966,53 @@ impl Translator<'_> {
         };
         let boxed = self.box_f64(result);
         self.store(dst, boxed);
+        self.b.ins().jump(done, &[]);
+
+        self.b.switch_to_block(done);
+    }
+
+    /// `%` of two `int32`s, as `rem_fast` computes it: an `int32`, or `-0` when the dividend is
+    /// negative and the remainder zero. A divisor of `0` (`NaN`) or `-1` (where the machine's
+    /// remainder may trap) and other types take the slow path.
+    fn remainder(&mut self, dst: u32, lhs: u32, rhs: u32, pc: u32, next: u32) {
+        let a = self.load(lhs);
+        let b = self.load(rhs);
+        let slow = self.slow_block(pc, &[next]);
+        let ints = self.b.create_block();
+        let divide = self.b.create_block();
+        let int_store = self.b.create_block();
+        let negative_zero = self.b.create_block();
+        let done = self.continue_block();
+        let a_int = self.is_int(a);
+        let b_int = self.is_int(b);
+        let both_int = self.b.ins().band(a_int, b_int);
+        self.b.ins().brif(both_int, ints, &[], slow, &[]);
+
+        self.b.switch_to_block(ints);
+        let x = self.b.ins().ireduce(I32, a);
+        let y = self.b.ins().ireduce(I32, b);
+        let zero = self.b.ins().icmp_imm_s(IntCC::Equal, y, 0);
+        let minus_one = self.b.ins().icmp_imm_s(IntCC::Equal, y, -1);
+        let unsafe_divisor = self.b.ins().bor(zero, minus_one);
+        self.b.ins().brif(unsafe_divisor, slow, &[], divide, &[]);
+
+        self.b.switch_to_block(divide);
+        let remainder = self.b.ins().srem(x, y);
+        let is_zero = self.b.ins().icmp_imm_s(IntCC::Equal, remainder, 0);
+        let x_negative = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, x, 0);
+        let minus_zero = self.b.ins().band(is_zero, x_negative);
+        self.b
+            .ins()
+            .brif(minus_zero, negative_zero, &[], int_store, &[]);
+
+        self.b.switch_to_block(int_store);
+        let boxed = self.box_int(remainder);
+        self.store(dst, boxed);
+        self.b.ins().jump(done, &[]);
+
+        self.b.switch_to_block(negative_zero);
+        let bits = self.b.ins().iconst(I64, (-0.0f64).to_bits() as i64);
+        self.store(dst, bits);
         self.b.ins().jump(done, &[]);
 
         self.b.switch_to_block(done);

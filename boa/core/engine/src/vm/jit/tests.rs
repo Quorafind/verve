@@ -1044,11 +1044,70 @@ fn collections_invalidate_property_caches() {
         )
     };
     let before = fills();
-    context.eval(Source::from_bytes(&source(false))).expect("runs");
+    context
+        .eval(Source::from_bytes(&source(false)))
+        .expect("runs");
     let quiet = fills() - before;
     let before = fills();
-    context.eval(Source::from_bytes(&source(true))).expect("runs");
+    context
+        .eval(Source::from_bytes(&source(true)))
+        .expect("runs");
     let collecting = fills() - before;
     assert!(quiet <= 2, "a hot access fills its cache once: {quiet}");
-    assert!(collecting >= 15, "each collection costs one miss: {collecting}");
+    assert!(
+        collecting >= 15,
+        "each collection costs one miss: {collecting}"
+    );
+}
+
+/// `Array.prototype.fill` of plain dense arrays takes a shortcut; ranges, holes, frozen,
+/// non-extensible and fixed-length arrays, side effects of the bounds, setters on the prototype,
+/// array-likes, typed arrays and subclasses behave as the specification says. The expected
+/// output is Node's.
+#[test]
+fn fill_matches_the_specification() {
+    let out = same(
+        r#"function show2(v) {
+           switch (typeof v) {
+             case 'number': return Object.is(v, -0) ? '-0' : String(v);
+             case 'string': return JSON.stringify(v);
+             case 'object':
+               if (v === null) return 'null';
+               if (Array.isArray(v)) return '[' + Array.from(v, (x, i) => (i in v ? show2(x) : '_')).join(',') + ']';
+               return '{' + Object.keys(v).map(k => k + ':' + show2(v[k])).join(',') + '}';
+             default: return String(v);
+           }
+         }
+         const out = [];
+         const t = (f) => { try { out.push(show2(f())); } catch (e) { out.push(e.name); } };
+         t(() => new Array(5).fill(true));
+         t(() => new Array(5).fill(0.5, 1, 3));
+         t(() => [1, 2, 3, 4].fill(-0, -2));
+         t(() => [1, 2, 3].fill('x', 5));
+         t(() => [1, 2, 3].fill(null, 1, -5));
+         t(() => { const a = new Array(4); a[0] = 1; return a.fill(9, 2); });
+         t(() => [1, , 3].fill(7));
+         t(() => Object.freeze([1, 2]).fill(0));
+         t(() => { const a = Object.preventExtensions(new Array(3)); return a.fill(1); });
+         t(() => { const a = [1, 2]; Object.defineProperty(a, 'length', { writable: false }); return a.fill(5); });
+         t(() => { const log = []; const a = [1, 2, 3]; a.fill(0, { valueOf() { log.push('start'); return 1; } }, { valueOf() { log.push('end'); return 2; } }); return [a, log.join()]; });
+         t(() => {
+           const log = [];
+           Object.defineProperty(Array.prototype, '2', { set(v) { log.push('setter ' + v); }, configurable: true });
+           const a = new Array(4).fill('z');
+           delete Array.prototype[2];
+           return [a, log.join()];
+         });
+         t(() => { const o = { length: 3 }; Array.prototype.fill.call(o, 'a', 1); return o; });
+         t(() => new Int8Array(3).fill(200));
+         t(() => { class X extends Array {} return X.from([1, 2]).fill(0) instanceof X; });
+         t(() => { const a = [{}, {}]; const o = { k: 1 }; a.fill(o); return [a[0] === a[1], a[1] === o]; });
+         t(() => new Array(3).fill(NaN));
+         t(() => { const a = []; a.length = 3; a.fill(1, 0, 2); return [a, a.length]; });
+         out.join(' ')"#,
+    );
+    assert_eq!(
+        out,
+        r#"[true,true,true,true,true] [_,0.5,0.5,_,_] [1,2,-0,-0] [1,2,3] [1,2,3] [1,_,9,9] [7,7,7] TypeError TypeError [5,5] [[1,0,3],"start,end"] [["z","z",_,"z"],"setter z"] {1:"a",2:"a",length:3} {0:-56,1:-56,2:-56} true [true,true] [NaN,NaN,NaN] [[1,1,_],3]"#
+    );
 }
