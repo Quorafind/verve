@@ -20,6 +20,11 @@ use std::{
 pub(crate) type Id = u64;
 pub(crate) enum Command {
     Connect(Id, String, u16, u8),
+    /// A connection to a target through a proxy: the target is what permissions are checked
+    /// against, and it is never resolved here.
+    ConnectVia(Id, String, u16, super::proxy::Via),
+    /// The proxies the embedder configured, which need no outbound rule of their own.
+    Proxies(Vec<(String, u16)>),
     Listen(Id, SocketAddr, i32, bool),
     Accept(Id),
     Adopt(Id, Id),
@@ -59,6 +64,8 @@ pub(crate) enum Event {
     DatagramConnected(SocketAddr, SocketAddr),
     DatagramBuffers(usize, usize),
     Error(String, String),
+    /// The proxy answered a `CONNECT` with this status rather than 200.
+    TunnelRefused(u16, String),
 }
 
 #[derive(Clone)]
@@ -123,7 +130,11 @@ pub(crate) struct Reactor {
     pub counters: Arc<Counters>,
 }
 impl Reactor {
-    pub fn new(permissions: super::Permissions, host: Arc<crate::WakeSlot>) -> io::Result<Self> {
+    pub fn new(
+        permissions: super::Permissions,
+        proxies: Vec<(String, u16)>,
+        host: Arc<crate::WakeSlot>,
+    ) -> io::Result<Self> {
         let poll = Poll::new()?;
         let wake = Arc::new(Waker::new(poll.registry(), Token(0))?);
         let (tx, commands) = mpsc::channel();
@@ -169,7 +180,7 @@ impl Reactor {
             .spawn(move || {
                 let counters = out.counters.clone();
                 let _count = ThreadCount::new(&counters.reactor_threads);
-                run(poll, commands, out, dns_tx, permissions);
+                run(poll, commands, out, dns_tx, permissions, proxies);
             })?;
         Ok(Self {
             events,
@@ -207,6 +218,103 @@ struct Connection {
     tls_permitted: bool,
     tls_server: bool,
     tls_verification: Arc<Mutex<Option<String>>>,
+    /// A `CONNECT` not yet answered: nothing else is read or written until it is.
+    tunnel: Option<Tunnel>,
+}
+/// A `CONNECT` request on its way to the proxy, and the proxy's answer as it arrives.
+struct Tunnel {
+    request: Vec<u8>,
+    sent: usize,
+    response: Vec<u8>,
+    target: String,
+}
+impl Tunnel {
+    fn new(host: &str, port: u16, authorization: Option<&str>) -> Self {
+        let target = if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        let mut request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
+        if let Some(credentials) = authorization {
+            request.push_str(&format!("Proxy-Authorization: {credentials}\r\n"));
+        }
+        request.push_str("\r\n");
+        Self {
+            request: request.into_bytes(),
+            sent: 0,
+            response: Vec::new(),
+            target,
+        }
+    }
+}
+/// Where a tunnel stands after a step.
+enum Tunneled {
+    Waiting,
+    Open,
+    Refused(u16, String),
+}
+/// Sends what is left of the `CONNECT` and reads the answer's head, a byte at a time so that
+/// nothing after it — the target's first bytes — is taken from the socket.
+fn tunnel_step(c: &mut Connection) -> io::Result<Tunneled> {
+    let Some(t) = c.tunnel.as_mut() else {
+        return Ok(Tunneled::Open);
+    };
+    while t.sent < t.request.len() {
+        match c.socket.write(&t.request[t.sent..]) {
+            Ok(n) => t.sent += n,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Tunneled::Waiting),
+            Err(e) => return Err(e),
+        }
+    }
+    let mut byte = [0; 1];
+    while !t.response.ends_with(b"\r\n\r\n") {
+        if t.response.len() > 16 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the proxy's answer to CONNECT is too long",
+            ));
+        }
+        match c.socket.read(&mut byte) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    format!(
+                        "the proxy closed the connection before tunneling to {}",
+                        t.target
+                    ),
+                ));
+            }
+            Ok(_) => t.response.push(byte[0]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Tunneled::Waiting),
+            Err(e) => return Err(e),
+        }
+    }
+    c.activity = Instant::now();
+    let head = String::from_utf8_lossy(&t.response);
+    let line = head.lines().next().unwrap_or_default().trim().to_owned();
+    let status = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|_| line.starts_with("HTTP/1."));
+    match status {
+        Some(200) => {
+            c.tunnel = None;
+            Ok(Tunneled::Open)
+        }
+        Some(status) => Ok(Tunneled::Refused(
+            status,
+            format!(
+                "Failed to establish tunnel to {} through the proxy: {line}",
+                t.target
+            ),
+        )),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the proxy answered CONNECT with something not HTTP: {line}"),
+        )),
+    }
 }
 impl Connection {
     fn new(socket: TcpStream, connecting: bool) -> Self {
@@ -229,11 +337,21 @@ impl Connection {
             tls_permitted: false,
             tls_server: false,
             tls_verification: Arc::default(),
+            tunnel: None,
         }
     }
     fn interest(&self) -> Option<Interest> {
         if self.failed {
             return None;
+        }
+        if let Some(t) = &self.tunnel
+            && !self.connecting
+        {
+            return Some(if t.sent < t.request.len() {
+                Interest::READABLE | Interest::WRITABLE
+            } else {
+                Interest::READABLE
+            });
         }
         match (
             (self.credit && !self.ended && (self.tls.is_none() || self.tls_permitted))
@@ -339,6 +457,7 @@ fn run(
     out: Output,
     dns: mpsc::SyncSender<(Id, super::dns::Query)>,
     permissions: super::Permissions,
+    mut proxies: Vec<(String, u16)>,
 ) {
     let mut sockets: HashMap<Id, Connection> = HashMap::new();
     let mut tls_options = HashMap::new();
@@ -499,13 +618,48 @@ fn run(
                     }
                 }
                 Command::Stop => return,
-                Command::Connect(id, host, port, family) => {
-                    if !permissions.allows_outbound(&host, port) {
-                        let _ =
-                            out.send((id, Event::Error("EACCES".into(), "connect EACCES".into())));
-                        continue;
-                    }
-                    pending.insert(id, (false, VecDeque::new(), false, 0));
+                Command::Proxies(list) => proxies = list,
+                Command::Connect(..) | Command::ConnectVia(..) => {
+                    let (id, host, port, family, tunnel) = match command {
+                        Command::Connect(id, host, port, family) => {
+                            if !permissions.allows_outbound(&host, port) {
+                                let _ = out.send((
+                                    id,
+                                    Event::Error("EACCES".into(), "connect EACCES".into()),
+                                ));
+                                continue;
+                            }
+                            (id, host, port, family, None)
+                        }
+                        Command::ConnectVia(id, host, port, via) => {
+                            let proxy = &via.proxy;
+                            let configured = proxies.iter().any(|(h, p)| {
+                                h.eq_ignore_ascii_case(&proxy.host) && *p == proxy.port
+                            });
+                            if !permissions.allows_outbound(&host, port)
+                                || !(configured
+                                    || permissions.allows_outbound(&proxy.host, proxy.port))
+                            {
+                                let _ = out.send((
+                                    id,
+                                    Event::Error("EACCES".into(), "connect EACCES".into()),
+                                ));
+                                continue;
+                            }
+                            let tunnel = via
+                                .tunnel
+                                .then(|| Tunnel::new(&host, port, proxy.authorization.as_deref()));
+                            (id, via.proxy.host, via.proxy.port, 0, tunnel)
+                        }
+                        _ => continue,
+                    };
+                    pending.insert(
+                        id,
+                        Waiting {
+                            tunnel,
+                            ..Waiting::default()
+                        },
+                    );
                     if let Ok(ip) = host.parse::<IpAddr>() {
                         let result = vec![SocketAddr::new(ip, port)];
                         open(id, result, &mut sockets, &mut pending, &poll, &out);
@@ -643,14 +797,14 @@ fn run(
                         c.credit = enabled;
                     }
                     if let Some(p) = pending.get_mut(&id) {
-                        p.0 = enabled;
+                        p.read = enabled;
                     }
                 }
                 Command::Write(id, data) => {
                     if let Some(c) = sockets.get_mut(&id) {
                         c.writes.push_back((data, 0));
                     } else if let Some(p) = pending.get_mut(&id) {
-                        p.1.push_back((data, 0));
+                        p.writes.push_back((data, 0));
                     }
                 }
                 Command::End(id) => {
@@ -658,7 +812,7 @@ fn run(
                         c.end = true;
                     }
                     if let Some(p) = pending.get_mut(&id) {
-                        p.2 = true;
+                        p.end = true;
                     }
                 }
                 Command::NoDelay(id, enabled) => {
@@ -691,7 +845,7 @@ fn run(
                         c.activity = Instant::now();
                     }
                     if let Some(p) = pending.get_mut(&id) {
-                        p.3 = ms;
+                        p.timeout = ms;
                     }
                 }
                 Command::Close(id) => {
@@ -786,6 +940,7 @@ fn run(
                 && c.writes.is_empty()
                 && c.tls_written.is_none()
                 && !c.connecting
+                && c.tunnel.is_none()
                 && (c.tls.is_none() || c.tls_permitted)
             {
                 if let Some(tls) = c.tls.as_mut() {
@@ -803,6 +958,7 @@ fn run(
             }
             if c.tls.is_some()
                 && !c.connecting
+                && c.tunnel.is_none()
                 && let Err(e) = tls_step(c, id, false, &out)
             {
                 c.failed = true;
@@ -892,10 +1048,32 @@ fn run(
                 if let (Ok(local), Ok(peer)) = (c.socket.local_addr(), c.socket.peer_addr()) {
                     c.connecting = false;
                     c.activity = Instant::now();
-                    let _ = out.send((id, Event::Connected(local, peer)));
+                    if c.tunnel.is_none() {
+                        let _ = out.send((id, Event::Connected(local, peer)));
+                    }
                 } else {
                     continue;
                 }
+            }
+            if c.tunnel.is_some() {
+                match tunnel_step(c) {
+                    Ok(Tunneled::Waiting) => {}
+                    Ok(Tunneled::Open) => {
+                        if let (Ok(local), Ok(peer)) = (c.socket.local_addr(), c.socket.peer_addr())
+                        {
+                            let _ = out.send((id, Event::Connected(local, peer)));
+                        }
+                    }
+                    Ok(Tunneled::Refused(status, message)) => {
+                        c.failed = true;
+                        let _ = out.send((id, Event::TunnelRefused(status, message)));
+                    }
+                    Err(e) => {
+                        c.failed = true;
+                        error(&out, id, e);
+                    }
+                }
+                continue;
             }
             if c.tls.is_some() {
                 if let Err(e) = tls_step(c, id, ready.is_readable(), &out) {
@@ -1167,7 +1345,16 @@ fn tls_step(c: &mut Connection, id: Id, readable: bool, out: &Output) -> io::Res
     Ok(())
 }
 
-type Pending = HashMap<Id, (bool, VecDeque<(Vec<u8>, usize)>, bool, u64)>;
+/// What a connection still being resolved has been asked to do once it is open.
+#[derive(Default)]
+struct Waiting {
+    read: bool,
+    writes: VecDeque<(Vec<u8>, usize)>,
+    end: bool,
+    timeout: u64,
+    tunnel: Option<Tunnel>,
+}
+type Pending = HashMap<Id, Waiting>;
 fn open(
     id: Id,
     addresses: Vec<SocketAddr>,
@@ -1186,11 +1373,12 @@ fn open(
             Ok(socket) => {
                 let mut c = Connection::new(socket, true);
                 c.alternatives = addresses;
-                if let Some((read, writes, end, timeout)) = pending.remove(&id) {
-                    c.credit = read;
-                    c.writes = writes;
-                    c.end = end;
-                    c.timeout = timeout;
+                if let Some(waiting) = pending.remove(&id) {
+                    c.credit = waiting.read;
+                    c.writes = waiting.writes;
+                    c.end = waiting.end;
+                    c.timeout = waiting.timeout;
+                    c.tunnel = waiting.tunnel;
                 }
                 if let Err(e) = c.register(poll, id) {
                     error(out, id, e);

@@ -371,7 +371,10 @@ fn agent(module: &JsValue, cx: &mut Context) -> JsResult<JsValue> {
         .ok_or_else(|| crate::native::type_error("Agent"))?;
     let options = object(cx);
     options.set(js_string!("keepAlive"), true, false, cx)?;
-    let agent: JsValue = class.construct(&[options.into()], None, cx)?.into();
+    let agent = class.construct(&[options.into()], None, cx)?;
+    // Undici's proxy rules: the realm's proxy, `HTTP_PROXY` standing in for `HTTPS_PROXY`.
+    hidden(&agent, js_string!("__proxyRealm"), js_text("fetch"), cx)?;
+    let agent: JsValue = agent.into();
     let free = crate::native::function(cx, "", 1, |_, args, cx| {
         let socket = arg(args, 0);
         if !get(&socket, "__fetchIdle", cx)?.to_boolean() {
@@ -409,7 +412,8 @@ fn on_request_error(
     cx: &mut Context,
 ) -> JsResult<JsValue> {
     if !stale(fetch, *hop) {
-        fail(fetch, arg(args, 0), cx);
+        let cause = undici_cause(arg(args, 0), cx)?;
+        fail(fetch, cause, cx);
     }
     Ok(JsValue::undefined())
 }
@@ -781,6 +785,19 @@ fn type_error_with_cause(cx: &mut Context, message: &str, cause: JsValue) -> JsV
     crate::native::construct_global(cx, "TypeError", &[js_text(message), options.into()])
         .map(JsValue::from)
         .unwrap_or_default()
+}
+
+/// A proxy's refusal to tunnel, as undici's `ProxyAgent` reports it; any other error as it is.
+fn undici_cause(error: JsValue, cx: &mut Context) -> JsResult<JsValue> {
+    if crate::print(&get(&error, "code", cx)?) != "ERR_PROXY_TUNNEL" {
+        return Ok(error);
+    }
+    let status = crate::print(&get(&error, "statusCode", cx)?);
+    let message = format!("Proxy response ({status}) !== 200 when HTTP Tunneling");
+    let cause = plain_error(cx, &message, Some("UND_ERR_ABORTED"));
+    super::tcp::put(&cause, "name", js_text("RequestAbortedError"), cx)?;
+    super::tcp::put(&cause, "cause", error, cx)?;
+    Ok(cause)
 }
 
 /// `TypeError: fetch failed`, as undici rejects with for any network error.

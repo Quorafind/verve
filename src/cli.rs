@@ -36,6 +36,7 @@
 //! | `--allow-write[=a,b]`, `--allow-fs-write=<path>` (repeatable, `*` for all) | write |
 //! | `--allow-net[=host[:port],…]` | connect to those (alone: anything; and listen, and DNS) |
 //! | `--allow-worker` | start workers |
+//! | `--use-env-proxy` | `fetch`, `WebSocket` and the `http`/`https` global agents go through `HTTP_PROXY`/`HTTPS_PROXY`, minus `NO_PROXY` — also when `NODE_USE_ENV_PROXY=1` |
 //! | `--permission`, `--experimental-permission` | accepted: permissions are always on |
 //! | `-e`, `--eval <source>` | run `source` as `node -e` does (also `verve eval <source>`) |
 //! | `--disable-proto=throw\|delete` | `Object.prototype.__proto__` throws, or is gone |
@@ -47,6 +48,11 @@
 //! `--allow-read` and `--allow-write` split their value at commas; Node's `--allow-fs-read` and
 //! `--allow-fs-write` take one path each, as Node 22 does. Paths are relative to the working
 //! directory. An unknown flag is an error (exit 9, as Node's).
+//!
+//! **A proxy** is Node 24's: with `--use-env-proxy` or `NODE_USE_ENV_PROXY=1` the proxy
+//! variables are read once, at startup, and `--allow-net` is checked against each request's
+//! target, never the proxy — a host that confines the process to its proxy grants the hosts it
+//! means, and the proxy it set up needs no grant.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -76,6 +82,7 @@ const USAGE: &str = "usage: verve run [flags] <entry.js|.mjs|.cjs> [args...]
 
 flags: -A/--allow-all, --allow-read[=paths], --allow-fs-read=<path>, --allow-write[=paths],
        --allow-fs-write=<path>, --allow-net[=hosts], --allow-worker, --permission,
+       --use-env-proxy,
        --disable-proto=throw|delete, --stack-size=<KiB>, --no-warnings,
        --experimental-vm-modules, --no-addons, --max-old-space-size=<MiB>";
 
@@ -87,6 +94,7 @@ struct Options {
     write: Option<Vec<PathBuf>>,
     net: Option<Vec<NetworkRule>>,
     worker: bool,
+    use_env_proxy: bool,
     stack_kib: Option<usize>,
     disable_proto: Option<Proto>,
     no_warnings: bool,
@@ -210,6 +218,7 @@ fn parse(args: Vec<String>) -> Result<Command, String> {
                 }
             }
             "--allow-worker" => options.worker = true,
+            "--use-env-proxy" => options.use_env_proxy = true,
             "--permission" | "--experimental-permission" => {}
             "--no-warnings" => options.no_warnings = true,
             "--experimental-vm-modules" | "--no-addons" => {}
@@ -406,6 +415,11 @@ fn script(options: Options, argv0: String) -> i32 {
     runtime.set_permissions(permissions.clone());
     runtime.set_worker_permissions(permissions);
     runtime.set_waker(Some(waker.clone()));
+    if options.use_env_proxy {
+        runtime.set_proxy_env(Some(crate::ProxyEnv::from_process_vars()));
+    } else if let Some(proxy) = crate::ProxyEnv::from_process_env() {
+        runtime.set_proxy_env(Some(proxy));
+    }
     let exec_path = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| argv0.clone());

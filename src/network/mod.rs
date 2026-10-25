@@ -4,6 +4,7 @@
 pub(crate) mod dns;
 pub(crate) mod fetch;
 pub(crate) mod http;
+pub(crate) mod proxy;
 pub(crate) mod reactor;
 pub(crate) mod tcp;
 pub(crate) mod tls;
@@ -16,6 +17,7 @@ use reactor::{Command, Event, Id, Reactor};
 use std::collections::HashMap;
 
 pub use crate::permission::Permissions;
+pub use proxy::ProxyEnv;
 
 /// An outbound rule matches both the host and port. An empty list grants no connections.
 /// `host: None` matches every host; names match case-insensitively, without wildcard expansion.
@@ -53,6 +55,9 @@ pub(crate) struct State {
     /// PEM certificates TLS clients trust besides the system's, as Node's
     /// `NODE_EXTRA_CA_CERTS` adds them: what `fetch` and a `tls.connect` without `ca` verify with.
     pub trusted: Vec<Vec<u8>>,
+    /// The proxy `fetch`, `WebSocket` and the global agents go through, when the embedder set
+    /// one (`NODE_USE_ENV_PROXY`); see [`proxy`].
+    pub proxy: Option<(ProxyEnv, std::rc::Rc<proxy::Config>)>,
     pub reactor: Option<Reactor>,
     pub next: Id,
     // WeakRef objects, not the sockets themselves. Dropping the realm closes the reactor.
@@ -75,8 +80,12 @@ pub(crate) fn register(target: &JsObject, cx: &mut Context) -> JsResult<Id> {
     let mut state = shared.network.borrow_mut();
     if state.reactor.is_none() {
         state.reactor = Some(
-            Reactor::new(state.permissions.clone(), shared.wake.clone())
-                .map_err(|e| crate::native::type_error(e.to_string()))?,
+            Reactor::new(
+                state.permissions.clone(),
+                configured_proxies(&state),
+                shared.wake.clone(),
+            )
+            .map_err(|e| crate::native::type_error(e.to_string()))?,
         );
     }
     state.next += 1;
@@ -85,6 +94,25 @@ pub(crate) fn register(target: &JsObject, cx: &mut Context) -> JsResult<Id> {
     drop(state);
     crate::native::hidden(target, js_string!("__networkId"), id as f64, cx)?;
     Ok(id)
+}
+
+/// The proxies the embedder configured: reached without an outbound rule of their own.
+pub(crate) fn configured_proxies(state: &State) -> Vec<(String, u16)> {
+    state
+        .proxy
+        .as_ref()
+        .map(|(_, config)| config.endpoints())
+        .unwrap_or_default()
+}
+
+/// The realm's own proxy configuration, if the embedder set one.
+pub(crate) fn proxy_config(cx: &Context) -> Option<std::rc::Rc<proxy::Config>> {
+    crate::shared(cx)
+        .network
+        .borrow()
+        .proxy
+        .as_ref()
+        .map(|(_, config)| config.clone())
 }
 
 pub(crate) fn send(cx: &Context, cmd: Command) {

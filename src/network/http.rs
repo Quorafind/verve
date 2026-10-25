@@ -1,5 +1,6 @@
 //! HTTP/1.1 over native Duplex sockets. Parsing is incremental and body chunks inherit stream
 //! backpressure. Agents pool only completely consumed responses; redirects are never followed.
+use super::proxy;
 use super::tcp::{self, emit, put};
 use crate::native::{
     ClassSpec, arg, array, class, closure, coded_error_value, function, get, hidden, invoke,
@@ -381,10 +382,16 @@ fn start_head(this: &JsValue, body: bool, cx: &mut Context) -> JsResult<Vec<u8>>
             || crate::print(&get(&request, "method", cx)?) == "HEAD");
     put(this, "__httpNoBody", no_body, cx)?;
     let mut line = if client {
+        let target = get(this, "__httpTarget", cx)?;
+        let target = if target.is_string() {
+            target
+        } else {
+            get(this, "path", cx)?
+        };
         format!(
             "{} {} HTTP/1.1\r\n",
             crate::print(&get(this, "method", cx)?),
-            crate::print(&get(this, "path", cx)?)
+            crate::print(&target)
         )
     } else {
         let reason = get(this, "statusMessage", cx)?;
@@ -1015,7 +1022,65 @@ fn agent_init(target: &JsObject, args: &[JsValue], cx: &mut Context) -> JsResult
     for key in ["sockets", "freeSockets", "requests"] {
         target.set(JsString::from(key), JsObject::with_null_proto(), false, cx)?;
     }
+    // Node 24's `proxyEnv`: this agent's own proxy variables (`process.env` or any object).
+    let env = get(&options, "proxyEnv", cx)?;
+    if env.is_object() {
+        let config = std::rc::Rc::new(proxy::config_of_env(&env, cx)?);
+        let data = JsObject::from_proto_and_data(None, proxy::ConfigData { config });
+        hidden(target, js_string!("__proxyConfig"), data, cx)?;
+    }
     Ok(())
+}
+
+/// The proxy a request goes through, if any: the route its options already carry (a
+/// `WebSocket`'s), else its agent's — one made with `proxyEnv`, or the global agents and
+/// `fetch`'s on the realm's own configuration. A request with an agent of its own goes direct,
+/// as do requests to a `socketPath` or through a `createConnection`.
+fn route(
+    options: &JsValue,
+    agent: &JsValue,
+    https: bool,
+    host: &str,
+    port: u16,
+    cx: &mut Context,
+) -> JsResult<Option<proxy::Via>> {
+    if let Some(via) = proxy::via_of(options, cx)? {
+        return Ok(Some(via));
+    }
+    if !get(options, "socketPath", cx)?.is_undefined()
+        || get(options, "createConnection", cx)?.is_callable()
+    {
+        return Ok(None);
+    }
+    let own = get(agent, "__proxyConfig", cx)?.as_object().and_then(|o| {
+        o.downcast_ref::<proxy::ConfigData>()
+            .map(|d| d.config.clone())
+    });
+    let (config, fallback) = match own {
+        Some(config) => (Some(config), false),
+        None => match get(agent, "__proxyRealm", cx)?.as_string() {
+            Some(kind) => (
+                super::proxy_config(cx),
+                kind.to_std_string_escaped() == "fetch",
+            ),
+            None => (None, false),
+        },
+    };
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    match config.route(https, fallback, host, port) {
+        None => Ok(None),
+        Some(Ok(proxy)) => Ok(Some(proxy::Via {
+            proxy,
+            tunnel: https,
+        })),
+        Some(Err(message)) => Err(crate::native::coded_error(
+            cx,
+            &message,
+            "ERR_PROXY_INVALID_CONFIG",
+        )),
+    }
 }
 fn origin(options: &JsValue, cx: &mut Context) -> JsResult<String> {
     use sha2::Digest;
@@ -1285,7 +1350,16 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
     put(&req, "agent", agent.clone(), cx)?;
     let keep = get(&agent, "keepAlive", cx)?.to_boolean();
     put(&req, "__httpKeepAlive", keep, cx)?;
-    let key = origin(&options, cx)?;
+    let via = route(&options, &agent, https, &host, port, cx)?;
+    let mut key = origin(&options, cx)?;
+    if let Some(via) = &via {
+        key.push_str(&format!(
+            "|via {}:{}{}",
+            via.proxy.host,
+            via.proxy.port,
+            if via.tunnel { " tunnel" } else { "" }
+        ));
+    }
     put(&req, "__httpOrigin", js_text(&key), cx)?;
     let free = get(&agent, "freeSockets", cx)?;
     let list = get(&free, &key, cx)?;
@@ -1324,6 +1398,10 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
         let socket_path = get(&options, "socketPath", cx)?;
         if !socket_path.is_undefined() {
             connection_options.set(js_string!("path"), socket_path, false, cx)?;
+        }
+        if let Some(via) = &via {
+            let route = proxy::via_object(via.clone());
+            hidden(&connection_options, js_string!("__verveVia"), route, cx)?;
         }
         let connection_options: JsValue = connection_options.into();
         let create = get(&options, "createConnection", cx)?;
@@ -1384,6 +1462,28 @@ fn request(args: &[JsValue], https: bool, cx: &mut Context) -> JsResult<JsValue>
             ],
             cx,
         )?;
+    }
+    if let Some(via) = via.filter(|via| !via.tunnel) {
+        // To a forward proxy, the request-target is the whole URL.
+        let path = text_of(&get(&req, "path", cx)?, cx)?;
+        if path.starts_with('/') {
+            let authority = text_of(&header_value(&req, "host", cx)?, cx)?;
+            put(
+                &req,
+                "__httpTarget",
+                js_text(&format!("http://{authority}{path}")),
+                cx,
+            )?;
+        }
+        if let Some(credentials) = via.proxy.authorization
+            && header_value(&req, "proxy-authorization", cx)?.is_undefined()
+        {
+            set_header(
+                &req,
+                &[js_text("Proxy-Authorization"), js_text(&credentials)],
+                cx,
+            )?;
+        }
     }
     if let Some(cb) = args.iter().rev().find(|v| v.is_callable()) {
         invoke(&req, "once", &[js_text("response"), cb.clone()], cx)?;
@@ -1586,6 +1686,13 @@ pub(crate) fn install(module: &JsObject, https: bool, cx: &mut Context) -> JsRes
     let global_options = object(cx);
     global_options.set(js_string!("keepAlive"), true, false, cx)?;
     let global_agent = agent.construct(&[global_options.into()], None, cx)?;
+    // Node 24's global agents take `NODE_USE_ENV_PROXY`'s proxy; here, the realm's.
+    hidden(
+        &global_agent,
+        js_string!("__proxyRealm"),
+        js_text("node"),
+        cx,
+    )?;
     module.set(js_string!("globalAgent"), global_agent, false, cx)?;
     for (name, get_request) in [("request", false), ("get", true)] {
         let f = closure(

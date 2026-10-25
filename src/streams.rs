@@ -1500,6 +1500,12 @@ pub(crate) fn release_reader(context: &mut Context, reader: &JsObject) {
     }
     let reason = type_error_value("The reader was released", context);
     settle_closed(context, reader, Err(reason));
+    // The standard marks this rejection handled: letting go of a reader is no one's error.
+    let closed = reader.downcast_ref::<Reader>().map(|r| r.closed.clone());
+    if let Some(closed) = closed.and_then(|c| JsPromise::from_object(c).ok()) {
+        let ignore = crate::native::function(context, "", 1, |_, _, _| Ok(JsValue::undefined()));
+        let _ = closed.then(None, JsFunction::from_object(ignore), context);
+    }
     if let Some(mut r) = reader.downcast_mut::<Reader>() {
         r.stream = None;
     }

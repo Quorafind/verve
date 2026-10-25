@@ -73,7 +73,7 @@ mod web;
 mod worker;
 mod zlib;
 
-pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule};
+pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
 
 use std::cell::{Cell, RefCell};
@@ -366,6 +366,38 @@ impl Runtime {
             .trusted
             .push(pem.to_vec());
         Ok(count)
+    }
+
+    /// Routes `fetch`, `WebSocket` and the `http`/`https` global agents through a proxy, as Node
+    /// 24 does when `NODE_USE_ENV_PROXY=1` (`verve run` sets it from its environment that way;
+    /// [`ProxyEnv::from_process_env`] reads it for an embedder that wants the same). `None`
+    /// connects directly again. Workers started from now on get the same proxy.
+    ///
+    /// Outbound permissions are checked against each request's target, never its proxy: the
+    /// proxies named here need no [`NetworkRule`] of their own. Connections already open stay
+    /// as they are. See the `proxy` module of `network` for what is proxied and how `NO_PROXY`
+    /// matches.
+    pub fn set_proxy_env(&mut self, proxy: Option<ProxyEnv>) {
+        let state = shared(&self.context);
+        let mut net = state.network.borrow_mut();
+        net.proxy = proxy.map(|env| {
+            let config = Rc::new(network::proxy::Config::parse(&env));
+            (env, config)
+        });
+        let proxies = network::configured_proxies(&net);
+        if let Some(reactor) = &net.reactor {
+            reactor.send(network::reactor::Command::Proxies(proxies));
+        }
+    }
+
+    /// The proxy [`Runtime::set_proxy_env`] set, if any.
+    pub fn proxy_env(&self) -> Option<ProxyEnv> {
+        shared(&self.context)
+            .network
+            .borrow()
+            .proxy
+            .as_ref()
+            .map(|(env, _)| env.clone())
     }
 
     /// Read counters without waiting for any network thread.

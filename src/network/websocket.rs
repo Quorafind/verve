@@ -278,6 +278,22 @@ pub(crate) fn connect(
         url.query().map(|q| format!("?{q}")).unwrap_or_default()
     );
     options.set(js_string!("path"), js_text(&path), false, cx)?;
+    // Undici's WebSocket takes the realm's proxy as `fetch` does, through a CONNECT tunnel for
+    // `ws:` as for `wss:`.
+    if let Some(config) = super::proxy_config(cx) {
+        match config.route(https, true, host, port) {
+            Some(Ok(proxy)) => {
+                let via = super::proxy::Via {
+                    proxy,
+                    tunnel: true,
+                };
+                let route = super::proxy::via_object(via);
+                hidden(&options, js_string!("__verveVia"), route, cx)?;
+            }
+            Some(Err(_)) => return Ok(false),
+            None => {}
+        }
+    }
     let http = crate::modules::node_module(cx, if https { "https" } else { "http" })?;
     let request = invoke(&http, "request", &[options.into()], cx)?;
     hidden(target, js_string!("__wsRequest"), request.clone(), cx)?;

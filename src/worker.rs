@@ -186,7 +186,12 @@ fn clone_value(
         .object()
         .constructor()
         .get(js_string!("keys"), from)?;
-    let keys = crate::call(from, &keys_fn, &JsValue::undefined(), &[value.clone()])?;
+    let keys = crate::call(
+        from,
+        &keys_fn,
+        &JsValue::undefined(),
+        std::slice::from_ref(value),
+    )?;
     let error = source.is::<boa_engine::builtins::error::Error>();
     let mut names: Vec<JsString> = Vec::new();
     if let Some(keys) = keys.as_object() {
@@ -329,6 +334,7 @@ fn worker_runtime(name: &str, grant: Grant) -> JsResult<Runtime> {
     for pem in &grant.trusted {
         let _ = runtime.add_trusted_certificates(pem);
     }
+    runtime.set_proxy_env(grant.proxy);
     let context = runtime.context();
     *shared(context).port.borrow_mut() = Some(Port::default());
     let global = context.global_object();
@@ -502,6 +508,7 @@ const WORKER_STACK: usize = 16 * 1024 * 1024;
 struct Grant {
     permissions: crate::Permissions,
     trusted: Vec<Vec<u8>>,
+    proxy: Option<crate::ProxyEnv>,
 }
 
 /// What a worker starts with: its name, its script and where it came from, and its grant.
@@ -749,6 +756,7 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
                 ..network.worker_permissions.clone()
             },
             trusted: network.trusted.clone(),
+            proxy: network.proxy.as_ref().map(|(env, _)| env.clone()),
         }
     };
     let wake = shared(context).wake.clone();
