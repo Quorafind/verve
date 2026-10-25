@@ -43,7 +43,7 @@
 //! | `--stack-size=<KiB>`, `--stack_size=<KiB>` | the script thread's stack, in KiB as V8's |
 //! | `--no-warnings` | `process.emitWarning` writes nothing |
 //! | `--jitless` | hot functions stay interpreted, whatever `VERVE_JIT` says (Node's flag) |
-//! | `--code-cache=<dir>` | keep the compiled code of ES modules in `dir` between runs (also `VERVE_CODE_CACHE=<dir>`); see `Runtime::set_code_cache_dir` |
+//! | `--code-cache=<dir>` | keep the compiled code of ES modules in `dir` between runs (also `VERVE_CODE_CACHE=<dir>`); signed with the user's own secret, see `Runtime::set_code_cache_dir_with_user_secret` |
 //! | `--experimental-vm-modules`, `--no-addons` | accepted; nothing to change here |
 //! | `--max-old-space-size=<MiB>` | accepted and ignored: Boa has no heap cap; bound memory with the OS (a Job Object, `RLIMIT_AS`) |
 //!
