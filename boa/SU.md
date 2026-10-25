@@ -160,6 +160,13 @@ always agree with one another.
   request is used up, so what runs next runs. For an embedder whose watchdog finds a script that
   will not return.
 
+- `boa_engine`, `builtins/array_buffer`: a data block the allocator refuses (`new
+  Uint8Array(16 * 1024 * 1024)` under a job object's memory limit) throws V8's `RangeError:
+  Array buffer allocation failed`, not `invalid layout Layout { size: …, align: 64 } while
+  allocating data block` — the engine's layout is no business of the script's, and an
+  embedder tells an exhausted memory limit by V8's words. A fixed-length buffer past
+  `HostHooks::max_buffer_size` fails with the same words, as V8's does past its own limit.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

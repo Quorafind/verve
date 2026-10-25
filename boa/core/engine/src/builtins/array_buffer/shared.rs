@@ -591,16 +591,9 @@ pub(crate) fn create_shared_byte_data_block(
     //        [[ByteIndex]]: i, [[ElementSize]]: 1, [[Payload]]: zero } to eventsRecord.[[EventList]].
     // 6. Return db.
     let mut buf = AlignedVec::<u8>::new(0);
-    buf.try_reserve_exact(size).map_err(|e| {
-        let message = match e {
-            aligned_vec::TryReserveError::CapacityOverflow => {
-                format!("capacity overflow for size {size} while allocating data block")
-            }
-            aligned_vec::TryReserveError::AllocError { layout } => {
-                format!("invalid layout {layout:?} while allocating data block")
-            }
-        };
-        JsNativeError::range().with_message(message)
+    buf.try_reserve_exact(size).map_err(|_| {
+        // V8's words for it; the layout or overflow behind it is the engine's business.
+        JsNativeError::range().with_message("Array buffer allocation failed")
     })?;
     buf.resize(size, 0);
     buf.shrink_to_fit();

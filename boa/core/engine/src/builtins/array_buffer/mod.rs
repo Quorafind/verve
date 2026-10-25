@@ -950,9 +950,13 @@ pub(crate) fn create_byte_data_block(
     assert!(size <= alloc_size);
 
     if alloc_size > context.host_hooks().max_buffer_size(context) {
-        return Err(JsNativeError::range()
-            .with_message("cannot allocate a buffer that exceeds the maximum buffer size")
-            .into());
+        // V8 fails a fixed-length buffer past its own limit as one the allocator refused.
+        let message = if max_buffer_size.is_some() {
+            "cannot allocate a buffer that exceeds the maximum buffer size"
+        } else {
+            "Array buffer allocation failed"
+        };
+        return Err(JsNativeError::range().with_message(message).into());
     }
 
     // 1. Let db be a new Data Block value consisting of size bytes. If it is impossible to
@@ -962,16 +966,9 @@ pub(crate) fn create_byte_data_block(
     })?;
 
     let mut data_block = AlignedVec::<u8>::new(64);
-    data_block.try_reserve_exact(alloc_size).map_err(|e| {
-        let message = match e {
-            aligned_vec::TryReserveError::CapacityOverflow => {
-                format!("capacity overflow for size {size} while allocating data block")
-            }
-            aligned_vec::TryReserveError::AllocError { layout } => {
-                format!("invalid layout {layout:?} while allocating data block")
-            }
-        };
-        JsNativeError::range().with_message(message)
+    data_block.try_reserve_exact(alloc_size).map_err(|_| {
+        // V8's words for it; the layout or overflow behind it is the engine's business.
+        JsNativeError::range().with_message("Array buffer allocation failed")
     })?;
 
     // since size <= alloc_size, then `size` must also fit inside a `usize`.
