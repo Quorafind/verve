@@ -610,6 +610,7 @@ impl ModuleLoader for Loader {
         request: &ModuleRequest,
         context: &mut Context,
     ) -> JsResult<()> {
+        crate::vm::guard_import(referrer, request, context)?;
         self.prepare(referrer, request, context)
     }
 

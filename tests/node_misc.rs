@@ -439,7 +439,7 @@ fn vm_v8_and_worker_threads() {
         log.push(vm.runInThisContext('1 + 2'));
         globalThis.shared = 'global';
         const sandbox = { x: 2 };
-        log.push(vm.runInNewContext('var y = x * 21; z = shared + "!"; y', sandbox));
+        log.push(vm.runInNewContext('var y = x * 21; z = typeof shared + "!"; y', sandbox));
         log.push(sandbox.y, sandbox.z, typeof globalThis.y, vm.isContext(sandbox));
         const ctx = vm.createContext({ n: 1 });
         new vm.Script('n += 1').runInContext(ctx);
@@ -464,11 +464,11 @@ fn vm_v8_and_worker_threads() {
             "3",
             "42",
             "42",
-            "global!",
+            "undefined!",
             "undefined",
             "true",
             "2",
-            "number",
+            "global",
             "SyntaxError",
             "5",
             r#"{"a":[1,"b"]}"#,

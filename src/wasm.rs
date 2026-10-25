@@ -453,7 +453,6 @@ fn host_function(store: &mut Store<HostData>, ty: FuncType, import: usize) -> Fu
             if let Err(error) = sync_out(&wasm, &ctx, context) {
                 return Err(throw(context, error));
             }
-            drop(ctx);
             // While JavaScript runs, a call back into the module goes through this caller.
             let previous = wasm
                 .caller
@@ -503,7 +502,20 @@ fn bytes_from(value: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
     })
 }
 
+/// Refuses in a `vm` context made with `codeGeneration: { wasm: false }`.
+fn generation_allowed(context: &mut Context) -> JsResult<()> {
+    if crate::vm::wasm_allowed(context) {
+        return Ok(());
+    }
+    Err(wasm_error(
+        context,
+        "CompileError",
+        "Wasm code generation disallowed by embedder",
+    ))
+}
+
 fn compile(bytes: &[u8], context: &mut Context) -> JsResult<JsObject> {
+    generation_allowed(context)?;
     let engine = engine(context);
     let module = Module::new(&engine, bytes)
         .map_err(|e| wasm_error(context, "CompileError", &e.to_string()))?;
@@ -559,6 +571,7 @@ fn owned(value: &JsValue, kind: &str, context: &mut Context) -> Option<(Rc<Wasm>
 }
 
 fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsResult<JsObject> {
+    generation_allowed(context)?;
     let (id, wasm) = new_wasm(context);
     let mut linker = wasmi::Linker::<HostData>::new(module.engine());
     // What each import is, from the object the imports came in.
@@ -681,7 +694,7 @@ fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsR
         let pre = linker
             .instantiate(&mut *store, module)
             .map_err(|e| e.to_string());
-        let started = pre.and_then(|pre| {
+        pre.and_then(|pre| {
             pre.start(&mut *store).map_err(|e| {
                 if e.downcast_ref::<Thrown>().is_some() {
                     "thrown".to_owned()
@@ -689,8 +702,7 @@ fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsR
                     error_text(&e)
                 }
             })
-        });
-        started
+        })
     };
     let made = match made {
         Ok(made) => made,

@@ -174,6 +174,12 @@ always agree with one another.
   where the specification parses each part alone so neither can close the function early.
   `vm.compileFunction` relies on it to wrap a body in its `contextExtensions`.
 
+- `boa_engine`, `object/builtins/jsproxy.rs`: `JsProxy::from_target_and_handler` makes a proxy
+  without a `Context`. `HostHooks::create_global_object` has the new realm's intrinsics but no
+  context, and Verve's `node:vm` makes a context's global object a proxy there — its handler
+  empty while the realm installs its builtins, given its traps once the realm exists — so the
+  contextified object's properties are the context's globals, as Node's interceptors make them.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

@@ -524,7 +524,8 @@ fn eval(context: &mut Context, source: &str) -> JsResult<()> {
 
 /// `--disable-proto`: `Object.prototype.__proto__` throws Node's `ERR_PROTO_ACCESS` when
 /// touched, or is not there at all. `{ __proto__: x }` in a literal, which is syntax rather
-/// than the accessor, still works, as in Node.
+/// than the accessor, still works, as in Node — and in every `vm` context made later, as Node
+/// does it for each V8 context.
 fn disable_proto(context: &mut Context, proto: Proto) -> JsResult<()> {
     let script = match proto {
         Proto::Delete => "delete Object.prototype.__proto__;",
@@ -543,6 +544,7 @@ fn disable_proto(context: &mut Context, proto: Proto) -> JsResult<()> {
         }
     };
     context.eval(Source::from_bytes(script))?;
+    context.insert_data(crate::vm::DisabledProto(script));
     Ok(())
 }
 

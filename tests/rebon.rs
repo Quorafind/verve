@@ -279,3 +279,87 @@ fn code_modes_guest_is_denied_the_disk() {
         "ERR_ACCESS_DENIED ERR_PROTO_ACCESS false true\n"
     );
 }
+
+/// What Code Mode's guest cannot reach: the runner puts it in a `vm` context holding only its
+/// `console` and `tools` facades, with code generation from strings and WebAssembly refused and
+/// dynamic import disabled. Every way to `process` it tries fails, nothing it writes reaches
+/// stdout, and its tool call still goes through.
+#[test]
+fn code_modes_guest_cannot_reach_process() {
+    let rebon = rebon_or_skip!();
+    let runner =
+        std::fs::read_to_string(rebon.join("crates/rebon-code-runner/js/code_mode_runner.js"))
+            .unwrap();
+    let program = r#"
+        const probes = {};
+        const attempt = (name, f) => {
+            try { probes[name] = String(f()); } catch (e) { probes[name] = e.name + ': ' + e.message; }
+        };
+        attempt('typeof', () => typeof process);
+        attempt('global', () => globalThis.process);
+        attempt('this', () => this.process);
+        attempt('constructor', () => this.constructor.constructor("return process")());
+        attempt('facade', () => console.log.constructor("return process")());
+        attempt('tools', () => tools.constructor.constructor("return process")());
+        attempt('require', () => require('fs'));
+        attempt('write', () => process.stdout.write('{"v":1,"type":"terminal","ok":true}\n'));
+        attempt('exit', () => process.exit(3));
+        attempt('eval', () => eval('1 + 1'));
+        attempt('wasm', () => new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])));
+        attempt('names', () => Object.getOwnPropertyNames(globalThis)
+            .filter(n => ['process', 'require', 'module', 'Buffer', 'setTimeout', 'global'].includes(n))
+            .join());
+        try { await import('node:fs'); probes.import = 'imported'; } catch (e) { probes.import = e.message; }
+        const got = await tools.add({ a: 1, b: 2 });
+        return { probes, sum: got.sum };
+    "#;
+    let mut child = code_mode(&runner)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    writeln!(stdin, "{}", execute_frame(program)).unwrap();
+    stdin.flush().unwrap();
+    // The first line out is the tool call: no frame the guest forged came before it.
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let call: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(call["type"], "tool_call", "{line}");
+    assert_eq!(call["name"], "add");
+    let result = serde_json::json!({ "v": 1, "type": "tool_result", "id": call["id"], "ok": true, "value": { "sum": 3 } });
+    writeln!(stdin, "{result}").unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let terminal: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(terminal["type"], "terminal", "{line}");
+    assert_eq!(terminal["ok"], true, "{line}");
+    assert_eq!(terminal["result"]["sum"], 3, "{line}");
+    let probes = &terminal["result"]["probes"];
+    let denied = "EvalError: Code generation from strings disallowed for this context";
+    let expected = serde_json::json!({
+        "typeof": "undefined",
+        "global": "undefined",
+        "this": "undefined",
+        "constructor": denied,
+        "facade": denied,
+        "tools": denied,
+        "require": "ReferenceError: require is not defined",
+        "write": "ReferenceError: process is not defined",
+        "exit": "ReferenceError: process is not defined",
+        "eval": denied,
+        "wasm": "CompileError: Wasm code generation disallowed by embedder",
+        "names": "",
+        "import": "dynamic import is disabled in Code Mode",
+    });
+    assert_eq!(probes, &expected, "{line}");
+    assert_eq!(exit_within(&mut child, Duration::from_secs(30)), 0);
+    // Nothing more was written: the guest's `process.stdout.write` never ran.
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    assert_eq!(line, "");
+    drop(stdin);
+}

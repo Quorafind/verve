@@ -33,6 +33,18 @@ impl JsProxy {
         JsProxyBuilder::new(target)
     }
 
+    /// Creates a proxy of `target` whose traps are `handler`'s, without a [`Context`]: what
+    /// [`HostHooks::create_global_object`](crate::context::HostHooks::create_global_object)
+    /// needs to make a realm's global object exotic, before the realm (and so any function
+    /// that could be a trap) exists. The handler may be empty then and given its traps later;
+    /// a proxy reads them from it at each operation.
+    #[must_use]
+    pub fn from_target_and_handler(target: JsObject, handler: JsObject) -> Self {
+        Self {
+            inner: JsObject::from_proto_and_data(None, Proxy::new(target, handler)),
+        }
+    }
+
     /// Create a [`JsProxy`] from a [`JsObject`], if the object is not a `Proxy` throw a
     /// `TypeError`.
     #[inline]

@@ -21,11 +21,12 @@ use std::rc::Rc;
 use boa_engine::{
     Context, JsData, JsError, JsObject, JsResult, JsString, JsValue,
     builtins::promise::{OperationType, Promise, PromiseState},
-    context::HostHooks,
+    context::{HostHooks, intrinsics::Intrinsics},
     job::{JobCallback, PromiseJob},
     js_string,
     native_function::NativeFunctionPointer,
     object::builtins::{JsFunction, JsPromise},
+    realm::Realm,
 };
 use boa_gc::{Finalize, Trace};
 
@@ -115,6 +116,21 @@ pub(crate) struct Hooks;
 struct Registered(#[unsafe_ignore_trace] Vec<(JsObject, JsValue)>);
 
 impl HostHooks for Hooks {
+    fn create_global_object(&self, intrinsics: &Intrinsics) -> JsObject {
+        crate::vm::global_object(intrinsics)
+    }
+
+    fn ensure_can_compile_strings(
+        &self,
+        realm: Realm,
+        _parameters: &[JsString],
+        _body: &JsString,
+        _direct: bool,
+        _context: &mut Context,
+    ) -> JsResult<()> {
+        crate::vm::ensure_can_compile_strings(&realm)
+    }
+
     fn make_job_callback(&self, callback: JsFunction, context: &mut Context) -> JobCallback {
         JobCallback::new(callback, Registered(current(context)))
     }
