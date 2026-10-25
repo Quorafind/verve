@@ -248,15 +248,19 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
                     && matches!(
                         tag,
                         "meta" | "title" | "link" | "style" | "script" | "base" | "noscript"
-                    )
-                    && stack[0].id != head =>
+                    ) =>
                 {
-                    stack.truncate(1);
-                    stack[0] = Open {
-                        id: head,
-                        tag: "head".into(),
-                        namespace: Namespace::Html,
-                    };
+                    // What belongs in `<head>` before the body goes there, whether or not
+                    // `<head>` was written; once there, it stays (this arm, not the next).
+                    #[allow(clippy::collapsible_if)]
+                    if stack[0].id != head {
+                        stack.truncate(1);
+                        stack[0] = Open {
+                            id: head,
+                            tag: "head".into(),
+                            namespace: Namespace::Html,
+                        };
+                    }
                 }
                 _ if !in_body => {
                     in_body = true;
