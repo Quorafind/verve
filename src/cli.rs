@@ -120,6 +120,17 @@ enum Command {
 /// Answers the code the process should exit with. `process.exit()` ends the process itself,
 /// as Node's does, without returning here.
 pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
+    main_with(args, |_| Ok(()))
+}
+
+/// What an embedder adds to the runtime before the script runs: builtin modules, globals.
+/// Called on the script's thread, after the process globals exist and before any user code;
+/// an error ends the process with code 70, as a failed process setup does.
+pub type Setup = fn(&mut Runtime) -> Result<(), String>;
+
+/// [`main`] for an embedder that ships its own runner: `setup` runs on the runtime before
+/// the script does (see [`Setup`]).
+pub fn main_with(args: impl IntoIterator<Item = OsString>, setup: Setup) -> ExitCode {
     let args: Vec<String> = args
         .into_iter()
         .map(|a| a.to_string_lossy().into_owned())
@@ -131,7 +142,7 @@ pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Command::Run(options)) => {
-            let code = run(options, argv0);
+            let code = run(options, argv0, setup);
             ExitCode::from((code & 0xff) as u8)
         }
         Err(message) => {
@@ -374,7 +385,7 @@ impl Signal {
 }
 
 /// Runs the script on a thread with the stack it asked for, and answers its exit code.
-fn run(options: Options, argv0: String) -> i32 {
+fn run(options: Options, argv0: String, embedder: Setup) -> i32 {
     let stack = options
         .stack_kib
         .map_or(DEFAULT_STACK, |kib| kib.saturating_mul(1024))
@@ -384,7 +395,7 @@ fn run(options: Options, argv0: String) -> i32 {
         .stack_size(stack)
         .spawn(move || {
             crate::set_thread_stack(stack);
-            script(options, argv0)
+            script(options, argv0, embedder)
         });
     match thread.map(|t| t.join()) {
         Ok(Ok(code)) => code,
@@ -403,7 +414,7 @@ fn resolved(path: &Path) -> PathBuf {
     crate::modules::clean(&absolute)
 }
 
-fn script(options: Options, argv0: String) -> i32 {
+fn script(options: Options, argv0: String, embedder: Setup) -> i32 {
     let entry = options.entry.as_deref().map(resolved);
     let permissions = permissions(&options, entry.as_deref());
     let signal = Arc::new(Signal::default());
@@ -447,6 +458,11 @@ fn script(options: Options, argv0: String) -> i32 {
         eprintln!("verve: {}", crate::describe(context, &error));
         return 70;
     }
+    if let Err(error) = embedder(&mut runtime) {
+        eprintln!("verve: {error}");
+        return 70;
+    }
+    let context = runtime.context();
     if let Some(proto) = options.disable_proto
         && let Err(error) = disable_proto(context, proto)
     {
@@ -631,6 +647,30 @@ mod tests {
             Ok(Command::Print(text)) => panic!("printed {text}"),
             Err(error) => panic!("{error}"),
         }
+    }
+
+    #[test]
+    fn an_embedder_s_setup_runs_before_the_script_and_can_end_it() {
+        fn embed(runtime: &mut Runtime) -> Result<(), String> {
+            let exports = boa_engine::object::ObjectInitializer::new(runtime.context())
+                .property(
+                    boa_engine::js_string!("answer"),
+                    42,
+                    boa_engine::property::Attribute::all(),
+                )
+                .build();
+            runtime.define_builtin("embedded", exports.into());
+            Ok(())
+        }
+        let run = |setup: Setup| {
+            script(
+                options(&["-e", "process.exitCode = require('embedded').answer"]),
+                "verve".into(),
+                setup,
+            )
+        };
+        assert_eq!(run(embed), 42, "the script sees what setup defined");
+        assert_eq!(run(|_| Err("no".into())), 70, "a failed setup ends the run");
     }
 
     #[test]
