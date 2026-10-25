@@ -1259,6 +1259,38 @@ pub(crate) fn cancel_stream(
     Ok(when(context, promise, (), ignore, rethrow)?.into())
 }
 
+/// A source in Rust feeding `stream`, as its controller's `enqueue(chunk)` would: false when the
+/// stream no longer takes chunks (it was cancelled, or errored).
+pub(crate) fn source_enqueue(
+    context: &mut Context,
+    stream: &JsObject,
+    chunk: JsValue,
+) -> JsResult<bool> {
+    if !can_close_or_enqueue(stream) {
+        return Ok(false);
+    }
+    enqueue(context, stream, chunk)?;
+    Ok(true)
+}
+
+/// The controller's `close()`, from Rust: nothing if the stream is already done with.
+pub(crate) fn source_close(context: &mut Context, stream: &JsObject) -> JsResult<()> {
+    if can_close_or_enqueue(stream) {
+        controller_close(context, stream)?;
+    }
+    Ok(())
+}
+
+/// The controller's `error(reason)`, from Rust.
+pub(crate) fn source_error(context: &mut Context, stream: &JsObject, reason: JsValue) {
+    readable_error(context, stream, reason);
+}
+
+/// The controller's `desiredSize`: how much more the stream's queue wants; `None` once errored.
+pub(crate) fn source_desired_size(stream: &JsObject) -> Option<f64> {
+    desired_size(stream)
+}
+
 const CONTROLLER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("enqueue", 1, |this, args, cx| {
         let stream = controlled_readable(this)?;

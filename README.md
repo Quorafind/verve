@@ -52,8 +52,15 @@ Node's and the web's APIs and no Node underneath.
   `CompressionStream`/`DecompressionStream` (gzip, deflate, deflate-raw).
 - `Headers`, `Request`, `Response` (body as bytes or a stream; `text`/`json`/`arrayBuffer`/
   `bytes`/`blob`/`formData`; `Response.json`/`error`/`redirect`) and `FormData` (sent as
-  multipart, read back from multipart or urlencoded), constructible with no network — `fetch`
-  itself is the host's.
+  multipart, read back from multipart or urlencoded), constructible with no network.
+- `fetch`, on the `http`/`https` client below and under the same `Permissions`: the response
+  body a `ReadableStream` fed as bytes arrive (an SSE reply is read event by event) and paused
+  while its reader is behind; `gzip`/`deflate`/`br` decoded; redirects followed (up to 20),
+  `manual` or `error`; `AbortSignal` rejecting the response or erroring its body, and closing
+  the connection; string, buffer, `Blob`, `URLSearchParams`, `FormData` and stream bodies;
+  `data:` and `blob:` addresses. Network errors and refused hosts reject with
+  `TypeError: fetch failed` and a `cause`, as undici does. A host that brings its own `fetch`
+  puts it in the global's place.
 - `Blob`/`File` (with `stream()`), `URL`, `URLSearchParams`, `URLPattern`, `atob`/`btoa`,
   `TextEncoder`/`TextDecoder`, `structuredClone` (typed arrays, `DataView`, errors, boxed
   primitives, `Blob`/`File`, `DOMException`, `transfer`), `performance`, `queueMicrotask`,
@@ -107,7 +114,9 @@ Node's and the web's APIs and no Node underneath.
   `resolveSrv` use the system resolver configuration. Other granted record queries fail ENOSYS.
 - `Runtime::set_permissions(Permissions)` defaults to denial: outbound host/port rules,
   independent listening (`Deny`, `Loopback`, `Any`) and DNS. Replacing a policy closes existing
-  resources; workers start denied. The reserved `child_process` bit does not enable execution.
+  resources. Workers start denied unless `Runtime::set_worker_permissions` grants them a policy.
+  `Runtime::add_trusted_certificates` trusts PEM certificates besides the system's, as Node's
+  `NODE_EXTRA_CA_CERTS` does. The reserved `child_process` bit does not enable execution.
 - `tls`: rustls client/server Duplex sockets on the same reactor, system trust by default,
   PEM `ca`/`cert`/`key`, `secureContext`, SNI and named server contexts, ALPN, TLS 1.2/1.3
   bounds, cipher selection, client-certificate requests, `rejectUnauthorized`, the JavaScript
@@ -120,7 +129,7 @@ Node's and the web's APIs and no Node underneath.
   pooling, chunked bodies and trailers, `rawHeaders`/`headersDistinct`, Node's duplicate-header
   merging, upgrades, and explicit all/idle connection closure. Redirects are returned, never
   automatically followed. Idle pool limits are enforced; active `maxSockets`/`maxTotalSockets`
-  request scheduling is not implemented. Host-provided `fetch` is unchanged.
+  request scheduling is not implemented.
 - `dgram`: IPv4/IPv6 UDP sockets, explicit bind and implicit outbound bindings, connected
   peers, Buffer/string/sliced sends, message metadata, multicast and socket options. Listening
   needs its own capability; an outbound-only binding accepts replies only from contacted peers.

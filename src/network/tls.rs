@@ -18,6 +18,8 @@ use std::{
 pub(crate) struct Options {
     pub host: String,
     pub ca: Vec<Vec<u8>>,
+    /// The realm's extra trust, added to the system's when no `ca` replaces both.
+    pub trusted: Vec<Vec<u8>>,
     pub cert: Vec<u8>,
     pub key: Vec<u8>,
     pub alpn: Vec<Vec<u8>>,
@@ -94,6 +96,7 @@ pub(crate) fn options(value: &JsValue, host: &str, cx: &mut Context) -> JsResult
             text_of(&name, cx)?
         },
         ca,
+        trusted: crate::shared(cx).network.borrow().trusted.clone(),
         cert: bytes(&field("cert", cx)?, cx)?,
         key: bytes(&field("key", cx)?, cx)?,
         alpn,
@@ -110,7 +113,9 @@ pub(crate) fn options(value: &JsValue, host: &str, cx: &mut Context) -> JsResult
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.to_string())
 }
-fn certificates(pem: &[u8]) -> io::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+pub(crate) fn certificates(
+    pem: &[u8],
+) -> io::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
     rustls_pemfile::certs(&mut Cursor::new(pem)).collect::<Result<Vec<_>, _>>()
 }
 fn key(pem: &[u8]) -> io::Result<rustls::pki_types::PrivateKeyDer<'static>> {
@@ -122,6 +127,11 @@ fn roots(options: &Options) -> io::Result<rustls::RootCertStore> {
     if options.ca.is_empty() {
         for cert in rustls_native_certs::load_native_certs().certs {
             let _ = roots.add(cert);
+        }
+        for pem in &options.trusted {
+            for cert in certificates(pem)? {
+                roots.add(cert).map_err(invalid)?;
+            }
         }
     } else {
         for pem in &options.ca {

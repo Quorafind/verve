@@ -2,6 +2,7 @@
 //! belongs to one lazy reactor and two DNS workers. A host beat never waits for either.
 
 pub(crate) mod dns;
+pub(crate) mod fetch;
 pub(crate) mod http;
 pub(crate) mod reactor;
 pub(crate) mod tcp;
@@ -69,6 +70,11 @@ pub struct NetworkDiagnostics {
 #[derive(Default)]
 pub(crate) struct State {
     pub permissions: Permissions,
+    /// What the workers this realm starts are granted: nothing, unless the embedder says so.
+    pub worker_permissions: Permissions,
+    /// PEM certificates TLS clients trust besides the system's, as Node's
+    /// `NODE_EXTRA_CA_CERTS` adds them: what `fetch` and a `tls.connect` without `ca` verify with.
+    pub trusted: Vec<Vec<u8>>,
     pub reactor: Option<Reactor>,
     pub next: Id,
     // WeakRef objects, not the sockets themselves. Dropping the realm closes the reactor.

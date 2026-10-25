@@ -279,6 +279,35 @@ impl Runtime {
         shared(&self.context).network.borrow().permissions.clone()
     }
 
+    /// What the workers this realm starts from now on are granted. Workers are denied
+    /// everything unless the embedder grants it here; a worker's own workers get the same.
+    pub fn set_worker_permissions(&mut self, permissions: Permissions) {
+        shared(&self.context)
+            .network
+            .borrow_mut()
+            .worker_permissions = permissions;
+    }
+
+    /// Trusts the certificates in `pem` besides the system's, for `fetch`, `https` and
+    /// `tls.connect` without a `ca` of their own — as Node's `NODE_EXTRA_CA_CERTS` does — here
+    /// and in the workers started from now on. Answers how many certificates it read; a PEM
+    /// with none is an error.
+    pub fn add_trusted_certificates(&mut self, pem: &[u8]) -> std::io::Result<usize> {
+        let count = network::tls::certificates(pem)?.len();
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no PEM certificate",
+            ));
+        }
+        shared(&self.context)
+            .network
+            .borrow_mut()
+            .trusted
+            .push(pem.to_vec());
+        Ok(count)
+    }
+
     /// Read counters without waiting for any network thread.
     pub fn network_diagnostics(&self) -> NetworkDiagnostics {
         network::diagnostics(&self.context)

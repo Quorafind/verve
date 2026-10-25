@@ -1,8 +1,12 @@
 //! The classes `fetch` speaks in — `Headers`, `Request`, `Response` and `FormData` — made
-//! without any network: the host owns `fetch` itself (Obsidian's `requestUrl`, the window's own),
-//! and bundled libraries build these objects whether or not they send them. An SDK makes a
-//! `Request` to sign it, wraps bytes it already has in a `Response` to read them as JSON, posts a
-//! `FormData`; a polyfill checks that `Response` exists before choosing its path.
+//! without any network: bundled libraries build these objects whether or not they send them. An
+//! SDK makes a `Request` to sign it, wraps bytes it already has in a `Response` to read them as
+//! JSON, posts a `FormData`; a polyfill checks that `Response` exists before choosing its path.
+//!
+//! `fetch` itself sends them, on the realm's permissioned HTTP client: it lives with the network
+//! in [`crate::network::fetch`], and takes requests apart and makes responses with what this
+//! module gives it ([`outgoing`], [`fetched_response`]). A host with a `fetch` of its own puts it
+//! in the global's place.
 //!
 //! A body is kept as bytes until something asks for it as a stream (`response.body`), and from
 //! then on is that `ReadableStream`; `text()`, `json()`, `arrayBuffer()`, `bytes()`, `blob()` and
@@ -1595,6 +1599,105 @@ fn parse_form(kind: &str, bytes: &[u8], context: &mut Context) -> JsResult<JsObj
     ))
 }
 
+// ─── What `fetch` takes and gives ───────────────────────────────────────────────────────────
+
+/// A request as `fetch` sends it: `new Request(input, init)` made and taken apart, its body
+/// taken (the request is used up, as one handed to `fetch` is).
+pub(crate) struct Outgoing {
+    pub url: String,
+    pub method: String,
+    pub redirect: String,
+    pub headers: Vec<(String, String)>,
+    pub body: OutgoingBody,
+    pub signal: JsValue,
+}
+
+/// An outgoing body: bytes already, or a stream still to read.
+pub(crate) enum OutgoingBody {
+    None,
+    Bytes(Vec<u8>),
+    Stream(JsObject),
+}
+
+/// `fetch(input, init)`'s request, checked as `new Request(input, init)` checks it.
+pub(crate) fn outgoing(
+    input: &JsValue,
+    init: &JsValue,
+    context: &mut Context,
+) -> JsResult<Outgoing> {
+    let class = classes(context)?.request.clone();
+    let request = class.construct(&[input.clone(), init.clone()], None, context)?;
+    let body = with_body(&request, |body, used| {
+        if *used || matches!(body, Body::Stream(s) if is_disturbed_or_locked(s)) {
+            return Err(type_error("Body is unusable: Body has already been read"));
+        }
+        let taken = std::mem::replace(body, Body::Empty);
+        *used = !matches!(taken, Body::Empty);
+        Ok(match &taken {
+            Body::Empty => OutgoingBody::None,
+            Body::Bytes(bytes) => OutgoingBody::Bytes(bytes.clone()),
+            Body::Stream(stream) => OutgoingBody::Stream(stream.clone()),
+        })
+    })
+    .expect("a body")?;
+    let r = request.downcast_ref::<Request>().expect("a Request");
+    Ok(Outgoing {
+        url: r.fields.url.clone(),
+        method: r.fields.method.clone(),
+        redirect: r.fields.redirect.clone(),
+        headers: headers_list(&r.headers),
+        body,
+        signal: r.signal.clone(),
+    })
+}
+
+fn is_disturbed_or_locked(stream: &JsObject) -> bool {
+    crate::streams::is_disturbed(stream) || crate::streams::is_locked(stream)
+}
+
+/// Every chunk of `stream`, read and joined: a promise of a `Uint8Array`.
+pub(crate) fn read_stream(stream: &JsObject, context: &mut Context) -> JsResult<JsValue> {
+    read_all(context, stream)
+}
+
+/// A response that came from somewhere: the network, a `data:` or a `blob:` address. Its
+/// headers are immutable, as a fetched response's are; `body` is `None` for a null body.
+pub(crate) struct Fetched {
+    pub status: u16,
+    pub status_text: String,
+    pub headers: Vec<(String, String)>,
+    pub url: String,
+    pub redirected: bool,
+    pub body: Option<FetchedBody>,
+}
+
+pub(crate) enum FetchedBody {
+    Bytes(Vec<u8>),
+    Stream(JsObject),
+}
+
+pub(crate) fn fetched_response(fetched: Fetched, context: &mut Context) -> JsResult<JsObject> {
+    let proto = classes(context)?.response_proto.clone();
+    let headers = new_headers(context, fetched.headers, true)?;
+    Ok(JsObject::from_proto_and_data(
+        Some(proto),
+        Response {
+            body: match fetched.body {
+                None => Body::Empty,
+                Some(FetchedBody::Bytes(bytes)) => Body::Bytes(bytes),
+                Some(FetchedBody::Stream(stream)) => Body::Stream(stream),
+            },
+            used: false,
+            headers,
+            status: fetched.status,
+            status_text: fetched.status_text,
+            kind: "basic",
+            url: fetched.url,
+            redirected: fetched.redirected,
+        },
+    ))
+}
+
 // ─── Installing them ────────────────────────────────────────────────────────────────────────
 
 const GLOBALS: &[(&str, crate::native::GlobalMaker)] = &[
@@ -1602,10 +1705,12 @@ const GLOBALS: &[(&str, crate::native::GlobalMaker)] = &[
     ("Request", |cx| Ok(classes(cx)?.request.clone().into())),
     ("Response", |cx| Ok(classes(cx)?.response.clone().into())),
     ("FormData", |cx| Ok(classes(cx)?.form_data.clone().into())),
+    ("fetch", |cx| Ok(crate::network::fetch::function(cx).into())),
 ];
 
-/// The four globals, each made (with the rest) the first time one is read. A host with
-/// classes of its own — a DOM's `FormData` — simply puts them in their place.
+/// The five globals, each made (with the rest) the first time one is read. A host with
+/// classes of its own — a DOM's `FormData`, a `fetch` of its own — simply puts them in their
+/// place.
 pub fn install(context: &mut Context) -> JsResult<()> {
     for (name, make) in GLOBALS {
         crate::native::lazy_global(context, name, *make)?;
