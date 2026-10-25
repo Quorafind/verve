@@ -180,6 +180,19 @@ always agree with one another.
   empty while the realm installs its builtins, given its traps once the realm exists — so the
   contextified object's properties are the context's globals, as Node's interceptors make them.
 
+- `boa_engine`, `value/operations.rs`: the `int32` fast paths of `%` use `wrapping_rem`, so
+  `(-2147483648 | 0) % -1` is `-0` instead of a panic in builds with overflow checks.
+
+- `boa_engine`, `vm/jit/` (feature `jit`, off by default): a baseline JIT. Hot functions are
+  compiled with Cranelift to native code that keeps the interpreter's frame exactly (the same
+  `CallFrame`, registers in the VM stack), does numbers, moves, comparisons and branches inline,
+  and runs everything else with the interpreter's own opcode handlers. It touches the VM in a
+  few places: `JitSlot` in `CodeBlock`, `JitVm` in `Vm`, a pending flag set by
+  `push_frame`/`pop_frame`/`handle_exception_at`/`IncrementLoopIteration` and polled by
+  `run_loop`, and `JsValue::raw_bits`/`from_raw_bits` (with `JsValue` and the NaN-boxed inner
+  value `repr(transparent)` on 64-bit). `Context::jit_options_mut`, `Context::jit_stats`,
+  `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>`. Design and results: Verve's `docs/jit.md`.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
