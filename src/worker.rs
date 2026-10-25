@@ -322,8 +322,13 @@ fn entries(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
 // ─── The worker's own realm ─────────────────────────────────────────────────────────────────
 
 /// A runtime made a worker's: `self`, `postMessage`, `close`, the `message` listeners.
-fn worker_runtime(name: &str) -> JsResult<Runtime> {
+fn worker_runtime(name: &str, grant: Grant) -> JsResult<Runtime> {
     let mut runtime = Runtime::new();
+    runtime.set_permissions(grant.permissions.clone());
+    runtime.set_worker_permissions(grant.permissions);
+    for pem in &grant.trusted {
+        let _ = runtime.add_trusted_certificates(pem);
+    }
     let context = runtime.context();
     *shared(context).port.borrow_mut() = Some(Port::default());
     let global = context.global_object();
@@ -493,19 +498,38 @@ fn epoch_ms() -> f64 {
 /// How big a worker thread's stack is: the bundles plugins ship are parsed on it.
 const WORKER_STACK: usize = 16 * 1024 * 1024;
 
-/// A worker's life, on its thread: the script run, then every message heard and every timer
-/// fired as they come, until its page lets go of it, terminates it, or it closes itself.
-fn worker_thread(
+/// What a worker's realm is granted, as its page's embedder set it for the page's workers.
+struct Grant {
+    permissions: crate::Permissions,
+    trusted: Vec<Vec<u8>>,
+}
+
+/// What a worker starts with: its name, its script and where it came from, and its grant.
+struct Launch {
     name: String,
     script: String,
     url: String,
     module: bool,
+    grant: Grant,
+}
+
+/// A worker's life, on its thread: the script run, then every message heard and every timer
+/// fired as they come, until its page lets go of it, terminates it, or it closes itself.
+fn worker_thread(
+    launch: Launch,
     inbox: Receiver<ToWorker>,
     out: Sender<FromWorker>,
     progress: Arc<Progress>,
 ) {
+    let Launch {
+        name,
+        script,
+        url,
+        module,
+        grant,
+    } = launch;
     let startup = Startup(&progress);
-    let mut runtime = match worker_runtime(&name) {
+    let mut runtime = match worker_runtime(&name, grant) {
         Ok(runtime) => runtime,
         Err(error) => {
             let _ = out.send(FromWorker::Console(
@@ -687,6 +711,14 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     let (out, from) = mpsc::channel();
     let progress = Arc::new(Progress::starting());
     let thread_progress = Arc::clone(&progress);
+    let grant = {
+        let state = shared(context);
+        let network = state.network.borrow();
+        Grant {
+            permissions: network.worker_permissions.clone(),
+            trusted: network.trusted.clone(),
+        }
+    };
     let thread_name = if name.is_empty() {
         "worker".to_owned()
     } else {
@@ -697,7 +729,14 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
         .stack_size(WORKER_STACK)
         .spawn(move || {
             crate::set_thread_stack(WORKER_STACK);
-            worker_thread(name, script, url, module, inbox, out, thread_progress)
+            let launch = Launch {
+                name,
+                script,
+                url,
+                module,
+                grant,
+            };
+            worker_thread(launch, inbox, out, thread_progress)
         })
         .map_err(|error| type_error(format!("Worker: no thread to run it on ({error})")))?;
     let object = JsObject::with_object_proto(context.intrinsics());

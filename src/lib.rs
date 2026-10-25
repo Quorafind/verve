@@ -42,6 +42,7 @@ mod module_hooks;
 mod modules;
 mod native;
 mod navigator;
+mod network;
 mod node;
 mod node_url;
 mod os;
@@ -63,6 +64,8 @@ mod wasm;
 mod web;
 mod worker;
 mod zlib;
+
+pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, Permissions};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -149,6 +152,7 @@ struct Shared {
     /// What each `URL.createObjectURL` address stands for: the blob's bytes.
     blobs: RefCell<HashMap<String, Vec<u8>>>,
     /// The workers this realm started.
+    network: RefCell<network::State>,
     workers: RefCell<Vec<worker::WorkerSlot>>,
     /// In a worker's own realm: its messages, coming and going.
     port: RefCell<Option<worker::Port>>,
@@ -248,6 +252,72 @@ impl Default for Runtime {
 }
 
 impl Runtime {
+    /// Replace realm-local capabilities. Existing sockets are closed on a policy change;
+    /// workers remain independently default-denied. Child process execution stays disabled.
+    pub fn set_permissions(&mut self, permissions: Permissions) {
+        let state = shared(&self.context);
+        let mut net = state.network.borrow_mut();
+        if net.permissions != permissions {
+            net.reactor = None;
+            let sockets = net.targets.keys().copied().collect::<Vec<_>>();
+            let queries = net.dns.pending.keys().copied().collect::<Vec<_>>();
+            net.revoked.extend(
+                sockets
+                    .into_iter()
+                    .map(|id| (id, network::reactor::Event::Closed)),
+            );
+            net.revoked.extend(
+                queries
+                    .into_iter()
+                    .map(|id| (id, network::reactor::Event::Dns(Err("EACCES".into())))),
+            );
+            net.permissions = permissions;
+        }
+    }
+
+    pub fn permissions(&self) -> Permissions {
+        shared(&self.context).network.borrow().permissions.clone()
+    }
+
+    /// What the workers this realm starts from now on are granted. Workers are denied
+    /// everything unless the embedder grants it here; a worker's own workers get the same.
+    pub fn set_worker_permissions(&mut self, permissions: Permissions) {
+        shared(&self.context)
+            .network
+            .borrow_mut()
+            .worker_permissions = permissions;
+    }
+
+    /// Trusts the certificates in `pem` besides the system's, for `fetch`, `https` and
+    /// `tls.connect` without a `ca` of their own — as Node's `NODE_EXTRA_CA_CERTS` does — here
+    /// and in the workers started from now on. Answers how many certificates it read; a PEM
+    /// with none is an error.
+    pub fn add_trusted_certificates(&mut self, pem: &[u8]) -> std::io::Result<usize> {
+        let count = network::tls::certificates(pem)?.len();
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no PEM certificate",
+            ));
+        }
+        shared(&self.context)
+            .network
+            .borrow_mut()
+            .trusted
+            .push(pem.to_vec());
+        Ok(count)
+    }
+
+    /// Read counters without waiting for any network thread.
+    pub fn network_diagnostics(&self) -> NetworkDiagnostics {
+        network::diagnostics(&self.context)
+    }
+
+    /// Deliver already queued I/O, without waiting for the reactor or resolver pool.
+    pub fn run_network_until(&mut self, deadline: Option<std::time::Instant>) -> usize {
+        network::poll(&mut self.context, deadline)
+    }
+
     /// A runtime on the system's monotonic clock.
     pub fn new() -> Self {
         let start = web_time::Instant::now();
@@ -291,6 +361,7 @@ impl Runtime {
             console_depth: std::cell::Cell::new(0),
             echo: std::env::var_os("VERVE_ECHO").is_some(),
             blobs: RefCell::new(HashMap::new()),
+            network: RefCell::new(network::State::default()),
             workers: RefCell::new(Vec::new()),
             port: RefCell::new(None),
             idb: RefCell::new(indexeddb::IdbState::default()),
@@ -457,7 +528,8 @@ impl Runtime {
     /// One beat of the workers this realm started: their messages delivered both ways, their
     /// timers run. Answers whether anything happened.
     pub fn run_workers(&mut self) -> bool {
-        let busy = worker::run_workers(&mut self.context, None);
+        let busy = network::poll(&mut self.context, None) > 0;
+        let busy = worker::run_workers(&mut self.context, None) || busy;
         self.run_microtasks();
         busy
     }
@@ -465,7 +537,8 @@ impl Runtime {
     /// [`Runtime::run_workers`], stopping at `deadline` once something has been heard: what is
     /// left is heard on a later call.
     pub fn run_workers_until(&mut self, deadline: std::time::Instant) -> bool {
-        let busy = worker::run_workers(&mut self.context, Some(deadline));
+        let busy = network::poll(&mut self.context, Some(deadline)) > 0;
+        let busy = worker::run_workers(&mut self.context, Some(deadline)) || busy;
         self.run_microtasks();
         busy
     }
@@ -498,6 +571,11 @@ impl Runtime {
             .reduce(f64::min);
         // A worker's, on this realm's clock.
         let worker = worker::next_due(&self.context).map(|wait| self.now() + wait);
+        let own = if network::active(&self.context) {
+            Some(own.map_or(self.now() + 1., |due| due.min(self.now() + 1.)))
+        } else {
+            own
+        };
         match (own, worker) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -515,6 +593,7 @@ impl Runtime {
     /// [`Runtime::run_due`], stopping at `deadline` once one has fired: the rest stay due, and
     /// fire on a later call — as a browser spreads a burst of tasks over its frames.
     pub fn run_due_until(&mut self, deadline: Option<std::time::Instant>) -> usize {
+        network::poll(&mut self.context, deadline);
         let now = self.now();
         let state = shared(&self.context);
         let mut due: Vec<(Millis, u32)> = state

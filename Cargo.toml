@@ -47,10 +47,34 @@ iana-time-zone = "0.1"
 # WebAssembly, run by an interpreter written in Rust.
 wasmi = "0.35"
 
+# Permissioned TCP/UDP: one portable readiness reactor, with kernel socket options.
+mio = { version = "1.2", features = ["net", "os-poll"] }
+# TCP keepalive and datagram options, without a connection-per-thread runtime.
+socket2 = { version = "0.6", features = ["all"] }
+# System-configured DNS record queries, confined to the fixed resolver pool.
+hickory-resolver = { version = "0.24", features = ["system-config"] }
+
+# TLS client/server handshakes and certificate verification within the mio reactor.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+# Native trust anchors; loaded off the JavaScript thread.
+rustls-native-certs = "0.8"
+# Node's PEM ca/cert/key options, parsed without OpenSSL.
+rustls-pemfile = "2.2"
+# Decode getPeerCertificate metadata; TLS verification itself remains rustls/webpki.
+x509-parser = "0.18"
+
+# Incremental HTTP/1 head parsing without a blocking HTTP client or async runtime.
+httparse = "1.10"
+
+# RFC 6455 client framing/validation over existing native Duplex sockets, without TLS duplication.
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+
 [dev-dependencies]
 serde_json = "1"
 # WebAssembly tests write their modules as text.
 wat = "1.251"
+# TLS tests sign a localhost certificate as they run: the repository keeps no private key.
+rcgen = "0.14"
 
 # Boa as Verve carries it in `boa/`: 0.22.0 with the fixes listed in `boa/SU.md`, and the
 # interrupt handle isolates stop a script with. An embedder takes Boa from this repository too,

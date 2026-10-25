@@ -12,7 +12,8 @@
 //! write to the console the host reads.
 
 use boa_engine::{
-    Context, JsBigInt, JsObject, JsResult, JsString, JsValue, js_string, object::builtins::JsArray,
+    Context, JsBigInt, JsObject, JsResult, JsString, JsSymbol, JsValue, js_string,
+    object::builtins::JsArray, property::PropertyDescriptor,
 };
 
 use crate::native::{arg, array, coded_error, exports, function, invoke, js_text, object, text_of};
@@ -342,6 +343,15 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
     let emitter = crate::modules::node_module(context, "events")?;
     let emitter = emitter.as_object().expect("EventEmitter is a class");
     let process = emitter.construct(&[], None, context)?;
+    process.define_property_or_throw(
+        JsSymbol::to_string_tag(),
+        PropertyDescriptor::builder()
+            .value(js_text("process"))
+            .writable(true)
+            .enumerable(false)
+            .configurable(false),
+        context,
+    )?;
     exports(context, &process, PROCESS_FUNCTIONS)?;
     let hrtime = process.get(js_string!("hrtime"), context)?;
     let bigint = function(context, "bigint", 0, |_, _, cx| {

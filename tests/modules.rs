@@ -222,6 +222,23 @@ fn process_looks_like_electrons_renderer() {
 }
 
 #[test]
+fn process_has_nodes_type_tag() {
+    let mut rt = Runtime::new();
+    let result = rt
+        .eval(
+            r#"JSON.stringify([
+                Object.prototype.toString.call(process),
+                Object.getOwnPropertyDescriptor(process, Symbol.toStringTag)
+            ])"#,
+        )
+        .unwrap();
+    assert_eq!(
+        verve::print(&result),
+        r#"["[object process]",{"value":"process","writable":true,"enumerable":false,"configurable":false}]"#
+    );
+}
+
+#[test]
 fn node_classes_extend_three_ways() {
     let dir = folder("classes", &[]);
     let mut rt = Runtime::new();

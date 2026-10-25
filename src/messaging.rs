@@ -1,14 +1,14 @@
 //! Messages within the realm: `MessageChannel` and its two `MessagePort`s, `BroadcastChannel`
-//! — and `WebSocket`, which this runtime does not connect.
+//! — and the permissioned native `WebSocket` transport.
 //!
 //! A message is copied as `structuredClone` copies it, and heard as a task of its own: on the
 //! runtime's clock, at the next [`crate::Runtime::run_due`], as a page hears it after the
 //! script that sent it has finished. Bundles schedule work this way — React's scheduler posts
 //! itself a message to yield — so it is a timer, not a microtask, that delivers it.
 //!
-//! `WebSocket` is there for the code that makes one, and its connection fails as one to a
-//! server that cannot be reached does: an `error` event, then a `close` event (code 1006), a
-//! task after it was made. Plugins speak to the network through the host's `requestUrl`.
+//! `WebSocket` uses the realm's HTTP/TLS reactor when outbound access is granted. Without a
+//! matching capability it retains the original asynchronous `error`, then `close` (1006),
+//! refusal. The host's `requestUrl` remains independent of these capabilities.
 
 use std::cell::RefCell;
 
@@ -423,12 +423,15 @@ fn make_socket(
     let socket = JsObject::from_proto_and_data(
         prototype.clone(),
         TargetData::new(Kind::Socket {
-            url: href,
+            url: href.clone(),
             state: 0,
             binary_type: "blob".into(),
             buffered: 0.,
         }),
     );
+    if crate::network::websocket::connect(&socket, &url, &arg(args, 1), context)? {
+        return Ok(socket);
+    }
     let fail = closure(context, "", 0, fail_socket, socket.clone());
     crate::set_timeout(context, fail.into(), 0., false, Vec::new());
     Ok(socket)
@@ -477,7 +480,7 @@ fn fail_socket(
     Ok(JsValue::undefined())
 }
 
-fn socket_part<R>(
+pub(crate) fn socket_part<R>(
     this: &JsValue,
     f: impl FnOnce(&mut String, &mut u16, &mut String, &mut f64) -> R,
 ) -> JsResult<R> {
@@ -504,6 +507,9 @@ const SOCKET_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         }
         // Sent after closing: counted, as a browser counts it, and never sent.
         let data = arg(args, 0);
+        if state == 1 && crate::network::websocket::send(this, &data, cx)? {
+            return Ok(JsValue::undefined());
+        }
         let size = match crate::encoding::bytes_of(&data, cx)? {
             Some(bytes) => bytes.len(),
             None => text_of(&data, cx)?.len(),
@@ -533,6 +539,15 @@ const SOCKET_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
                 "SyntaxError",
             ));
         }
+        let close_code = arg(args, 0).as_number().unwrap_or(1000.) as u16;
+        let close_reason = if reason.is_undefined() {
+            String::new()
+        } else {
+            text_of(&reason, cx)?
+        };
+        if crate::network::websocket::close(this, close_code, close_reason, cx)? {
+            return Ok(JsValue::undefined());
+        }
         socket_part(this, |_, state, _, _| {
             if *state < 2 {
                 *state = 2;
@@ -553,7 +568,18 @@ const SOCKET_ACCESSORS: &[(&str, NativeFunctionPointer, Option<NativeFunctionPoi
         |this, _, _| socket_part(this, |_, state, _, _| u32::from(*state).into()),
         None,
     ),
-    ("protocol", |_, _, _| Ok(js_text("")), None),
+    (
+        "protocol",
+        |this, _, cx| {
+            let value = get(this, "__wsProtocol", cx)?;
+            Ok(if value.is_undefined() {
+                js_text("")
+            } else {
+                value
+            })
+        },
+        None,
+    ),
     ("extensions", |_, _, _| Ok(js_text("")), None),
     (
         "bufferedAmount",
