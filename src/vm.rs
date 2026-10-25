@@ -399,6 +399,8 @@ fn environment_data(context: &mut Context) -> JsResult<JsObject> {
 }
 
 fn worker_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResult<()> {
+    // Refused as Node refuses it without `--allow-worker`, before anything is started.
+    crate::permission::worker(context)?;
     let emitter = crate::modules::node_module(context, "events")?;
     crate::call(context, &emitter, &this.clone().into(), &[])?;
     this.set(js_string!("threadId"), -1, false, context)?;

@@ -316,6 +316,17 @@ fn flags_of(value: &JsValue, default: &str, context: &mut Context) -> JsResult<F
     Ok(flags)
 }
 
+/// Throws unless the realm may open `path` as `flags` would: to read it, to write it, or both.
+fn opening(context: &mut Context, path: &str, flags: Flags) -> JsResult<()> {
+    if flags.read {
+        crate::permission::read(context, path)?;
+    }
+    if flags.write || flags.append || flags.create || flags.truncate {
+        crate::permission::write(context, path)?;
+    }
+    Ok(())
+}
+
 fn open_with(path: &str, flags: Flags) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options
@@ -669,6 +680,7 @@ fn read_file(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         })?
     } else {
         let path = path_of(&target, "path", context)?;
+        crate::permission::read(context, &path)?;
         if Path::new(&path).is_dir() {
             return Err(fs_error(context, "EISDIR", "read", None, None));
         }
@@ -698,6 +710,7 @@ fn write_file(args: &[JsValue], context: &mut Context, append: bool) -> JsResult
         if append { "a" } else { "w" },
         context,
     )?;
+    opening(context, &path, flags)?;
     let outcome = open_with(&path, flags).and_then(|mut file| file.write_all(&bytes));
     outcome.map_err(|e| io_error(context, e, "open", &path))?;
     Ok(JsValue::undefined())
@@ -705,6 +718,11 @@ fn write_file(args: &[JsValue], context: &mut Context, append: bool) -> JsResult
 
 fn stat_at(args: &[JsValue], context: &mut Context, follow: bool) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
+    if follow {
+        crate::permission::read(context, &path)?;
+    } else {
+        crate::permission::read_here(context, &path)?;
+    }
     let options = arg(args, 1);
     let meta = if follow {
         std::fs::metadata(&path)
@@ -732,6 +750,7 @@ fn stat_at(args: &[JsValue], context: &mut Context, follow: bool) -> JsResult<Js
 
 fn read_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
+    crate::permission::read(context, &path)?;
     let options = arg(args, 1);
     let with_types = flag(&options, "withFileTypes", context)?;
     let recursive = flag(&options, "recursive", context)?;
@@ -794,6 +813,7 @@ fn read_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
 
 fn make_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
+    crate::permission::write(context, &path)?;
     let options = arg(args, 1);
     if !flag(&options, "recursive", context)? {
         std::fs::create_dir(&path).map_err(|e| io_error(context, e, "mkdir", &path))?;
@@ -828,6 +848,7 @@ fn make_temp_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
             .map(|b| LETTERS[*b as usize % LETTERS.len()] as char)
             .collect();
         let path = format!("{prefix}{suffix}");
+        crate::permission::write(context, &path)?;
         match std::fs::create_dir(&path) {
             Ok(()) => return Ok(js_text(&path)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -845,6 +866,7 @@ fn make_temp_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
 
 fn remove(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
+    crate::permission::write_here(context, &path)?;
     let options = arg(args, 1);
     let (recursive, force) = (
         flag(&options, "recursive", context)?,
@@ -871,6 +893,7 @@ fn remove(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
 
 fn remove_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
+    crate::permission::write_here(context, &path)?;
     let outcome = if flag(&arg(args, 1), "recursive", context)? {
         std::fs::remove_dir_all(&path)
     } else {
@@ -904,9 +927,26 @@ fn copy_tree(from: &Path, to: &Path, force: bool, error_on_exist: bool) -> std::
     std::fs::copy(from, to).map(|_| ())
 }
 
+/// Throws unless every file `cp` would read under `from` is readable and every one it would
+/// write under `to` writable: a link inside the tree is followed, so each is checked where it
+/// leads.
+fn copy_allowed(context: &mut Context, from: &Path, to: &Path) -> JsResult<()> {
+    crate::permission::read(context, from)?;
+    crate::permission::write(context, to)?;
+    if from.is_dir()
+        && let Ok(entries) = std::fs::read_dir(from)
+    {
+        for entry in entries.flatten() {
+            copy_allowed(context, &entry.path(), &to.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 fn copy(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let from = path_arg(args, 0, context)?;
     let to = path_arg(args, 1, context)?;
+    copy_allowed(context, Path::new(&from), Path::new(&to))?;
     let options = arg(args, 2);
     let recursive = flag(&options, "recursive", context)?;
     let force = match option(&options, "force", context)? {
@@ -925,6 +965,10 @@ fn copy(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
 fn access(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     let mode = arg(args, 1).as_number().unwrap_or(0.) as i64;
+    crate::permission::read(context, &path)?;
+    if mode & 2 != 0 {
+        crate::permission::write(context, &path)?;
+    }
     let meta = std::fs::metadata(&path).map_err(|e| io_error(context, e, "access", &path))?;
     if mode & 2 != 0 && meta.permissions().readonly() {
         return Err(fs_error(context, "EACCES", "access", Some(&path), None));
@@ -981,8 +1025,13 @@ fn set_times(
     )
 }
 
-fn utimes(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn utimes(args: &[JsValue], context: &mut Context, follow: bool) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
+    if follow {
+        crate::permission::write(context, &path)?;
+    } else {
+        crate::permission::write_here(context, &path)?;
+    }
     let accessed = time_of(&arg(args, 1), context)?;
     let modified = time_of(&arg(args, 2), context)?;
     open_for_times(&path)
@@ -1019,6 +1068,8 @@ fn mode_arg(value: &JsValue, context: &mut Context) -> JsResult<u32> {
 fn symlink(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let target = path_arg(args, 0, context)?;
     let path = path_arg(args, 1, context)?;
+    // What the link leads to is checked whenever it is followed; making it is a write here.
+    crate::permission::write_here(context, &path)?;
     let kind = arg(args, 2);
     let kind = if kind.is_string() {
         text_of(&kind, context)?
@@ -1053,6 +1104,7 @@ fn symlink(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
 fn open(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     let flags = flags_of(&arg(args, 1), "r", context)?;
+    opening(context, &path, flags)?;
     if flags.read && !flags.write && Path::new(&path).is_dir() {
         return Err(fs_error(context, "EISDIR", "open", Some(&path), None));
     }
@@ -1265,6 +1317,7 @@ fn write(args: &[JsValue], context: &mut Context) -> JsResult<(usize, JsValue)> 
 
 fn statfs(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
+    crate::permission::read(context, &path)?;
     std::fs::metadata(&path).map_err(|e| io_error(context, e, "statfs", &path))?;
     let out = object(context);
     for (key, value) in [
@@ -1310,6 +1363,7 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         1,
         |_, args, cx| {
             let path = path_arg(args, 0, cx)?;
+            crate::permission::write_here(cx, &path)?;
             std::fs::remove_file(&path).map_err(|e| io_error(cx, e, "unlink", &path))?;
             Ok(JsValue::undefined())
         },
@@ -1321,6 +1375,8 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         |_, args, cx| {
             let from = path_arg(args, 0, cx)?;
             let to = path_arg(args, 1, cx)?;
+            crate::permission::write_here(cx, &from)?;
+            crate::permission::write_here(cx, &to)?;
             std::fs::rename(&from, &to).map_err(|e| io_error2(cx, e, "rename", &from, &to))?;
             Ok(JsValue::undefined())
         },
@@ -1333,6 +1389,8 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
             let from = path_arg(args, 0, cx)?;
             let to = path_arg(args, 1, cx)?;
             let mode = arg(args, 2).as_number().unwrap_or(0.) as i64;
+            crate::permission::read(cx, &from)?;
+            crate::permission::write(cx, &to)?;
             if mode & 1 != 0 && Path::new(&to).exists() {
                 return Err(fs_error(cx, "EEXIST", "copyfile", Some(&from), Some(&to)));
             }
@@ -1348,6 +1406,7 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         2,
         |_, args, cx| {
             let path = path_arg(args, 0, cx)?;
+            crate::permission::read(cx, &path)?;
             let real =
                 std::fs::canonicalize(&path).map_err(|e| io_error(cx, e, "realpath", &path))?;
             bytes_or_text(&plain(&real), &arg(args, 1), cx)
@@ -1359,6 +1418,7 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         2,
         |_, args, cx| {
             let path = path_arg(args, 0, cx)?;
+            crate::permission::read_here(cx, &path)?;
             let target =
                 std::fs::read_link(&path).map_err(|e| io_error(cx, e, "readlink", &path))?;
             bytes_or_text(&plain(&target), &arg(args, 1), cx)
@@ -1372,6 +1432,11 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         |_, args, cx| {
             let from = path_arg(args, 0, cx)?;
             let to = path_arg(args, 1, cx)?;
+            // The new name reaches the same file: whoever may use it must already have been
+            // allowed to read and write the file.
+            crate::permission::read(cx, &from)?;
+            crate::permission::write(cx, &from)?;
+            crate::permission::write_here(cx, &to)?;
             std::fs::hard_link(&from, &to).map_err(|e| io_error2(cx, e, "link", &from, &to))?;
             Ok(JsValue::undefined())
         },
@@ -1383,6 +1448,7 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         |_, args, cx| {
             let path = path_arg(args, 0, cx)?;
             let length = arg(args, 1).as_number().unwrap_or(0.).max(0.) as u64;
+            crate::permission::write(cx, &path)?;
             OpenOptions::new()
                 .write(true)
                 .open(&path)
@@ -1392,14 +1458,15 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         },
         true,
     ),
-    ("utimes", 3, |_, args, cx| utimes(args, cx), true),
-    ("lutimes", 3, |_, args, cx| utimes(args, cx), true),
+    ("utimes", 3, |_, args, cx| utimes(args, cx, true), true),
+    ("lutimes", 3, |_, args, cx| utimes(args, cx, false), true),
     (
         "chmod",
         2,
         |_, args, cx| {
             let path = path_arg(args, 0, cx)?;
             let mode = mode_arg(&arg(args, 1), cx)?;
+            crate::permission::write(cx, &path)?;
             chmod_path(&path, mode).map_err(|e| io_error(cx, e, "chmod", &path))?;
             Ok(JsValue::undefined())
         },
@@ -1411,6 +1478,7 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         // Ownership is not this runtime's to change: the file must be there, and stays as it is.
         |_, args, cx| {
             let path = path_arg(args, 0, cx)?;
+            crate::permission::write(cx, &path)?;
             std::fs::metadata(&path).map_err(|e| io_error(cx, e, "chown", &path))?;
             Ok(JsValue::undefined())
         },
@@ -1421,6 +1489,7 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         3,
         |_, args, cx| {
             let path = path_arg(args, 0, cx)?;
+            crate::permission::write_here(cx, &path)?;
             std::fs::symlink_metadata(&path).map_err(|e| io_error(cx, e, "lchown", &path))?;
             Ok(JsValue::undefined())
         },
@@ -1532,6 +1601,7 @@ fn bytes_or_text(path: &str, options: &JsValue, context: &mut Context) -> JsResu
 /// `opendirSync(path)`: a `Dir`, its entries read when it is opened and handed out one at a time.
 fn open_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
+    crate::permission::read(context, &path)?;
     let options = object(context);
     options.set(js_string!("withFileTypes"), true, false, context)?;
     let entries = read_dir(&[js_text(&path), options.into()], context)?;
@@ -1836,17 +1906,24 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
         context,
         &fs,
         &[
+            // A path the realm may not read does not exist, as far as it can tell.
             ("existsSync", 1, |_, args, cx| {
                 Ok(match path_of(&arg(args, 0), "path", cx) {
-                    Ok(path) => Path::new(&path).exists(),
+                    Ok(path) => {
+                        crate::permission::read(cx, &path).is_ok() && Path::new(&path).exists()
+                    }
                     Err(_) => false,
                 }
                 .into())
             }),
             ("exists", 2, |_, args, cx| {
                 let (callback, rest) = callback_of(args, cx)?;
-                let exists =
-                    path_of(&arg(rest, 0), "path", cx).is_ok_and(|path| Path::new(&path).exists());
+                let exists = match path_of(&arg(rest, 0), "path", cx) {
+                    Ok(path) => {
+                        crate::permission::read(cx, &path).is_ok() && Path::new(&path).exists()
+                    }
+                    Err(_) => false,
+                };
                 crate::microtask(cx, callback, vec![exists.into()]);
                 Ok(JsValue::undefined())
             }),
@@ -1871,10 +1948,14 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
                 Ok(JsValue::undefined())
             }),
             ("watch", 3, |_, args, cx| {
+                let watched = path_of(&arg(args, 0), "filename", cx)?;
+                crate::permission::read(cx, &watched)?;
                 let listener = args.iter().skip(1).find(|a| a.is_callable());
                 watcher(cx, "FSWatcher", "change", listener)
             }),
             ("watchFile", 3, |_, args, cx| {
+                let watched = path_of(&arg(args, 0), "filename", cx)?;
+                crate::permission::read(cx, &watched)?;
                 let listener = args.iter().skip(1).find(|a| a.is_callable());
                 watcher(cx, "StatWatcher", "change", listener)
             }),
@@ -1894,7 +1975,9 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
         settled(outcome, cx)
     });
     promises.set(js_string!("open"), open_handle, false, context)?;
-    let watch = function(context, "watch", 2, |_, _, cx| {
+    let watch = function(context, "watch", 2, |_, args, cx| {
+        let watched = path_of(&arg(args, 0), "filename", cx)?;
+        crate::permission::read(cx, &watched)?;
         // An async iterator that never yields: nothing here watches the disk.
         let iterator = object(cx);
         methods(

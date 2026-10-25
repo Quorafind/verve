@@ -168,7 +168,8 @@ fn as_file_or_folder(base: &Path) -> Option<PathBuf> {
     }
     if base.is_dir() {
         let manifest = base.join("package.json");
-        if let Ok(text) = std::fs::read_to_string(&manifest)
+        if crate::permission::resolution_may_read(&manifest)
+            && let Ok(text) = std::fs::read_to_string(&manifest)
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
         {
             let main = json.get("main").and_then(|m| m.as_str());
@@ -218,6 +219,7 @@ fn is_path(name: &str) -> bool {
 
 /// What `name`, required from a module in `folder`, names.
 fn resolve(context: &mut Context, folder: &Path, name: &str) -> JsResult<Resolved> {
+    let _resolving = crate::permission::Resolving::enter(context);
     if is_builtin(context, name) && !is_path(name) {
         return Ok(Resolved::Builtin(name.to_owned()));
     }
@@ -305,6 +307,7 @@ pub(crate) fn load_file(
     if cached.is_object() {
         return get(&cached, "exports", context);
     }
+    crate::permission::read(context, path)?;
     let text = std::fs::read_to_string(path).map_err(|error| {
         JsNativeError::error().with_message(format!("{}: {error}", path.display()))
     })?;

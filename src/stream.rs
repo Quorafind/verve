@@ -4580,6 +4580,12 @@ pub(crate) fn create_read_stream(context: &mut Context, args: &[JsValue]) -> JsR
             return Ok(JsValue::undefined());
         }
         let size = wanted.min(left).min(16. * 1024. * 1024.) as usize;
+        // `path` is the stream's own property, which code can change between reads.
+        if let Err(error) = crate::permission::read(cx, &path) {
+            let error = error.into_opaque(cx)?;
+            invoke(this, "destroy", &[error], cx)?;
+            return Ok(JsValue::undefined());
+        }
         let outcome = (|| -> std::io::Result<Vec<u8>> {
             use std::io::{Read, Seek, SeekFrom};
             let mut file = std::fs::File::open(&path)?;
@@ -4633,6 +4639,11 @@ pub(crate) fn create_read_stream(context: &mut Context, args: &[JsValue]) -> JsR
         |_, args, cx| {
             let stream = arg(args, 0);
             let path = text_of(&get(&stream, "path", cx)?, cx)?;
+            if let Err(error) = crate::permission::read(cx, &path) {
+                let error = error.into_opaque(cx)?;
+                invoke(&stream, "destroy", &[error], cx)?;
+                return Ok(JsValue::undefined());
+            }
             match std::fs::File::open(PathBuf::from(&path)) {
                 Ok(_) => {
                     if let Some(target) = stream.as_object() {
@@ -4677,25 +4688,36 @@ pub(crate) fn create_write_stream(context: &mut Context, args: &[JsValue]) -> Js
     stream.set(js_string!("pending"), true, false, context)?;
     stream.set(js_string!("fd"), JsValue::null(), false, context)?;
     stream.set(js_string!("flags"), js_text(&flags), false, context)?;
-    let opened = if flags.starts_with('a') {
+    let allowed = crate::permission::write(context, &path);
+    let opened = if let Err(denied) = allowed {
+        Err(Err(denied))
+    } else if flags.starts_with('a') {
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
+            .map_err(Ok)
     } else {
         std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(&path)
+            .map_err(Ok)
     };
-    let failure = opened
-        .err()
-        .map(|error| fs_error(context, &error, &path, "open"));
+    let failure = match opened {
+        Ok(_) => None,
+        Err(Ok(error)) => Some(fs_error(context, &error, &path, "open")),
+        Err(Err(denied)) => Some(denied.into_opaque(context)?),
+    };
     let write = function(context, "_write", 3, |this, args, cx| {
         let path = text_of(&get(this, "path", cx)?, cx)?;
         let bytes = crate::encoding::bytes_of(&arg(args, 0), cx)?.unwrap_or_default();
         let callback = arg(args, 2);
+        if let Err(error) = crate::permission::write(cx, &path) {
+            let error = error.into_opaque(cx)?;
+            return crate::call(cx, &callback, &JsValue::undefined(), &[error]);
+        }
         let outcome = (|| -> std::io::Result<()> {
             use std::io::Write;
             let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;

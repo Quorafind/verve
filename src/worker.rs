@@ -686,7 +686,14 @@ fn script_of(url: &str, context: &Context) -> Option<String> {
 }
 
 fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    crate::permission::worker(context)?;
     let url = arg(args, 0).to_string(context)?.to_std_string_escaped();
+    if let Ok(parsed) = url::Url::parse(&url)
+        && parsed.scheme() == "file"
+        && let Ok(path) = crate::esm_resolve::file_path(&parsed)
+    {
+        crate::permission::read(context, &path)?;
+    }
     let script = script_of(&url, context).ok_or_else(|| {
         type_error(format!(
             "Worker: '{url}' is not a script here — a blob: or data: address is"
@@ -714,8 +721,15 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     let grant = {
         let state = shared(context);
         let network = state.network.borrow();
+        // The network is what the embedder granted workers; the disk and workers are the
+        // page's own, so a worker is no way around them.
         Grant {
-            permissions: network.worker_permissions.clone(),
+            permissions: crate::Permissions {
+                fs_read: network.permissions.fs_read.clone(),
+                fs_write: network.permissions.fs_write.clone(),
+                worker: network.permissions.worker,
+                ..network.worker_permissions.clone()
+            },
             trusted: network.trusted.clone(),
         }
     };

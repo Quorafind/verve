@@ -54,6 +54,9 @@ pub(crate) fn file_path(url: &Url) -> Result<PathBuf> {
 
 pub(crate) fn manifest(dir: &Path) -> Result<Option<Value>> {
     let path = dir.join("package.json");
+    if !crate::permission::resolution_may_read(&path) {
+        return Ok(None);
+    }
     match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).map(Some).map_err(|err| {
             error(

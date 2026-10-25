@@ -458,6 +458,7 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
         let stream = std_stream(context, &emitter, fd)?;
         process.set(JsString::from(name), stream, false, context)?;
     }
+    crate::permission::install(context, &process)?;
     crate::native::define_global(context, "process", process)?;
     Ok(())
 }

@@ -48,6 +48,7 @@ mod node_url;
 mod os;
 mod package_json;
 mod path;
+mod permission;
 mod process;
 mod querystring;
 mod readline;
@@ -66,7 +67,8 @@ mod web;
 mod worker;
 mod zlib;
 
-pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, Permissions};
+pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule};
+pub use permission::{FsAccess, Permissions};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -253,12 +255,20 @@ impl Default for Runtime {
 }
 
 impl Runtime {
-    /// Replace realm-local capabilities. Existing sockets are closed on a policy change;
-    /// workers remain independently default-denied. Child process execution stays disabled.
+    /// Replace realm-local capabilities: the network (default denied), the filesystem and
+    /// workers (default unrestricted, as embedders have always had them). A changed network
+    /// policy closes existing sockets; filesystem grants apply to the next operation — files
+    /// already open stay open, as Node's descriptors opened before do. Workers this realm starts
+    /// from now on share its filesystem and worker grants; their network is
+    /// [`Runtime::set_worker_permissions`]'s. Child process execution stays disabled.
+    ///
+    /// Filesystem grants are resolved when set — made absolute against the process's working
+    /// directory, links followed — and every `fs` entry point and every module read from disk
+    /// checks against them, failing with Node's `ERR_ACCESS_DENIED`. See [`FsAccess`].
     pub fn set_permissions(&mut self, permissions: Permissions) {
         let state = shared(&self.context);
         let mut net = state.network.borrow_mut();
-        if net.permissions != permissions {
+        if !net.permissions.same_network(&permissions) {
             net.reactor = None;
             let sockets = net.targets.keys().copied().collect::<Vec<_>>();
             let queries = net.dns.pending.keys().copied().collect::<Vec<_>>();
@@ -272,16 +282,24 @@ impl Runtime {
                     .into_iter()
                     .map(|id| (id, network::reactor::Event::Dns(Err("EACCES".into())))),
             );
-            net.permissions = permissions;
         }
+        if net.permissions.fs_read != permissions.fs_read
+            || net.permissions.fs_write != permissions.fs_write
+        {
+            net.grants = Rc::new(permission::Grants::of(&permissions));
+        }
+        net.permissions = permissions;
     }
 
     pub fn permissions(&self) -> Permissions {
         shared(&self.context).network.borrow().permissions.clone()
     }
 
-    /// What the workers this realm starts from now on are granted. Workers are denied
-    /// everything unless the embedder grants it here; a worker's own workers get the same.
+    /// The network the workers this realm starts from now on are granted. Workers are denied
+    /// the network unless the embedder grants it here; a worker's own workers get the same.
+    /// Their filesystem and worker grants are this realm's own (see
+    /// [`Runtime::set_permissions`]), whatever this says: a worker reaches no file its page
+    /// cannot.
     pub fn set_worker_permissions(&mut self, permissions: Permissions) {
         shared(&self.context)
             .network

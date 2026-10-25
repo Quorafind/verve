@@ -15,6 +15,7 @@ fn granted() -> Permissions {
         listen: ListenPermission::Loopback,
         dns: true,
         child_process: false,
+        ..Permissions::default()
     }
 }
 fn run(script: &str, permissions: Permissions) -> String {

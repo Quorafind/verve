@@ -116,11 +116,24 @@ Node's and the web's APIs and no Node underneath.
   timeouts. One lazy mio reactor and a fixed two-worker DNS pool deliver I/O on host beats.
   `dns.lookup` and promises use system getaddrinfo; `resolve4`, `resolve6`, `resolveTxt` and
   `resolveSrv` use the system resolver configuration. Other granted record queries fail ENOSYS.
-- `Runtime::set_permissions(Permissions)` defaults to denial: outbound host/port rules,
-  independent listening (`Deny`, `Loopback`, `Any`) and DNS. Replacing a policy closes existing
-  resources. Workers start denied unless `Runtime::set_worker_permissions` grants them a policy.
-  `Runtime::add_trusted_certificates` trusts PEM certificates besides the system's, as Node's
-  `NODE_EXTRA_CA_CERTS` does. The reserved `child_process` bit does not enable execution.
+- `Runtime::set_permissions(Permissions)` is the permission model. The network defaults to
+  denial: outbound host/port rules, independent listening (`Deny`, `Loopback`, `Any`) and DNS;
+  replacing a network policy closes existing resources, and workers get the network only as
+  `Runtime::set_worker_permissions` grants it. The filesystem and workers default to what
+  embedders always had — `fs_read`/`fs_write: FsAccess::All`, `worker: true` — and confine a
+  realm as Node's `--permission` does: `FsAccess::Only(paths)` grants each path and everything
+  below it, and `Permissions::none()` is Node's `--permission` with no grants. Every `fs` entry
+  point (sync, callback, promises, streams, `Dir`, `FileHandle`, `watch`, `exists`, `access`,
+  `realpath`, `stat`…) and every module read from disk (`require`, `import`, `import()`) is
+  checked, failing with Node's `ERR_ACCESS_DENIED` (`permission: 'FileSystemRead'` or
+  `'FileSystemWrite'`, `resource`); a `package.json` resolution may not read is passed over.
+  Paths are checked where they really are — `..` resolved and every link followed, so neither
+  escapes a grant (Node checks the path as written). A worker shares its page's filesystem and
+  worker grants; without `worker`, `Worker` and `worker_threads.Worker` throw `ERR_ACCESS_DENIED`
+  (`WorkerThreads`). `process.permission.has(scope, reference)` answers as Node's (`fs`,
+  `fs.read`, `fs.write`, `worker`, and Verve's `net`; `child`, `addon` and `wasi` are always
+  false). `Runtime::add_trusted_certificates` trusts PEM certificates besides the system's, as
+  Node's `NODE_EXTRA_CA_CERTS` does. The reserved `child_process` bit does not enable execution.
 - `tls`: rustls client/server Duplex sockets on the same reactor, system trust by default,
   PEM `ca`/`cert`/`key`, `secureContext`, SNI and named server contexts, ALPN, TLS 1.2/1.3
   bounds, cipher selection, client-certificate requests, `rejectUnauthorized`, the JavaScript

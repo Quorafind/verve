@@ -132,7 +132,10 @@ impl Loader {
             });
         }
         let parent = self.parent(parent, context)?;
-        let result = resolve::resolve(specifier, &parent, mode, &self.conditions.borrow());
+        let result = {
+            let _resolving = crate::permission::Resolving::enter(context);
+            resolve::resolve(specifier, &parent, mode, &self.conditions.borrow())
+        };
         let url = result.map_err(|e| resolve_error(context, e))?;
         match url.scheme() {
             "file" | "data" | "blob" => {}
@@ -277,6 +280,7 @@ impl Loader {
                         "ERR_UNKNOWN_FILE_EXTENSION",
                     ));
                 }
+                crate::permission::read(context, &path)?;
                 let text = std::fs::read_to_string(&path).map_err(|e| {
                     coded_error(
                         context,
@@ -685,7 +689,11 @@ pub(crate) fn is_esm(path: &Path, source: &str, context: &mut Context) -> JsResu
             ));
         }
     }
-    if let Some((_, json)) = resolve::scope(path).map_err(|e| resolve_error(context, e))? {
+    let scope = {
+        let _resolving = crate::permission::Resolving::enter(context);
+        resolve::scope(path)
+    };
+    if let Some((_, json)) = scope.map_err(|e| resolve_error(context, e))? {
         match json.get("type").and_then(resolve::Value::as_str) {
             Some("module") => return Ok(true),
             Some("commonjs") => return Ok(false),
@@ -802,6 +810,7 @@ fn cjs_names(
             if let Ok(url) = loader.resolve(&name, Some(&path), Mode::Require, true, context)
                 && let Ok(path) = resolve::file_path(&url)
                 && !seen.contains(&path)
+                && crate::permission::read(context, &path).is_ok()
                 && let Ok(source) = std::fs::read_to_string(&path)
             {
                 pending.push((path, source));

@@ -15,6 +15,8 @@ use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
 use reactor::{Command, Event, Id, Reactor};
 use std::collections::HashMap;
 
+pub use crate::permission::Permissions;
+
 /// An outbound rule matches both the host and port. An empty list grants no connections.
 /// `host: None` matches every host; names match case-insensitively, without wildcard expansion.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,32 +34,6 @@ pub enum ListenPermission {
     Any,
 }
 
-/// Capabilities are realm-local, default denied and never inherited by workers. Changing the
-/// policy closes existing resources. `child_process` is reserved: it does not enable execution.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Permissions {
-    pub outbound: Vec<NetworkRule>,
-    pub listen: ListenPermission,
-    pub dns: bool,
-    pub child_process: bool,
-}
-
-impl Permissions {
-    pub fn allows_outbound(&self, host: &str, port: u16) -> bool {
-        self.outbound.iter().any(|rule| {
-            rule.port.is_none_or(|p| p == port)
-                && rule
-                    .host
-                    .as_ref()
-                    .is_none_or(|h| h.eq_ignore_ascii_case(host))
-        })
-    }
-    pub fn allows_listen(&self, address: std::net::IpAddr) -> bool {
-        self.listen == ListenPermission::Any
-            || (self.listen == ListenPermission::Loopback && address.is_loopback())
-    }
-}
-
 /// Nonblocking transport counters, intended for host observability and acceptance tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NetworkDiagnostics {
@@ -70,6 +46,8 @@ pub struct NetworkDiagnostics {
 #[derive(Default)]
 pub(crate) struct State {
     pub permissions: Permissions,
+    /// The filesystem half of `permissions`, resolved for checking.
+    pub grants: std::rc::Rc<crate::permission::Grants>,
     /// What the workers this realm starts are granted: nothing, unless the embedder says so.
     pub worker_permissions: Permissions,
     /// PEM certificates TLS clients trust besides the system's, as Node's

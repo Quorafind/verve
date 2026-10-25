@@ -22,6 +22,7 @@ fn loopback() -> Permissions {
         listen: ListenPermission::Loopback,
         dns: false,
         child_process: false,
+        ..Permissions::default()
     }
 }
 
