@@ -66,8 +66,10 @@ data, parsers, diff and search loops.
 `compiler.rs` turns one `CodeBlock` into one native function, `fn(state, block) -> u32`.
 
 - **Leaders**: `pc` 0, every branch target and exception handler, and the instruction after
-  every branch and after every instruction handed to the interpreter. Each leader is a Cranelift
-  block and an entry point; a `br_table` on the `block` argument starts there.
+  every branch, after every instruction handed to the interpreter, and after every inline
+  instruction that has a slow path (so that after the slow path compiled code goes on, rather than
+  returning to the interpreter at every turn of a loop that adds strings). Each leader is a
+  Cranelift block and an entry point; a `br_table` on the `block` argument starts there.
 - **Validation**: the compiler does not trust the bytecode it is given. It refuses a code block
   if:
   - a branch, jump-table entry or exception handler points anywhere but the start of an
@@ -339,7 +341,8 @@ With the feature built, the JIT is on unless switched off.
   - refused executable memory switches it off after one try;
   - malformed bytecode (targets inside instructions or past the end, registers out of range,
     falling off the end) is refused;
-  - each limit holds, and code is given back when its function is collected.
+  - each limit holds, and code is given back when its function is collected;
+  - the slow path of string `+` stays in compiled code.
 - **Behaviour tests**:
   - tier-up happens, and cold code is not compiled;
   - OSR enters a running loop;

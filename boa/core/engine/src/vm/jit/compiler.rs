@@ -322,6 +322,28 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
     }
 }
 
+/// Whether an inline instruction has a slow path through [`jit_step`]: all but the stores of
+/// constants.
+fn has_slow_path(instruction: &Instruction) -> bool {
+    !matches!(
+        instruction,
+        Instruction::StoreZero { .. }
+            | Instruction::StoreOne { .. }
+            | Instruction::StoreInt8 { .. }
+            | Instruction::StoreInt16 { .. }
+            | Instruction::StoreInt32 { .. }
+            | Instruction::StoreFloat { .. }
+            | Instruction::StoreDouble { .. }
+            | Instruction::StoreNan { .. }
+            | Instruction::StorePositiveInfinity { .. }
+            | Instruction::StoreNegativeInfinity { .. }
+            | Instruction::StoreNull { .. }
+            | Instruction::StoreTrue { .. }
+            | Instruction::StoreFalse { .. }
+            | Instruction::StoreUndefined { .. }
+    )
+}
+
 /// The byte offset of `register` from the frame's first register. Registers are checked against
 /// the code block's register count in [`leaders`], which also bounds the count.
 fn register_offset(register: u32) -> i32 {
@@ -443,7 +465,10 @@ fn leaders(code_block: &CodeBlock) -> Result<(Vec<u32>, Profile), String> {
             }
         }
         all_targets.extend(targets.iter().copied());
-        if ends_block {
+        // The next instruction starts a block after a branch or a step, and after an inline
+        // instruction that may take its slow path, so that after the slow path compiled code
+        // goes on there rather than returning to the interpreter.
+        if ends_block || has_slow_path(&instruction) {
             leaders.extend(targets);
             leaders.insert(next as u32);
         }

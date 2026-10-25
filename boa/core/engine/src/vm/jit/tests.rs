@@ -699,3 +699,18 @@ fn compile_limits_hold_and_code_is_given_back() {
     assert!(after.live_code_bytes < before.live_code_bytes);
     assert_eq!(after.code_bytes, before.code_bytes);
 }
+
+/// After the slow path of an inline instruction (here `+` on strings), compiled code goes on
+/// rather than returning to the interpreter at every turn of the loop.
+#[test]
+fn slow_paths_stay_in_compiled_code() {
+    let mut context = fresh(Mode::Eager);
+    let value = context
+        .eval(Source::from_bytes(
+            "function f(n) { let s = ''; for (let i = 0; i < n; i++) s = s + 'x'; return s.length } f(1000)",
+        ))
+        .expect("runs");
+    assert_eq!(value.as_number(), Some(1000.0));
+    let stats = context.jit_stats();
+    assert!(stats.entries < 50, "{stats:?}");
+}
