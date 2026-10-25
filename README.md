@@ -134,6 +134,13 @@ Node's and the web's APIs and no Node underneath.
   `fs.read`, `fs.write`, `worker`, and Verve's `net`; `child`, `addon` and `wasi` are always
   false). `Runtime::add_trusted_certificates` trusts PEM certificates besides the system's, as
   Node's `NODE_EXTRA_CA_CERTS` does. The reserved `child_process` bit does not enable execution.
+- `Runtime::set_proxy_env(Some(ProxyEnv))` is Node 24's `NODE_USE_ENV_PROXY`: `fetch`,
+  `WebSocket` and the `http`/`https` global agents (and an `Agent` with `proxyEnv`) go through
+  `HTTP_PROXY`/`HTTPS_PROXY` — absolute-URI requests for `http:`, a `CONNECT` tunnel with TLS to
+  the real host for `https:`, `ws:` and `wss:` — except for the hosts `NO_PROXY` lists. The
+  target is never resolved locally; permissions are checked against it, and the configured proxy
+  needs no rule. HTTP proxies only: `https://` and `socks5://` ones fail the request
+  (`ERR_PROXY_INVALID_CONFIG`) rather than going direct. `src/network/proxy.rs` has the rules.
 - `Runtime::set_waker` lets a host sleep until the network or a worker has something for the
   realm, instead of being asked (by `next_due`) to look every millisecond while a socket is
   open.
@@ -202,7 +209,8 @@ Permissions are on unless `-A`: nothing may be read, written, connected to or st
 flag. The entry file itself may be read (not its folder); a `-e` script needs no grant. Flags
 are Deno's with Node's spellings beside them: `--allow-read[=a,b]` / `--allow-fs-read=<path>`,
 `--allow-write[=a,b]` / `--allow-fs-write=<path>`, `--allow-net[=host[:port],…]`,
-`--allow-worker`, `-A`; `--permission` is accepted and changes nothing. Node's
+`--allow-worker`, `-A`; `--permission` is accepted and changes nothing. `--use-env-proxy` or
+`NODE_USE_ENV_PROXY=1` routes requests through the environment's proxy, as Node 24's do. Node's
 `--disable-proto=throw|delete`, `--stack-size=<KiB>` (the script thread's stack, at least
 4 MiB), `--no-warnings`, `--experimental-vm-modules`, `--no-addons` and
 `--max-old-space-size` (ignored: bound memory with the OS) are accepted, so a Node command line

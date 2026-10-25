@@ -209,7 +209,11 @@ pub(crate) fn connect(this: &JsValue, args: &[JsValue], cx: &mut Context) -> JsR
         put(this, "__tlsIdentityHost", js_text(&config.host), cx)?;
         super::send(cx, Command::TlsClient(id, config));
     }
-    super::send(cx, Command::Connect(id, host, port, family));
+    let options = arg(args, 0);
+    match super::proxy::via_of(&options, cx)? {
+        Some(via) => super::send(cx, Command::ConnectVia(id, host, port, via)),
+        None => super::send(cx, Command::Connect(id, host, port, family)),
+    }
     let timeout = get(this, "timeout", cx)?.as_number().unwrap_or(0.) as u64;
     if timeout != 0 {
         super::send(cx, Command::Timeout(id, timeout));
@@ -643,6 +647,12 @@ pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context)
         | Event::DatagramSent(..)
         | Event::DatagramConnected(..)
         | Event::DatagramBuffers(..) => {}
+        Event::TunnelRefused(status, message) => {
+            // Node's `ERR_PROXY_TUNNEL`, with the proxy's status to tell a refusal by.
+            let error = coded_error_value(cx, &message, "ERR_PROXY_TUNNEL");
+            put(&error, "statusCode", status, cx)?;
+            invoke(&this, "destroy", &[error], cx)?;
+        }
         Event::Error(code, message) => {
             let error = coded_error_value(cx, &format!("{code}: {message}"), &code);
             if get(&this, "_readableState", cx)?.is_object() {
