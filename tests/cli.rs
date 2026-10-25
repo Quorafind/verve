@@ -676,3 +676,51 @@ fn no_warnings_and_the_flags_with_nothing_to_change() {
     assert_eq!((accepted.code, accepted.stdout.as_str()), (0, "fine\n"));
     assert_eq!(eval("0", &["--allow-child-process"]).code, 9);
 }
+
+#[test]
+fn a_confined_process_is_refused_programs_as_node_refuses_them() {
+    // Under the permission model the refusal is the model's, thrown at once.
+    let confined = eval(
+        "for (const call of [() => require('child_process').spawn('x'), \
+           () => require('child_process').execSync('x'), \
+           () => require('child_process').spawnSync('x')]) { \
+           try { call(); console.log('started'); } \
+           catch (e) { console.log(e.code, e.permission); } }",
+        &["--permission"],
+    );
+    assert_eq!(
+        confined.stdout,
+        "ERR_ACCESS_DENIED ChildProcess\n".repeat(3),
+        "{}",
+        confined.stderr
+    );
+    // Unconfined, there are still no programs to start: Verve has none.
+    let open = eval(
+        "try { require('child_process').execSync('x'); } catch (e) { console.log(e.code); }",
+        &["-A"],
+    );
+    assert_eq!(open.stdout, "ENOSYS\n", "{}", open.stderr);
+}
+
+#[cfg(windows)]
+#[test]
+fn process_env_finds_a_name_whatever_its_case_on_windows() {
+    let mut command = command(
+        &[
+            "-A",
+            "-e",
+            "process.env.Fresh = 1; \
+             console.log(process.env.HTTPS_PROXY, process.env.https_proxy, 'HTTPS_PROXY' in process.env, \
+             Object.keys(process.env).includes('https_proxy'), process.env.FRESH, typeof process.env.fresh)",
+        ],
+        &std::env::temp_dir(),
+    );
+    command.env("https_proxy", "http://127.0.0.1:1");
+    let ran = wait(command.spawn().unwrap(), Instant::now());
+    assert_eq!(
+        ran.stdout,
+        "http://127.0.0.1:1 http://127.0.0.1:1 true true 1 string\n",
+        "{}",
+        ran.stderr
+    );
+}

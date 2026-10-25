@@ -415,15 +415,15 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
     let exec_argv = JsArray::new(context)?;
     process.set(js_string!("execArgv"), exec_argv, false, context)?;
 
-    let env = object(context);
-    for (key, value) in std::env::vars_os() {
-        env.set(
-            JsString::from(key.to_string_lossy().as_ref()),
-            js_text(&value.to_string_lossy()),
-            false,
-            context,
-        )?;
-    }
+    let vars: Vec<(String, String)> = std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    let env = env_object(context, &vars)?;
     process.set(js_string!("env"), env, false, context)?;
 
     let versions = object(context);
@@ -582,10 +582,7 @@ pub(crate) fn become_process(context: &mut Context, setup: Setup) -> JsResult<()
     process.set(js_string!("execArgv"), exec_argv, false, context)?;
     process.set(js_string!("title"), js_text("verve"), false, context)?;
     process.delete_property_or_throw(js_string!("type"), context)?;
-    let env = object(context);
-    for (key, value) in &setup.env {
-        env.set(JsString::from(key.as_str()), js_text(value), false, context)?;
-    }
+    let env = env_object(context, &setup.env)?;
     process.set(js_string!("env"), env, false, context)?;
     if let Some(versions) = process.get(js_string!("versions"), context)?.as_object() {
         for key in ["electron", "chrome"] {
@@ -990,3 +987,57 @@ pub(crate) fn unhandled_rejection(context: &mut Context, reason: JsValue) {
     };
     uncaught(context, &error);
 }
+
+/// `process.env` holding `vars`. On Windows a name is found whatever its case,
+/// as Windows and Node's `process.env` find it — `Path` is `PATH`, and a proxy
+/// variable set as `https_proxy` answers `HTTPS_PROXY` — while the names list
+/// as they were given. A value set is kept as a string, as Node keeps it.
+pub(crate) fn env_object(context: &mut Context, vars: &[(String, String)]) -> JsResult<JsObject> {
+    let target = object(context);
+    for (key, value) in vars {
+        target.set(JsString::from(key.as_str()), js_text(value), false, context)?;
+    }
+    if !cfg!(windows) {
+        return Ok(target);
+    }
+    let wrap = context.eval(boa_engine::Source::from_bytes(ENV_PROXY))?;
+    let env = crate::call(context, &wrap, &JsValue::undefined(), &[target.into()])?;
+    env.as_object()
+        .ok_or_else(|| crate::native::type_error("process.env is not an object"))
+}
+
+/// What makes `process.env` case-insensitive: a proxy over the object holding the variables.
+const ENV_PROXY: &str = r#"(target) => {
+  const find = (key) => {
+    const upper = key.toUpperCase();
+    return Object.keys(target).find((name) => name.toUpperCase() === upper);
+  };
+  const real = (key) => (typeof key === 'string' ? find(key) : key);
+  return new Proxy(target, {
+    get(t, key, receiver) {
+      const name = real(key);
+      return name === undefined ? undefined : Reflect.get(t, name, receiver);
+    },
+    set(t, key, value) {
+      if (typeof key !== 'string') return Reflect.set(t, key, value);
+      t[find(key) ?? key] = String(value);
+      return true;
+    },
+    has(t, key) {
+      return real(key) !== undefined;
+    },
+    deleteProperty(t, key) {
+      const name = real(key);
+      if (name !== undefined) delete t[name];
+      return true;
+    },
+    getOwnPropertyDescriptor(t, key) {
+      const name = real(key);
+      return name === undefined ? undefined : Reflect.getOwnPropertyDescriptor(t, name);
+    },
+    defineProperty(t, key, descriptor) {
+      const name = typeof key === 'string' ? (find(key) ?? key) : key;
+      return Reflect.defineProperty(t, name, descriptor);
+    },
+  });
+}"#;

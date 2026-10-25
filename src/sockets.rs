@@ -1516,6 +1516,7 @@ fn child_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResult
 /// `spawn`, `exec`, `execFile`, `fork`: a `ChildProcess` that never started — its callback hears
 /// why, and it emits `error` and `close`.
 fn refused(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    crate::permission::child_process(context)?;
     let error = spawn_error(context, "spawn", &arg(args, 0));
     // `exec`'s callback is `(error, stdout, stderr)`.
     call_later(
@@ -1564,6 +1565,7 @@ pub(crate) fn child_process_module(context: &mut Context, _: &str) -> JsResult<J
         &module,
         &[
             ("execSync", 2, |_, args, cx| {
+                crate::permission::child_process(cx)?;
                 Err(boa_engine::JsError::from_opaque(spawn_error(
                     cx,
                     "spawnSync",
@@ -1571,6 +1573,7 @@ pub(crate) fn child_process_module(context: &mut Context, _: &str) -> JsResult<J
                 )))
             }),
             ("execFileSync", 3, |_, args, cx| {
+                crate::permission::child_process(cx)?;
                 Err(boa_engine::JsError::from_opaque(spawn_error(
                     cx,
                     "spawnSync",
@@ -1578,6 +1581,7 @@ pub(crate) fn child_process_module(context: &mut Context, _: &str) -> JsResult<J
                 )))
             }),
             ("spawnSync", 3, |_, args, cx| {
+                crate::permission::child_process(cx)?;
                 // As Node answers a program that could not start: no output, no status, the error.
                 let result = object(cx);
                 let error = spawn_error(cx, "spawnSync", &arg(args, 0));

@@ -341,6 +341,19 @@ fn check(context: &mut Context, path: &Path, writing: bool, follow: bool) -> JsR
     Err(denied(context, permission, &shown.to_string_lossy()))
 }
 
+/// Whether the realm may start a program. Verve starts none, but under the
+/// permission model — a realm confined to some files — the refusal is the
+/// model's, `ERR_ACCESS_DENIED` for `ChildProcess`, thrown as Node throws it;
+/// outside it the caller says programs are not available at all.
+pub(crate) fn child_process(context: &mut Context) -> JsResult<()> {
+    let grants = grants(context);
+    let confined = !grants.reads_all() || !grants.writes_all();
+    if confined && !crate::shared(context).network.borrow().permissions.child_process {
+        return Err(denied(context, "ChildProcess", ""));
+    }
+    Ok(())
+}
+
 /// Whether the realm may start a worker; Node's refusal when not.
 pub(crate) fn worker(context: &mut Context) -> JsResult<()> {
     if crate::shared(context).network.borrow().permissions.worker {
