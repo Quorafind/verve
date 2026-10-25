@@ -644,7 +644,7 @@ impl Vm {
         // A new frame on top: its code may be compiled, or getting hot.
         #[cfg(feature = "jit")]
         {
-            self.jit.pending = true;
+            self.jit.pending = self.jit.options.enabled;
         }
     }
 
@@ -669,7 +669,7 @@ impl Vm {
         // The caller is back on top, after its call: compiled code can go on there.
         #[cfg(feature = "jit")]
         {
-            self.jit.pending = true;
+            self.jit.pending = self.jit.options.enabled;
         }
         self.frames.pop()
     }
@@ -697,7 +697,7 @@ impl Vm {
         // Compiled code can go on at the handler.
         #[cfg(feature = "jit")]
         {
-            self.jit.pending = true;
+            self.jit.pending = self.jit.options.enabled;
         }
 
         true
@@ -1038,29 +1038,19 @@ impl Context {
     }
 
     fn run_loop(&mut self) -> CompletionRecord {
-        loop {
-            // The frame on top changed, or got hotter: run its compiled code if it has some.
-            #[cfg(feature = "jit")]
-            if self.vm.jit.pending {
-                self.vm.jit.pending = false;
-                match jit::try_enter(self) {
-                    None => {}
-                    // Compiled code returned at a frame change: look again at the new top.
-                    Some(ControlFlow::Continue(())) => continue,
-                    Some(ControlFlow::Break(value)) => return value,
-                }
-            }
+        #[cfg(feature = "jit")]
+        if let Some(value) = self.jit_poll() {
+            return value;
+        }
 
-            let Some(byte) = self
-                .vm
-                .frame()
-                .code_block
-                .bytecode
-                .bytes
-                .get(self.vm.frame().pc as usize)
-            else {
-                break;
-            };
+        while let Some(byte) = self
+            .vm
+            .frame()
+            .code_block
+            .bytecode
+            .bytes
+            .get(self.vm.frame().pc as usize)
+        {
             let opcode = Opcode::decode(*byte);
 
             match self.execute_one(
@@ -1072,12 +1062,36 @@ impl Context {
                 },
                 opcode,
             ) {
-                ControlFlow::Continue(()) => {}
+                ControlFlow::Continue(()) => {
+                    #[cfg(feature = "jit")]
+                    if self.vm.jit.pending
+                        && let Some(value) = self.jit_poll()
+                    {
+                        return value;
+                    }
+                }
                 ControlFlow::Break(value) => return value,
             }
         }
 
         CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
+    }
+
+    /// The frame on top changed, or got hotter: runs compiled code while there is some to run
+    /// for the frame on top. `Some` is the run's end.
+    #[cfg(feature = "jit")]
+    #[inline(never)]
+    fn jit_poll(&mut self) -> Option<CompletionRecord> {
+        while self.vm.jit.pending {
+            self.vm.jit.pending = false;
+            match jit::try_enter(self) {
+                // Compiled code returned at a frame change: look again at the new top.
+                Some(ControlFlow::Continue(())) => {}
+                Some(ControlFlow::Break(value)) => return Some(value),
+                None => return None,
+            }
+        }
+        None
     }
 
     /// Throws, uncatchably, when the host has asked for what is running to stop — and clears the

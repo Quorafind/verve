@@ -13,6 +13,8 @@ impl IncrementLoopIteration {
     pub(crate) fn operation((): (), context: &mut Context) -> JsResult<()> {
         context.check_interrupt()?;
         let max = context.vm.runtime_limits.loop_iteration_limit();
+        #[cfg(feature = "jit")]
+        let jit = context.vm.jit.options.enabled;
         let frame = context.vm.frame_mut();
         let previous_iteration_count = frame.loop_iteration_count;
 
@@ -24,7 +26,7 @@ impl IncrementLoopIteration {
 
         // The loop makes its code hotter, or can go on in compiled code.
         #[cfg(feature = "jit")]
-        if frame.code_block.jit.wants_entry() {
+        if jit && frame.code_block.jit.wants_entry() {
             context.vm.jit.pending = true;
         }
         Ok(())

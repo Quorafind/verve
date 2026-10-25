@@ -230,20 +230,36 @@ fn kind(instruction: &Instruction) -> Kind {
 /// What a code block is made of, to judge whether compiling it pays.
 #[derive(Debug, Default)]
 struct Profile {
-    instructions: usize,
-    inline: usize,
-    /// Calls that may push a frame, which leave compiled code and come back.
-    calls: usize,
-    loops: bool,
+    /// Each instruction's `pc`, whether it is done inline, and whether it is a call that may
+    /// push a frame (and so leave compiled code and come back).
+    instructions: Vec<(u32, bool, bool)>,
+    /// Loops, as the spans from a backward branch's target to the branch.
+    loops: Vec<(u32, u32)>,
 }
 
 impl Profile {
-    /// Every entry into and exit from compiled code costs about as much as a few instructions
-    /// done inline save, and a call to a JavaScript function is an exit and an entry. Code with
-    /// a loop runs its inline instructions many times for an entry, as long as it does not
-    /// call out at every turn; straight-line code must be mostly inline.
+    /// Inline instructions a loop must do per call in it for compiled code to pay: an exit and
+    /// an entry (a call) cost about what eight instructions done inline save.
+    const INLINE_PER_CALL: usize = 8;
+
+    /// Whether compiling pays: if the loops do enough inline work for the calls in them, or if
+    /// at least half of straight-line code is inline.
     fn profitable(&self) -> bool {
-        (self.loops && self.inline >= 4 * self.calls) || self.inline * 2 >= self.instructions
+        let in_loop = |pc: u32| {
+            self.loops
+                .iter()
+                .any(|&(start, end)| start <= pc && pc <= end)
+        };
+        let (mut loop_inline, mut loop_calls, mut inline) = (0, 0, 0);
+        for &(pc, is_inline, is_call) in &self.instructions {
+            inline += usize::from(is_inline);
+            if in_loop(pc) {
+                loop_inline += usize::from(is_inline);
+                loop_calls += usize::from(is_call);
+            }
+        }
+        (loop_inline > 0 && loop_inline >= Self::INLINE_PER_CALL * loop_calls)
+            || inline * 2 >= self.instructions.len()
     }
 }
 
@@ -268,39 +284,34 @@ fn leaders(code_block: &CodeBlock) -> Result<(Vec<u32>, Profile), String> {
         }
         let (instruction, next) = bytecode.next_instruction(pc);
         starts.insert(pc as u32);
-        profile.instructions += 1;
-        match opcode {
-            Opcode::IncrementLoopIteration => {
-                profile.loops = true;
-                profile.inline += 1;
-            }
+        let is_call = matches!(
+            opcode,
             Opcode::Call
-            | Opcode::CallSpread
-            | Opcode::CallEval
-            | Opcode::CallEvalSpread
-            | Opcode::New
-            | Opcode::NewSpread
-            | Opcode::SuperCall
-            | Opcode::SuperCallSpread
-            | Opcode::SuperCallDerived => profile.calls += 1,
-            _ => {}
+                | Opcode::CallSpread
+                | Opcode::CallEval
+                | Opcode::CallEvalSpread
+                | Opcode::New
+                | Opcode::NewSpread
+                | Opcode::SuperCall
+                | Opcode::SuperCallSpread
+                | Opcode::SuperCallDerived
+        );
+        let kind = kind(&instruction);
+        let is_inline = opcode == Opcode::IncrementLoopIteration || !matches!(kind, Kind::Step(_));
+        profile.instructions.push((pc as u32, is_inline, is_call));
+        let (ends_block, targets) = match kind {
+            Kind::Inline => (false, Vec::new()),
+            Kind::Branch(targets) | Kind::Step(targets) => (true, targets),
+            Kind::Jump(target) => (true, vec![target]),
+        };
+        for &target in &targets {
+            if target <= pc as u32 {
+                profile.loops.push((target, pc as u32));
+            }
         }
-        match kind(&instruction) {
-            Kind::Inline => profile.inline += 1,
-            Kind::Branch(targets) => {
-                profile.inline += 1;
-                leaders.extend(targets);
-                leaders.insert(next as u32);
-            }
-            Kind::Step(targets) => {
-                leaders.extend(targets);
-                leaders.insert(next as u32);
-            }
-            Kind::Jump(target) => {
-                profile.inline += 1;
-                leaders.insert(target);
-                leaders.insert(next as u32);
-            }
+        if ends_block {
+            leaders.extend(targets);
+            leaders.insert(next as u32);
         }
         pc = next;
     }
