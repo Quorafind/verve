@@ -9,7 +9,8 @@
 //!
 //! Each instruction is either done inline — with a fast path for the common types and, when the
 //! types are not those, a call to [`jit_step`] to run it as the interpreter does — or done by
-//! [`jit_step`] alone. After [`jit_step`] compiled code goes on at the `pc` it answers: the next
+//! [`jit_step`] alone. "Inline" includes a call to a fast helper ([`helpers`]) that does the
+//! instruction's common case and otherwise leaves it to [`jit_step`]. After [`jit_step`] compiled code goes on at the `pc` it answers: the next
 //! instruction usually, a branch target, a handler; any other leader through `dispatch`; and if
 //! there is none, or the frame changed, it returns to the interpreter.
 //!

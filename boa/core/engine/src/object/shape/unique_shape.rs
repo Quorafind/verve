@@ -248,6 +248,7 @@ pub(crate) struct WeakUniqueShape {
 
 impl WeakUniqueShape {
     /// Whether this is a weak reference to `shape`.
+    #[cfg(feature = "jit")]
     #[inline]
     pub(crate) fn points_to(&self, shape: &UniqueShape) -> bool {
         self.inner.points_to(&shape.inner)

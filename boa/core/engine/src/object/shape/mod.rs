@@ -260,6 +260,7 @@ impl WeakShape {
     }
 
     /// Whether this is a weak reference to `shape`, which is alive; changes no reference count.
+    #[cfg(feature = "jit")]
     #[inline]
     #[must_use]
     pub(crate) fn points_to(&self, shape: &Shape) -> bool {

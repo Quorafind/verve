@@ -9,14 +9,16 @@
 //! - leaving compiled code for the interpreter, at any instruction, is just returning — there is
 //!   nothing to deoptimise;
 //! - calls, returns, exceptions, the shadow stack, generators and the garbage collector all work
-//!   as they do for the interpreter, because compiled code never makes a frame of its own: a call
-//!   returns to the interpreter's loop, which pushes the callee and enters *its* compiled code,
-//!   and re-enters the caller's when the callee returns. Native recursion does not grow with
-//!   JavaScript recursion.
+//!   as they do for the interpreter, because compiled code never makes a frame of its own: the
+//!   interpreter's handler pushes the callee's frame, and if the callee is compiled its code
+//!   runs nested under the caller's helper (to a bounded depth), else the caller returns to
+//!   the interpreter's loop, which re-enters it when the callee has returned.
 //!
 //! What compiled code does inline is where the interpreter spends its time on plain code:
-//! moving and storing registers, `int32` and `f64` arithmetic and comparisons, and branches,
-//! with no dispatch between instructions. See `docs/jit.md` in Verve for the plan beyond this.
+//! moving and storing registers, `int32` and `f64` arithmetic and comparisons, branches,
+//! property accesses through per-access caches, and elements of dense arrays, with no dispatch
+//! between instructions; fast helpers ([`helpers`]) do the common case of other frequent
+//! instructions. See `docs/jit.md` in Verve for the design and the plan.
 //!
 //! The JIT is off unless the `jit` feature is built, and then can be switched off at run time
 //! with [`JitOptions::enabled`] (or `BOA_JIT=0` in the environment).

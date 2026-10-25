@@ -6,10 +6,12 @@
 //! frame's `pc`.
 //!
 //! Anything compiled code does not do inline it hands to [`jit_step`], which runs that one
-//! instruction with the interpreter's own handler. If the instruction leaves the frame — a call
-//! pushed a callee, a return or a throw popped it — compiled code returns to the interpreter's
-//! loop, which runs the new frame (compiled or not) and re-enters this code when the frame is
-//! back on top.
+//! instruction with the interpreter's own handler. If the instruction pushed a callee whose
+//! code is compiled, [`jit_step`] runs it nested ([`run_callees`]) and carries on when this
+//! frame is back on top. Otherwise, if the instruction left the frame — a call pushed an
+//! interpreted callee, a return, a yield or a throw popped it — compiled code returns to the
+//! interpreter's loop, which runs the new frame and re-enters this code when the frame is back
+//! on top.
 //!
 //! No helper lets a panic unwind into compiled code (there is no unwind information for it):
 //! each catches it, compiled code returns, and [`execute`] resumes the panic.
