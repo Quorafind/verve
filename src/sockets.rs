@@ -1,17 +1,6 @@
-//! Node's modules that reach other machines or other programs — `net`, `tls`, `dns`, `http`,
-//! `https`, `http2`, `dgram`, `cluster`, `child_process` — loadable, with their classes and
-//! constants, and refusing to do what they are for.
-//!
-//! A plugin here asks the network through Obsidian's `requestUrl` (the host's), and starts no
-//! programs. So a socket that connects, a server that listens, a request sent with Node's own
-//! client, a lookup of a name other than `localhost`, a program started — each fails as Node's
-//! does when the system says no: the callback hears the error, and the object answered emits
-//! `error` (when someone listens, so a library that forgot to is not thrown at) and `close`, a
-//! microtask later. What only describes — `net.isIP`, `http.STATUS_CODES`, `tls.DEFAULT_*`,
-//! header validation — works.
-//!
-//! The socket classes are `EventEmitter`s; Node's are `stream.Duplex`es, which the `stream`
-//! module's classes could be put under here.
+//! Node's network and process modules. Networking is default-denied and may be granted by
+//! the embedder; the native implementation lives in `network`. Process execution, cluster,
+//! IPC sockets and HTTP/2 remain refused. The refusal paths here retain their original errors.
 
 use boa_engine::{
     Context, JsObject, JsResult, JsString, JsValue, js_string,
@@ -22,6 +11,42 @@ use crate::native::{
     ClassSpec, arg, array, class, closure, coded_error_value, exports, function, get, invoke,
     js_text, object,
 };
+
+pub(crate) fn denied_socket(
+    this: &JsValue,
+    name: &str,
+    args: &[JsValue],
+    cx: &mut Context,
+) -> JsResult<JsValue> {
+    match SOCKET_METHODS.iter().find(|(key, _, _)| *key == name) {
+        Some((_, _, f)) => f(this, args, cx),
+        None => Ok(this.clone()),
+    }
+}
+pub(crate) fn denied_server(
+    this: &JsValue,
+    name: &str,
+    args: &[JsValue],
+    cx: &mut Context,
+) -> JsResult<JsValue> {
+    match SERVER_METHODS.iter().find(|(key, _, _)| *key == name) {
+        Some((_, _, f)) => f(this, args, cx),
+        None => Ok(this.clone()),
+    }
+}
+pub(crate) fn denied_dns(
+    args: &[JsValue],
+    kind: &str,
+    promise: bool,
+    cx: &mut Context,
+) -> JsResult<JsValue> {
+    match (kind, promise) {
+        ("lookup", false) => lookup(&JsValue::undefined(), args, cx),
+        ("lookup", true) => lookup_promise(&JsValue::undefined(), args, cx),
+        (_, false) => resolve_failing(&JsValue::undefined(), args, cx),
+        (_, true) => resolve_failing_promise(&JsValue::undefined(), args, cx),
+    }
+}
 
 const NO_NETWORK: &str =
     "Verve does not let plugins open network connections with Node's modules: use requestUrl";
@@ -392,6 +417,7 @@ pub(crate) fn net_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
         },
     )?;
     module.set(js_string!("SocketAddress"), address, false, context)?;
+    crate::network::tcp::install(&module, context)?;
     Ok(module.into())
 }
 
@@ -475,6 +501,7 @@ pub(crate) fn tls_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     }
     module.set(js_string!("CLIENT_RENEG_LIMIT"), 3, false, context)?;
     module.set(js_string!("CLIENT_RENEG_WINDOW"), 600, false, context)?;
+    crate::network::tls::install(&module, context)?;
     Ok(module.into())
 }
 
@@ -690,6 +717,7 @@ pub(crate) fn dns_promises_module(context: &mut Context, _: &str) -> JsResult<Js
     let resolver = resolver_class(context, true)?;
     module.set(js_string!("Resolver"), resolver, false, context)?;
     dns_constants(context, &module)?;
+    crate::network::dns::install(&module, true, context)?;
     Ok(module.into())
 }
 
@@ -707,10 +735,22 @@ pub(crate) fn dns_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     dns_constants(context, &module)?;
     let promises = crate::modules::node_module(context, "dns/promises")?;
     module.set(js_string!("promises"), promises, false, context)?;
+    crate::network::dns::install(&module, false, context)?;
     Ok(module.into())
 }
 
 // ─── http, https ────────────────────────────────────────────────────────────────────────────
+
+pub(crate) fn denied_http(cx: &mut Context) -> JsResult<JsValue> {
+    request(&JsValue::undefined(), &[], cx)
+}
+pub(crate) fn status_text(code: u16) -> &'static str {
+    STATUS_CODES
+        .iter()
+        .find(|(c, _)| *c == code)
+        .map(|(_, s)| *s)
+        .unwrap_or("unknown")
+}
 
 const STATUS_CODES: &[(u16, &str)] = &[
     (100, "Continue"),
@@ -967,7 +1007,11 @@ fn request(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValu
     Ok(request.into())
 }
 
-fn validate_header_name(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn validate_header_name(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let name = crate::native::text_of(&arg(args, 0), context)?;
     let token = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
     if name.is_empty() || !name.chars().all(token) {
@@ -980,7 +1024,7 @@ fn validate_header_name(_: &JsValue, args: &[JsValue], context: &mut Context) ->
     Ok(JsValue::undefined())
 }
 
-fn validate_header_value(
+pub(crate) fn validate_header_value(
     _: &JsValue,
     args: &[JsValue],
     context: &mut Context,
@@ -1109,6 +1153,7 @@ fn http_like(context: &mut Context, https: bool) -> JsResult<JsValue> {
     }
     module.set(js_string!("STATUS_CODES"), codes, false, context)?;
     module.set(js_string!("maxHeaderSize"), 16384, false, context)?;
+    crate::network::http::install(&module, https, context)?;
     Ok(module.into())
 }
 
@@ -1355,6 +1400,7 @@ pub(crate) fn dgram_module(context: &mut Context, _: &str) -> JsResult<JsValue> 
         Ok(socket.into())
     });
     module.set(js_string!("createSocket"), create, false, context)?;
+    crate::network::udp::install(&module, context)?;
     Ok(module.into())
 }
 
