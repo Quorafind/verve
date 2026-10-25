@@ -319,6 +319,19 @@ pub(crate) fn write_here(context: &mut Context, path: impl AsRef<Path>) -> JsRes
 }
 
 fn check(context: &mut Context, path: &Path, writing: bool, follow: bool) -> JsResult<()> {
+    // The code cache's directory and secret are the runtime's: what JavaScript could write there
+    // would run as the code of the modules it loads, whatever else it is granted.
+    if crate::code_cache::is_on(context)
+        && crate::code_cache::protects(context, &real(path, follow))
+    {
+        let permission = if writing {
+            "FileSystemWrite"
+        } else {
+            "FileSystemRead"
+        };
+        let shown = unverbatim(lexical(&absolute(path)));
+        return Err(denied(context, permission, &shown.to_string_lossy()));
+    }
     let grants = grants(context);
     if (writing && grants.writes_all()) || (!writing && grants.reads_all()) {
         return Ok(());
@@ -348,7 +361,13 @@ fn check(context: &mut Context, path: &Path, writing: bool, follow: bool) -> JsR
 pub(crate) fn child_process(context: &mut Context) -> JsResult<()> {
     let grants = grants(context);
     let confined = !grants.reads_all() || !grants.writes_all();
-    if confined && !crate::shared(context).network.borrow().permissions.child_process {
+    if confined
+        && !crate::shared(context)
+            .network
+            .borrow()
+            .permissions
+            .child_process
+    {
         return Err(denied(context, "ChildProcess", ""));
     }
     Ok(())

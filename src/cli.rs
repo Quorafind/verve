@@ -441,9 +441,9 @@ fn script(options: Options, argv0: String, embedder: Setup) -> i32 {
             .map(PathBuf::from)
     });
     if let Some(dir) = code_cache
-        && let Err(error) = runtime.set_code_cache_dir(Some(&dir))
+        && let Err(error) = runtime.set_code_cache_dir_with_user_secret(&dir)
     {
-        eprintln!("verve: code cache {}: {error}", dir.display());
+        eprintln!("verve: code cache {} not used: {error}", dir.display());
     }
     runtime.set_permissions(permissions.clone());
     runtime.set_worker_permissions(permissions);

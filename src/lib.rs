@@ -75,6 +75,19 @@ mod worker;
 mod zlib;
 
 pub use code_cache::CodeCacheStats;
+
+/// The user's own code cache secret: 32 random bytes in a file only they can read, outside any
+/// cache directory (`%LOCALAPPDATA%\Verve\code-cache-secret` on Windows,
+/// `$XDG_CONFIG_HOME/verve/code-cache-secret` or `~/.config/verve/code-cache-secret`
+/// elsewhere), made the first time.
+///
+/// # Errors
+///
+/// If there is no such place, or the file or its folder is not private to the user, or the file
+/// is not a secret.
+pub fn code_cache_user_secret() -> std::io::Result<[u8; 32]> {
+    code_cache::user_secret().map(|(secret, _)| secret)
+}
 pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
 
@@ -443,7 +456,10 @@ impl Runtime {
         #[cfg(feature = "code-cache-env")]
         let code_cache = std::env::var_os("VERVE_CODE_CACHE")
             .filter(|dir| !dir.is_empty())
-            .and_then(|dir| code_cache::CodeCache::open(std::path::Path::new(&dir), None).ok())
+            .and_then(|dir| {
+                let (secret, file) = code_cache::user_secret().ok()?;
+                code_cache::CodeCache::open(std::path::Path::new(&dir), secret, vec![file]).ok()
+            })
             .map(Rc::new);
         #[cfg(not(feature = "code-cache-env"))]
         let code_cache = None;
@@ -497,44 +513,62 @@ impl Runtime {
     }
 
     /// Keeps the compiled code of the ES modules this runtime loads in `dir`, and reads it back
-    /// in later runs instead of parsing and compiling the same source again; `None` stops. Off
-    /// by default. Entries are signed with a secret kept in `<dir>/key`, made at random the
-    /// first time, and only an authentic entry for the very source text and build is read.
+    /// in later runs instead of parsing and compiling the same source again. Off by default.
+    /// Entries are signed with `secret`, and only an authentic entry for the very source text,
+    /// build and global scope is read. `dir` is made private to the user if it is not there
+    /// (owner-only on Windows, `0700` elsewhere), and refused on Unix unless the user owns it and
+    /// no one else can write it; JavaScript this runtime runs cannot read or write it.
     ///
-    /// Whoever can read or write `dir` can make every module this runtime loads run code of
-    /// their choosing: it must be private to the user the runtime runs as, and out of reach of
-    /// any code that is trusted less than the modules loaded here (see `docs/startup.md`). Use
-    /// [`Runtime::set_code_cache_dir_with_secret`] to keep the secret elsewhere.
-    ///
-    /// # Errors
-    ///
-    /// If `dir` cannot be made, or its secret cannot be read or made.
-    pub fn set_code_cache_dir(&mut self, dir: Option<&std::path::Path>) -> std::io::Result<()> {
-        let cache = dir
-            .map(|dir| code_cache::CodeCache::open(dir, None))
-            .transpose()?;
-        *shared(&self.context).code_cache.borrow_mut() = cache.map(Rc::new);
-        Ok(())
-    }
-
-    /// [`Runtime::set_code_cache_dir`], with entries signed with `secret` rather than with one
-    /// kept in the directory: an embedder that keeps its secret where code it runs cannot read
-    /// it makes entries that code wrote, even in `dir`, fail to be read.
+    /// Whoever holds `secret` can make every module this runtime loads run code of their
+    /// choosing: keep it where code less trusted than those modules cannot read it, never in
+    /// `dir` (see `docs/startup.md`). [`code_cache_user_secret`] is the user's own, which
+    /// `verve run --code-cache` uses.
     ///
     /// # Errors
     ///
-    /// If `dir` cannot be made.
+    /// If `dir` cannot be made or is not private to the user.
     pub fn set_code_cache_dir_with_secret(
         &mut self,
         dir: &std::path::Path,
         secret: [u8; 32],
     ) -> std::io::Result<()> {
-        let cache = code_cache::CodeCache::open(dir, Some(secret))?;
+        self.set_code_cache(dir, secret, Vec::new())
+    }
+
+    fn set_code_cache(
+        &mut self,
+        dir: &std::path::Path,
+        secret: [u8; 32],
+        protected: Vec<PathBuf>,
+    ) -> std::io::Result<()> {
+        let cache = code_cache::CodeCache::open(dir, secret, protected)?;
         *shared(&self.context).code_cache.borrow_mut() = Some(Rc::new(cache));
         Ok(())
     }
 
-    /// What the code cache has done since [`Runtime::set_code_cache_dir`] set it: modules read
+    /// [`Runtime::set_code_cache_dir_with_secret`] with the user's own secret
+    /// ([`code_cache_user_secret`]), which JavaScript this runtime runs cannot read either:
+    /// what `verve run --code-cache` does.
+    ///
+    /// # Errors
+    ///
+    /// If `dir` cannot be made or is not private to the user, or the user's secret cannot be
+    /// read, is not private to them or is not a secret.
+    pub fn set_code_cache_dir_with_user_secret(
+        &mut self,
+        dir: &std::path::Path,
+    ) -> std::io::Result<()> {
+        let (secret, file) = code_cache::user_secret()?;
+        self.set_code_cache(dir, secret, vec![file])
+    }
+
+    /// Stops keeping compiled code; what is compiled but not written yet is written first.
+    pub fn disable_code_cache(&mut self) {
+        *shared(&self.context).code_cache.borrow_mut() = None;
+    }
+
+    /// What the code cache has done since [`Runtime::set_code_cache_dir_with_secret`] set it:
+    /// modules read
     /// back, compiled, refused and kept. `None` without one.
     pub fn code_cache_stats(&self) -> Option<CodeCacheStats> {
         code_cache::stats(&self.context)
