@@ -76,9 +76,14 @@ fn set_by_name(
             .into());
     }
 
-    // Cache the property.
+    // Cache the property. A set of `length` is never cached: on an array it has to run
+    // ArraySetLength (convert, validate, truncate), not overwrite the slot, and an
+    // ordinary object can share an array's shape, so the shape alone can't tell them apart.
     let slot = *context.slot();
-    if succeeded && slot.is_cacheable() {
+    if succeeded
+        && slot.is_cacheable()
+        && !matches!(&name, PropertyKey::String(s) if *s == js_str!("length"))
+    {
         let ic = &context.vm.frame().code_block.ic[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape();
