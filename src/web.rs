@@ -669,14 +669,24 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         .duration_since(web_time::UNIX_EPOCH)
         .map_or(0., |d| d.as_millis() as f64);
     performance.set(js_string!("timeOrigin"), origin, false, context)?;
-    for name in ["mark", "measure", "clearMarks", "clearMeasures"] {
+    // No timeline is kept, so recording an entry records nothing. That
+    // includes Node's `markResourceTiming`, which undici's `fetch` calls as
+    // every response body ends.
+    for name in [
+        "mark",
+        "measure",
+        "clearMarks",
+        "clearMeasures",
+        "clearResourceTimings",
+        "markResourceTiming",
+    ] {
         let f = function(context, name, 1, |_, _, _| Ok(JsValue::undefined()));
         performance.set(JsString::from(name), f, false, context)?;
     }
-    let entries = function(context, "getEntriesByName", 1, |_, _, cx| {
-        Ok(JsArray::new(cx)?.into())
-    });
-    performance.set(js_string!("getEntriesByName"), entries, false, context)?;
+    for name in ["getEntries", "getEntriesByName", "getEntriesByType"] {
+        let entries = function(context, name, 1, |_, _, cx| Ok(JsArray::new(cx)?.into()));
+        performance.set(JsString::from(name), entries, false, context)?;
+    }
     context.register_global_property(
         js_string!("performance"),
         performance,
