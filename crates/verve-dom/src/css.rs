@@ -1763,7 +1763,56 @@ fn own_style(dom: &Dom, styler: &Styler, id: NodeId, inherited: &Style) -> (Styl
             *value = resolve_vars(value, &custom, 0);
         }
     }
+    // A font size is computed to pixels, so what inherits it inherits the size and not `1.5em`
+    // to apply again.
+    let parent_size = inherited
+        .get("font-size")
+        .and_then(|v| length(v, 16.))
+        .unwrap_or(16.);
+    if let Some(size) = style.get("font-size").cloned()
+        && let Some(px) = font_size_px(&size, parent_size)
+    {
+        style.insert("font-size".into(), format_px(px));
+    }
     (style, pointer)
+}
+
+/// A font size in pixels, against the parent's: lengths, percentages, `em`, `rem`, and the
+/// keywords.
+fn font_size_px(value: &str, parent: f32) -> Option<f32> {
+    let value = value.trim();
+    let keyword = match value {
+        "xx-small" => Some(9.),
+        "x-small" => Some(10.),
+        "small" => Some(13.),
+        "medium" => Some(16.),
+        "large" => Some(18.),
+        "x-large" => Some(24.),
+        "xx-large" => Some(32.),
+        "xxx-large" => Some(48.),
+        "smaller" => Some(parent / 1.2),
+        "larger" => Some(parent * 1.2),
+        _ => None,
+    };
+    if keyword.is_some() {
+        return keyword;
+    }
+    if let Some(percent) = value.strip_suffix('%') {
+        return percent.trim().parse::<f32>().ok().map(|p| p / 100. * parent);
+    }
+    if value.ends_with("px") && !value.contains('(') {
+        return None;
+    }
+    length(value, parent)
+}
+
+fn format_px(px: f32) -> String {
+    let rounded = (px * 1000.).round() / 1000.;
+    if rounded.fract() == 0. {
+        format!("{}px", rounded as i64)
+    } else {
+        format!("{rounded}px")
+    }
 }
 
 /// Writes a declaration, opening up the shorthands this engine reads as their longhands, and

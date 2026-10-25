@@ -755,6 +755,85 @@ fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResul
     Ok(())
 }
 
+/// `new FormData(form, submitter)`: Verve's `FormData`, filled from the form's controls as a
+/// submission would send them.
+fn install_form_data(context: &mut Context) -> JsResult<()> {
+    let original = context.global_object().get(js_string!("FormData"), context)?;
+    let Some(original) = original.as_object() else {
+        return Ok(());
+    };
+    let proxy = JsProxyBuilder::new(original)
+        .construct(|_, args, cx| {
+            let target = arg(args, 0).as_object().ok_or_else(|| super::type_error("no FormData"))?;
+            let given = super::list(&arg(args, 1), cx)?;
+            let new_target = arg(args, 2);
+            let form = given.first().and_then(super::node_id);
+            let submitter = given.get(1).and_then(super::node_id);
+            let made = target.construct(&[], new_target.as_object().as_ref(), cx)?;
+            if let Some(form) = form {
+                for (name, value) in form_entries(cx, form, submitter) {
+                    super::call_method(&made.clone().into(), "append", &[text(&name), text(&value)], cx)?;
+                }
+            }
+            Ok(made.into())
+        })
+        .build(context)?;
+    context.register_global_property(js_string!("FormData"), JsObject::from(proxy), Attribute::WRITABLE | Attribute::CONFIGURABLE)?;
+    Ok(())
+}
+
+/// What a form submits: each named, enabled control's value — boxes only when ticked, a
+/// select's chosen options, the submitter when it has a name.
+pub fn form_entries(context: &Context, form: crate::dom::NodeId, submitter: Option<crate::dom::NodeId>) -> Vec<(String, String)> {
+    read_dom(context, |dom| {
+        if dom.get(form).and_then(|n| n.tag()) != Some("form") {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for control in dom.descendants(form) {
+            let Some(node) = dom.get(control) else { continue };
+            let Some(name) = node.attr("name").filter(|n| !n.is_empty()) else { continue };
+            if node.attr("disabled").is_some() {
+                continue;
+            }
+            match node.tag() {
+                Some("input") => {
+                    let kind = super::element::input_type(dom, control);
+                    match kind.as_str() {
+                        "checkbox" | "radio" => {
+                            if node.checked {
+                                out.push((name.to_owned(), node.attr("value").unwrap_or("on").to_owned()));
+                            }
+                        }
+                        "submit" | "image" | "button" | "reset" => {
+                            if submitter == Some(control) {
+                                out.push((name.to_owned(), dom.value(control)));
+                            }
+                        }
+                        "file" => {}
+                        _ => out.push((name.to_owned(), dom.value(control))),
+                    }
+                }
+                Some("button") => {
+                    if submitter == Some(control) {
+                        out.push((name.to_owned(), node.attr("value").unwrap_or("").to_owned()));
+                    }
+                }
+                Some("textarea") => out.push((name.to_owned(), dom.value(control))),
+                Some("select") => {
+                    for option in dom.options(control) {
+                        if super::element::option_selected(dom, option) {
+                            out.push((name.to_owned(), dom.option_value(option)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    })
+}
+
 pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> {
     // `Window`, the window's class: `window instanceof Window`, and `EventTarget`'s methods
     // reached through it as a browser's window reaches them.
@@ -863,6 +942,7 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
     verve::dom_events::handler_accessors(context, &media_proto, &["change"])?;
     install_screen(context)?;
     install_navigator(context, options)?;
+    install_form_data(context)?;
     let _ = node_of;
     let _ = wrap;
     Ok(())

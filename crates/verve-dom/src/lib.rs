@@ -919,26 +919,29 @@ impl Document {
         let (left, entered) = self.state.borrow_mut().dom.set_hovered(path);
         let context = runtime.context();
         let related = |n: Option<NodeId>, cx: &mut Context| n.map_or(JsValue::null(), |n| bind::node::wrap(cx, n));
+        // The pointer's events, then the mouse's, as UI Events orders them: out of the old
+        // element and each element left (innermost first), over the new and each element
+        // entered (outermost first).
         let mut init = Self::pointer_init(pointer, 0);
         if let Some(previous) = previous.filter(|p| self.state.borrow().dom.exists(*p)) {
             let to = related(node, context);
             init.push(("relatedTarget", to));
-            self.fire(runtime, previous, "PointerEvent", "pointerout", &init);
-            self.fire(runtime, previous, "MouseEvent", "mouseout", &init);
-            for id in &left {
-                self.fire(runtime, *id, "PointerEvent", "pointerleave", &init);
-                self.fire(runtime, *id, "MouseEvent", "mouseleave", &init);
+            for (class, out, leave) in [("PointerEvent", "pointerout", "pointerleave"), ("MouseEvent", "mouseout", "mouseleave")] {
+                self.fire(runtime, previous, class, out, &init);
+                for id in &left {
+                    self.fire(runtime, *id, class, leave, &init);
+                }
             }
             init.pop();
         }
         if let Some(node) = node {
             let from = related(previous, runtime.context());
             init.push(("relatedTarget", from));
-            self.fire(runtime, node, "PointerEvent", "pointerover", &init);
-            self.fire(runtime, node, "MouseEvent", "mouseover", &init);
-            for id in entered.iter().rev() {
-                self.fire(runtime, *id, "PointerEvent", "pointerenter", &init);
-                self.fire(runtime, *id, "MouseEvent", "mouseenter", &init);
+            for (class, over, enter) in [("PointerEvent", "pointerover", "pointerenter"), ("MouseEvent", "mouseover", "mouseenter")] {
+                self.fire(runtime, node, class, over, &init);
+                for id in entered.iter().rev() {
+                    self.fire(runtime, *id, class, enter, &init);
+                }
             }
         }
     }

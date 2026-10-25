@@ -237,17 +237,51 @@ fn scrolled(this: &JsValue, context: &mut Context, axis: usize) -> JsResult<JsVa
 /// scrolled to (see [`crate::Document::set_scroll_offsets`]). Setting a box to where it is
 /// already scrolled asks for nothing.
 pub fn request_scroll(context: &mut Context, request: crate::ScrollRequest) {
-    let state = shared(context);
-    let mut state = state.borrow_mut();
-    if let crate::ScrollRequest::To { node, left, top } = &request {
-        let at = state.scroll_offsets.get(node).copied().unwrap_or([0., 0.]);
-        if left.is_none_or(|l| l == at[0]) && top.is_none_or(|t| t == at[1]) {
-            return;
-        }
-        state.scroll_offsets.insert(*node, [left.unwrap_or(at[0]), top.unwrap_or(at[1])]);
+    let moved = {
+        let state = shared(context);
+        let mut state = state.borrow_mut();
+        let moved = match &request {
+            crate::ScrollRequest::To { node, left, top } => {
+                let at = state.scroll_offsets.get(node).copied().unwrap_or([0., 0.]);
+                if left.is_none_or(|l| l == at[0]) && top.is_none_or(|t| t == at[1]) {
+                    return;
+                }
+                let to = [left.unwrap_or(at[0]).max(0.), top.unwrap_or(at[1]).max(0.)];
+                state.scroll_offsets.insert(*node, to);
+                Some(*node)
+            }
+            crate::ScrollRequest::By { node, left, top } => {
+                let at = state.scroll_offsets.get(node).copied().unwrap_or([0., 0.]);
+                state.scroll_offsets.insert(*node, [(at[0] + left).max(0.), (at[1] + top).max(0.)]);
+                Some(*node)
+            }
+            crate::ScrollRequest::Reveal(_) => None,
+        };
+        state.requests.push(crate::Request::Scroll(request));
+        state.touch();
+        moved
+    };
+    // Where it is scrolled to reads at once; `scroll` is heard a task later.
+    if let Some(node) = moved {
+        let target = wrap(context, node);
+        let fire = closure(
+            context,
+            "scroll",
+            |_, _, node: &JsValue, cx| {
+                let Some(id) = node_id(node) else { return Ok(JsValue::undefined()) };
+                let root = read_dom(cx, |dom| dom.html);
+                if id == root {
+                    let document = cx.global_object().get(js_string!("document"), cx)?;
+                    super::events::fire(cx, &document, "Event", "scroll", &[("bubbles", true.into())])?;
+                } else {
+                    super::events::fire(cx, node, "Event", "scroll", &[("bubbles", false.into())])?;
+                }
+                Ok(JsValue::undefined())
+            },
+            target,
+        );
+        verve::set_timeout(context, fire.into(), 0., false, Vec::new());
     }
-    state.requests.push(crate::Request::Scroll(request));
-    state.touch();
 }
 
 /// `scrollTo(x, y)`, `scrollTo({ left, top })`, and `scrollBy` the same way, for an element or
