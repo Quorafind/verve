@@ -62,9 +62,20 @@ body when it is first called or constructed. Verve turns it on for every runtime
     against, and a function compiled after that `eval` ran would see them in every call. So inside
     a function that contains a direct `eval`, nested functions are compiled at once, and any code
     that emits a direct `eval` compiles its stubs eagerly before it can run (`ByteCompiler::finish`);
-  - a function compiled later may find a global `let` declared by a script parsed since (eager
-    Boa looks those up on the global object, which is itself a bug). The global declarative
-    environment is resized before such code runs, so the index it was compiled with exists.
+  - a function compiled later finds a global `let` that a script declared since, as the
+    specification has it; one compiled with its script looks the name up on the global object,
+    as eager Boa always has. So **eager and lazy differ** for a function that reads a global
+    `let` declared by a later script, and the code cache, which compiles every function when it
+    writes a module down, sides with eager: such a function in a cached module misses the later
+    `let`. The global declarative environment is resized before lazily compiled code runs, so
+    the index it was compiled with exists.
+  - a script's global lexical declarations are only found once its GlobalDeclarationInstantiation
+    has run. Parsing a script makes them (its own code is compiled against them), but they are
+    hidden from every other lookup (`Scope::withdraw_bindings`) until the script runs, and hidden
+    again if instantiating them throws; a script parsed and never run, or one whose
+    `let undefined` fails, declares nothing. Before, they were found from the moment the script
+    was parsed, by any code compiled afterwards (eager Boa had that bug for later scripts too);
+    two scripts parsed with the same `let` now fail when the second runs, not when it parses.
 - **Interners.** A `Sym` only means something to the interner that made it, and a function's tree
   is its context's. `Interner` now has an identity; a stub records its own, and a first call from
   another context throws a `TypeError` rather than compile with the wrong interner. This is why
@@ -95,41 +106,59 @@ Reading never trusts the bytes to be in bounds and never panics:
   names (and each such binding is checked again by name and index);
 - every count, index, tag, string, span and scope (binding flags, names bound once, indices within
   the scope), with code blocks nested in exactly one parent;
-- every code block's bytecode, through `Bytecode::check_instruction` (generated with the opcode
-  table): each instruction whole, each register below the frame's register count (the interpreter
-  reads registers unchecked), each jump and handler at the start of an instruction, the code ending
-  with a return; the registers async frames use implicitly; the global tables pointing at constants
-  of the right kind; source maps in order.
+- every module import and re-export, against the modules the module requests;
+- every code block's bytecode, through `Bytecode::check_instruction_in` (generated with the
+  opcode table): each instruction whole and none of the reserved opcodes, each register below the
+  frame's register count (the interpreter reads registers unchecked) including those held as
+  plain numbers (`JumpTable`, `TemplateCreate`), each jump and handler at the start of an
+  instruction, the code ending with a return; each constant, binding and inline-cache index an
+  instruction holds within its table and of the kind its handler reads; the registers async
+  frames use implicitly; the global tables pointing at constants of the right kind; source maps
+  in order.
 
-What is not proved is what an instruction does with a constant, binding or inline-cache index: a
-wrong one is caught by Rust's bounds checks or Boa's own assertions (a panic, not undefined
-behaviour). Well-formed code is run as written. So the bytes must come from a writer the embedder
-trusts — as it trusts the source text — and an embedder that keeps them on disk must authenticate
-them.
+What is not proved is what running the instructions does with the stack and the environments: code
+that pops more than it pushed, or names a binding its environments lack, is stopped by Boa's own
+assertions — a panic, not undefined behaviour. Well-formed code is run as written. So the bytes
+must come from a writer the embedder trusts — as it trusts the source text — and an embedder that
+keeps them on disk must authenticate them.
 
 `BOA_CODE_CACHE_ROUNDTRIP=1` sends every parsed module through the cache before it is used: a whole
 suite then runs code read back from it.
 
 ### Verve: the pack on disk
 
-`Runtime::set_code_cache_dir(Some(dir))` keeps the compiled code of the ES modules a runtime loads
-(`verve run --code-cache=<dir>` or `VERVE_CODE_CACHE=<dir>`). Off by default.
+`Runtime::set_code_cache_dir_with_secret(dir, secret)` keeps the compiled code of the ES modules a
+runtime loads, signed with the embedder's secret; `set_code_cache_dir_with_user_secret(dir)` signs
+with the user's own (`verve::code_cache_user_secret`), which is what `verve run --code-cache=<dir>`
+and `VERVE_CODE_CACHE=<dir>` do. `disable_code_cache` stops. Off by default.
 
 - **One pack per build**, `<dir>/<build>.pack`: a header, an index (key, offset, length, tag per
   entry), then the code. A run opens it once, reads the index, and reads an entry when its module
-  loads; nothing else stays in memory. Writing merges what this run compiled with what is on disk
-  (another process may have written since), newest first, then what this run read, capped at
+  loads; nothing else stays in memory. A file larger than a pack can be (64 MB), or an index
+  claiming more entries than fit, is not read. Writing merges what this run compiled with what is
+  on disk (another process may have written since), newest first, then what this run read (from
+  the pack it opened and checked), then the rest, keeping only entries whose tags verify, capped at
   64 MB; it goes to a temporary file renamed into place, when a burst of loading settles (100 ms
   after the first new entry, at the next round of jobs), at exit, when the runtime is dropped, or
   on `Runtime::flush_code_cache`.
 - **The key** of an entry is a SHA-256 of the build's fingerprint — Boa's fingerprint, Verve's
-  version, the executable's path, size and modification time — and of the whole source text the
-  loader produced (after any load hooks). Any rebuild starts a new pack; old ones are left for the
-  embedder to delete.
-- **The tag** is an HMAC-SHA256 of the key and the code under a 32-byte secret: by default
-  `<dir>/key`, made at random the first time (linked into place, so processes starting together
-  agree on one); `Runtime::set_code_cache_dir_with_secret` takes the embedder's own instead. It is
-  checked in constant time before Boa reads anything.
+  version, the executable's path, size and modification time — of the realm's global scope
+  (`boa_engine::code_cache::global_scope_fingerprint`), and of the whole source text the loader
+  produced (after any load hooks). Any rebuild starts a new pack; old ones are left for the
+  embedder to delete. Hosts with different global scopes keep entries of their own.
+- **The tag** is an HMAC-SHA256 of the key and the code under a 32-byte secret that is never in
+  the directory: the embedder's, or the user's own — 32 random bytes in
+  `%LOCALAPPDATA%\Verve\code-cache-secret` (Windows) or `$XDG_CONFIG_HOME/verve/code-cache-secret`
+  (else `~/.config/verve/…`), made the first time, written and synced beside the final name and
+  linked into place only if none is there, so processes starting together agree on one. A secret
+  file that is not 32 bytes leaves the run without a cache, with a warning. The tag is checked in
+  constant time before Boa reads anything.
+- **The directory** (and the user's secret folder) is made private when it is made: a protected
+  DACL granting its owner alone on Windows, `0700` elsewhere. On Unix a directory or secret file
+  not owned by the effective user, writable by its group or others, or a link, is refused, and the
+  pack and secret are opened with `O_NOFOLLOW`. **JavaScript the runtime runs can neither read nor
+  write the cache directory or the user's secret**, whatever `--allow-read`/`--allow-write` grant
+  (`ERR_ACCESS_DENIED`).
 - Anything missing, not authentic, or refused by Boa is parsed and compiled as without the cache,
   and its fresh entry replaces the old one. `Runtime::code_cache_stats` counts hits, misses,
   refusals and stores.
@@ -137,19 +166,21 @@ suite then runs code read back from it.
 ### Trust model
 
 A checksum would only catch accidents; the HMAC means an entry is only read if it was written by
-someone holding the secret. **Whoever can read the secret can make every module the runtime loads
-run code of their choosing**, with that runtime's permissions; whoever can only write the directory
-can make modules compile again, nothing more. So:
+someone holding the secret, and the secret is never kept where the entries are. So:
 
-- the cache directory (and the key file in it) must be private to the user the runtime runs as —
-  as private as the plugins' own files, since anyone who can change those can change what runs
-  anyway;
-- code less trusted than the modules being cached must not be able to read it. Rebon's Code Mode
-  runs untrusted programs: it must not use a cache, and its file permissions must not reach a
-  plugin host's cache directory. A host that keeps its secret elsewhere
-  (`set_code_cache_dir_with_secret`) makes the key file irrelevant;
-- what a forged entry could do is bounded by the secret, not by Boa's checks: those make damaged
-  or foreign bytes fail safely, not malicious ones written with the key.
+- **whoever can only write the cache directory can make modules compile again, nothing more**:
+  the key of an entry is made of public data, but its tag is not, and a key file planted in the
+  directory is not read (an earlier version read `<dir>/key`, which let write access alone forge
+  entries; that is gone);
+- **whoever can read the secret can make every module the runtime loads run code of their
+  choosing**, with that runtime's permissions. The user's secret is in a folder only they can
+  reach; an embedder's must be kept as carefully. Anyone who can already change the user's files
+  can change the plugins themselves, so the user's own account is the boundary;
+- code less trusted than the modules being cached must not reach the secret or the directory. The
+  permission model denies JavaScript both; native code in the same process is not confined. Rebon's
+  Code Mode runs untrusted programs: it must not use a cache;
+- what a forged entry could do is bounded by the secret, not by Boa's checks: those make damaged or
+  foreign bytes fail safely, not malicious ones written with the key.
 
 ## Results
 
@@ -197,13 +228,15 @@ cut packs, another secret, a forged entry, `verve run --code-cache` and `VERVE_C
 
 ## Using it from Rebon
 
-- A plugin host's guest: `runtime.set_code_cache_dir(Some(&dir))?` before loading anything, with
-  `dir` a per-user directory under Rebon's data directory (for example
-  `%LOCALAPPDATA%\Rebon\code-cache` or `~/.cache/rebon/code-cache`), created with permissions that
-  only the user can read (`0700`). Or `set_code_cache_dir_with_secret(&dir, secret)` with a secret
-  Rebon keeps in its own private storage. Call `runtime.flush_code_cache()` before a host is shut
-  down without the runtime being dropped.
-- Contained-plugin processes started as `verve run`: pass `--code-cache=<dir>`.
+- A plugin host's guest: `runtime.set_code_cache_dir_with_secret(&dir, secret)?` before loading
+  anything, with `dir` a per-user directory under Rebon's data directory (for example
+  `%LOCALAPPDATA%\Rebon\code-cache` or `~/.cache/rebon/code-cache`; Verve makes it private) and
+  `secret` 32 random bytes Rebon keeps in its own private storage, not in `dir`. Or
+  `set_code_cache_dir_with_user_secret(&dir)` to share the user's Verve secret. An error is a
+  reason to run without the cache, not to fail. Call `runtime.flush_code_cache()` before a host
+  is shut down without the runtime being dropped.
+- Contained-plugin processes started as `verve run`: pass `--code-cache=<dir>`; the user's secret
+  is used.
 - Code Mode: no cache; lazy compilation is on by default and needs nothing.
 - `code_cache_stats()` is there to log how well the cache does.
 
@@ -212,8 +245,12 @@ cut packs, another secret, a forged entry, `verve run --code-cache` and `VERVE_C
 - `CodeBlock` has one more field, `lazy: Option<Box<LazyCode>>`. A function object's code may be a
   stub with no bytecode: code that reads a function's `CodeBlock` to run it (JIT-to-JIT calls, for
   one) must call through `function_call`, or take `CodeBlock::compiled`, when `is_lazy()`.
-- `Bytecode::check_instruction` is generated by `generate_opcodes!` from each operand's `Argument`
-  type, which gained a `check` method; a new operand type needs one.
+- `Bytecode::check_instruction_in` is generated by `generate_opcodes!` from each operand's
+  `Argument` type, which gained a `check` method; a new operand type needs one. The verifier
+  classifies index operands (and plain `u32`s) by instruction and field name
+  (`code_cache::operand_use`), and refuses code with one it does not know: an instruction with a
+  new index or `u32` field needs an entry there, or modules using it are compiled rather than
+  read back.
 
 ## What is left
 
