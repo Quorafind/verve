@@ -33,6 +33,9 @@ jobs:
         run: cargo build --release --features jit --example jit_probe --target ${{ matrix.target }}
       - name: Unsigned, hardened with allow-jit, hardened without it
         run: sh ci/macos/jit-probe.sh target/${{ matrix.target }}/release/examples/jit_probe
+      - name: Code goes in MAP_JIT pages and runs
+        working-directory: boa
+        run: cargo test --release -p boa_engine --features jit --lib vm::jit::memory --target ${{ matrix.target }}
 
   tests:
     name: JIT tests (aarch64)

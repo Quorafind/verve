@@ -268,3 +268,30 @@ mod macos {
         }
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{ExecutableCode, LiveCode, Pages};
+    use std::rc::Rc;
+
+    /// A process that is not hardened may always map `MAP_JIT` pages, so code goes there, and
+    /// runs: on Apple silicon that is the per-thread write switch working.
+    #[test]
+    fn code_is_mapped_with_map_jit_and_runs() {
+        // `mov w0/eax, 42; ret`.
+        let code: &[u8] = if cfg!(target_arch = "aarch64") {
+            &[0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6]
+        } else {
+            &[0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3]
+        };
+        let live = Rc::new(LiveCode::default());
+        let executable = ExecutableCode::new(code, &live).expect("executable memory");
+        assert!(matches!(executable.pages, Pages::MapJit(_)));
+        // SAFETY: the pages hold a complete function of this signature for the host.
+        let function: extern "C" fn() -> u32 = unsafe { std::mem::transmute(executable.as_ptr()) };
+        assert_eq!(function(), 42);
+        assert_eq!(live.functions(), 1);
+        drop(executable);
+        assert_eq!(live.functions(), 0);
+    }
+}
