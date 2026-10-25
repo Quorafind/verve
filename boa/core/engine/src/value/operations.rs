@@ -154,7 +154,7 @@ impl JsValue {
                 if y == 0 {
                     Self::nan()
                 } else {
-                    match x % y {
+                    match x.wrapping_rem(y) {
                         rem if rem == 0 && x < 0 => Self::new(-0.0),
                         rem => Self::new(rem),
                     }
@@ -754,7 +754,7 @@ impl JsValue {
             if y == 0 {
                 return Some(Self::nan());
             }
-            return Some(match x % y {
+            return Some(match x.wrapping_rem(y) {
                 rem if rem == 0 && x < 0 => Self::new(-0.0),
                 rem => Self::new(rem),
             });

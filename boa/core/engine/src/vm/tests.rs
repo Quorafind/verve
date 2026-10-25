@@ -601,3 +601,13 @@ fn recursion_in_setter_throws_range_error() {
         ),
     ]);
 }
+
+#[test]
+fn int32_min_remainder_minus_one() {
+    // `i32::MIN % -1` overflows in Rust; in JavaScript it is `-0`.
+    run_test_actions([
+        TestAction::assert("Object.is((-2147483648 | 0) % -1, -0)"),
+        TestAction::assert("Object.is(((-2147483648 | 0) % (-1 | 0)), -0)"),
+        TestAction::assert("let m = -2147483648 | 0, d = -1 | 0; Object.is(m % d, -0)"),
+    ]);
+}
