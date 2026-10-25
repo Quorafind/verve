@@ -1105,3 +1105,109 @@ fn lockfiles(
     full.extend(entries);
     (shell(full), shell(hidden))
 }
+
+/// One package's published tarball, as `npm pack <spec>` leaves it.
+#[derive(Clone, Debug)]
+pub struct Packed {
+    pub name: String,
+    pub version: String,
+    /// The `.tgz` written, named as npm names it (`scope-name-1.2.3.tgz`).
+    pub tarball: PathBuf,
+    /// The integrity it was checked against, or its `sha512` when the registry vouched for none.
+    pub integrity: String,
+}
+
+/// Fetches the tarball `spec` names into `dest`, as `npm pack <spec> --ignore-scripts` does:
+/// `name` (its `latest`), `name@range`, `name@tag`, or a tarball URL. It is checked against the
+/// integrity the registry published and written as it came — never unpacked, no script run —
+/// for whoever asked to read it their own way.
+pub fn pack(spec: &str, options: &InstallOptions, dest: &Path) -> Result<Packed, InstallError> {
+    let registry = Registry::new(options);
+    let (name, wanted) = split_pack_spec(spec);
+    let parsed = if name.is_empty() {
+        spec::Spec::Tarball {
+            url: wanted.to_owned(),
+        }
+    } else {
+        spec::parse(name, wanted).map_err(|error| InstallError::Spec {
+            package: name.to_owned(),
+            spec: wanted.to_owned(),
+            reason: error.to_string(),
+        })?
+    };
+    let (manifest, bytes) = match &parsed {
+        spec::Spec::Registry { name, wanted } => {
+            let packument = registry.packument(name)?;
+            let manifest =
+                packument
+                    .pick(wanted)
+                    .map_err(|reason| InstallError::NoMatchingVersion {
+                        package: name.clone(),
+                        spec: spec.to_owned(),
+                        reason,
+                    })?;
+            let url = manifest
+                .tarball
+                .clone()
+                .ok_or_else(|| InstallError::BadTarball {
+                    package: manifest.name.clone(),
+                    version: manifest.version.clone(),
+                    reason: "no tarball URL".to_owned(),
+                })?;
+            let bytes = registry.tarball(&manifest.name, &url, manifest.integrity.as_deref())?;
+            (manifest, bytes)
+        }
+        spec::Spec::Tarball { url } => {
+            let bytes = registry.tarball(name, url, None)?;
+            let doc =
+                extract::read_package_json(&bytes).map_err(|reason| InstallError::BadTarball {
+                    package: name.to_owned(),
+                    version: url.clone(),
+                    reason,
+                })?;
+            (Arc::new(Manifest::from_json(&doc)), bytes)
+        }
+    };
+    let integrity = integrity::verify(
+        &bytes,
+        manifest.integrity.as_deref(),
+        manifest.shasum.as_deref(),
+    )
+    .map_err(|mismatch| InstallError::Integrity {
+        package: manifest.name.clone(),
+        version: manifest.version.clone(),
+        expected: mismatch.expected,
+        actual: mismatch.actual,
+    })?;
+    registry.store(&bytes);
+    let file = format!(
+        "{}-{}.tgz",
+        manifest.name.trim_start_matches('@').replace('/', "-"),
+        manifest.version
+    );
+    std::fs::create_dir_all(dest).map_err(io_error(dest))?;
+    let tarball = dest.join(file);
+    std::fs::write(&tarball, &bytes).map_err(io_error(&tarball))?;
+    Ok(Packed {
+        name: manifest.name.clone(),
+        version: manifest.version.clone(),
+        tarball,
+        integrity,
+    })
+}
+
+/// `name@wanted` apart, the way npm reads a pack argument: the `@` of a scope is part of the
+/// name, a bare name wants `latest`, and a URL is a tarball of its own.
+fn split_pack_spec(spec: &str) -> (&str, &str) {
+    if spec.starts_with("https://") || spec.starts_with("http://") {
+        return ("", spec);
+    }
+    match spec
+        .get(1..)
+        .and_then(|rest| rest.find('@'))
+        .map(|at| at + 1)
+    {
+        Some(at) => (&spec[..at], &spec[at + 1..]),
+        None => (spec, "latest"),
+    }
+}

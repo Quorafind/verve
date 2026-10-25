@@ -16,7 +16,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use serde_json::{Value, json};
 use sha2::Digest;
-use verve::npm::{InstallError, InstallOptions, Platform, Url, install};
+use verve::npm::{InstallError, InstallOptions, Platform, Url, install, pack};
 
 // ---------------------------------------------------------------------------------------------
 // A temporary folder, removed when dropped.
@@ -1492,4 +1492,81 @@ fn installs_a_dsh_package_shaped_as_rebon_slims_it() {
 #[ignore = "reaches registry.npmjs.org"]
 fn installs_a_dsh_package_with_its_own_dependencies() {
     install_dsh_as_rebon("@deepseek-ai/dsh-web-search-perplexity");
+}
+
+#[test]
+fn pack_fetches_one_checked_tarball_as_npm_pack_does() {
+    let registry = Registry::start();
+    registry.publish("plain", "1.0.0", json!({}));
+    registry.publish("plain", "1.4.0", json!({}));
+    registry.publish("plain", "2.0.0-beta.1", json!({}));
+    registry.tag("plain", "next", "2.0.0-beta.1");
+    registry.publish("@scope/thing", "3.1.0", json!({}));
+    let options = registry.options();
+    let dest = TempDir::new("pack");
+
+    // A bare name is its `latest`; a range its highest match; a tag what it points at.
+    let latest = pack("plain", &options, dest.path()).unwrap();
+    assert_eq!(latest.version, "1.4.0");
+    assert!(
+        latest.tarball.ends_with("plain-1.4.0.tgz"),
+        "{:?}",
+        latest.tarball
+    );
+    assert!(latest.integrity.starts_with("sha512-"));
+    assert_eq!(
+        pack("plain@~1.0", &options, dest.path()).unwrap().version,
+        "1.0.0"
+    );
+    assert_eq!(
+        pack("plain@next", &options, dest.path()).unwrap().version,
+        "2.0.0-beta.1"
+    );
+    // A scope's `@` is part of the name, and npm's file name drops it.
+    let scoped = pack("@scope/thing", &options, dest.path()).unwrap();
+    assert_eq!(scoped.name, "@scope/thing");
+    assert!(scoped.tarball.ends_with("scope-thing-3.1.0.tgz"));
+
+    // The file is the tarball itself, never unpacked.
+    let bytes = std::fs::read(&latest.tarball).unwrap();
+    assert_eq!(&bytes[..2], &[0x1f, 0x8b]);
+
+    // A tarball URL is fetched as it is, its name read from its own package.json.
+    let url = format!("{}plain/-/plain-1.0.0.tgz", registry.base);
+    let by_url = pack(&url, &options, dest.path()).unwrap();
+    assert_eq!(
+        (by_url.name.as_str(), by_url.version.as_str()),
+        ("plain", "1.0.0")
+    );
+}
+
+#[test]
+fn pack_refuses_a_tarball_the_registry_did_not_vouch_for() {
+    let registry = Registry::start();
+    let bytes = tarball(&[(
+        "package.json".to_owned(),
+        br#"{"name":"forged","version":"1.0.0"}"#.to_vec(),
+    )]);
+    registry.publish_tarball(
+        "forged",
+        "1.0.0",
+        json!({}),
+        bytes,
+        Some(sri(b"something else")),
+    );
+    let dest = TempDir::new("pack-forged");
+    let error = pack("forged", &registry.options(), dest.path()).unwrap_err();
+    assert!(matches!(error, InstallError::Integrity { .. }), "{error:?}");
+    assert!(
+        std::fs::read_dir(dest.path()).map_or(true, |mut entries| entries.next().is_none()),
+        "nothing is written for a tarball that fails its check"
+    );
+
+    let error = pack("ghost", &registry.options(), dest.path()).unwrap_err();
+    assert!(matches!(error, InstallError::NotFound { .. }), "{error:?}");
+    let error = pack("forged@^9", &registry.options(), dest.path()).unwrap_err();
+    assert!(
+        matches!(error, InstallError::NoMatchingVersion { .. }),
+        "{error:?}"
+    );
 }
