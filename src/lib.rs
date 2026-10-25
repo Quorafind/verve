@@ -30,7 +30,7 @@ mod buffer;
 mod cjs_exports;
 pub mod cli;
 mod crypto;
-mod dom_events;
+pub mod dom_events;
 mod encoding;
 mod esm;
 mod esm_resolve;

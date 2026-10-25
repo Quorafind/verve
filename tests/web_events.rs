@@ -386,3 +386,70 @@ fn the_host_may_put_its_own_event_classes_in_place() {
     );
     assert_eq!(log, ["still heard abort"]);
 }
+
+/// A host's own targets in a tree of its own, by the hooks `verve::dom_events` gives a host with
+/// a document: an event is captured down the path the host names, heard at its target, and
+/// bubbles back up to the window, which the global object stands for.
+#[test]
+fn a_host_tree_carries_an_event_down_and_back_up_its_path() {
+    use verve::boa_engine::{JsObject, JsResult, JsValue, js_string};
+    use verve::dom_events as events;
+
+    let (_, mut rt) = runtime();
+    let context = rt.context();
+    let target = events::classes(context).unwrap().event_target;
+    // Three nodes, 1 in 2 in 3, and 3 in the window.
+    let nodes: Vec<JsObject> = (1..=3)
+        .map(|id| events::host_target(target.1.clone(), id))
+        .collect();
+    for (name, node) in ["a", "b", "c"].iter().zip(&nodes) {
+        context
+            .global_object()
+            .set(verve::boa_engine::JsString::from(*name), node.clone(), false, context)
+            .unwrap();
+    }
+    events::install_window_target(context).unwrap();
+    fn parent(target: &JsValue, _: &JsObject, context: &mut verve::boa_engine::Context) -> JsResult<Option<JsValue>> {
+        let Some(id) = target.as_object().and_then(|o| events::host_id(&o)) else {
+            return Ok(None);
+        };
+        let global = context.global_object();
+        Ok(match id {
+            1 => Some(global.get(js_string!("b"), context)?),
+            2 => Some(global.get(js_string!("c"), context)?),
+            3 => Some(global.into()),
+            _ => None,
+        })
+    }
+    events::set_event_parent(context, parent);
+    rt.eval(
+        r#"
+        var log = [];
+        const add = EventTarget.prototype.addEventListener;
+        add.call(globalThis, 'go', (e) => log.push('window ' + e.eventPhase + ' ' + (e.currentTarget === globalThis)), true);
+        add.call(globalThis, 'go', (e) => log.push('window ' + e.eventPhase));
+        c.addEventListener('go', (e) => log.push('c ' + e.eventPhase), true);
+        b.addEventListener('go', (e) => log.push('b ' + e.eventPhase));
+        a.addEventListener('go', (e) => log.push('a ' + e.eventPhase + ' ' + e.composedPath().length));
+        a.dispatchEvent(new Event('go', { bubbles: true }));
+        a.dispatchEvent(new Event('go'));
+        "#,
+    )
+    .unwrap();
+    let text = rt.eval("JSON.stringify(log)").unwrap();
+    let log: Vec<String> = serde_json::from_str(&verve::print(&text)).unwrap();
+    assert_eq!(
+        log,
+        [
+            "window 1 true",
+            "c 1",
+            "a 2 4",
+            "b 3",
+            "window 3",
+            // Not bubbling: captured, then heard at its target only.
+            "window 1 true",
+            "c 1",
+            "a 2 4",
+        ]
+    );
+}
