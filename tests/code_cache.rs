@@ -239,8 +239,13 @@ fn a_forged_entry_is_refused() {
     // keep its key, but cannot make its tag.
     let pack = fixture.pack();
     let mut bytes = std::fs::read(&pack).unwrap();
-    let first_len = u64::from_le_bytes(bytes[8 + 32..8 + 40].try_into().unwrap()) as usize;
-    bytes[8 + 40 + first_len / 2] ^= 0x01;
+    // The pack: a header, an index entry per module (key, offset, length, tag), then the code.
+    let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let code = 12 + count * 80;
+    let first =
+        |at: usize| u64::from_le_bytes(bytes[12 + at..12 + at + 8].try_into().unwrap()) as usize;
+    let (offset, len) = (first(32), first(40));
+    bytes[code + offset + len / 2] ^= 0x01;
     std::fs::write(&pack, &bytes).unwrap();
     let (result, stats) = cached(&fixture);
     assert_eq!(result, expected);

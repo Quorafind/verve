@@ -5,9 +5,10 @@
 //!
 //! The entries of one build live in one file, `<dir>/<build>.pack`: opening a file costs more
 //! than reading one (on Windows, with a scanner looking at each, about half a millisecond), so a
-//! run reads the pack once and finds every module's entry in it. What a run compiles is added
-//! to the pack when its loading settles (see [`flush`]), when the process exits and when the
-//! runtime is dropped.
+//! run opens the pack once, reads its index, and reads each module's entry from it when the
+//! module is loaded; nothing else of it stays in memory. What a run compiles is added to the
+//! pack when its loading settles (see [`flush`]), when the process exits and when the runtime
+//! is dropped.
 //!
 //! # Trust
 //!
@@ -44,7 +45,7 @@ use boa_engine::{Context, JsResult, Module, Source};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
-const MAGIC: &[u8; 8] = b"VERVEPK\x01";
+const MAGIC: &[u8; 8] = b"VERVEPK\x02";
 const TAG_DOMAIN: &[u8] = b"verve code cache entry v1";
 const KEY_LEN: usize = 32;
 const TAG_LEN: usize = 32;
@@ -53,9 +54,20 @@ const MAX_PACK: usize = 64 << 20;
 /// How long new entries wait for more to join them before the pack is written.
 const SETTLE: Duration = Duration::from_millis(100);
 
+/// The length of an entry in a pack's index: its key, where its code is and how long, its tag.
+const INDEX_ENTRY: usize = KEY_LEN + 8 + 8 + TAG_LEN;
+
 type Key = [u8; KEY_LEN];
-/// The entries of a pack, by key: each one's code and tag.
-type Entries = HashMap<Key, (Vec<u8>, [u8; TAG_LEN])>;
+type Tag = [u8; TAG_LEN];
+
+/// Where an entry's code is in a pack (from the start of the code), how long it is, and its
+/// tag.
+#[derive(Clone, Copy)]
+struct Located {
+    offset: u64,
+    len: u64,
+    tag: Tag,
+}
 
 /// A directory of compiled modules, and the secret its entries are signed with.
 pub(crate) struct CodeCache {
@@ -84,15 +96,19 @@ pub struct CodeCacheStats {
 /// The pack as this run knows it.
 #[derive(Default)]
 struct Pack {
-    read: bool,
-    /// Each entry read from disk: its code and tag, checked when it is used.
-    entries: Entries,
-    /// The keys on disk, in the pack's order: most recently written first.
-    order: Vec<Key>,
+    /// Whether the pack has been opened (whether or not there was one).
+    opened: bool,
+    /// The pack as it was when it was opened: a pack written since replaces the file, not what
+    /// this handle reads.
+    file: Option<fs::File>,
+    /// Where the code of the pack's entries starts in it.
+    code_start: u64,
+    /// Each entry of the pack, checked when it is read.
+    index: HashMap<Key, Located>,
     /// The entries this run read, which stay ahead of those it did not.
     used: HashSet<Key>,
     /// What this run compiled and has not written yet, with its tag.
-    pending: Vec<(Key, Vec<u8>, [u8; TAG_LEN])>,
+    pending: Vec<(Key, Vec<u8>, Tag)>,
     /// When the first pending entry came.
     pending_since: Option<Instant>,
 }
@@ -162,20 +178,26 @@ impl CodeCache {
     pub(crate) fn load(&self, source: &str) -> Result<Option<Vec<u8>>, ()> {
         let key = self.key(source);
         let mut state = self.state.borrow_mut();
-        if !state.read {
-            state.read = true;
-            if let Ok(bytes) = fs::read(&self.pack) {
-                let (entries, order) = parse_pack(&bytes);
-                state.entries = entries;
-                state.order = order;
+        if !state.opened {
+            state.opened = true;
+            if let Ok(mut file) = fs::File::open(&self.pack)
+                && let Some((index, code_start)) = read_index(&mut file)
+            {
+                state.index = index;
+                state.code_start = code_start;
+                state.file = Some(file);
             }
         }
-        let Some((payload, tag)) = state.entries.get(&key) else {
+        let Some(located) = state.index.get(&key).copied() else {
             return Ok(None);
         };
+        let code_start = state.code_start;
+        let file = state.file.as_mut().ok_or(())?;
+        let payload = read_code(file, code_start, located).ok_or(())?;
         // Constant time: how much of a forged tag matched says nothing.
-        self.mac(&key, payload).verify_slice(tag).map_err(|_| ())?;
-        let payload = payload.clone();
+        self.mac(&key, &payload)
+            .verify_slice(&located.tag)
+            .map_err(|_| ())?;
         state.used.insert(key);
         Ok(Some(payload))
     }
@@ -200,111 +222,191 @@ impl CodeCache {
         if !settled && since.elapsed() < SETTLE {
             return;
         }
-        // What another process wrote since this one read the pack is kept too.
-        let (mut on_disk, disk_order) = fs::read(&self.pack)
-            .map(|bytes| parse_pack(&bytes))
-            .unwrap_or_default();
-        for key in &state.order {
-            if let Some(entry) = state.entries.get(key) {
-                on_disk.entry(*key).or_insert_with(|| entry.clone());
-            }
-        }
+        // What another process wrote since this one opened the pack is kept too, and what this
+        // run read from the pack it opened, if the pack on disk no longer has it.
+        let disk = fs::read(&self.pack).unwrap_or_default();
+        let on_disk = parse_pack(&disk);
         let mut out = PackWriter::default();
         // Newest first, then what this run read, then the rest as they were.
         for (key, payload, tag) in state.pending.iter().rev() {
             out.put(key, payload, tag);
         }
-        for key in disk_order.iter().chain(state.order.iter()) {
-            if state.used.contains(key)
-                && let Some((payload, tag)) = on_disk.get(key)
-            {
+        let used: Vec<Key> = state.used.iter().copied().collect();
+        for key in &used {
+            if let Some((payload, tag)) = on_disk.entries.get(key) {
+                out.put(key, payload, tag);
+            } else if let Some(located) = state.index.get(key).copied() {
+                let code_start = state.code_start;
+                if let Some(file) = state.file.as_mut()
+                    && let Some(payload) = read_code(file, code_start, located)
+                {
+                    out.put(key, &payload, &located.tag);
+                }
+            }
+        }
+        for key in &on_disk.order {
+            if let Some((payload, tag)) = on_disk.entries.get(key) {
                 out.put(key, payload, tag);
             }
         }
-        for key in disk_order.iter().chain(state.order.iter()) {
-            if let Some((payload, tag)) = on_disk.get(key) {
-                out.put(key, payload, tag);
-            }
-        }
-        let PackWriter { bytes, order, .. } = out;
-        let _ = write_atomically(&self.pack, &bytes);
-        let pending = std::mem::take(&mut state.pending);
-        state.pending_since = None;
-        for (key, payload, tag) in pending {
-            state.used.insert(key);
-            state.entries.insert(key, (payload, tag));
-        }
-        state.order = order;
+        let _ = write_atomically(&self.pack, &out.finish());
+        // The next load reads the pack just written.
+        *state = Pack {
+            used: state.used.clone(),
+            ..Pack::default()
+        };
     }
 }
 
-/// A pack being written: its bytes, and which keys it holds in what order.
+/// A pack being written: its entries in order, until it is full.
+#[derive(Default)]
 struct PackWriter {
-    bytes: Vec<u8>,
-    order: Vec<Key>,
+    entries: Vec<(Key, Vec<u8>, Tag)>,
+    size: usize,
     written: HashSet<Key>,
-}
-
-impl Default for PackWriter {
-    fn default() -> Self {
-        Self {
-            bytes: MAGIC.to_vec(),
-            order: Vec::new(),
-            written: HashSet::new(),
-        }
-    }
 }
 
 impl PackWriter {
     /// Adds an entry, unless one with its key is in already or the pack is full.
-    fn put(&mut self, key: &Key, payload: &[u8], tag: &[u8; TAG_LEN]) {
-        if self.bytes.len() + KEY_LEN + 8 + payload.len() + TAG_LEN > MAX_PACK
-            || !self.written.insert(*key)
-        {
+    fn put(&mut self, key: &Key, payload: &[u8], tag: &Tag) {
+        let size = INDEX_ENTRY + payload.len();
+        if self.size + size > MAX_PACK || !self.written.insert(*key) {
             return;
         }
-        self.bytes.extend_from_slice(key);
-        self.bytes
-            .extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        self.bytes.extend_from_slice(payload);
-        self.bytes.extend_from_slice(tag);
-        self.order.push(*key);
+        self.size += size;
+        self.entries.push((*key, payload.to_vec(), *tag));
     }
+
+    /// The pack's bytes: the header, the index, then the code of each entry.
+    fn finish(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(MAGIC.len() + 4 + self.size);
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
+        let mut offset = 0u64;
+        for (key, payload, tag) in &self.entries {
+            bytes.extend_from_slice(key);
+            bytes.extend_from_slice(&offset.to_le_bytes());
+            bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(tag);
+            offset += payload.len() as u64;
+        }
+        for (_, payload, _) in &self.entries {
+            bytes.extend_from_slice(payload);
+        }
+        bytes
+    }
+}
+
+/// Reads a pack's index from `file`: each entry's place, and where their code starts. `None`
+/// if the file is not a pack, or its index is cut short.
+fn read_index(file: &mut fs::File) -> Option<(HashMap<Key, Located>, u64)> {
+    use std::io::Read as _;
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).ok()?;
+    if &header[..8] != MAGIC.as_slice() {
+        return None;
+    }
+    let count = u32::from_le_bytes(header[8..].try_into().ok()?) as usize;
+    let len = file.metadata().ok()?.len();
+    let index_len = count.checked_mul(INDEX_ENTRY)?;
+    let code_start = 12u64.checked_add(index_len as u64)?;
+    if code_start > len {
+        return None;
+    }
+    let mut bytes = vec![0u8; index_len];
+    file.read_exact(&mut bytes).ok()?;
+    let code_len = len - code_start;
+    let mut index = HashMap::with_capacity(count);
+    for entry in bytes.chunks_exact(INDEX_ENTRY) {
+        let (key, rest) = entry.split_at(KEY_LEN);
+        let (offset, rest) = rest.split_at(8);
+        let (code, tag) = rest.split_at(8);
+        let located = Located {
+            offset: u64::from_le_bytes(offset.try_into().ok()?),
+            len: u64::from_le_bytes(code.try_into().ok()?),
+            tag: tag.try_into().ok()?,
+        };
+        // An entry whose code is not inside the pack is left out.
+        if located
+            .offset
+            .checked_add(located.len)
+            .is_some_and(|end| end <= code_len)
+        {
+            index.entry(key.try_into().ok()?).or_insert(located);
+        }
+    }
+    Some((index, code_start))
+}
+
+/// Reads an entry's code from the pack `file`.
+fn read_code(file: &mut fs::File, code_start: u64, located: Located) -> Option<Vec<u8>> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    file.seek(SeekFrom::Start(code_start.checked_add(located.offset)?))
+        .ok()?;
+    let mut code = vec![0u8; usize::try_from(located.len).ok()?];
+    file.read_exact(&mut code).ok()?;
+    Some(code)
+}
+
+/// The entries of a pack read whole, as far as its index holds, by key and in order.
+#[derive(Default)]
+struct OnDisk<'a> {
+    entries: HashMap<Key, (&'a [u8], Tag)>,
+    order: Vec<Key>,
+}
+
+fn parse_pack(bytes: &[u8]) -> OnDisk<'_> {
+    let mut pack = OnDisk::default();
+    let Some(rest) = bytes.strip_prefix(MAGIC.as_slice()) else {
+        return pack;
+    };
+    let Some((count, rest)) = rest.split_first_chunk::<4>() else {
+        return pack;
+    };
+    let count = u32::from_le_bytes(*count) as usize;
+    let Some(index_len) = count.checked_mul(INDEX_ENTRY) else {
+        return pack;
+    };
+    if rest.len() < index_len {
+        return pack;
+    }
+    let (index, code) = rest.split_at(index_len);
+    for entry in index.chunks_exact(INDEX_ENTRY) {
+        let (key, rest) = entry.split_at(KEY_LEN);
+        let (offset, rest) = rest.split_at(8);
+        let (len, tag) = rest.split_at(8);
+        let (Ok(key), Ok(offset), Ok(len), Ok(tag)) = (
+            <Key>::try_from(key),
+            <[u8; 8]>::try_from(offset),
+            <[u8; 8]>::try_from(len),
+            <Tag>::try_from(tag),
+        ) else {
+            continue;
+        };
+        let (Ok(offset), Ok(len)) = (
+            usize::try_from(u64::from_le_bytes(offset)),
+            usize::try_from(u64::from_le_bytes(len)),
+        ) else {
+            continue;
+        };
+        let Some(payload) = offset
+            .checked_add(len)
+            .and_then(|end| code.get(offset..end))
+        else {
+            continue;
+        };
+        if let std::collections::hash_map::Entry::Vacant(slot) = pack.entries.entry(key) {
+            pack.order.push(key);
+            slot.insert((payload, tag));
+        }
+    }
+    pack
 }
 
 impl Drop for CodeCache {
     fn drop(&mut self) {
         self.write(true);
     }
-}
-
-/// The entries of a pack, as far as it is whole, and their keys in its order.
-fn parse_pack(bytes: &[u8]) -> (Entries, Vec<Key>) {
-    let mut entries = HashMap::new();
-    let mut order = Vec::new();
-    let Some(mut rest) = bytes.strip_prefix(MAGIC.as_slice()) else {
-        return (entries, order);
-    };
-    while rest.len() >= KEY_LEN + 8 + TAG_LEN {
-        let (key, after) = rest.split_at(KEY_LEN);
-        let (len, after) = after.split_at(8);
-        let Ok(len) = usize::try_from(u64::from_le_bytes(len.try_into().unwrap_or_default()))
-        else {
-            break;
-        };
-        if after.len() < len.saturating_add(TAG_LEN) {
-            break;
-        }
-        let (payload, after) = after.split_at(len);
-        let (tag, after) = after.split_at(TAG_LEN);
-        let key: Key = key.try_into().unwrap_or_default();
-        if let std::collections::hash_map::Entry::Vacant(entry) = entries.entry(key) {
-            order.push(key);
-            entry.insert((payload.to_vec(), tag.try_into().unwrap_or_default()));
-        }
-        rest = after;
-    }
-    (entries, order)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -356,9 +458,25 @@ fn directory_secret(dir: &Path) -> io::Result<[u8; 32]> {
     }
     let mut secret = [0u8; 32];
     getrandom::fill(&mut secret).map_err(|e| io::Error::other(e.to_string()))?;
-    write_atomically(&path, &secret)?;
-    // Another process may have made one at the same time; the one on disk is the one to use.
-    fs::read(&path).map_or(Ok(secret), read)
+    // Written whole beside it, then linked into place only if no other process has made one
+    // meanwhile: the first secret made is the one every process uses.
+    let mut nonce = [0u8; 8];
+    let _ = getrandom::fill(&mut nonce);
+    let temp = dir.join(format!("key.{}.{}.tmp", std::process::id(), hex(&nonce)));
+    let made = (|| {
+        let mut file = private_file(&temp)?;
+        file.write_all(&secret)?;
+        drop(file);
+        match fs::hard_link(&temp, &path) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            // Where links cannot be made, the last secret renamed into place wins.
+            Err(_) => fs::rename(&temp, &path),
+            Ok(()) => Ok(()),
+        }
+    })();
+    let _ = fs::remove_file(&temp);
+    made?;
+    read(fs::read(&path)?)
 }
 
 /// What compiled code depends on besides its source: Boa's format and opcodes, Verve's
