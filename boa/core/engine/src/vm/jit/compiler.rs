@@ -150,9 +150,6 @@ pub(super) fn compile(
     options: &JitOptions,
     live: &Rc<LiveCode>,
 ) -> Result<JitCode, CompileError> {
-    if code_block.is_async() || code_block.is_generator() {
-        return Err("generators and async functions are not compiled".into());
-    }
     if code_block.bytecode.bytes.len() > options.max_bytecode_len {
         return Err("too much bytecode".into());
     }
@@ -190,18 +187,15 @@ pub(super) fn compile(
     })
 }
 
-/// Opcodes compiled code never runs: they suspend the frame or are not real instructions.
+/// Opcodes compiled code never runs: they are not real instructions.
+///
+/// The ones that suspend a generator or an async function (`Generator`, `GeneratorYield`,
+/// `Await`, …) run with [`jit_step`] like any other: they take the frame off the stack, so
+/// compiled code returns, and when the frame is resumed — its registers back on the stack,
+/// wherever they are — the interpreter's loop enters it at the instruction after, which starts
+/// a block as the instruction after any stepped one does.
 fn rejected(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::Generator
-            | Opcode::AsyncGenerator
-            | Opcode::GeneratorYield
-            | Opcode::AsyncGeneratorYield
-            | Opcode::AsyncGeneratorClose
-            | Opcode::Await
-            | Opcode::CreatePromiseCapability
-    ) || opcode.as_str() == "Reserved"
+    opcode.as_str() == "Reserved"
 }
 
 /// How an instruction is compiled.

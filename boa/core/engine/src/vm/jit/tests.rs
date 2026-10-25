@@ -161,18 +161,93 @@ fn disabled_jit_compiles_nothing() {
     assert_eq!(stats, JitStats::default());
 }
 
+/// Runs `source`, then the jobs it queued, then evaluates `result`, in every mode; the results
+/// must be the same.
+#[track_caller]
+fn same_after_jobs(source: &str, result: &str) -> String {
+    let run = |mode: Mode| {
+        let mut context = context(mode);
+        let mut out = match context.eval(Source::from_bytes(&format!("{SHOW}\n{source}"))) {
+            Ok(_) => String::new(),
+            Err(error) => format!("uncaught {error}; "),
+        };
+        if let Err(error) = context.run_jobs() {
+            out.push_str(&format!("job error {error}; "));
+        }
+        match context.eval(Source::from_bytes(result)) {
+            Ok(value) => out.push_str(&value.display().to_string()),
+            Err(error) => out.push_str(&format!("uncaught {error}")),
+        }
+        (out, context.jit_stats())
+    };
+    let (interpreted, _) = run(Mode::Interpreted);
+    for mode in [Mode::Eager, Mode::Hot] {
+        let (compiled, stats) = run(mode);
+        assert_eq!(
+            interpreted, compiled,
+            "{mode:?} differs from the interpreter for:\n{source}"
+        );
+        assert!(stats.compiled > 0, "{stats:?}");
+    }
+    interpreted
+}
+
+/// Generators are compiled: they yield from compiled code and are resumed into it, with
+/// `yield*`, `return()`, `throw()`, `finally`, and resumes from compiled callers.
 #[test]
-fn generators_and_async_functions_stay_interpreted() {
+fn generators_are_compiled() {
     let out = same(
-        "function* g(n) { for (let i = 0; i < n; i++) yield i * 2; }
-         async function a(x) { let y = await x; return y + 1; }
-         let s = 0; for (const v of g(100)) s += v;
-         let p; a(41).then(v => { p = v; });
-         [s, typeof p].map(show).join(' ')",
+        "function* g(n) { for (let i = 0; i < n; i++) yield i * 2; return 'end'; }
+         function* inner() { try { yield 1; yield 2; } finally { log.push('inner finally'); } }
+         function* outer() { yield 0; const r = yield* inner(); yield 3; return r; }
+         function* echo() { let x = 0; while (true) { try { x = yield x * 10; } catch (e) { log.push('caught ' + e); x = -1; } } }
+         const log = [];
+         let s = 0; for (const v of g(200)) s += v;
+         const it = g(3); const steps = [it.next(), it.next(), it.next(), it.next(), it.next()];
+         const o = outer(); const os = [o.next(), o.next(), o.return('early'), o.next()];
+         const e = echo(); const es = [e.next(), e.next(1), e.next(2), e.throw('boom'), e.next(5), e.return(9)];
+         function sum(gen) { let t = 0; for (const v of gen) t += v; return t; }
+         let total = 0; for (let k = 0; k < 50; k++) total += sum(g(k));
+         [s, total, [...outer()].join(','),
+          steps.map(r => show(r.value) + '/' + r.done).join(' '),
+          os.map(r => show(r.value) + '/' + r.done).join(' '),
+          es.map(r => show(r.value) + '/' + r.done).join(' '), log.join(';')].join(' | ')",
     );
-    assert_eq!(out, "9900 \"undefined\"");
+    assert!(out.starts_with("39800 | "), "{out}");
     let (_, stats) = run("function* g() { yield 1 } [...g()]; 1", Mode::Eager);
-    assert!(stats.rejected >= 1, "{stats:?}");
+    assert_eq!(stats.rejected, 0, "{stats:?}");
+}
+
+/// Async functions and async generators are compiled: they await from compiled code and are
+/// resumed into it by promise jobs, with rejections caught at awaits, `finally`, async
+/// callers, `for await`, and an async generator's `return()`.
+#[test]
+fn async_functions_are_compiled() {
+    let out = same_after_jobs(
+        "async function add(a, b) { await null; return a + b; }
+         async function fails(x) { await null; throw new Error('no ' + x); }
+         async function loop(n) {
+           let s = 0;
+           for (let i = 0; i < n; i++) {
+             s += await add(i, 1);
+             try { await fails(i); } catch (e) { if (i % 10 === 0) log.push(e.message); }
+             finally { s += 1; }
+           }
+           return s;
+         }
+         async function* ticks(n) { for (let i = 0; i < n; i++) { await null; yield i; } }
+         async function consume() { let t = 0; for await (const v of ticks(20)) t += v; return t; }
+         async function early() { const it = ticks(5); await it.next(); const r = await it.return('r'); return r.value + r.done; }
+         const log = [];
+         var results = [];
+         loop(100).then(v => results.push('loop ' + v));
+         consume().then(v => results.push('consume ' + v));
+         early().then(v => results.push('early ' + v));
+         Promise.all([add(1, 2), add(3, 4)]).then(v => results.push('all ' + v.join(',')));
+         fails('top').catch(e => results.push(e.message));",
+        "results.join(' | ') + ' | ' + log.join(';')",
+    );
+    assert!(out.contains("loop 5150"), "{out}");
 }
 
 #[test]
