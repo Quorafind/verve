@@ -686,7 +686,7 @@ pub(crate) fn is_esm(path: &Path, source: &str, context: &mut Context) -> JsResu
         }
     }
     if let Some((_, json)) = resolve::scope(path).map_err(|e| resolve_error(context, e))? {
-        match json.get("type").and_then(serde_json::Value::as_str) {
+        match json.get("type").and_then(resolve::Value::as_str) {
             Some("module") => return Ok(true),
             Some("commonjs") => return Ok(false),
             _ => {}

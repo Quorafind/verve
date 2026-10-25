@@ -45,6 +45,7 @@ mod navigator;
 mod node;
 mod node_url;
 mod os;
+mod package_json;
 mod path;
 mod process;
 mod querystring;

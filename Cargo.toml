@@ -39,8 +39,7 @@ crc32fast = "1"
 brotli = "8"
 # IndexedDB's databases, kept on disk as JSON.
 serde = { version = "1", features = ["derive"] }
-# Preserve package exports/imports condition order, as Node resolves it.
-serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+serde_json = "1"
 # `Intl.Segmenter`: grapheme clusters, words and sentences, by Unicode's rules (UAX #29).
 unicode-segmentation = "1.12"
 # The zone the system's clock is set to, by its IANA name: `Intl`'s default `timeZone`.
@@ -49,8 +48,7 @@ iana-time-zone = "0.1"
 wasmi = "0.35"
 
 [dev-dependencies]
-# Preserve package exports/imports condition order, as Node resolves it.
-serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+serde_json = "1"
 # WebAssembly tests write their modules as text.
 wat = "1.251"
 

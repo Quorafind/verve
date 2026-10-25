@@ -2,8 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
 use url::Url;
+
+pub(crate) use crate::package_json::{Json as Value, Object};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -298,7 +299,7 @@ fn exports_resolve(
 }
 
 fn map_match(
-    map: &serde_json::Map<String, Value>,
+    map: &Object,
     name: &str,
     root: &Path,
     imports: bool,
@@ -426,7 +427,7 @@ fn package_target(
                     "Numeric package condition keys are not allowed",
                 ));
             }
-            // serde_json's preserve_order feature is essential: conditions are tried in source order.
+            // Conditions are tried in source order, which `Object` keeps.
             for (condition, target) in map {
                 if condition == "default"
                     || condition == "node"
