@@ -25,10 +25,10 @@ use cranelift_codegen::{
     Context as ClifContext,
     control::ControlPlane,
     ir::{
-        AbiParam, Block, BlockArg, Function, InstBuilder, JumpTableData, MemFlagsData, Signature,
-        SigRef, UserFuncName, Value,
+        AbiParam, Block, BlockArg, Function, InstBuilder, JumpTableData, MemFlagsData, SigRef,
+        Signature, UserFuncName, Value,
         condcodes::{FloatCC, IntCC},
-        types::{F64, I32, I64},
+        types::{F64, I8, I32, I64},
     },
     isa::OwnedTargetIsa,
     settings::{self, Configurable},
@@ -46,7 +46,10 @@ use crate::{
 use super::{
     JitCode, JitOptions,
     memory::ExecutableCode,
-    runtime::{EXIT, REGS_OFFSET, jit_lookup, jit_step, jit_store},
+    runtime::{
+        EXIT, FRAME_OFFSET, INTERRUPT_OFFSET, LOOP_COUNT_OFFSET, LOOP_LIMIT_OFFSET, REGS_OFFSET,
+        jit_lookup, jit_step, jit_store,
+    },
 };
 
 /// The tag bits of NaN-boxed values (`value/inner/nan_boxed.rs`); checked against values made
@@ -87,14 +90,19 @@ fn make_isa() -> Result<OwnedTargetIsa, String> {
     set(
         &mut flags,
         "enable_verifier",
-        if cfg!(debug_assertions) { "true" } else { "false" },
+        if cfg!(debug_assertions) {
+            "true"
+        } else {
+            "false"
+        },
     )?;
     // Frames stay small, but never skip a guard page (Windows grows the stack by touching it).
     set(&mut flags, "enable_probestack", "true")?;
     set(&mut flags, "probestack_strategy", "inline")?;
     // Profilers and debuggers can walk through compiled frames.
     set(&mut flags, "preserve_frame_pointers", "true")?;
-    let builder = cranelift_native::builder().map_err(|error| format!("no JIT for this host: {error}"))?;
+    let builder =
+        cranelift_native::builder().map_err(|error| format!("no JIT for this host: {error}"))?;
     builder
         .finish(settings::Flags::new(flags))
         .map_err(|error| format!("cannot build the target ISA: {error}"))
@@ -108,10 +116,14 @@ pub(super) fn compile(code_block: &CodeBlock, options: &JitOptions) -> Result<Ji
     if code_block.bytecode.bytes.len() > options.max_bytecode_len {
         return Err("too much bytecode".into());
     }
-    let block_pcs = leaders(code_block)?;
+    let (block_pcs, profile) = leaders(code_block)?;
+    // With a threshold of 0 everything is compiled, which is what tests want.
+    if options.threshold > 0 && !profile.profitable() {
+        return Err("too little to do inline".into());
+    }
     ISA.with(|isa| {
         let isa = isa.get_or_init(make_isa).as_ref().map_err(Clone::clone)?;
-        let function = translate(code_block, &block_pcs, isa)?;
+        let function = translate(code_block, &block_pcs, isa);
         let mut context = ClifContext::for_function(function);
         let compiled = context
             .compile(&**isa, &mut ControlPlane::default())
@@ -215,13 +227,39 @@ fn kind(instruction: &Instruction) -> Kind {
     }
 }
 
-/// The `pc`s compiled code can start a block at, in order.
-fn leaders(code_block: &CodeBlock) -> Result<Vec<u32>, String> {
+/// What a code block is made of, to judge whether compiling it pays.
+#[derive(Debug, Default)]
+struct Profile {
+    instructions: usize,
+    inline: usize,
+    /// Calls that may push a frame, which leave compiled code and come back.
+    calls: usize,
+    loops: bool,
+}
+
+impl Profile {
+    /// Every entry into and exit from compiled code costs about as much as a few instructions
+    /// done inline save, and a call to a JavaScript function is an exit and an entry. Code with
+    /// a loop runs its inline instructions many times for an entry, as long as it does not
+    /// call out at every turn; straight-line code must be mostly inline.
+    fn profitable(&self) -> bool {
+        (self.loops && self.inline >= 4 * self.calls) || self.inline * 2 >= self.instructions
+    }
+}
+
+/// The `pc`s compiled code can start a block at, in order, and the code block's profile.
+fn leaders(code_block: &CodeBlock) -> Result<(Vec<u32>, Profile), String> {
+    let mut profile = Profile::default();
     let bytecode = &code_block.bytecode;
     let len = bytecode.bytes.len();
     let mut starts = BTreeSet::new();
     let mut leaders = BTreeSet::from([0u32]);
-    leaders.extend(code_block.handlers.iter().map(|handler| handler.handler().as_u32()));
+    leaders.extend(
+        code_block
+            .handlers
+            .iter()
+            .map(|handler| handler.handler().as_u32()),
+    );
     let mut pc = 0;
     while pc < len {
         let opcode = Opcode::decode(bytecode.bytes[pc]);
@@ -230,20 +268,43 @@ fn leaders(code_block: &CodeBlock) -> Result<Vec<u32>, String> {
         }
         let (instruction, next) = bytecode.next_instruction(pc);
         starts.insert(pc as u32);
+        profile.instructions += 1;
+        match opcode {
+            Opcode::IncrementLoopIteration => {
+                profile.loops = true;
+                profile.inline += 1;
+            }
+            Opcode::Call
+            | Opcode::CallSpread
+            | Opcode::CallEval
+            | Opcode::CallEvalSpread
+            | Opcode::New
+            | Opcode::NewSpread
+            | Opcode::SuperCall
+            | Opcode::SuperCallSpread
+            | Opcode::SuperCallDerived => profile.calls += 1,
+            _ => {}
+        }
         match kind(&instruction) {
-            Kind::Inline => {}
-            Kind::Branch(targets) | Kind::Step(targets) => {
+            Kind::Inline => profile.inline += 1,
+            Kind::Branch(targets) => {
+                profile.inline += 1;
+                leaders.extend(targets);
+                leaders.insert(next as u32);
+            }
+            Kind::Step(targets) => {
                 leaders.extend(targets);
                 leaders.insert(next as u32);
             }
             Kind::Jump(target) => {
+                profile.inline += 1;
                 leaders.insert(target);
                 leaders.insert(next as u32);
             }
         }
         pc = next;
     }
-    Ok(leaders.intersection(&starts).copied().collect())
+    Ok((leaders.intersection(&starts).copied().collect(), profile))
 }
 
 /// The machine-code side of a code block in translation.
@@ -262,11 +323,13 @@ struct Translator<'a> {
     slow: Vec<(Block, u32, Vec<u32>)>,
 }
 
-fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) -> Result<Function, String> {
+fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) -> Function {
     let call_conv = isa.default_call_conv();
     let ptr = isa.pointer_type();
     let mut signature = Signature::new(call_conv);
-    signature.params.extend([AbiParam::new(ptr), AbiParam::new(I32)]);
+    signature
+        .params
+        .extend([AbiParam::new(ptr), AbiParam::new(I32)]);
     signature.returns.push(AbiParam::new(I32));
     let mut store_signature = Signature::new(call_conv);
     store_signature
@@ -292,7 +355,9 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
     let state = b.block_params(entry)[0];
     let start = b.block_params(entry)[1];
     let regs = b.declare_var(ptr);
-    let first_regs = b.ins().load(ptr, MemFlagsData::trusted(), state, REGS_OFFSET);
+    let first_regs = b
+        .ins()
+        .load(ptr, MemFlagsData::trusted(), state, REGS_OFFSET);
     b.def_var(regs, first_regs);
 
     let mut t = Translator {
@@ -356,7 +421,7 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
 
     t.b.seal_all_blocks();
     t.b.finalize(isa.frontend_config());
-    Ok(function)
+    function
 }
 
 impl Translator<'_> {
@@ -397,7 +462,10 @@ impl Translator<'_> {
     fn store(&mut self, register: u32, bits: Value) {
         let old = self.load(register);
         let top = self.b.ins().ushr_imm_s(old, 50);
-        let is_pointer = self.b.ins().icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
+        let is_pointer = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
         let fast = self.b.create_block();
         let slow = self.b.create_block();
         let done = self.b.create_block();
@@ -437,7 +505,10 @@ impl Translator<'_> {
             .load(I64, MemFlagsData::trusted(), self.state, REGS_OFFSET);
         self.b.def_var(self.regs, regs);
         for &target in expected {
-            let is_target = self.b.ins().icmp_imm_s(IntCC::Equal, next, i64::from(target));
+            let is_target = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, next, i64::from(target));
             let otherwise = self.b.create_block();
             let block = self.block(target);
             self.b.ins().brif(is_target, block, &[], otherwise, &[]);
@@ -455,7 +526,9 @@ impl Translator<'_> {
 
     fn is_int(&mut self, value: Value) -> Value {
         let high = self.b.ins().ushr_imm_s(value, 32);
-        self.b.ins().icmp_imm_s(IntCC::Equal, high, bits::INT32_HIGH)
+        self.b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, high, bits::INT32_HIGH)
     }
 
     /// Whether `value` is a number stored as an `f64`, as `bits::is_float` decides.
@@ -476,12 +549,103 @@ impl Translator<'_> {
         self.b.ins().bor(int, float)
     }
 
-    fn to_f64(&mut self, value: Value) -> Value {
+    fn as_f64(&mut self, value: Value) -> Value {
         let is_int = self.is_int(value);
         let int = self.b.ins().ireduce(I32, value);
         let from_int = self.b.ins().fcvt_from_sint(F64, int);
         let as_float = self.b.ins().bitcast(F64, MemFlagsData::new(), value);
         self.b.ins().select(is_int, from_int, as_float)
+    }
+
+    /// `ToInt32` of a number, as `f64_to_int32` computes it; `slow` for other types and for
+    /// finite floats too large for an exact `i64`. Leaves the builder in a new block.
+    fn int32_of(&mut self, value: Value, slow: Block) -> Value {
+        let join = self.b.create_block();
+        self.b.append_block_param(join, I32);
+        let int_block = self.b.create_block();
+        let not_int = self.b.create_block();
+        let is_int = self.is_int(value);
+        self.b.ins().brif(is_int, int_block, &[], not_int, &[]);
+
+        self.b.switch_to_block(int_block);
+        let int = self.b.ins().ireduce(I32, value);
+        self.b.ins().jump(join, &[BlockArg::Value(int)]);
+
+        self.b.switch_to_block(not_int);
+        let is_float = self.is_float(value);
+        let float_block = self.b.create_block();
+        self.b.ins().brif(is_float, float_block, &[], slow, &[]);
+
+        // Below 2^63 the truncation is an exact `i64`, whose low 32 bits are `ToInt32`.
+        self.b.switch_to_block(float_block);
+        let float = self.b.ins().bitcast(F64, MemFlagsData::new(), value);
+        let magnitude = self.b.ins().fabs(float);
+        let limit = self.b.ins().f64const(9_223_372_036_854_775_808.0);
+        let in_range = self.b.ins().fcmp(FloatCC::LessThan, magnitude, limit);
+        let convert = self.b.create_block();
+        let out_of_range = self.b.create_block();
+        self.b.ins().brif(in_range, convert, &[], out_of_range, &[]);
+
+        self.b.switch_to_block(convert);
+        let wide = self.b.ins().fcvt_to_sint_sat(I64, float);
+        let int = self.b.ins().ireduce(I32, wide);
+        self.b.ins().jump(join, &[BlockArg::Value(int)]);
+
+        // `NaN` and the infinities are 0; other large floats are rare enough for `slow`.
+        self.b.switch_to_block(out_of_range);
+        let infinity = self.b.ins().f64const(f64::INFINITY);
+        let is_infinite = self.b.ins().fcmp(FloatCC::Equal, magnitude, infinity);
+        let is_nan = self.b.ins().fcmp(FloatCC::Unordered, float, float);
+        let zero_result = self.b.ins().bor(is_infinite, is_nan);
+        let zero = self.b.ins().iconst(I32, 0);
+        self.b
+            .ins()
+            .brif(zero_result, join, &[BlockArg::Value(zero)], slow, &[]);
+
+        self.b.switch_to_block(join);
+        self.b.block_params(join)[0]
+    }
+
+    /// `IncrementLoopIteration`: unless an interrupt is asked for or the loop limit is reached
+    /// (which [`jit_step`] turns into the interpreter's errors), counts the iteration.
+    fn loop_iteration(&mut self, pc: u32, next: u32) {
+        let slow = self.slow_block(pc, &[next]);
+        let flag = self
+            .b
+            .ins()
+            .load(I64, MemFlagsData::trusted(), self.state, INTERRUPT_OFFSET);
+        let check_flag = self.b.create_block();
+        let check_count = self.b.create_block();
+        self.b.ins().brif(flag, check_flag, &[], check_count, &[]);
+
+        self.b.switch_to_block(check_flag);
+        let raised = self.b.ins().atomic_load(I8, MemFlagsData::trusted(), flag);
+        self.b.ins().brif(raised, slow, &[], check_count, &[]);
+
+        self.b.switch_to_block(check_count);
+        let frame = self
+            .b
+            .ins()
+            .load(I64, MemFlagsData::trusted(), self.state, FRAME_OFFSET);
+        let count = self
+            .b
+            .ins()
+            .load(I64, MemFlagsData::trusted(), frame, LOOP_COUNT_OFFSET);
+        let limit = self
+            .b
+            .ins()
+            .load(I64, MemFlagsData::trusted(), self.state, LOOP_LIMIT_OFFSET);
+        let over = self.b.ins().icmp(IntCC::UnsignedGreaterThan, count, limit);
+        let count_it = self.b.create_block();
+        self.b.ins().brif(over, slow, &[], count_it, &[]);
+
+        self.b.switch_to_block(count_it);
+        let counted = self.b.ins().iadd_imm_s(count, 1);
+        self.b
+            .ins()
+            .store(MemFlagsData::trusted(), counted, frame, LOOP_COUNT_OFFSET);
+        let block = self.block(next);
+        self.b.ins().jump(block, &[]);
     }
 
     fn box_int(&mut self, int: Value) -> Value {
@@ -500,7 +664,10 @@ impl Translator<'_> {
     /// (strings, objects — `document.all` is falsy —, bigints).
     fn branch_truthy(&mut self, value: Value, truthy: Block, falsy: Block, slow: Block) {
         let without_low = self.b.ins().band_imm_s(value, !1);
-        let is_bool = self.b.ins().icmp_imm_s(IntCC::Equal, without_low, bits::BOOLEAN);
+        let is_bool = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, without_low, bits::BOOLEAN);
         let bool_block = self.b.create_block();
         let not_bool = self.b.create_block();
         self.b.ins().brif(is_bool, bool_block, &[], not_bool, &[]);
@@ -510,7 +677,10 @@ impl Translator<'_> {
         self.b.ins().brif(low, truthy, &[], falsy, &[]);
 
         self.b.switch_to_block(not_bool);
-        let is_nullish = self.b.ins().icmp_imm_s(IntCC::Equal, without_low, bits::OTHER);
+        let is_nullish = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, without_low, bits::OTHER);
         let not_nullish = self.b.create_block();
         self.b.ins().brif(is_nullish, falsy, &[], not_nullish, &[]);
 
@@ -574,32 +744,71 @@ impl Translator<'_> {
             Instruction::Move { dst, src } => {
                 let value = self.load(src.into());
                 let top = self.b.ins().ushr_imm_s(value, 50);
-                let is_pointer = self.b.ins().icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
+                let is_pointer = self
+                    .b
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
                 let slow = self.slow_block(pc, &[next]);
                 let fast = self.b.create_block();
                 self.b.ins().brif(is_pointer, slow, &[], fast, &[]);
                 self.b.switch_to_block(fast);
                 self.store(dst.into(), value);
             }
-            Instruction::Add { dst, lhs, rhs } => self.arithmetic(Arith::Add, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::Sub { dst, lhs, rhs } => self.arithmetic(Arith::Sub, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::Mul { dst, lhs, rhs } => self.arithmetic(Arith::Mul, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::BitAnd { dst, lhs, rhs } => self.bitwise(Bitwise::And, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::BitOr { dst, lhs, rhs } => self.bitwise(Bitwise::Or, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::BitXor { dst, lhs, rhs } => self.bitwise(Bitwise::Xor, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::ShiftLeft { dst, lhs, rhs } => self.bitwise(Bitwise::Shl, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::ShiftRight { dst, lhs, rhs } => self.bitwise(Bitwise::Shr, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::UnsignedShiftRight { dst, lhs, rhs } => self.bitwise(Bitwise::Ushr, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::LessThan { dst, lhs, rhs } => self.compare(Compare::Lt, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::LessThanOrEq { dst, lhs, rhs } => self.compare(Compare::Le, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::GreaterThan { dst, lhs, rhs } => self.compare(Compare::Gt, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::GreaterThanOrEq { dst, lhs, rhs } => self.compare(Compare::Ge, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::Eq { dst, lhs, rhs } => self.compare(Compare::Eq, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::NotEq { dst, lhs, rhs } => self.compare(Compare::Ne, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::StrictEq { dst, lhs, rhs } => self.strict_equals(false, dst.into(), lhs.into(), rhs.into(), pc, next),
-            Instruction::StrictNotEq { dst, lhs, rhs } => self.strict_equals(true, dst.into(), lhs.into(), rhs.into(), pc, next),
+            Instruction::Add { dst, lhs, rhs } => {
+                self.arithmetic(Arith::Add, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::Sub { dst, lhs, rhs } => {
+                self.arithmetic(Arith::Sub, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::Mul { dst, lhs, rhs } => {
+                self.arithmetic(Arith::Mul, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::BitAnd { dst, lhs, rhs } => {
+                self.bitwise(Bitwise::And, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::BitOr { dst, lhs, rhs } => {
+                self.bitwise(Bitwise::Or, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::BitXor { dst, lhs, rhs } => {
+                self.bitwise(Bitwise::Xor, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::ShiftLeft { dst, lhs, rhs } => {
+                self.bitwise(Bitwise::Shl, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::ShiftRight { dst, lhs, rhs } => {
+                self.bitwise(Bitwise::Shr, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::UnsignedShiftRight { dst, lhs, rhs } => {
+                self.bitwise(Bitwise::Ushr, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::LessThan { dst, lhs, rhs } => {
+                self.compare(Compare::Lt, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::LessThanOrEq { dst, lhs, rhs } => {
+                self.compare(Compare::Le, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::GreaterThan { dst, lhs, rhs } => {
+                self.compare(Compare::Gt, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::GreaterThanOrEq { dst, lhs, rhs } => {
+                self.compare(Compare::Ge, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::Eq { dst, lhs, rhs } => {
+                self.compare(Compare::Eq, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::NotEq { dst, lhs, rhs } => {
+                self.compare(Compare::Ne, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::StrictEq { dst, lhs, rhs } => {
+                self.strict_equals(false, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::StrictNotEq { dst, lhs, rhs } => {
+                self.strict_equals(true, dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
             Instruction::Inc { dst, src } => self.increment(true, dst.into(), src.into(), pc, next),
-            Instruction::Dec { dst, src } => self.increment(false, dst.into(), src.into(), pc, next),
+            Instruction::Dec { dst, src } => {
+                self.increment(false, dst.into(), src.into(), pc, next);
+            }
             Instruction::LogicalNot { value } => {
                 let register: u32 = value.into();
                 let value = self.load(register);
@@ -622,7 +831,8 @@ impl Translator<'_> {
                 self.b.ins().jump(block, &[]);
                 return true;
             }
-            Instruction::JumpIfTrue { address, value } | Instruction::LogicalOr { address, value } => {
+            Instruction::JumpIfTrue { address, value }
+            | Instruction::LogicalOr { address, value } => {
                 let target = address.as_u32();
                 let value = self.load(value.into());
                 let slow = self.slow_block(pc, &[next, target]);
@@ -630,7 +840,8 @@ impl Translator<'_> {
                 self.branch_truthy(value, taken, fallthrough, slow);
                 return true;
             }
-            Instruction::JumpIfFalse { address, value } | Instruction::LogicalAnd { address, value } => {
+            Instruction::JumpIfFalse { address, value }
+            | Instruction::LogicalAnd { address, value } => {
                 let target = address.as_u32();
                 let value = self.load(value.into());
                 let slow = self.slow_block(pc, &[next, target]);
@@ -640,9 +851,14 @@ impl Translator<'_> {
             }
             Instruction::JumpIfNotUndefined { address, value } => {
                 let value = self.load(value.into());
-                let is_undefined = self.b.ins().icmp_imm_s(IntCC::Equal, value, bits::UNDEFINED);
+                let is_undefined = self
+                    .b
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, value, bits::UNDEFINED);
                 let (taken, fallthrough) = (self.block(address.as_u32()), self.block(next));
-                self.b.ins().brif(is_undefined, fallthrough, &[], taken, &[]);
+                self.b
+                    .ins()
+                    .brif(is_undefined, fallthrough, &[], taken, &[]);
                 return true;
             }
             Instruction::JumpIfNullOrUndefined { address, value }
@@ -650,7 +866,10 @@ impl Translator<'_> {
                 let is_jump = matches!(instruction, Instruction::JumpIfNullOrUndefined { .. });
                 let value = self.load(value.into());
                 let without_low = self.b.ins().band_imm_s(value, !1);
-                let is_nullish = self.b.ins().icmp_imm_s(IntCC::Equal, without_low, bits::OTHER);
+                let is_nullish = self
+                    .b
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, without_low, bits::OTHER);
                 let (taken, fallthrough) = (self.block(address.as_u32()), self.block(next));
                 if is_jump {
                     self.b.ins().brif(is_nullish, taken, &[], fallthrough, &[]);
@@ -660,19 +879,51 @@ impl Translator<'_> {
                 return true;
             }
             Instruction::JumpIfNotLessThan { address, lhs, rhs } => {
-                self.compare_jump(Compare::Lt, address.as_u32(), lhs.into(), rhs.into(), pc, next);
+                self.compare_jump(
+                    Compare::Lt,
+                    address.as_u32(),
+                    lhs.into(),
+                    rhs.into(),
+                    pc,
+                    next,
+                );
                 return true;
             }
             Instruction::JumpIfNotLessThanOrEqual { address, lhs, rhs } => {
-                self.compare_jump(Compare::Le, address.as_u32(), lhs.into(), rhs.into(), pc, next);
+                self.compare_jump(
+                    Compare::Le,
+                    address.as_u32(),
+                    lhs.into(),
+                    rhs.into(),
+                    pc,
+                    next,
+                );
                 return true;
             }
             Instruction::JumpIfNotGreaterThan { address, lhs, rhs } => {
-                self.compare_jump(Compare::Gt, address.as_u32(), lhs.into(), rhs.into(), pc, next);
+                self.compare_jump(
+                    Compare::Gt,
+                    address.as_u32(),
+                    lhs.into(),
+                    rhs.into(),
+                    pc,
+                    next,
+                );
                 return true;
             }
             Instruction::JumpIfNotGreaterThanOrEqual { address, lhs, rhs } => {
-                self.compare_jump(Compare::Ge, address.as_u32(), lhs.into(), rhs.into(), pc, next);
+                self.compare_jump(
+                    Compare::Ge,
+                    address.as_u32(),
+                    lhs.into(),
+                    rhs.into(),
+                    pc,
+                    next,
+                );
+                return true;
+            }
+            Instruction::IncrementLoopIteration => {
+                self.loop_iteration(pc, next);
                 return true;
             }
             _ => {
@@ -730,9 +981,13 @@ impl Translator<'_> {
         } else {
             overflow
         };
-        self.b
-            .ins()
-            .brif(to_float, float_block, &[], int_store, &[BlockArg::Value(result)]);
+        self.b.ins().brif(
+            to_float,
+            float_block,
+            &[],
+            int_store,
+            &[BlockArg::Value(result)],
+        );
 
         self.b.switch_to_block(int_store);
         let result = self.b.block_params(int_store)[0];
@@ -748,8 +1003,8 @@ impl Translator<'_> {
         self.b.ins().brif(both_number, float_block, &[], slow, &[]);
 
         self.b.switch_to_block(float_block);
-        let x = self.to_f64(a);
-        let y = self.to_f64(b);
+        let x = self.as_f64(a);
+        let y = self.as_f64(b);
         let result = match op {
             Arith::Add => self.b.ins().fadd(x, y),
             Arith::Sub => self.b.ins().fsub(x, y),
@@ -766,16 +1021,9 @@ impl Translator<'_> {
         let a = self.load(lhs);
         let b = self.load(rhs);
         let slow = self.slow_block(pc, &[next]);
-        let int_block = self.b.create_block();
         let done = self.continue_block();
-        let a_int = self.is_int(a);
-        let b_int = self.is_int(b);
-        let both_int = self.b.ins().band(a_int, b_int);
-        self.b.ins().brif(both_int, int_block, &[], slow, &[]);
-
-        self.b.switch_to_block(int_block);
-        let x = self.b.ins().ireduce(I32, a);
-        let y = self.b.ins().ireduce(I32, b);
+        let x = self.int32_of(a, slow);
+        let y = self.int32_of(b, slow);
         // Cranelift's shifts take the amount modulo 32, as `wrapping_shl` and JavaScript do.
         let result = match op {
             Bitwise::And => self.b.ins().band(x, y),
@@ -787,7 +1035,10 @@ impl Translator<'_> {
         };
         if op == Bitwise::Ushr {
             // A `u32`: an int if it fits, an `f64` if not (`From<u32> for JsValue`).
-            let fits = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, result, 0);
+            let fits = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, result, 0);
             let int_store = self.b.create_block();
             let float_store = self.b.create_block();
             self.b.ins().brif(fits, int_store, &[], float_store, &[]);
@@ -809,7 +1060,15 @@ impl Translator<'_> {
     }
 
     /// Compares two numbers, branching to `on_true`/`on_false`, or to `slow` for other types.
-    fn numeric_compare(&mut self, op: Compare, a: Value, b: Value, on_true: Block, on_false: Block, slow: Block) {
+    fn numeric_compare(
+        &mut self,
+        op: Compare,
+        a: Value,
+        b: Value,
+        on_true: Block,
+        on_false: Block,
+        slow: Block,
+    ) {
         let int_block = self.b.create_block();
         let not_int = self.b.create_block();
         let float_block = self.b.create_block();
@@ -839,8 +1098,8 @@ impl Translator<'_> {
         self.b.ins().brif(both_number, float_block, &[], slow, &[]);
 
         self.b.switch_to_block(float_block);
-        let x = self.to_f64(a);
-        let y = self.to_f64(b);
+        let x = self.as_f64(a);
+        let y = self.as_f64(b);
         // As Rust's operators on `f64`: ordered, except `!=`, which is true for `NaN`.
         let condition = match op {
             Compare::Lt => FloatCC::LessThan,
@@ -891,21 +1150,27 @@ impl Translator<'_> {
         let not_numbers = self.b.create_block();
         let by_identity = self.b.create_block();
         let done = self.continue_block();
-        let (if_equal, if_not) = if negate { (on_false, on_true) } else { (on_true, on_false) };
+        let (if_equal, if_not) = if negate {
+            (on_false, on_true)
+        } else {
+            (on_true, on_false)
+        };
 
         // Numbers, first as ints, then as `f64`; `slow` is never taken from here.
         let a_number = self.is_number(a);
         let b_number = self.is_number(b);
         let both_number = self.b.ins().band(a_number, b_number);
         let numbers = self.b.create_block();
-        self.b.ins().brif(both_number, numbers, &[], not_numbers, &[]);
+        self.b
+            .ins()
+            .brif(both_number, numbers, &[], not_numbers, &[]);
         self.b.switch_to_block(numbers);
         self.numeric_compare(Compare::Eq, a, b, if_equal, if_not, slow);
 
         self.b.switch_to_block(not_numbers);
-        let a_identity = self.compared_by_identity(a);
-        let b_identity = self.compared_by_identity(b);
-        let either = self.b.ins().bor(a_identity, b_identity);
+        let lhs_identity = self.compared_by_identity(a);
+        let rhs_identity = self.compared_by_identity(b);
+        let either = self.b.ins().bor(lhs_identity, rhs_identity);
         self.b.ins().brif(either, by_identity, &[], slow, &[]);
 
         self.b.switch_to_block(by_identity);
@@ -924,7 +1189,12 @@ impl Translator<'_> {
     fn compared_by_identity(&mut self, value: Value) -> Value {
         let top = self.b.ins().ushr_imm_s(value, 48);
         let mut result = None;
-        for tag in [bits::TOP16_BOOLEAN, bits::TOP16_OTHER, bits::TOP16_OBJECT, bits::TOP16_SYMBOL] {
+        for tag in [
+            bits::TOP16_BOOLEAN,
+            bits::TOP16_OTHER,
+            bits::TOP16_OBJECT,
+            bits::TOP16_SYMBOL,
+        ] {
             let is = self.b.ins().icmp_imm_s(IntCC::Equal, top, tag);
             result = Some(match result {
                 Some(previous) => self.b.ins().bor(previous, is),

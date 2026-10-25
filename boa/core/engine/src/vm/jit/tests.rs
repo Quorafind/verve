@@ -145,7 +145,9 @@ fn cold_functions_are_not_compiled() {
         ..JitOptions::default()
     };
     context
-        .eval(Source::from_bytes("function f(x) { return x + 1 } f(1); f(2);"))
+        .eval(Source::from_bytes(
+            "function f(x) { return x + 1 } f(1); f(2);",
+        ))
         .expect("runs");
     assert_eq!(context.jit_stats().compiled, 0);
 }
@@ -358,7 +360,9 @@ fn interrupts_stop_compiled_loops() {
     assert!(context.jit_stats().compiled >= 1);
     // The context runs again after an interrupt.
     let value = context
-        .eval(Source::from_bytes("let t = 0; for (let i = 0; i < 10; i++) t += i; t"))
+        .eval(Source::from_bytes(
+            "let t = 0; for (let i = 0; i < 10; i++) t += i; t",
+        ))
         .expect("runs");
     assert_eq!(value.as_number(), Some(45.0));
 }
@@ -423,13 +427,38 @@ impl Generator {
 
     fn expression(&mut self, depth: u32) -> String {
         const LEAVES: &[&str] = &[
-            "x", "y", "z", "a", "b", "i", "0", "-0", "1", "-1", "2", "31", "0.5", "-1.5",
-            "2147483647", "-2147483648", "4294967296", "NaN", "Infinity", "null", "undefined",
-            "true", "false", "'7'", "'q'", "''", "o.p", "arr[i & 3]",
+            "x",
+            "y",
+            "z",
+            "a",
+            "b",
+            "i",
+            "0",
+            "-0",
+            "1",
+            "-1",
+            "2",
+            "31",
+            "0.5",
+            "-1.5",
+            "2147483647",
+            "-2147483648",
+            "4294967296",
+            "NaN",
+            "Infinity",
+            "null",
+            "undefined",
+            "true",
+            "false",
+            "'7'",
+            "'q'",
+            "''",
+            "o.p",
+            "arr[i & 3]",
         ];
         const BINARY: &[&str] = &[
-            "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>", "<", "<=", ">", ">=",
-            "==", "!=", "===", "!==", "&&", "||", "??",
+            "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>", "<", "<=", ">", ">=", "==",
+            "!=", "===", "!==", "&&", "||", "??",
         ];
         const UNARY: &[&str] = &["-", "!", "~", "+", "typeof "];
         if depth == 0 || self.next() % 4 == 0 {
@@ -455,7 +484,11 @@ impl Generator {
     fn statement(&mut self) -> String {
         let target = self.pick(&["x", "y", "z"]);
         match self.next() % 7 {
-            0 => format!("if ({}) {{ {target} = {}; }} else {{ {target}++; }}", self.expression(2), self.expression(2)),
+            0 => format!(
+                "if ({}) {{ {target} = {}; }} else {{ {target}++; }}",
+                self.expression(2),
+                self.expression(2)
+            ),
             1 => format!("{target}--;"),
             2 => format!("o.p = {};", self.expression(2)),
             3 => format!("if ({}) continue;", self.expression(1)),

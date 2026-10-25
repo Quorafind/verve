@@ -16,14 +16,16 @@
 
 use std::{
     any::Any,
+    mem::offset_of,
     ops::ControlFlow,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     ptr,
+    sync::atomic::AtomicBool,
 };
 
 use crate::{
     Context, JsValue,
-    vm::{CodeBlock, CompletionRecord, opcode::OPCODE_HANDLERS, opcode::Opcode},
+    vm::{CallFrame, CodeBlock, CompletionRecord, Vm, opcode::OPCODE_HANDLERS, opcode::Opcode},
 };
 
 use super::JitCode;
@@ -36,11 +38,17 @@ pub(crate) type EntryFn = unsafe extern "C" fn(*mut JitState, u32) -> u32;
 
 /// The state compiled code runs with.
 ///
-/// Compiled code reads `regs` (offset 0) directly; everything else only the helpers touch.
+/// Compiled code reads the first four fields directly; the rest only the helpers touch.
 #[repr(C)]
 pub(crate) struct JitState {
     /// The frame's first register, in the VM stack. Helpers update it when the stack moves.
     pub(crate) regs: *mut JsValue,
+    /// The frame, in the VM's frames. Helpers update it when the frames move.
+    frame: *mut CallFrame,
+    /// The flag another thread sets to interrupt the run, or null if there is none.
+    interrupt: *const AtomicBool,
+    /// `RuntimeLimits::loop_iteration_limit`.
+    loop_limit: u64,
     context: *mut Context,
     code: *const JitCode,
     code_block: *const CodeBlock,
@@ -51,14 +59,22 @@ pub(crate) struct JitState {
     panic: Option<Box<dyn Any + Send + 'static>>,
 }
 
-/// The offset of [`JitState::regs`], for compiled code.
-pub(crate) const REGS_OFFSET: i32 = 0;
-const _: () = assert!(std::mem::offset_of!(JitState, regs) == REGS_OFFSET as usize);
+/// The offsets of what compiled code reads in [`JitState`] and [`CallFrame`].
+pub(crate) const REGS_OFFSET: i32 = offset_of!(JitState, regs) as i32;
+pub(crate) const FRAME_OFFSET: i32 = offset_of!(JitState, frame) as i32;
+pub(crate) const INTERRUPT_OFFSET: i32 = offset_of!(JitState, interrupt) as i32;
+pub(crate) const LOOP_LIMIT_OFFSET: i32 = offset_of!(JitState, loop_limit) as i32;
+pub(crate) const LOOP_COUNT_OFFSET: i32 = offset_of!(CallFrame, loop_iteration_count) as i32;
+const _: () = assert!(size_of::<u64>() == size_of::<*const ()>());
 // Compiled code reads and writes registers as the 64-bit words of NaN-boxed values.
 const _: () = assert!(size_of::<JsValue>() == 8);
 
 /// Runs compiled code for the frame on top, from the block `block`.
-pub(crate) fn execute(context: &mut Context, code: &JitCode, block: u32) -> ControlFlow<CompletionRecord> {
+pub(crate) fn execute(
+    context: &mut Context,
+    code: &JitCode,
+    block: u32,
+) -> ControlFlow<CompletionRecord> {
     context.vm.jit.stats.entries += 1;
     let frame = context.vm.frame();
     let rp = frame.rp;
@@ -66,8 +82,12 @@ pub(crate) fn execute(context: &mut Context, code: &JitCode, block: u32) -> Cont
     let frames_len = context.vm.frames.len();
     // SAFETY: the frame's registers are on the stack, from `rp` on.
     let regs = unsafe { context.vm.stack.stack.as_mut_ptr().add(rp as usize) };
+    let (frame, interrupt, loop_limit) = frame_state(&mut context.vm);
     let mut state = JitState {
         regs,
+        frame,
+        interrupt,
+        loop_limit,
         context: &raw mut *context,
         code: &raw const *code,
         code_block,
@@ -116,10 +136,18 @@ fn step(state: &mut JitState, pc: u32) -> u32 {
         return EXIT;
     }
     let next = frame.pc;
-    // The stack may have grown, and moved.
+    // The stack and the frames may have grown, and moved.
     // SAFETY: the frame's registers are on the stack, from `rp` on.
     state.regs = unsafe { vm.stack.stack.as_mut_ptr().add(state.rp as usize) };
+    (state.frame, state.interrupt, state.loop_limit) = frame_state(vm);
     next
+}
+
+/// The frame on top, the interrupt flag, and the loop limit, for compiled code.
+fn frame_state(vm: &mut Vm) -> (*mut CallFrame, *const AtomicBool, u64) {
+    let frame = ptr::from_mut(vm.frame_mut());
+    let interrupt = vm.interrupt.as_deref().map_or(ptr::null(), ptr::from_ref);
+    (frame, interrupt, vm.runtime_limits.loop_iteration_limit())
 }
 
 /// The block at `pc`, or [`EXIT`] if `pc` starts none; the frame's `pc` is already `pc`.

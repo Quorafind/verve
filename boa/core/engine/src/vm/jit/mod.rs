@@ -39,7 +39,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{Context, vm::CompletionRecord};
+use crate::{
+    Context,
+    vm::{CodeBlock, CompletionRecord},
+};
 
 use self::{memory::ExecutableCode, runtime::EntryFn};
 
@@ -147,7 +150,10 @@ impl JitCode {
 
     /// The index of the block that starts at `pc`, if one does.
     pub(crate) fn block_for_pc(&self, pc: u32) -> Option<u32> {
-        self.block_pcs.binary_search(&pc).ok().map(|index| index as u32)
+        self.block_pcs
+            .binary_search(&pc)
+            .ok()
+            .map(|index| index as u32)
     }
 }
 
@@ -204,6 +210,15 @@ impl JitSlot {
 /// its `pc`. `None` is to go on interpreting.
 #[inline(never)]
 pub(crate) fn try_enter(context: &mut Context) -> Option<ControlFlow<CompletionRecord>> {
+    // Fuzzing counts instructions, which compiled code does not.
+    if cfg!(feature = "fuzz") {
+        return None;
+    }
+    // Tracing shows every instruction the interpreter runs.
+    #[cfg(feature = "trace")]
+    if context.vm.trace {
+        return None;
+    }
     let options = context.vm.jit.options;
     // The dummy frame at the bottom never runs code.
     if !options.enabled || context.vm.frames.len() <= 1 {
@@ -211,7 +226,9 @@ pub(crate) fn try_enter(context: &mut Context) -> Option<ControlFlow<CompletionR
     }
     let frame = context.vm.frame();
     let pc = frame.pc;
-    let code_block = frame.code_block().clone();
+    let code_block: *const CodeBlock = &raw const **frame.code_block();
+    // SAFETY: the frame on top keeps its code block alive, and nothing here pops it.
+    let code_block = unsafe { &*code_block };
     let slot = &code_block.jit;
     let code = match slot.tier.get() {
         Tier::Rejected => return None,
@@ -229,7 +246,7 @@ pub(crate) fn try_enter(context: &mut Context) -> Option<ControlFlow<CompletionR
                 return None;
             }
             let start = std::time::Instant::now();
-            let compiled = compiler::compile(&code_block, &options);
+            let compiled = compiler::compile(code_block, &options);
             jit.stats.compile_time += start.elapsed();
             match compiled {
                 Ok(code) => {

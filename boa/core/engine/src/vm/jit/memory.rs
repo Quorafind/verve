@@ -36,7 +36,11 @@ impl ExecutableCode {
 
         // SAFETY: the range is exactly the allocation, which nothing else refers to.
         unsafe {
-            region::protect(ptr.cast_const(), allocation.len(), region::Protection::READ_EXECUTE)
+            region::protect(
+                ptr.cast_const(),
+                allocation.len(),
+                region::Protection::READ_EXECUTE,
+            )
         }
         .map_err(|error| format!("cannot make code pages executable: {error}"))?;
 
