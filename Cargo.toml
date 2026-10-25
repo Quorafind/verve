@@ -82,6 +82,17 @@ oxc_semantic = "0.146"
 oxc_span = "0.146"
 oxc_transformer = "0.146"
 
+# `verve::npm`: installing a package.json's dependencies without npm. A blocking HTTP client
+# on the rustls Verve's network stack already carries, and tar for the tarballs (gzip is flate2).
+ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "gzip"], optional = true }
+tar = { version = "0.4.44", default-features = false, optional = true }
+base64 = { version = "0.23", optional = true }
+
+[features]
+default = ["npm"]
+# The npm installer: an embedder that installs no packages leaves out its HTTP client.
+npm = ["dep:ureq", "dep:tar", "dep:base64"]
+
 [dev-dependencies]
 serde_json = "1"
 # WebAssembly tests write their modules as text.

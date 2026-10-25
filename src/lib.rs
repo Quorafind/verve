@@ -45,6 +45,8 @@ mod navigator;
 mod network;
 mod node;
 mod node_url;
+#[cfg(feature = "npm")]
+pub mod npm;
 mod os;
 mod package_json;
 mod path;
