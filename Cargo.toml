@@ -100,6 +100,9 @@ npm = ["dep:ureq", "dep:tar", "dep:base64"]
 # Boa's baseline JIT: hot functions run as native code (see `docs/jit.md`). Switched off at
 # runtime with `VERVE_JIT=0` or `Runtime::set_jit_enabled(false)`.
 jit = ["boa_engine/jit"]
+# Every runtime made with `Runtime::new` keeps a code cache in `VERVE_CODE_CACHE`, as `verve run`
+# does: for running whole test suites with one. An embedder sets its directory itself.
+code-cache-env = []
 
 [[example]]
 name = "jit_probe"

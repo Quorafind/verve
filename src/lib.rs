@@ -29,6 +29,7 @@ mod assert;
 mod buffer;
 mod cjs_exports;
 pub mod cli;
+mod code_cache;
 mod crypto;
 mod dom_events;
 mod encoding;
@@ -73,6 +74,7 @@ mod web;
 mod worker;
 mod zlib;
 
+pub use code_cache::CodeCacheStats;
 pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
 
@@ -204,6 +206,8 @@ struct Shared {
     wake: std::sync::Arc<WakeSlot>,
     /// Set when this realm is a process of its own (`verve run`): see `process::Profile`.
     profile: RefCell<Option<Rc<process::Profile>>>,
+    /// Where compiled modules are kept between runs, if anywhere: see `code_cache`.
+    code_cache: RefCell<code_cache::Shared>,
 }
 
 /// The microtask queue: promise reactions, `queueMicrotask`, `process.nextTick`.
@@ -435,6 +439,21 @@ impl Runtime {
         }
         #[cfg(feature = "jit")]
         jit_from_env(&mut context);
+        // A whole test suite can run with a code cache: see the `code-cache-env` feature.
+        #[cfg(feature = "code-cache-env")]
+        let code_cache = std::env::var_os("VERVE_CODE_CACHE")
+            .filter(|dir| !dir.is_empty())
+            .and_then(|dir| code_cache::CodeCache::open(std::path::Path::new(&dir), None).ok())
+            .map(Rc::new);
+        #[cfg(not(feature = "code-cache-env"))]
+        let code_cache = None;
+        // Functions compile when first called, unless `VERVE_LAZY_COMPILE=0`.
+        context.set_lazy_compile(!std::env::var("VERVE_LAZY_COMPILE").is_ok_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "off" | "false" | "no"
+            )
+        }));
         context.insert_data(Rc::new(Shared {
             clock: Box::new(clock),
             next_timer: Cell::new(1),
@@ -462,9 +481,75 @@ impl Runtime {
             wasm: RefCell::new(wasm::WasmState::default()),
             wake: std::sync::Arc::default(),
             profile: RefCell::new(None),
+            code_cache: RefCell::new(code_cache),
         }));
         install_globals(&mut context).expect("the globals install");
         Self { context }
+    }
+
+    /// Compile each function's body when the function is first called (the default), or with
+    /// the module or script that declares it. What runs is the same either way; lazily, the
+    /// code a module carries but never calls is never compiled, which is most of a bundle's at
+    /// startup. `VERVE_LAZY_COMPILE=0` (also `off`, `false`, `no`) starts a runtime eager. It
+    /// applies to code loaded after the change.
+    pub fn set_lazy_compile(&mut self, lazy: bool) {
+        self.context.set_lazy_compile(lazy);
+    }
+
+    /// Keeps the compiled code of the ES modules this runtime loads in `dir`, and reads it back
+    /// in later runs instead of parsing and compiling the same source again; `None` stops. Off
+    /// by default. Entries are signed with a secret kept in `<dir>/key`, made at random the
+    /// first time, and only an authentic entry for the very source text and build is read.
+    ///
+    /// Whoever can read or write `dir` can make every module this runtime loads run code of
+    /// their choosing: it must be private to the user the runtime runs as, and out of reach of
+    /// any code that is trusted less than the modules loaded here (see `docs/startup.md`). Use
+    /// [`Runtime::set_code_cache_dir_with_secret`] to keep the secret elsewhere.
+    ///
+    /// # Errors
+    ///
+    /// If `dir` cannot be made, or its secret cannot be read or made.
+    pub fn set_code_cache_dir(&mut self, dir: Option<&std::path::Path>) -> std::io::Result<()> {
+        let cache = dir
+            .map(|dir| code_cache::CodeCache::open(dir, None))
+            .transpose()?;
+        *shared(&self.context).code_cache.borrow_mut() = cache.map(Rc::new);
+        Ok(())
+    }
+
+    /// [`Runtime::set_code_cache_dir`], with entries signed with `secret` rather than with one
+    /// kept in the directory: an embedder that keeps its secret where code it runs cannot read
+    /// it makes entries that code wrote, even in `dir`, fail to be read.
+    ///
+    /// # Errors
+    ///
+    /// If `dir` cannot be made.
+    pub fn set_code_cache_dir_with_secret(
+        &mut self,
+        dir: &std::path::Path,
+        secret: [u8; 32],
+    ) -> std::io::Result<()> {
+        let cache = code_cache::CodeCache::open(dir, Some(secret))?;
+        *shared(&self.context).code_cache.borrow_mut() = Some(Rc::new(cache));
+        Ok(())
+    }
+
+    /// What the code cache has done since [`Runtime::set_code_cache_dir`] set it: modules read
+    /// back, compiled, refused and kept. `None` without one.
+    pub fn code_cache_stats(&self) -> Option<CodeCacheStats> {
+        code_cache::stats(&self.context)
+    }
+
+    /// Writes what the code cache has compiled to its directory now. It is written anyway
+    /// once a burst of loading settles, when the process exits and when the runtime is
+    /// dropped; a host about to be stopped without either can call this first.
+    pub fn flush_code_cache(&mut self) {
+        code_cache::flush_now(&self.context);
+    }
+
+    /// Whether functions are compiled when first called; see [`Runtime::set_lazy_compile`].
+    pub fn lazy_compile(&self) -> bool {
+        self.context.lazy_compile()
     }
 
     /// Whether hot functions run as native code. With the `jit` feature it is on unless
@@ -649,6 +734,7 @@ impl Runtime {
     /// Runs every queued microtask, and the ones they queue, until there are none.
     pub fn run_microtasks(&mut self) {
         let _ = self.context.run_jobs();
+        code_cache::flush(&self.context, false);
     }
 
     /// Where IndexedDB keeps its databases — one JSON file each. With none, they live in memory

@@ -395,11 +395,7 @@ impl Loader {
             }
             "module" => {
                 let path = PathBuf::from(url.as_str());
-                Module::parse(
-                    Source::from_bytes(source.trim_start_matches('\u{feff}')).with_path(&path),
-                    None,
-                    context,
-                )?
+                crate::code_cache::module(source.trim_start_matches('\u{feff}'), &path, context)?
             }
             format => {
                 return Err(coded_error(
