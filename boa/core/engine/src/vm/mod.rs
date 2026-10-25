@@ -121,6 +121,44 @@ pub struct Vm {
     pub(crate) current_frame: Option<*const CallFrame>,
 }
 
+/// Arguments popped off the [`Stack`]: inline when there are few, else in a `Vec`.
+#[derive(Debug)]
+pub(crate) enum PoppedArguments {
+    Inline(arrayvec::ArrayVec<JsValue, { PoppedArguments::INLINE }>),
+    Heap(Vec<JsValue>),
+}
+
+impl PoppedArguments {
+    /// How many arguments are kept inline.
+    const INLINE: usize = 6;
+}
+
+impl IntoIterator for PoppedArguments {
+    type Item = JsValue;
+    type IntoIter = std::iter::Chain<
+        arrayvec::IntoIter<JsValue, { PoppedArguments::INLINE }>,
+        std::vec::IntoIter<JsValue>,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Self::Inline(arguments) => arguments.into_iter().chain(Vec::new()),
+            Self::Heap(arguments) => arrayvec::ArrayVec::new().into_iter().chain(arguments),
+        }
+    }
+}
+
+impl std::ops::Deref for PoppedArguments {
+    type Target = [JsValue];
+
+    fn deref(&self) -> &[JsValue] {
+        match self {
+            Self::Inline(arguments) => arguments,
+            Self::Heap(arguments) => arguments,
+        }
+    }
+}
+
 /// The stack holds the [`JsValue`]s for the calling convention and registers.
 ///
 /// The stack is persistent across frames.
@@ -241,12 +279,19 @@ impl Stack {
 
     /// Pop the function arguments according to the calling convention.
     /// This will pop the last `argument_count` values from the stack.
+    ///
+    /// A few arguments are kept inline, without allocating: native functions are called with
+    /// them on every call.
     pub(crate) fn calling_convention_pop_arguments(
         &mut self,
         argument_count: usize,
-    ) -> Vec<JsValue> {
+    ) -> PoppedArguments {
         let index = self.stack.len() - argument_count;
-        self.stack.split_off(index)
+        if argument_count <= PoppedArguments::INLINE {
+            PoppedArguments::Inline(self.stack.drain(index..).collect())
+        } else {
+            PoppedArguments::Heap(self.stack.split_off(index))
+        }
     }
 
     /// Push the function arguments according to the calling convention.
