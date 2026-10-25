@@ -756,6 +756,9 @@ impl Translator<'_> {
         let object = self.b.create_block();
         let slow = self.b.create_block();
         let done = self.b.create_block();
+        for block in [pointer, object, slow] {
+            self.b.set_cold_block(block);
+        }
         self.b.ins().brif(is_pointer, pointer, &[], fast, &[]);
 
         // An object is dropped inline: one reference fewer. (Compiled code never runs while
@@ -830,6 +833,7 @@ impl Translator<'_> {
     /// A block that runs the instruction at `pc` with [`jit_step`].
     fn slow_block(&mut self, pc: u32, expected: &[u32]) -> Block {
         let slow = self.b.create_block();
+        self.b.set_cold_block(slow);
         self.slow.push((slow, pc, expected.to_vec()));
         slow
     }
@@ -1499,6 +1503,7 @@ impl Translator<'_> {
         let site = self.new_site();
         let done = self.b.create_block();
         let miss = self.b.create_block();
+        self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
             let value = self.load(object);
             let address = self.object_address(value, miss);
@@ -1537,6 +1542,7 @@ impl Translator<'_> {
     fn get_length(&mut self, [dst, object, ic]: [u32; 3], pc: u32, next: u32) {
         let done = self.b.create_block();
         let miss = self.b.create_block();
+        self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
             let value = self.load(object);
             let address = self.object_address(value, miss);
@@ -1587,6 +1593,7 @@ impl Translator<'_> {
         let site = self.new_site();
         let done = self.b.create_block();
         let miss = self.b.create_block();
+        self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
             let new = self.load(value);
             let target = self.load(object);
@@ -1687,6 +1694,7 @@ impl Translator<'_> {
     fn get_element(&mut self, [dst, key, object]: [u32; 3], pc: u32, next: u32) {
         let done = self.b.create_block();
         let miss = self.b.create_block();
+        self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
             let (address, index) = self.array_and_index(layout, object, key, miss);
             let flag = self.load_at(I64, address, layout.flag);
@@ -1761,6 +1769,7 @@ impl Translator<'_> {
     fn set_element(&mut self, [value, key, object]: [u32; 3], pc: u32, next: u32) {
         let done = self.b.create_block();
         let miss = self.b.create_block();
+        self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
             let new = self.load(value);
             let (address, index) = self.array_and_index(layout, object, key, miss);

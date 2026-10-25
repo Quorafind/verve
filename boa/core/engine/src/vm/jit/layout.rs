@@ -2,9 +2,23 @@
 //! keeps for property accesses.
 //!
 //! The offsets come from `offset_of!` and from `boa_gc::raw`, except where a `Vec` keeps its
-//! pointer and length, which Rust does not say and is found by looking at one. All of them are
-//! checked against a real object, on each thread, before any code relies on them: if anything
-//! does not match, property accesses are not compiled inline (the fast helpers still run them).
+//! pointer and length and a `ThinVec` its length and elements, which Rust does not say and are
+//! found by looking at real ones. All of them are checked against a real object, on each thread,
+//! before any code relies on them: if anything does not match, property and element accesses are
+//! not compiled inline (the fast helpers still run them).
+//!
+//! What compiled code relies on, besides the offsets:
+//!
+//! - an object value's pointer bits are its `GcBox`, whose first `u32` is its reference count
+//!   (`GcHeader` is `repr(C)`); dropping an object is counting it down, and `inc_ref_count`
+//!   panics past `0x7FFF_FFFF`;
+//! - a `GcRefCell`'s flag is `0` when unborrowed and `usize::MAX` when borrowed mutably;
+//! - a `Shape` is two words, equal exactly for the same shape (`Inner` is `repr(u64)`); a shared
+//!   shape never changes its properties or their slots; a shape is freed only by a collection,
+//!   which `boa_gc::raw::collections` counts first;
+//! - an array's vtable is `ARRAY_EXOTIC_INTERNAL_METHODS`, and its `length` is its first slot;
+//! - `IndexedProperties` is a tag word (`DenseI32`, `DenseF64`, `DenseElement` are 0, 1, 2) and
+//!   a `ThinVec` whose header is its length and capacity, its elements after.
 
 use std::{cell::Cell, cell::OnceCell, mem::offset_of, ptr};
 
