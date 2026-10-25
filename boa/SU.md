@@ -167,6 +167,13 @@ always agree with one another.
   embedder tells an exhausted memory limit by V8's words. A fixed-length buffer past
   `HostHooks::max_buffer_size` fails with the same words, as V8's does past its own limit.
 
+- `boa_parser`, `parser/mod.rs`: `parse_function_body` and `parse_formal_parameters` — what
+  `Function(...)` parses its parts with — fail on input left after what they parsed. Before,
+  `new Function("}); f(); ({")` made a function whose body stopped at the first `}` and
+  `new Function("a) { f() }; (function (", "")` one with that text as its parameters,
+  where the specification parses each part alone so neither can close the function early.
+  `vm.compileFunction` relies on it to wrap a body in its `contextExtensions`.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

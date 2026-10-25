@@ -247,7 +247,9 @@ impl<'a, R: ReadChar> Parser<'a, R> {
     ) -> ParseResult<FunctionBody> {
         let mut parser = FunctionStatementList::new(allow_yield, allow_await, "function body");
         parser.parse_full_input(true);
-        parser.parse(&mut self.cursor, interner)
+        let body = parser.parse(&mut self.cursor, interner)?;
+        self.expect_end(interner, "function body")?;
+        Ok(body)
     }
 
     /// Parses the full input as an [ECMAScript `FormalParameterList`][spec] into the boa AST representation.
@@ -263,7 +265,23 @@ impl<'a, R: ReadChar> Parser<'a, R> {
         allow_yield: bool,
         allow_await: bool,
     ) -> ParseResult<FormalParameterList> {
-        FormalParameters::new(allow_yield, allow_await).parse(&mut self.cursor, interner)
+        let parameters =
+            FormalParameters::new(allow_yield, allow_await).parse(&mut self.cursor, interner)?;
+        self.expect_end(interner, "formal parameters")?;
+        Ok(parameters)
+    }
+
+    /// The whole input must be what was parsed: `new Function("}); f(); ({")` is a
+    /// `SyntaxError`, not a function whose body stops at the first `}`.
+    fn expect_end(&mut self, interner: &mut Interner, what: &'static str) -> ParseResult<()> {
+        match self.cursor.peek(0, interner)? {
+            None => Ok(()),
+            Some(token) => Err(Error::unexpected(
+                token.to_string(interner),
+                boa_ast::Spanned::span(token),
+                what,
+            )),
+        }
     }
 }
 
