@@ -368,10 +368,7 @@ impl Module {
         context: &mut Context,
     ) -> JsResult<Self> {
         let realm = realm.unwrap_or_else(|| context.realm().clone());
-        let mut text = boa_ast::SourceText::with_capacity(source.len());
-        for c in source.chars() {
-            text.collect_code_point(u32::from(c));
-        }
+        let text = boa_ast::SourceText::from_code_units(source.encode_utf16().collect());
         Self::read_code_cache(bytes, SourceText::new(text), path, realm, context)
     }
 

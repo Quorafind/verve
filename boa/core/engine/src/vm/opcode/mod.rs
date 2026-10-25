@@ -526,12 +526,11 @@ macro_rules! generate_opcodes {
             /// verifier does: its opcode and where the next one starts, or `None` if the bytes
             /// end first. Each register and address operand is handed to `operand`.
             #[allow(unused_parens)]
-            pub(crate) fn check_instruction(
-                &self,
+            pub(crate) fn check_instruction_in(
+                bytes: &[u8],
                 pc: usize,
                 operand: &mut dyn FnMut(Operand),
             ) -> Option<(Opcode, usize)> {
-                let bytes = &self.bytes;
                 let opcode = Opcode::decode(*bytes.get(pc)?);
                 let next = match opcode {
                     $(

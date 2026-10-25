@@ -4,6 +4,9 @@
 //! declares and writes down what linking it needs: its import and export entries, its scopes
 //! and its code. [`Module::from_code_cache`](crate::Module::from_code_cache) reads that back
 //! into a module that links and runs as the parsed one would, without parsing or compiling.
+//! It checks every code block at once but makes only the module's own: a function's code block
+//! is made from its bytes when the function is first called, as a lazily compiled function's is
+//! compiled then.
 //!
 //! # What is checked, and what is trusted
 //!
@@ -25,7 +28,7 @@
 //! must come from a writer the embedder trusts, as it trusts the source text itself; an embedder
 //! that keeps them on disk must authenticate them (Verve signs them with a key of its own).
 
-use std::path::Path;
+use std::{path::Path, rc::Rc};
 
 use boa_ast::{
     LinearPosition, LinearSpan, Position, Span,
@@ -50,7 +53,7 @@ use crate::{
     spanned_source_text::SourceText,
     string::JsStrVariant,
     vm::{
-        CodeBlock, CodeBlockFlags, Constant, GlobalFunctionBinding, Handler, InlineCache,
+        CodeBlock, CodeBlockFlags, Constant, GlobalFunctionBinding, Handler, InlineCache, LazyCode,
         opcode::{Address, Bytecode, Opcode, Operand},
         source_info::{Entry, SourceInfo, SourceMap, SourcePath},
     },
@@ -58,7 +61,7 @@ use crate::{
 
 const MAGIC: [u8; 4] = *b"BOAC";
 /// The layout of what is written down; changed whenever it changes.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 /// More registers than a frame of real code has, so a count beyond it is refused.
 const MAX_REGISTERS: u32 = 1 << 20;
 
@@ -150,10 +153,23 @@ fn write_digest_string(hash: &mut Fnv, string: &JsString) {
     }
 }
 
+/// A digest of a source text, four code units at a time: it tells texts apart, it does not
+/// authenticate them, and it has to keep up with texts of megabytes.
 fn source_digest(units: &[u16]) -> u64 {
-    let mut hash = Fnv::new();
-    hash.write_u16s(units);
-    hash.finish()
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mut hash = units.len() as u64;
+    let mut chunks = units.chunks_exact(4);
+    for chunk in &mut chunks {
+        let word = u64::from(chunk[0])
+            | (u64::from(chunk[1]) << 16)
+            | (u64::from(chunk[2]) << 32)
+            | (u64::from(chunk[3]) << 48);
+        hash = (hash.rotate_left(5) ^ word).wrapping_mul(K);
+    }
+    for unit in chunks.remainder() {
+        hash = (hash.rotate_left(5) ^ u64::from(*unit)).wrapping_mul(K);
+    }
+    hash
 }
 
 // ---- Writing ----
@@ -366,9 +382,7 @@ impl Writer<'_> {
 
     /// Numbers a code block and those nested in it, parents first.
     fn collect_code(&mut self, code: &Gc<CodeBlock>) -> Option<()> {
-        if code.is_lazy() {
-            return None;
-        }
+        let code = &CodeBlock::read_back(code)?;
         let address = std::ptr::from_ref::<CodeBlock>(code) as usize;
         if self.code_ids.contains_key(&address) {
             return None;
@@ -423,7 +437,8 @@ impl Writer<'_> {
                 }
                 Constant::Function(function) => {
                     self.u8(1);
-                    let address = std::ptr::from_ref::<CodeBlock>(function) as usize;
+                    let function = CodeBlock::read_back(function)?;
+                    let address = std::ptr::from_ref::<CodeBlock>(&*function) as usize;
                     let id = *self.code_ids.get(&address)?;
                     self.u32(id);
                 }
@@ -732,7 +747,116 @@ enum RawConstant {
     Scope(Scope),
 }
 
-/// Reads back a module [`write_module`] wrote down from `source_text`, into `realm`.
+/// A module's code as read back: the bytes of its code blocks, checked whole when they were read
+/// and each made into a code block when its function is first called (see `LazyCode`).
+pub(crate) struct CachedModule {
+    bytes: Box<[u8]>,
+    /// Each code block: where its record is in `bytes`, and what its stub is made with.
+    codes: Box<[CodeMeta]>,
+    scopes: Box<[Scope]>,
+    global: Scope,
+    source_text: SourceText,
+    path: SourcePath,
+}
+
+impl std::fmt::Debug for CachedModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedModule")
+            .field("bytes", &self.bytes.len())
+            .field("codes", &self.codes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a code block's stub is made with, and where its record is.
+struct CodeMeta {
+    start: usize,
+    end: usize,
+    flags: CodeBlockFlags,
+    length: u32,
+    parameter_length: u32,
+    this_mode: ThisMode,
+    name: JsString,
+    span: Option<LinearSpan>,
+}
+
+impl CachedModule {
+    fn scope(&self, id: u32) -> Read<Scope> {
+        match id as usize {
+            0 => Ok(self.global.clone()),
+            n => self.scopes.get(n - 1).cloned().ok_or("no such scope"),
+        }
+    }
+
+    /// The stub of the code block `index`: what is read of a function before it runs, with its
+    /// record to read when it is first called.
+    fn stub(self: &Rc<Self>, index: usize) -> Read<CodeBlock> {
+        let meta = self.codes.get(index).ok_or("no such code")?;
+        let mut code = CodeBlock::new(meta.name.clone(), meta.length, false);
+        code.flags.set(meta.flags);
+        code.this_mode = meta.this_mode.clone();
+        code.parameter_length = meta.parameter_length;
+        code.source_info = SourceInfo::new(
+            SourceMap::new(Box::default(), self.path.clone()),
+            meta.name.clone(),
+            SpannedSourceText::new(self.source_text.clone(), meta.span),
+        );
+        code.lazy = Some(Box::new(LazyCode::cached(self.clone(), index)));
+        Ok(code)
+    }
+
+    /// Makes the code block `index` from its record, with stubs for the code blocks it nests.
+    /// Its record was checked when the module was read, so this only fails if that check let
+    /// something through.
+    pub(crate) fn code(self: &Rc<Self>, index: usize) -> Read<CodeBlock> {
+        let meta = self.codes.get(index).ok_or("no such code")?;
+        let bytes = self.bytes.get(meta.start..meta.end).ok_or("no such code")?;
+        let mut reader = Reader { bytes, pos: 0 };
+        let raw = read_code(&mut reader, index, self.codes.len(), &|id| self.scope(id))?;
+        let mut constants = ThinVec::with_capacity(raw.constants.len());
+        for constant in raw.constants {
+            constants.push(match constant {
+                RawConstant::String(string) => Constant::String(string),
+                RawConstant::Function(index) => Constant::Function(Gc::new(self.stub(index)?)),
+                RawConstant::BigInt(bigint) => Constant::BigInt(bigint),
+                RawConstant::Scope(scope) => Constant::Scope(scope),
+            });
+        }
+        Ok(CodeBlock {
+            flags: std::cell::Cell::new(raw.flags),
+            length: raw.length,
+            parameter_length: raw.parameter_length,
+            register_count: raw.register_count,
+            this_mode: raw.this_mode,
+            mapped_arguments_binding_indices: raw.mapped_arguments_binding_indices,
+            bytecode: Bytecode {
+                bytes: raw.bytecode,
+            },
+            constants,
+            bindings: raw.bindings,
+            handlers: raw.handlers,
+            ic: raw.ic,
+            source_info: SourceInfo::new(
+                SourceMap::new(raw.entries, self.path.clone()),
+                raw.name,
+                SpannedSourceText::new(self.source_text.clone(), raw.span),
+            ),
+            global_lexs: raw.global_lexs,
+            global_fns: raw.global_fns,
+            global_vars: raw.global_vars,
+            debug_id: CodeBlock::get_next_codeblock_id(),
+            #[cfg(feature = "trace")]
+            traced: std::cell::Cell::new(false),
+            #[cfg(feature = "jit")]
+            jit: crate::vm::jit::JitSlot::default(),
+            lazy: None,
+        })
+    }
+}
+
+/// Reads back a module [`write_module`] wrote down from `source_text`, into `realm`. Every code
+/// block is checked now; only the module's own is made now, and the rest when their functions
+/// are first called.
 pub(crate) fn read_module(
     bytes: &[u8],
     source_text: &SourceText,
@@ -794,82 +918,80 @@ pub(crate) fn read_module(
         };
         scopes.push(Scope::from_parts(outer, parts)?);
     }
-    let scope_ref = |id: u32| -> Read<Scope> {
-        match id as usize {
-            0 => Ok(global.clone()),
-            n => scopes.get(n - 1).cloned().ok_or("no such scope"),
-        }
+    let module_scope = match reader.u32()? as usize {
+        0 => return Err("a module scope must be the module's own"),
+        n => scopes.get(n - 1).cloned().ok_or("no such scope")?,
     };
-    let module_scope = scope_ref(reader.u32()?)?;
-    if module_scope.ptr_eq(&global) {
-        return Err("a module scope must be the module's own");
-    }
 
     let count = reader.count(16)?;
     if count == 0 {
         return Err("no code");
     }
-    let mut raw = Vec::with_capacity(count);
+    let base = reader.pos;
+    let mut codes = Vec::with_capacity(count);
+    let mut nested_in = vec![false; count];
+    let mut root_functions = Vec::new();
     for index in 0..count {
-        raw.push(read_code(&mut reader, index, count, &scope_ref)?);
+        let (meta, functions) = skim_code(
+            &mut reader,
+            index,
+            count,
+            scopes.len(),
+            &global,
+            units.len(),
+        )?;
+        // Every code block but the first is nested in exactly one other, which comes before it.
+        for function in &functions {
+            if std::mem::replace(&mut nested_in[*function], true) {
+                return Err("code nested in two places");
+            }
+        }
+        if index == 0 {
+            root_functions = functions;
+        }
+        codes.push(CodeMeta {
+            start: meta.start - base,
+            end: meta.end - base,
+            ..meta
+        });
     }
+    if nested_in.iter().skip(1).any(|nested| !nested) {
+        return Err("code nested nowhere");
+    }
+    let code_bytes = bytes.get(base..reader.pos).ok_or("truncated")?;
 
     let count_functions = reader.count(4)?;
     let mut functions = Vec::with_capacity(count_functions);
     for _ in 0..count_functions {
         let index = reader.u32()?;
         let locator = reader.locator()?;
+        check_global_binding(&locator, &global)?;
         functions.push((index, locator));
     }
     if reader.remaining() != 0 {
         return Err("bytes after the end");
     }
 
-    // Every code block but the first is nested in exactly one other, which comes before it.
-    let mut nested_in = vec![false; raw.len()];
-    for code in &raw {
-        for constant in &code.constants {
-            if let RawConstant::Function(index) = constant
-                && std::mem::replace(&mut nested_in[*index], true)
-            {
-                return Err("code nested in two places");
-            }
-        }
-    }
-    if nested_in.iter().skip(1).any(|nested| !nested) {
-        return Err("code nested nowhere");
-    }
-
-    let path: SourcePath = path.map(Path::to_path_buf).into();
-    let source_len = units.len();
-    let mut built: Vec<Option<Gc<CodeBlock>>> = vec![None; raw.len()];
-    for (index, code) in raw.into_iter().enumerate().rev() {
-        let code = build_code(code, &mut built, source_text, &path, source_len)?;
-        verify_code(&code)?;
-        built[index] = Some(Gc::new(code));
-    }
-    let codeblock = built[0].take().ok_or("no code")?;
-
+    let module = Rc::new(CachedModule {
+        bytes: code_bytes.into(),
+        codes: codes.into_boxed_slice(),
+        scopes: scopes.into_boxed_slice(),
+        global,
+        source_text: source_text.clone(),
+        path: path.map(Path::to_path_buf).into(),
+    });
+    let codeblock = Gc::new(module.code(0)?);
     for (index, _) in &functions {
         match codeblock.constants.get(*index as usize) {
             Some(Constant::Function(_)) => {}
             _ => return Err("a declared function that is not a function constant"),
         }
     }
-
-    // What the code finds in the global scope must be there, where it was.
-    let mut pending = vec![codeblock.clone()];
-    while let Some(code) = pending.pop() {
-        check_global_bindings(&code, &global)?;
-        for constant in &code.constants {
-            if let Constant::Function(function) = constant {
-                pending.push(function.clone());
-            }
-        }
-    }
-    for (_, locator) in &functions {
-        check_global_binding(locator, &global)?;
-    }
+    debug_assert!(
+        root_functions
+            .iter()
+            .all(|index| *index < module.codes.len())
+    );
 
     Ok((
         code,
@@ -880,6 +1002,236 @@ pub(crate) fn read_module(
             eager: true,
         },
     ))
+}
+
+/// A string as written down, not made into a `JsString` unless it is needed.
+enum RawString<'a> {
+    Latin1(&'a [u8]),
+    Utf16(&'a [u8]),
+}
+
+impl RawString<'_> {
+    fn to_js_string(&self) -> JsString {
+        match self {
+            Self::Latin1(bytes) => JsString::from(crate::string::JsStr::latin1(bytes)),
+            Self::Utf16(bytes) => {
+                let units: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                JsString::from(&units[..])
+            }
+        }
+    }
+}
+
+impl<'a> Reader<'a> {
+    fn raw_string(&mut self) -> Read<RawString<'a>> {
+        match self.u8()? {
+            0 => Ok(RawString::Latin1(self.bytes()?)),
+            1 => {
+                let len = self.count(2)?;
+                Ok(RawString::Utf16(self.take(len * 2)?))
+            }
+            _ => Err("unknown string encoding"),
+        }
+    }
+}
+
+/// Checks the record of a code block, as reading it and running it need, without making
+/// anything but its stub's name: what [`read_code`] would read, every instruction of its
+/// bytecode (whole, its registers within the frame, its jumps at instructions, ending with a
+/// return), its exception handlers, its constants and the tables that point at them, its source
+/// map and span, and the bindings it finds in the global scope. Answers what its stub is made
+/// with, and the code blocks it nests.
+fn skim_code(
+    reader: &mut Reader<'_>,
+    index: usize,
+    count: usize,
+    scopes: usize,
+    global: &Scope,
+    source_len: usize,
+) -> Read<(CodeMeta, Vec<usize>)> {
+    let start = reader.pos;
+    let flags = u16::try_from(reader.u32()?).map_err(|_| "unknown code flags")?;
+    let flags = CodeBlockFlags::from_bits(flags).ok_or("unknown code flags")?;
+    let length = reader.u32()?;
+    let parameter_length = reader.u32()?;
+    let register_count = reader.u32()?;
+    let this_mode = match reader.u8()? {
+        0 => ThisMode::Lexical,
+        1 => ThisMode::Strict,
+        2 => ThisMode::Global,
+        _ => return Err("unknown this mode"),
+    };
+    if register_count > MAX_REGISTERS {
+        return Err("too many registers");
+    }
+    // The registers a frame of async code uses without naming them.
+    let is_async = flags.contains(CodeBlockFlags::IS_ASYNC);
+    let implicit = match (is_async, flags.contains(CodeBlockFlags::IS_GENERATOR)) {
+        (true, true) => 5,
+        (true, false) => 4,
+        _ => 1,
+    };
+    if register_count < implicit {
+        return Err("fewer registers than the frame uses");
+    }
+    for _ in 0..reader.count(1)? {
+        reader.u32()?;
+    }
+    let starts = verify_bytecode(reader.bytes()?, register_count)?;
+
+    // What kind each constant is: 0 a string, 1 a function, 2 a bigint, 3 a scope.
+    let n = reader.count(2)?;
+    let mut kinds = Vec::with_capacity(n);
+    let mut functions = Vec::new();
+    for _ in 0..n {
+        let kind = reader.u8()?;
+        match kind {
+            0 => {
+                reader.raw_string()?;
+            }
+            1 => {
+                let function = reader.u32()? as usize;
+                if function <= index || function >= count {
+                    return Err("a function constant that is not nested after its code");
+                }
+                functions.push(function);
+            }
+            2 => {
+                let digits = std::str::from_utf8(reader.bytes()?).map_err(|_| "bad bigint")?;
+                JsBigInt::from_string_radix(digits, 16).ok_or("bad bigint")?;
+            }
+            3 => {
+                if reader.u32()? as usize > scopes {
+                    return Err("no such scope");
+                }
+            }
+            _ => return Err("unknown constant"),
+        }
+        kinds.push(kind);
+    }
+    for _ in 0..reader.count(4)? {
+        let name = reader.raw_string()?;
+        let scope = reader.u32()?;
+        let binding_index = reader.u32()?;
+        let unique = reader.u32()?;
+        // What the code finds in the global scope must be there, where it was.
+        if scope <= 1 {
+            let locator =
+                BindingLocator::from_parts(name.to_js_string(), scope, binding_index, unique);
+            check_global_binding(&locator, global)?;
+        }
+    }
+    let len = starts.len();
+    let is_start = |address: u32| starts.get(address as usize).copied().unwrap_or(false);
+    for _ in 0..reader.count(3)? {
+        let start = reader.u32()?;
+        let end = reader.u32()?;
+        reader.u32()?;
+        if start > end || !is_start(end) || (start as usize) > len {
+            return Err("an exception handler outside the code");
+        }
+    }
+    for _ in 0..reader.count(2)? {
+        reader.raw_string()?;
+    }
+    let mut last_pc = 0;
+    for _ in 0..reader.count(2)? {
+        let pc = reader.u32()?;
+        if pc < last_pc {
+            return Err("a source map out of order");
+        }
+        last_pc = pc;
+        if reader.bool()? {
+            reader.position()?;
+        }
+    }
+    let name = reader.string()?;
+    let span = if reader.bool()? {
+        let start = usize::try_from(reader.u64()?).map_err(|_| "span out of range")?;
+        let end = usize::try_from(reader.u64()?).map_err(|_| "span out of range")?;
+        if start > end || end > source_len {
+            return Err("a span outside the source text");
+        }
+        Some(LinearSpan::new(
+            LinearPosition::new(start),
+            LinearPosition::new(end),
+        ))
+    } else {
+        None
+    };
+    let kind = |index: u32| kinds.get(index as usize).copied();
+    for _ in 0..reader.count(1)? {
+        if kind(reader.u32()?) != Some(0) {
+            return Err("a global name that is not a string constant");
+        }
+    }
+    for _ in 0..reader.count(2)? {
+        let name = reader.u32()?;
+        let function = reader.u32()?;
+        if kind(name) != Some(0) || kind(function) != Some(1) {
+            return Err("a global function that is not a function constant");
+        }
+    }
+    for _ in 0..reader.count(1)? {
+        if kind(reader.u32()?) != Some(0) {
+            return Err("a global name that is not a string constant");
+        }
+    }
+    Ok((
+        CodeMeta {
+            start,
+            end: reader.pos,
+            flags,
+            length,
+            parameter_length,
+            this_mode,
+            name,
+            span,
+        },
+        functions,
+    ))
+}
+
+/// Checks that bytecode can run without reading outside what it has: every instruction whole,
+/// each register below `register_count`, each jump to the start of an instruction, and the
+/// last instruction a return, so it does not run past the end. Answers where instructions start.
+fn verify_bytecode(bytes: &[u8], register_count: u32) -> Read<Vec<bool>> {
+    let len = bytes.len();
+    if len == 0 || len > u32::MAX as usize {
+        return Err("no bytecode, or too much");
+    }
+    let mut starts = vec![false; len];
+    let mut targets = Vec::new();
+    let mut bad_register = false;
+    let mut pc = 0;
+    let mut last = None;
+    while pc < len {
+        starts[pc] = true;
+        let (opcode, next) =
+            Bytecode::check_instruction_in(bytes, pc, &mut |operand| match operand {
+                Operand::Register(register) => bad_register |= register >= register_count,
+                Operand::Address(address) => targets.push(address),
+            })
+            .ok_or("an instruction cut short")?;
+        if bad_register {
+            return Err("a register outside the frame");
+        }
+        last = Some(opcode);
+        pc = next;
+    }
+    if !matches!(last, Some(Opcode::Return)) {
+        return Err("code that does not end with a return");
+    }
+    if !targets
+        .iter()
+        .all(|target| starts.get(*target as usize).copied().unwrap_or(false))
+    {
+        return Err("a jump to the middle of an instruction or past the end");
+    }
+    Ok(starts)
 }
 
 fn read_code(
@@ -1011,161 +1363,6 @@ fn read_code(
         global_fns: global_fns.into_boxed_slice(),
         global_vars: global_vars.into_boxed_slice(),
     })
-}
-
-fn build_code(
-    raw: RawCode,
-    built: &mut [Option<Gc<CodeBlock>>],
-    source_text: &SourceText,
-    path: &SourcePath,
-    source_len: usize,
-) -> Read<CodeBlock> {
-    let mut constants = ThinVec::with_capacity(raw.constants.len());
-    for constant in raw.constants {
-        constants.push(match constant {
-            RawConstant::String(string) => Constant::String(string),
-            RawConstant::Function(index) => Constant::Function(
-                built
-                    .get_mut(index)
-                    .and_then(Option::take)
-                    .ok_or("a function constant read twice")?,
-            ),
-            RawConstant::BigInt(bigint) => Constant::BigInt(bigint),
-            RawConstant::Scope(scope) => Constant::Scope(scope),
-        });
-    }
-    if let Some(span) = raw.span
-        && span.end().pos() > source_len
-    {
-        return Err("span beyond the source text");
-    }
-    Ok(CodeBlock {
-        flags: std::cell::Cell::new(raw.flags),
-        length: raw.length,
-        parameter_length: raw.parameter_length,
-        register_count: raw.register_count,
-        this_mode: raw.this_mode,
-        mapped_arguments_binding_indices: raw.mapped_arguments_binding_indices,
-        bytecode: Bytecode {
-            bytes: raw.bytecode,
-        },
-        constants,
-        bindings: raw.bindings,
-        handlers: raw.handlers,
-        ic: raw.ic,
-        source_info: SourceInfo::new(
-            SourceMap::new(raw.entries, path.clone()),
-            raw.name,
-            SpannedSourceText::new(source_text.clone(), raw.span),
-        ),
-        global_lexs: raw.global_lexs,
-        global_fns: raw.global_fns,
-        global_vars: raw.global_vars,
-        debug_id: CodeBlock::get_next_codeblock_id(),
-        #[cfg(feature = "trace")]
-        traced: std::cell::Cell::new(false),
-        #[cfg(feature = "jit")]
-        jit: crate::vm::jit::JitSlot::default(),
-        lazy: None,
-    })
-}
-
-/// Checks that a code block can run without reading outside what it has: every instruction
-/// whole, its registers within the frame, its jumps and handlers at instructions, its tables of
-/// global names and functions pointing at constants of the right kind, and its source map in
-/// order.
-fn verify_code(code: &CodeBlock) -> Read<()> {
-    if code.register_count > MAX_REGISTERS {
-        return Err("too many registers");
-    }
-    // The registers a frame of async code uses without naming them.
-    let implicit = if code.is_async_generator() {
-        5
-    } else if code.is_async() {
-        4
-    } else {
-        1
-    };
-    if code.register_count < implicit {
-        return Err("fewer registers than the frame uses");
-    }
-
-    let bytes = &code.bytecode;
-    let len = bytes.bytes.len();
-    if len == 0 || len > u32::MAX as usize {
-        return Err("no bytecode, or too much");
-    }
-    let mut starts = vec![false; len];
-    let mut targets = Vec::new();
-    let mut bad_register = false;
-    let mut pc = 0;
-    let mut last = None;
-    while pc < len {
-        starts[pc] = true;
-        let (opcode, next) = bytes
-            .check_instruction(pc, &mut |operand| match operand {
-                Operand::Register(register) => {
-                    bad_register |= register >= code.register_count;
-                }
-                Operand::Address(address) => targets.push(address),
-            })
-            .ok_or("an instruction cut short")?;
-        if bad_register {
-            return Err("a register outside the frame");
-        }
-        last = Some(opcode);
-        pc = next;
-    }
-    // Running on past the last instruction would read past the end.
-    if !matches!(last, Some(Opcode::Return)) {
-        return Err("code that does not end with a return");
-    }
-    let is_start = |address: u32| starts.get(address as usize).copied().unwrap_or(false);
-    if !targets.iter().all(|target| is_start(*target)) {
-        return Err("a jump to the middle of an instruction or past the end");
-    }
-    for handler in &code.handlers {
-        let (start, end) = (handler.start.as_u32(), handler.end.as_u32());
-        if start > end || !is_start(end) || (start as usize) > len {
-            return Err("an exception handler outside the code");
-        }
-    }
-
-    let is_string = |index: u32| {
-        matches!(
-            code.constants.get(index as usize),
-            Some(Constant::String(_))
-        )
-    };
-    if !code.global_lexs.iter().all(|index| is_string(*index))
-        || !code.global_vars.iter().all(|index| is_string(*index))
-    {
-        return Err("a global name that is not a string constant");
-    }
-    for binding in &code.global_fns {
-        if !is_string(binding.name_index)
-            || !matches!(
-                code.constants.get(binding.function_index as usize),
-                Some(Constant::Function(_))
-            )
-        {
-            return Err("a global function that is not a function constant");
-        }
-    }
-
-    let entries = code.source_info.map().entries();
-    if entries.windows(2).any(|pair| pair[0].pc > pair[1].pc) {
-        return Err("a source map out of order");
-    }
-    Ok(())
-}
-
-/// Checks every binding the code finds in the global scope against the global scope it runs
-/// in.
-fn check_global_bindings(code: &CodeBlock, global: &Scope) -> Read<()> {
-    code.bindings
-        .iter()
-        .try_for_each(|locator| check_global_binding(locator, global))
 }
 
 fn check_global_binding(locator: &BindingLocator, global: &Scope) -> Read<()> {

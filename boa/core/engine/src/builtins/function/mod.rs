@@ -1015,12 +1015,9 @@ fn compile_lazy_function(
     realm: &Realm,
     context: &mut Context,
 ) -> JsResult<Gc<CodeBlock>> {
-    let compiled = CodeBlock::compiled(code, context.interner_mut()).ok_or_else(|| {
+    let compiled = CodeBlock::compiled(code, context.interner_mut()).map_err(|reason| {
         JsNativeError::typ()
-            .with_message(
-                "a lazily compiled function cannot be first called from another context; \
-                 turn lazy compilation off in the context that declares it",
-            )
+            .with_message(reason)
             .with_realm(realm.clone())
     })?;
     // The body may have been compiled to find a binding in the global scope that a script

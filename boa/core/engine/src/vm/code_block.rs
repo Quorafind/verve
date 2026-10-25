@@ -187,20 +187,41 @@ pub struct CodeBlock {
 }
 
 /// The body of a function that is compiled when the function is first called (see
-/// `FunctionCompiler::lazy`): pending until then, the compiled code after.
+/// `FunctionCompiler::lazy`), or read back from a code cache then: pending until then, the
+/// code after.
 #[derive(Debug, Clone, Trace, Finalize)]
 pub(crate) struct LazyCode {
-    // Safety: nothing in a pending function needs tracing: its scopes, AST and strings hold
-    // no `Gc`.
+    // Safety: nothing pending needs tracing: a syntax tree, scopes, strings and bytes hold no
+    // `Gc`.
     #[unsafe_ignore_trace]
-    pending: std::cell::RefCell<Option<Box<PendingFunction>>>,
+    pending: std::cell::RefCell<Option<Pending>>,
     compiled: GcRefCell<Option<Gc<CodeBlock>>>,
+}
+
+/// Where a pending function's code comes from.
+#[derive(Debug, Clone)]
+enum Pending {
+    /// Compiled from its syntax tree.
+    Ast(Box<PendingFunction>),
+    /// Read back from the `n`th code block of a module read from a code cache.
+    Cached(std::rc::Rc<crate::code_cache::CachedModule>, usize),
 }
 
 impl LazyCode {
     pub(crate) fn new(pending: PendingFunction) -> Self {
         Self {
-            pending: std::cell::RefCell::new(Some(Box::new(pending))),
+            pending: std::cell::RefCell::new(Some(Pending::Ast(Box::new(pending)))),
+            compiled: GcRefCell::new(None),
+        }
+    }
+
+    /// A function whose code block is the `index`th of `module`, made when it is first called.
+    pub(crate) fn cached(
+        module: std::rc::Rc<crate::code_cache::CachedModule>,
+        index: usize,
+    ) -> Self {
+        Self {
+            pending: std::cell::RefCell::new(Some(Pending::Cached(module, index))),
             compiled: GcRefCell::new(None),
         }
     }
@@ -211,32 +232,43 @@ impl LazyCode {
     }
 
     /// The compiled code, compiling it first if it is not yet. `eager` compiles the functions
-    /// nested in it at once too. `None` if it is not compiled and `interner` is not the one it
-    /// was parsed with: called from another context, it cannot be compiled there.
+    /// nested in it at once too. An error if it is not compiled and cannot be: a function
+    /// parsed with another interner (called from another context) or, if a code cache let
+    /// through what it should not have, a code block that cannot be read back.
     fn compile(
         &self,
         stub: &CodeBlock,
         eager: bool,
         interner: &mut Interner,
-    ) -> Option<Gc<CodeBlock>> {
+    ) -> Result<Gc<CodeBlock>, &'static str> {
         if let Some(code) = self.get() {
-            return Some(code);
+            return Ok(code);
         }
         // Compiling runs no JavaScript, so nothing can ask for this code while it compiles.
         let pending = {
             let mut pending = self.pending.borrow_mut();
-            if !pending.as_ref()?.parsed_with(interner) {
-                return None;
+            if let Some(Pending::Ast(function)) = pending.as_ref()
+                && !function.parsed_with(interner)
+            {
+                return Err(
+                    "a lazily compiled function cannot be first called from another \
+                            context; turn lazy compilation off in the context that declares it",
+                );
             }
-            pending.take()?
+            pending
+                .take()
+                .ok_or("a function's code is being made already")?
         };
-        let code = pending.compile(eager, interner);
+        let code = match pending {
+            Pending::Ast(function) => function.compile(eager, interner),
+            Pending::Cached(module, index) => Gc::new(module.code(index)?),
+        };
         debug_assert!(
             stub.agrees_with(&code),
             "a lazily compiled function must be what its stub said it would be"
         );
         *self.compiled.borrow_mut() = Some(code.clone());
-        Some(code)
+        Ok(code)
     }
 }
 
@@ -284,11 +316,14 @@ impl CodeBlock {
     }
 
     /// The code that runs for this function: this code block, or the body compiled from it,
-    /// compiling it now if it has not been. `None` if it must be compiled but `interner` is
-    /// not the one its function was parsed with (a call from another context).
-    pub(crate) fn compiled(code: &Gc<Self>, interner: &mut Interner) -> Option<Gc<Self>> {
+    /// compiling it now if it has not been. An error, saying why, if it must be compiled and
+    /// cannot be: see `LazyCode::compile`.
+    pub(crate) fn compiled(
+        code: &Gc<Self>,
+        interner: &mut Interner,
+    ) -> Result<Gc<Self>, &'static str> {
         match &code.lazy {
-            None => Some(code.clone()),
+            None => Ok(code.clone()),
             Some(lazy) => lazy.compile(code, false, interner),
         }
     }
@@ -302,6 +337,23 @@ impl CodeBlock {
                 .compile(code, true, interner)
                 .expect("nested functions are compiled with their own interner"),
         }
+    }
+
+    /// The code that runs for this function without compiling anything: this code block, the
+    /// body compiled from it, or the code block read back from a code cache for it, which is
+    /// made now if it is not yet. `None` for a function still to compile from its syntax tree.
+    pub(crate) fn read_back(code: &Gc<Self>) -> Option<Gc<Self>> {
+        let Some(lazy) = &code.lazy else {
+            return Some(code.clone());
+        };
+        if let Some(compiled) = lazy.get() {
+            return Some(compiled);
+        }
+        if !matches!(&*lazy.pending.borrow(), Some(Pending::Cached(..))) {
+            return None;
+        }
+        // Reading back needs no interner: a cached code block holds its strings itself.
+        lazy.compile(code, false, &mut Interner::default()).ok()
     }
 
     /// This code block, or the body compiled from it if it has been compiled: never compiles.

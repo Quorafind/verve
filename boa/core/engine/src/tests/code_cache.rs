@@ -253,3 +253,43 @@ fn modules_with_direct_eval_and_lazy_functions_round_trip() {
         assert!(parsed.starts_with("none,none,deep"), "{parsed}");
     }
 }
+
+#[test]
+fn cached_functions_are_read_back_when_first_called() {
+    use crate::{builtins::function::OrdinaryFunction, vm::CodeBlock};
+    let source = "export function f(a) { return a * 2; } export const g = () => f(21);";
+    let (mut context, _) = context(false);
+    let module = parse(source, "f.mjs", &mut context);
+    let bytes = module.code_cache(&mut context).unwrap().unwrap();
+    let (mut context, _) = self::context(false);
+    let module = Module::from_code_cache(&bytes, source, None, None, &mut context).unwrap();
+    let promise = module.load_link_evaluate(&mut context);
+    context.run_jobs().unwrap();
+    assert!(promise.state().as_fulfilled().is_some());
+    let namespace = module.namespace(&mut context);
+    let code = |name: &str, context: &mut Context| {
+        let value = namespace.get(js_string!(name), context).unwrap();
+        value
+            .as_object()
+            .unwrap()
+            .downcast_ref::<OrdinaryFunction>()
+            .unwrap()
+            .code
+            .clone()
+    };
+    let f = code("f", &mut context);
+    assert!(f.is_lazy(), "read back, not called: still a stub");
+    assert!(CodeBlock::resolved(&f).is_lazy());
+    let g = namespace.get(js_string!("g"), &mut context).unwrap();
+    let result = g
+        .as_callable()
+        .unwrap()
+        .call(&JsValue::undefined(), &[], &mut context)
+        .unwrap();
+    assert_eq!(result, JsValue::new(42));
+    // Called through `g`: `f`'s code block was made then, and its function object runs it next.
+    assert!(!CodeBlock::resolved(&f).is_lazy());
+    // Written down again, a module read back is the same module.
+    let again = module.code_cache(&mut context).unwrap();
+    assert!(again.is_none(), "a linked module is not written down");
+}
