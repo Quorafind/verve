@@ -8,11 +8,13 @@ use crate::{
         OrdinaryObject,
         function::{OrdinaryFunction, ThisMode},
     },
+    bytecompiler::PendingFunction,
     object::JsObject,
 };
 use bitflags::bitflags;
 use boa_ast::scope::{BindingLocator, Scope};
-use boa_gc::{Finalize, Gc, Trace, empty_trace};
+use boa_gc::{Finalize, Gc, GcRefCell, Trace, empty_trace};
+use boa_interner::Interner;
 use itertools::Itertools;
 use std::{cell::Cell, fmt::Display, fmt::Write as _};
 use thin_vec::ThinVec;
@@ -177,6 +179,65 @@ pub struct CodeBlock {
     #[cfg(feature = "jit")]
     #[unsafe_ignore_trace]
     pub(crate) jit: super::jit::JitSlot,
+
+    /// For a function whose body is compiled when it is first called: what that needs, then
+    /// the compiled code. Such a code block has no bytecode of its own and never runs; its
+    /// function objects run the compiled one. `None` for code compiled at once.
+    pub(crate) lazy: Option<Box<LazyCode>>,
+}
+
+/// The body of a function that is compiled when the function is first called (see
+/// `FunctionCompiler::lazy`): pending until then, the compiled code after.
+#[derive(Debug, Clone, Trace, Finalize)]
+pub(crate) struct LazyCode {
+    // Safety: nothing in a pending function needs tracing: its scopes, AST and strings hold
+    // no `Gc`.
+    #[unsafe_ignore_trace]
+    pending: std::cell::RefCell<Option<Box<PendingFunction>>>,
+    compiled: GcRefCell<Option<Gc<CodeBlock>>>,
+}
+
+impl LazyCode {
+    pub(crate) fn new(pending: PendingFunction) -> Self {
+        Self {
+            pending: std::cell::RefCell::new(Some(Box::new(pending))),
+            compiled: GcRefCell::new(None),
+        }
+    }
+
+    /// The compiled code, if the function has been compiled.
+    pub(crate) fn get(&self) -> Option<Gc<CodeBlock>> {
+        self.compiled.borrow().clone()
+    }
+
+    /// The compiled code, compiling it first if it is not yet. `eager` compiles the functions
+    /// nested in it at once too. `None` if it is not compiled and `interner` is not the one it
+    /// was parsed with: called from another context, it cannot be compiled there.
+    fn compile(
+        &self,
+        stub: &CodeBlock,
+        eager: bool,
+        interner: &mut Interner,
+    ) -> Option<Gc<CodeBlock>> {
+        if let Some(code) = self.get() {
+            return Some(code);
+        }
+        // Compiling runs no JavaScript, so nothing can ask for this code while it compiles.
+        let pending = {
+            let mut pending = self.pending.borrow_mut();
+            if !pending.as_ref()?.parsed_with(interner) {
+                return None;
+            }
+            pending.take()?
+        };
+        let code = pending.compile(eager, interner);
+        debug_assert!(
+            stub.agrees_with(&code),
+            "a lazily compiled function must be what its stub said it would be"
+        );
+        *self.compiled.borrow_mut() = Some(code.clone());
+        Some(code)
+    }
 }
 
 /// ---- `CodeBlock` public API ----
@@ -211,7 +272,62 @@ impl CodeBlock {
             traced: Cell::new(false),
             #[cfg(feature = "jit")]
             jit: super::jit::JitSlot::default(),
+            lazy: None,
         }
+    }
+
+    /// Whether this is the code block of a function whose body is compiled when it is first
+    /// called (whether or not it has been).
+    #[inline]
+    pub(crate) fn is_lazy(&self) -> bool {
+        self.lazy.is_some()
+    }
+
+    /// The code that runs for this function: this code block, or the body compiled from it,
+    /// compiling it now if it has not been. `None` if it must be compiled but `interner` is
+    /// not the one its function was parsed with (a call from another context).
+    pub(crate) fn compiled(code: &Gc<Self>, interner: &mut Interner) -> Option<Gc<Self>> {
+        match &code.lazy {
+            None => Some(code.clone()),
+            Some(lazy) => lazy.compile(code, false, interner),
+        }
+    }
+
+    /// Like [`CodeBlock::compiled`], with the functions nested in the body compiled at once
+    /// too; for code being compiled with the interner it was parsed with, so it always can be.
+    pub(crate) fn compiled_eagerly(code: &Gc<Self>, interner: &mut Interner) -> Gc<Self> {
+        match &code.lazy {
+            None => code.clone(),
+            Some(lazy) => lazy
+                .compile(code, true, interner)
+                .expect("nested functions are compiled with their own interner"),
+        }
+    }
+
+    /// This code block, or the body compiled from it if it has been compiled: never compiles.
+    pub(crate) fn resolved(code: &Gc<Self>) -> Gc<Self> {
+        code.lazy
+            .as_ref()
+            .and_then(|lazy| lazy.get())
+            .unwrap_or_else(|| code.clone())
+    }
+
+    /// Whether `code`, compiled from this stub, has everything the stub told of it before it
+    /// was compiled: what function objects are made with and what is read of them.
+    fn agrees_with(&self, code: &Self) -> bool {
+        let told = CodeBlockFlags::STRICT
+            | CodeBlockFlags::IS_ASYNC
+            | CodeBlockFlags::IS_GENERATOR
+            | CodeBlockFlags::HAS_PROTOTYPE_PROPERTY
+            | CodeBlockFlags::IS_CLASS_CONSTRUCTOR
+            | CodeBlockFlags::IS_DERIVED_CONSTRUCTOR
+            | CodeBlockFlags::IN_CLASS_FIELD_INITIALIZER;
+        self.flags.get().intersection(told).bits() == code.flags.get().intersection(told).bits()
+            && self.length == code.length
+            && self.parameter_length == code.parameter_length
+            && self.this_mode == code.this_mode
+            && self.name() == code.name()
+            && code.lazy.is_none()
     }
 
     /// Retrieves the name associated with this code block.
@@ -1103,6 +1219,12 @@ pub(crate) fn create_function_object(
     prototype: JsObject,
     context: &mut Context,
 ) -> JsObject {
+    // Once a function's body is compiled, its new function objects start with that code.
+    let code = if code.is_lazy() {
+        CodeBlock::resolved(&code)
+    } else {
+        code
+    };
     let name: JsValue = code.name().clone().into();
     let length: JsValue = code.length.into();
 
@@ -1171,6 +1293,12 @@ pub(crate) fn create_function_object(
 /// because it constructs the function from a pre-initialized object template,
 /// with all the properties and prototype set.
 pub(crate) fn create_function_object_fast(code: Gc<CodeBlock>, context: &mut Context) -> JsObject {
+    // Once a function's body is compiled, its new function objects start with that code.
+    let code = if code.is_lazy() {
+        CodeBlock::resolved(&code)
+    } else {
+        code
+    };
     let name: JsValue = code.name().clone().into();
     let length: JsValue = code.length.into();
 

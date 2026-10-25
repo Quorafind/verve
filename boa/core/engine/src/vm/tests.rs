@@ -521,6 +521,8 @@ fn super_construction_with_parameter_expression() {
 #[test]
 fn cross_context_function_call() {
     let context1 = &mut Context::default();
+    // A function first called from another context must have been compiled in its own.
+    context1.set_lazy_compile(false);
     let result = context1.eval(Source::from_bytes(indoc! {r"
         var global = 100;
 

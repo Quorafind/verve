@@ -5,6 +5,8 @@ fn compile_bytecode() {
 
     glob!("../scripts/", "**/*.js", |path| {
         let context = &mut Context::default();
+        // The snapshots show every function's bytecode, so compile them with the script.
+        context.set_lazy_compile(false);
         let source = Source::from_filepath(path).expect("Could not load source");
         let script = Script::parse(source, None, context).unwrap();
         let output = script.codeblock(context).unwrap().to_string();

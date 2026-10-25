@@ -136,6 +136,7 @@ impl Script {
             )?;
 
             let spanned_source_text = SpannedSourceText::new_source_only(self.get_source());
+            let lazy_functions = context.lazy_compile();
 
             let mut compiler = ByteCompiler::new(
                 js_string!("<main>"),
@@ -151,6 +152,7 @@ impl Script {
                 self.path().map(Path::to_owned).into(),
             );
 
+            compiler.lazy_functions = lazy_functions;
             #[cfg(feature = "annex-b")]
             {
                 compiler.annex_b_function_names = annex_b_function_names;

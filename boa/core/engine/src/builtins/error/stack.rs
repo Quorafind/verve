@@ -64,7 +64,12 @@ pub(super) fn stack_trace_limit(context: &Context) -> usize {
 pub(super) fn function_identity(function: &JsValue) -> Option<crate::vm::source_info::SourceInfo> {
     let function = function.as_object()?;
     let function = function.downcast_ref::<OrdinaryFunction>()?;
-    Some(function.code.source_info.clone())
+    // A function compiled when first called runs its compiled code, so its frames are those.
+    Some(
+        crate::vm::CodeBlock::resolved(&function.code)
+            .source_info
+            .clone(),
+    )
 }
 
 /// One frame of a stack, as V8 shows and describes it.

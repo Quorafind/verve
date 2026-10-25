@@ -111,6 +111,7 @@ impl ByteCompiler<'_> {
             spanned_source_text,
             self.source_path.clone(),
         );
+        compiler.lazy_functions = self.lazy_functions;
 
         compiler.code_block_flags |= CodeBlockFlags::IS_CLASS_CONSTRUCTOR;
 
@@ -425,6 +426,7 @@ impl ByteCompiler<'_> {
                         self.spanned_source_text.clone_only_source(),
                         self.source_path.clone(),
                     );
+                    field_compiler.lazy_functions = self.lazy_functions;
 
                     // Function environment
                     field_compiler.code_block_flags |= CodeBlockFlags::HAS_FUNCTION_SCOPE;
@@ -476,6 +478,7 @@ impl ByteCompiler<'_> {
                         self.spanned_source_text.clone_only_source(),
                         self.source_path.clone(),
                     );
+                    field_compiler.lazy_functions = self.lazy_functions;
                     field_compiler.code_block_flags |= CodeBlockFlags::HAS_FUNCTION_SCOPE;
                     let _ = field_compiler.push_scope(field.scope());
                     let value = field_compiler.register_allocator.alloc();
@@ -528,6 +531,7 @@ impl ByteCompiler<'_> {
                         self.spanned_source_text.clone_only_source(),
                         self.source_path.clone(),
                     );
+                    field_compiler.lazy_functions = self.lazy_functions;
                     field_compiler.code_block_flags |= CodeBlockFlags::HAS_FUNCTION_SCOPE;
                     let _ = field_compiler.push_scope(field.scope());
                     let value = field_compiler.register_allocator.alloc();
@@ -572,6 +576,7 @@ impl ByteCompiler<'_> {
                         self.spanned_source_text.clone_only_source(),
                         self.source_path.clone(),
                     );
+                    field_compiler.lazy_functions = self.lazy_functions;
                     field_compiler.code_block_flags |= CodeBlockFlags::HAS_FUNCTION_SCOPE;
                     let _ = field_compiler.push_scope(field.scope());
                     let value = field_compiler.register_allocator.alloc();
@@ -615,6 +620,7 @@ impl ByteCompiler<'_> {
                         self.spanned_source_text.clone_only_source(),
                         self.source_path.clone(),
                     );
+                    compiler.lazy_functions = self.lazy_functions;
                     compiler.code_block_flags |= CodeBlockFlags::HAS_FUNCTION_SCOPE;
                     let _ = compiler.push_scope(block.scopes().function_scope());
 

@@ -12,6 +12,7 @@ mod generators;
 mod interrupt;
 mod iterators;
 mod job;
+mod lazy;
 mod operators;
 mod promise;
 mod spread;

@@ -1705,6 +1705,7 @@ impl SourceTextModule {
         let env = source.scope().clone();
 
         let spanned_source_text = SpannedSourceText::new_source_only(source_text.clone());
+        let lazy_functions = context.lazy_compile();
         let mut compiler = ByteCompiler::new(
             js_string!("<main>"),
             true,
@@ -1719,6 +1720,7 @@ impl SourceTextModule {
             self.code.path.clone().into(),
         );
 
+        compiler.lazy_functions = lazy_functions;
         compiler.async_handler = self.code.has_tla.then(|| compiler.push_handler());
 
         let mut imports = Vec::new();

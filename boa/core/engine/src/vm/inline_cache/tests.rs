@@ -16,6 +16,8 @@ use crate::{
 #[test]
 fn get_own_property_internal_method() {
     let context = &mut Context::default();
+    // The bytecode is read before the function first runs.
+    context.set_lazy_compile(false);
 
     let o = context
         .intrinsics()
@@ -61,6 +63,8 @@ fn get_own_property_internal_method() {
 #[test]
 fn get_internal_method() {
     let context = &mut Context::default();
+    // The bytecode is read before the function first runs.
+    context.set_lazy_compile(false);
 
     let o = context
         .intrinsics()
@@ -106,6 +110,8 @@ fn get_internal_method() {
 #[test]
 fn get_internal_method_in_prototype() {
     let context = &mut Context::default();
+    // The bytecode is read before the function first runs.
+    context.set_lazy_compile(false);
 
     let o = context
         .intrinsics()
@@ -154,6 +160,8 @@ fn get_internal_method_in_prototype() {
 #[test]
 fn define_own_property_internal_method_non_existent_property() {
     let context = &mut Context::default();
+    // The bytecode is read before the function first runs.
+    context.set_lazy_compile(false);
 
     let o = context
         .intrinsics()
@@ -208,6 +216,8 @@ fn define_own_property_internal_method_non_existent_property() {
 #[test]
 fn define_own_property_internal_method_existing_property_property() {
     let context = &mut Context::default();
+    // The bytecode is read before the function first runs.
+    context.set_lazy_compile(false);
 
     let o = context
         .intrinsics()
@@ -274,6 +284,8 @@ fn define_own_property_internal_method_existing_property_property() {
 #[test]
 fn set_internal_method() {
     let context = &mut Context::default();
+    // The bytecode is read before the function first runs.
+    context.set_lazy_compile(false);
 
     let o = context
         .intrinsics()
@@ -326,6 +338,8 @@ fn get_codeblock(value: &JsValue) -> Option<(JsObject, Gc<CodeBlock>)> {
 #[test]
 fn set_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let context = &mut Context::default();
+    // The bytecode is read before the function first runs.
+    context.set_lazy_compile(false);
     let function = context.eval(Source::from_bytes("(function (o) { return o.test; })"))?;
     let (function, code) = get_codeblock(&function).unwrap();
 
@@ -355,6 +369,8 @@ fn set_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
 #[test]
 fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let context = &mut Context::default();
+    // The bytecode is read before the function first runs.
+    context.set_lazy_compile(false);
     let function = context.eval(Source::from_bytes("(function (o) { o.test = 30; })"))?;
     let (function, code) = get_codeblock(&function).unwrap();
 
@@ -384,6 +400,8 @@ fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
 #[test]
 fn test_polymorphic_inline_cache() -> JsResult<()> {
     let context = &mut Context::default();
+    // The bytecode is read before the function first runs.
+    context.set_lazy_compile(false);
     let function = context.eval(Source::from_bytes("(function (o) { return o.test; })"))?;
     let (function, code) = get_codeblock(&function).unwrap();
 
@@ -422,6 +440,8 @@ fn test_polymorphic_inline_cache() -> JsResult<()> {
 #[test]
 fn test_megamorphic_inline_cache() -> JsResult<()> {
     let context = &mut Context::default();
+    // The bytecode is read before the function first runs.
+    context.set_lazy_compile(false);
     let function = context.eval(Source::from_bytes("(function (o) { return o.test; })"))?;
     let (function, code) = get_codeblock(&function).unwrap();
 
