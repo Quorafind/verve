@@ -543,6 +543,50 @@ impl Scope {
         Rc::as_ptr(&self.inner) as usize
     }
 
+    /// Hides the bindings at positions `range` (as [`Scope::num_bindings`] counts them) from
+    /// every lookup, keeping their indices: a script's global lexical declarations, from when
+    /// it is parsed until its declarations are instantiated (see [`Scope::declare_withdrawn`]).
+    #[doc(hidden)]
+    pub fn withdraw_bindings(&self, range: std::ops::Range<u32>) {
+        let bindings = self.inner.bindings.borrow();
+        let mut positions = self.inner.positions.borrow_mut();
+        for position in range {
+            if let Some(binding) = bindings.get(position as usize)
+                && positions.get(&binding.name) == Some(&position)
+            {
+                positions.remove(&binding.name);
+            }
+        }
+    }
+
+    /// Makes the bindings at positions `range`, hidden by [`Scope::withdraw_bindings`], found
+    /// again. Nothing changes if another binding of one of their names is found already: that
+    /// name is the error.
+    ///
+    /// # Errors
+    ///
+    /// The name of a binding another binding of the scope already declares.
+    #[doc(hidden)]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn declare_withdrawn(&self, range: std::ops::Range<u32>) -> Result<(), JsString> {
+        let bindings = self.inner.bindings.borrow();
+        let mut positions = self.inner.positions.borrow_mut();
+        let range = range.start as usize..(range.end as usize).min(bindings.len());
+        for (position, binding) in bindings[range.clone()].iter().enumerate() {
+            let position = (range.start + position) as u32;
+            if positions
+                .get(&binding.name)
+                .is_some_and(|found| *found != position)
+            {
+                return Err(binding.name.clone());
+            }
+        }
+        for (position, binding) in bindings[range.clone()].iter().enumerate() {
+            positions.insert(binding.name.clone(), (range.start + position) as u32);
+        }
+        Ok(())
+    }
+
     /// What this scope is made of besides its outer scope, to write it down; see
     /// [`Scope::from_parts`].
     #[doc(hidden)]

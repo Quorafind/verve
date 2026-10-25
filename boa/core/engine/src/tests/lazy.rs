@@ -473,3 +473,116 @@ fn jit_compiles_lazily_compiled_functions() {
     assert_eq!(results[0], results[1]);
     assert_eq!(results[0], "1498636");
 }
+
+/// Runs `first` and `scripts` in one context, lazily or not, each as a script of its own, and
+/// answers what each script answered or threw.
+fn scripts(lazy: bool, scripts: &[&str]) -> Vec<String> {
+    let mut context = Context::default();
+    context.set_lazy_compile(lazy);
+    scripts
+        .iter()
+        .map(|source| match context.eval(Source::from_bytes(*source)) {
+            Ok(value) => value.to_string(&mut context).map_or_else(
+                |e| format!("toString threw {e}"),
+                |s| s.to_std_string_escaped(),
+            ),
+            Err(error) => format!("threw {error}"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_parsed_script_declares_nothing_until_it_runs() {
+    for lazy in [false, true] {
+        let mut context = Context::default();
+        context.set_lazy_compile(lazy);
+        context
+            .eval(Source::from_bytes(
+                "globalThis.setting = 'global'; function readSetting() { return setting; }",
+            ))
+            .unwrap();
+        // Parsed, never run: its `let` is not a global binding of the realm.
+        let parsed = crate::Script::parse(
+            Source::from_bytes("let setting = 'lexical';"),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        let read = context.eval(Source::from_bytes("readSetting()")).unwrap();
+        assert_eq!(read, js_string!("global").into(), "lazy: {lazy}");
+        // Run, it is.
+        parsed.evaluate(&mut context).unwrap();
+        let read = context.eval(Source::from_bytes("setting")).unwrap();
+        assert_eq!(read, js_string!("lexical").into(), "lazy: {lazy}");
+    }
+}
+
+#[test]
+fn a_script_that_fails_to_declare_declares_nothing() {
+    for lazy in [false, true] {
+        let results = scripts(
+            lazy,
+            &[
+                "function usesUndefined(v) { return v === undefined; } 'ok'",
+                "let undefined = 0;",
+                "usesUndefined(1)",
+                "typeof undefined",
+            ],
+        );
+        assert!(results[1].starts_with("threw SyntaxError"), "{results:?}");
+        assert_eq!(results[2..], ["false", "undefined"], "lazy: {lazy}");
+    }
+}
+
+#[test]
+fn global_lexicals_declared_twice() {
+    for lazy in [false, true] {
+        let mut context = Context::default();
+        context.set_lazy_compile(lazy);
+        let first =
+            crate::Script::parse(Source::from_bytes("let dup = 1; dup"), None, &mut context)
+                .unwrap();
+        let second =
+            crate::Script::parse(Source::from_bytes("let dup = 2; dup"), None, &mut context)
+                .unwrap();
+        assert_eq!(first.evaluate(&mut context).unwrap(), JsValue::new(1));
+        let error = second.evaluate(&mut context).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("'dup' has already been declared"),
+            "{error}"
+        );
+        assert_eq!(
+            context.eval(Source::from_bytes("dup")).unwrap(),
+            JsValue::new(1)
+        );
+        // A script that cannot even parse declares nothing either.
+        assert!(
+            context
+                .eval(Source::from_bytes("let z = 1; let dup = 3;"))
+                .is_err()
+        );
+        assert!(
+            context
+                .eval(Source::from_bytes("typeof z"))
+                .unwrap()
+                .as_string()
+                .is_some_and(|s| s == js_string!("undefined"))
+        );
+    }
+}
+
+/// A function compiled when first called finds a global `let` a script declared after the
+/// function was: as the specification has it. One compiled with its script looks the name up
+/// on the global object, as eager Boa always has.
+#[test]
+fn a_later_global_let_is_found_by_a_lazily_compiled_function() {
+    let source = [
+        "function readX() { return typeof x === 'undefined' ? 'undef' : x; } 'ok'",
+        "let x = 5;",
+        "readX()",
+    ];
+    assert_eq!(scripts(true, &source)[2], "5");
+    assert_eq!(scripts(false, &source)[2], "undef");
+}

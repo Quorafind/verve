@@ -53,6 +53,17 @@ enum ScriptPhase {
 struct Inner {
     realm: Realm,
     phase: GcRefCell<ScriptPhase>,
+    /// The global scope the script was parsed against, and the positions in it of its global
+    /// lexical declarations. Parsing makes them, so the script's code can find them, but no
+    /// other code may until the script's declarations are instantiated: they are hidden until
+    /// then, and again if that fails.
+    #[unsafe_ignore_trace]
+    global_scope: boa_ast::scope::Scope,
+    #[unsafe_ignore_trace]
+    global_lexicals: std::ops::Range<u32>,
+    /// Whether the script's global lexical declarations are instantiated.
+    #[unsafe_ignore_trace]
+    declared: std::cell::Cell<bool>,
     source_text: SourceText,
     loaded_modules: GcRefCell<FxHashMap<JsString, Module>>,
     host_defined: HostDefined,
@@ -96,7 +107,11 @@ impl Script {
             parser.set_strict();
         }
         let scope = context.realm().scope().clone();
-        let (mut code, source) = parser.parse_script_with_source(&scope, context.interner_mut())?;
+        let before = scope.num_bindings();
+        let parsed = parser.parse_script_with_source(&scope, context.interner_mut());
+        let global_lexicals = before..scope.num_bindings();
+        scope.withdraw_bindings(global_lexicals.clone());
+        let (mut code, source) = parsed?;
         if !context.optimizer_options().is_empty() {
             context.optimize_statement_list(code.statements_mut());
         }
@@ -107,6 +122,9 @@ impl Script {
             inner: Gc::new(Inner {
                 realm: realm.unwrap_or_else(|| context.realm().clone()),
                 phase: GcRefCell::new(ScriptPhase::Ast(code)),
+                global_scope: scope,
+                global_lexicals,
+                declared: std::cell::Cell::new(false),
                 source_text,
                 loaded_modules: GcRefCell::default(),
                 host_defined: HostDefined::default(),
@@ -119,6 +137,38 @@ impl Script {
     ///
     /// This is a no-op if this has been called previously.
     pub fn codeblock(&self, context: &mut Context) -> JsResult<Gc<CodeBlock>> {
+        // The script's own code finds its global lexical declarations while it compiles; other
+        // code only once they are instantiated.
+        let declared = self.inner.declared.get();
+        if !declared {
+            self.declare_global_lexicals()?;
+        }
+        let compiled = self.compile(context);
+        if !declared {
+            self.inner
+                .global_scope
+                .withdraw_bindings(self.inner.global_lexicals.clone());
+        }
+        compiled
+    }
+
+    /// Makes the script's global lexical declarations found by other code, as instantiating
+    /// them does; a `SyntaxError` if one of them is declared already.
+    fn declare_global_lexicals(&self) -> JsResult<()> {
+        self.inner
+            .global_scope
+            .declare_withdrawn(self.inner.global_lexicals.clone())
+            .map_err(|name| {
+                crate::JsNativeError::syntax()
+                    .with_message(format!(
+                        "Identifier '{}' has already been declared",
+                        name.to_std_string_escaped()
+                    ))
+                    .into()
+            })
+    }
+
+    fn compile(&self, context: &mut Context) -> JsResult<Gc<CodeBlock>> {
         let cb = {
             let phase = self.inner.phase.borrow();
             let source = match &*phase {
@@ -218,7 +268,23 @@ impl Script {
     }
 
     fn prepare_run(&self, context: &mut Context) -> JsResult<()> {
-        let codeblock = self.codeblock(context)?;
+        // GlobalDeclarationInstantiation: the script's global lexical declarations are declared
+        // now, and hidden again if instantiating them fails.
+        let declared = self.inner.declared.get();
+        if !declared {
+            self.declare_global_lexicals()?;
+            self.inner.declared.set(true);
+        }
+        let undeclare = |script: &Self| {
+            if !declared {
+                script.inner.declared.set(false);
+                script
+                    .inner
+                    .global_scope
+                    .withdraw_bindings(script.inner.global_lexicals.clone());
+            }
+        };
+        let codeblock = self.codeblock(context).inspect_err(|_| undeclare(self))?;
 
         let global_env = EnvironmentStack::new();
         context.vm.push_frame_with_stack(
@@ -240,6 +306,7 @@ impl Script {
             .global_declaration_instantiation(&codeblock)
             .inspect_err(|_| {
                 context.vm.pop_frame();
+                undeclare(self);
             })?;
 
         Ok(())
