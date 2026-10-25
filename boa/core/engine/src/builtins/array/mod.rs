@@ -861,6 +861,9 @@ impl Array {
     ) -> JsResult<JsValue> {
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
+        if let Some(len) = Self::push_dense(&o, args, context) {
+            return Ok(len.into());
+        }
         // 2. Let len be ? LengthOfArrayLike(O).
         let mut len = o.length_of_array_like(context)?;
         // 3. Let argCount be the number of elements in items.
@@ -885,6 +888,68 @@ impl Array {
 
         // 7. Return 𝔽(len).
         Ok(len.into())
+    }
+
+    /// `push` onto a plain array, when appending to its dense elements is all the steps of
+    /// `push` would do: the array has this realm's array shape (its one property a writable
+    /// `length`, its prototype this realm's `Array.prototype`), is extensible, and has its
+    /// elements dense up to its length; `Array.prototype` has no elements and this realm's
+    /// `Object.prototype` as its prototype, which has none either. Then each `Set` finds no
+    /// element on the prototype chain and defines one at the end, as
+    /// [`IndexedProperties::push_dense`] does, and `length` is set as `set_length` sets it.
+    /// Returns the new length, or `None` to take the steps.
+    fn push_dense(o: &JsObject, args: &[JsValue], context: &Context) -> Option<u64> {
+        if !o.is_array() {
+            return None;
+        }
+        let intrinsics = context.intrinsics();
+        let array_shape = intrinsics.templates().array().shape().to_addr_usize();
+        let mut object = o.try_borrow_mut().ok()?;
+        if !object.extensible || object.properties().shape.to_addr_usize() != array_shape {
+            return None;
+        }
+        // The prototypes, as the shape has them.
+        let array_prototype = object.properties().shape.prototype()?;
+        let object_prototype = array_prototype.try_borrow().ok()?.prototype()?;
+        if !JsObject::equals(
+            &object_prototype,
+            &intrinsics.constructors().object().prototype(),
+        ) || object_prototype.try_borrow().ok()?.prototype().is_some()
+        {
+            return None;
+        }
+        let no_elements = |object: &JsObject| {
+            object
+                .try_borrow()
+                .is_ok_and(|object| object.properties().index_property_keys().next().is_none())
+        };
+        if !no_elements(&array_prototype) || !no_elements(&object_prototype) {
+            return None;
+        }
+        let properties = object.properties_mut();
+        let len = properties.storage.first()?.as_number()?;
+        let elements = match &properties.indexed_properties {
+            IndexedProperties::DenseI32(vec) => vec.len(),
+            IndexedProperties::DenseF64(vec) => vec.len(),
+            IndexedProperties::DenseElement(vec) => vec.len(),
+            IndexedProperties::SparseElement(_) | IndexedProperties::SparseProperty(_) => {
+                return None;
+            }
+        };
+        let new_len = elements as u64 + args.len() as u64;
+        // The length of a dense array is the count of its elements; a length that is not an
+        // array index after the push takes the steps (which throw).
+        if len.to_bits() != (elements as f64).to_bits() || new_len >= u64::from(u32::MAX) {
+            return None;
+        }
+        for value in args {
+            if !properties.indexed_properties.push_dense(value) {
+                return None;
+            }
+        }
+        // NOTE: The "length" property is the first element.
+        properties.storage[0] = JsValue::new(new_len);
+        Some(new_len)
     }
 
     /// `Array.prototype.pop()`
