@@ -19,6 +19,7 @@
 use std::{
     cell::OnceCell,
     collections::{BTreeMap, BTreeSet},
+    rc::Rc,
 };
 
 use cranelift_codegen::{
@@ -45,7 +46,7 @@ use crate::{
 
 use super::{
     JitCode, JitOptions,
-    memory::ExecutableCode,
+    memory::{ExecutableCode, LiveCode},
     runtime::{
         EXIT, FRAME_OFFSET, INTERRUPT_OFFSET, LOOP_COUNT_OFFSET, LOOP_LIMIT_OFFSET, REGS_OFFSET,
         jit_lookup, jit_step, jit_store,
@@ -108,8 +109,40 @@ fn make_isa() -> Result<OwnedTargetIsa, String> {
         .map_err(|error| format!("cannot build the target ISA: {error}"))
 }
 
-/// Compiles `code_block`, or says why it cannot be.
-pub(super) fn compile(code_block: &CodeBlock, options: &JitOptions) -> Result<JitCode, String> {
+/// Why a code block was not compiled.
+#[derive(Debug)]
+#[allow(dead_code, reason = "the reasons are for debugging, through `Debug`")]
+pub(super) enum CompileError {
+    /// This code block cannot or should not be compiled; others may be.
+    Rejected(String),
+    /// Nothing can be compiled on this host: no executable memory, or no Cranelift backend.
+    Unavailable(String),
+}
+
+impl From<String> for CompileError {
+    fn from(reason: String) -> Self {
+        Self::Rejected(reason)
+    }
+}
+
+impl From<&str> for CompileError {
+    fn from(reason: &str) -> Self {
+        Self::Rejected(reason.to_owned())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests make the code generator panic, as a Cranelift bug would.
+    pub(super) static PANIC_IN_CODEGEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Compiles `code_block`, or says why it cannot be. The code is counted in `live`.
+pub(super) fn compile(
+    code_block: &CodeBlock,
+    options: &JitOptions,
+    live: &Rc<LiveCode>,
+) -> Result<JitCode, CompileError> {
     if code_block.is_async() || code_block.is_generator() {
         return Err("generators and async functions are not compiled".into());
     }
@@ -122,7 +155,14 @@ pub(super) fn compile(code_block: &CodeBlock, options: &JitOptions) -> Result<Ji
         return Err("too little to do inline".into());
     }
     ISA.with(|isa| {
-        let isa = isa.get_or_init(make_isa).as_ref().map_err(Clone::clone)?;
+        let isa = isa
+            .get_or_init(make_isa)
+            .as_ref()
+            .map_err(|reason| CompileError::Unavailable(reason.clone()))?;
+        #[cfg(test)]
+        if PANIC_IN_CODEGEN.with(std::cell::Cell::get) {
+            panic!("code generator panic (test)");
+        }
         let function = translate(code_block, &block_pcs, isa);
         let mut context = ClifContext::for_function(function);
         let compiled = context
@@ -133,7 +173,8 @@ pub(super) fn compile(code_block: &CodeBlock, options: &JitOptions) -> Result<Ji
         if !compiled.buffer.relocs().is_empty() {
             return Err("compiled code needs relocations".into());
         }
-        let code = ExecutableCode::new(compiled.code_buffer())?;
+        let code = ExecutableCode::new(compiled.code_buffer(), live)
+            .map_err(|error| CompileError::Unavailable(error.0))?;
         Ok(JitCode {
             code,
             block_pcs: block_pcs.into_boxed_slice(),
@@ -227,6 +268,69 @@ fn kind(instruction: &Instruction) -> Kind {
     }
 }
 
+/// The registers compiled code reads or writes itself for an inline instruction (the
+/// interpreter's handlers, run by [`jit_step`], check their own).
+fn inline_registers(instruction: &Instruction) -> Vec<u32> {
+    match *instruction {
+        Instruction::StoreZero { dst }
+        | Instruction::StoreOne { dst }
+        | Instruction::StoreInt8 { dst, .. }
+        | Instruction::StoreInt16 { dst, .. }
+        | Instruction::StoreInt32 { dst, .. }
+        | Instruction::StoreFloat { dst, .. }
+        | Instruction::StoreDouble { dst, .. }
+        | Instruction::StoreNan { dst }
+        | Instruction::StorePositiveInfinity { dst }
+        | Instruction::StoreNegativeInfinity { dst }
+        | Instruction::StoreNull { dst }
+        | Instruction::StoreTrue { dst }
+        | Instruction::StoreFalse { dst }
+        | Instruction::StoreUndefined { dst } => vec![dst.into()],
+        Instruction::Move { dst, src }
+        | Instruction::Inc { dst, src }
+        | Instruction::Dec { dst, src } => vec![dst.into(), src.into()],
+        Instruction::Add { dst, lhs, rhs }
+        | Instruction::Sub { dst, lhs, rhs }
+        | Instruction::Mul { dst, lhs, rhs }
+        | Instruction::BitAnd { dst, lhs, rhs }
+        | Instruction::BitOr { dst, lhs, rhs }
+        | Instruction::BitXor { dst, lhs, rhs }
+        | Instruction::ShiftLeft { dst, lhs, rhs }
+        | Instruction::ShiftRight { dst, lhs, rhs }
+        | Instruction::UnsignedShiftRight { dst, lhs, rhs }
+        | Instruction::LessThan { dst, lhs, rhs }
+        | Instruction::LessThanOrEq { dst, lhs, rhs }
+        | Instruction::GreaterThan { dst, lhs, rhs }
+        | Instruction::GreaterThanOrEq { dst, lhs, rhs }
+        | Instruction::Eq { dst, lhs, rhs }
+        | Instruction::NotEq { dst, lhs, rhs }
+        | Instruction::StrictEq { dst, lhs, rhs }
+        | Instruction::StrictNotEq { dst, lhs, rhs } => vec![dst.into(), lhs.into(), rhs.into()],
+        Instruction::LogicalNot { value }
+        | Instruction::JumpIfTrue { value, .. }
+        | Instruction::JumpIfFalse { value, .. }
+        | Instruction::JumpIfNotUndefined { value, .. }
+        | Instruction::JumpIfNullOrUndefined { value, .. }
+        | Instruction::LogicalAnd { value, .. }
+        | Instruction::LogicalOr { value, .. }
+        | Instruction::Coalesce { value, .. } => vec![value.into()],
+        Instruction::JumpIfNotLessThan { lhs, rhs, .. }
+        | Instruction::JumpIfNotLessThanOrEqual { lhs, rhs, .. }
+        | Instruction::JumpIfNotGreaterThan { lhs, rhs, .. }
+        | Instruction::JumpIfNotGreaterThanOrEqual { lhs, rhs, .. } => vec![lhs.into(), rhs.into()],
+        _ => Vec::new(),
+    }
+}
+
+/// The byte offset of `register` from the frame's first register. Registers are checked against
+/// the code block's register count in [`leaders`], which also bounds the count.
+fn register_offset(register: u32) -> i32 {
+    register
+        .checked_mul(8)
+        .and_then(|offset| i32::try_from(offset).ok())
+        .expect("register operands are checked before translation")
+}
+
 /// What a code block is made of, to judge whether compiling it pays.
 #[derive(Debug, Default)]
 struct Profile {
@@ -264,18 +368,36 @@ impl Profile {
 }
 
 /// The `pc`s compiled code can start a block at, in order, and the code block's profile.
+///
+/// It also checks what translation relies on, refusing bytecode that breaks it rather than
+/// trusting the bytecode compiler: every branch, jump-table and handler target is the start of
+/// an instruction; the last instruction cannot fall off the end of the code; and every register
+/// compiled code touches itself is below the code block's register count.
 fn leaders(code_block: &CodeBlock) -> Result<(Vec<u32>, Profile), String> {
     let mut profile = Profile::default();
     let bytecode = &code_block.bytecode;
     let len = bytecode.bytes.len();
+    if len == 0 || len >= EXIT as usize {
+        return Err("no bytecode, or too much".into());
+    }
+    let register_count = code_block.register_count;
+    if register_count
+        .checked_mul(8)
+        .and_then(|bytes| i32::try_from(bytes).ok())
+        .is_none()
+    {
+        return Err("too many registers".into());
+    }
     let mut starts = BTreeSet::new();
     let mut leaders = BTreeSet::from([0u32]);
-    leaders.extend(
-        code_block
-            .handlers
-            .iter()
-            .map(|handler| handler.handler().as_u32()),
-    );
+    let handlers: Vec<u32> = code_block
+        .handlers
+        .iter()
+        .map(|handler| handler.handler().as_u32())
+        .collect();
+    leaders.extend(handlers.iter().copied());
+    let mut all_targets = handlers;
+    let mut falls_off_the_end = false;
     let mut pc = 0;
     while pc < len {
         let opcode = Opcode::decode(bytecode.bytes[pc]);
@@ -296,8 +418,19 @@ fn leaders(code_block: &CodeBlock) -> Result<(Vec<u32>, Profile), String> {
                 | Opcode::SuperCallSpread
                 | Opcode::SuperCallDerived
         );
+        if let Some(register) = inline_registers(&instruction)
+            .into_iter()
+            .find(|&register| register >= register_count)
+        {
+            return Err(format!(
+                "{} uses register {register} of {register_count}",
+                opcode.as_str()
+            ));
+        }
         let kind = kind(&instruction);
         let is_inline = opcode == Opcode::IncrementLoopIteration || !matches!(kind, Kind::Step(_));
+        // Inline code goes on to the next instruction itself; at the end there is none.
+        falls_off_the_end = matches!(kind, Kind::Inline | Kind::Branch(_));
         profile.instructions.push((pc as u32, is_inline, is_call));
         let (ends_block, targets) = match kind {
             Kind::Inline => (false, Vec::new()),
@@ -309,13 +442,25 @@ fn leaders(code_block: &CodeBlock) -> Result<(Vec<u32>, Profile), String> {
                 profile.loops.push((target, pc as u32));
             }
         }
+        all_targets.extend(targets.iter().copied());
         if ends_block {
             leaders.extend(targets);
             leaders.insert(next as u32);
         }
         pc = next;
     }
-    Ok((leaders.intersection(&starts).copied().collect(), profile))
+    if pc != len {
+        return Err("the last instruction runs past the end of the code".into());
+    }
+    if falls_off_the_end {
+        return Err("the last instruction can fall off the end of the code".into());
+    }
+    if let Some(target) = all_targets.iter().find(|target| !starts.contains(target)) {
+        return Err(format!("{target:#x} is not the start of an instruction"));
+    }
+    // Leaders are targets, handlers and next instructions; the one after the last is not code.
+    leaders.retain(|leader| (*leader as usize) < len);
+    Ok((leaders.into_iter().collect(), profile))
 }
 
 /// The machine-code side of a code block in translation.
@@ -463,9 +608,12 @@ impl Translator<'_> {
 
     fn load(&mut self, register: u32) -> Value {
         let regs = self.b.use_var(self.regs);
-        self.b
-            .ins()
-            .load(I64, MemFlagsData::trusted(), regs, (register * 8) as i32)
+        self.b.ins().load(
+            I64,
+            MemFlagsData::trusted(),
+            regs,
+            register_offset(register),
+        )
     }
 
     /// Stores `bits`, a value without a pointer, in `register`: in place if what is there holds
@@ -484,9 +632,12 @@ impl Translator<'_> {
 
         self.b.switch_to_block(fast);
         let regs = self.b.use_var(self.regs);
-        self.b
-            .ins()
-            .store(MemFlagsData::trusted(), bits, regs, (register * 8) as i32);
+        self.b.ins().store(
+            MemFlagsData::trusted(),
+            bits,
+            regs,
+            register_offset(register),
+        );
         self.b.ins().jump(done, &[]);
 
         self.b.switch_to_block(slow);

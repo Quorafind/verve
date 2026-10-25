@@ -528,3 +528,174 @@ fn random_programs_match_the_interpreter() {
         same(&program);
     }
 }
+
+/// A context in `mode`, for tests that already have a `context` in scope.
+fn fresh(mode: Mode) -> Context {
+    context(mode)
+}
+
+/// The code generator panicking leaves the function interpreted and the JIT off for the process
+/// (for the thread, in tests); it never unwinds into the script's caller.
+#[test]
+fn a_panicking_code_generator_switches_the_jit_off() {
+    super::latch::reset();
+    super::compiler::PANIC_IN_CODEGEN.with(|panic| panic.set(true));
+    let mut context = fresh(Mode::Eager);
+    let value = context
+        .eval(Source::from_bytes(
+            "function f(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s } f(100)",
+        ))
+        .expect("runs interpreted");
+    super::compiler::PANIC_IN_CODEGEN.with(|panic| panic.set(false));
+    assert_eq!(value.as_number(), Some(4950.0));
+    let stats = context.jit_stats();
+    assert_eq!(stats.compiled, 0, "{stats:?}");
+    assert!(stats.rejected >= 1, "{stats:?}");
+    assert_eq!(
+        super::jit_unavailable(),
+        Some(super::JitUnavailable::CompilerPanicked)
+    );
+    // Nothing more is compiled, even with the generator fixed.
+    let mut context = fresh(Mode::Eager);
+    context
+        .eval(Source::from_bytes(
+            "function g(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s } g(100)",
+        ))
+        .expect("runs interpreted");
+    assert_eq!(context.jit_stats().compiled, 0);
+    super::latch::reset();
+}
+
+/// A host that refuses executable memory switches the JIT off after the first refusal, so each
+/// hot function does not pay a whole compile to be refused again.
+#[test]
+fn refused_executable_memory_switches_the_jit_off() {
+    super::latch::reset();
+    super::memory::FAIL_TO_MAP.with(|fail| fail.set(true));
+    let mut context = fresh(Mode::Eager);
+    let value = context
+        .eval(Source::from_bytes(
+            "function f(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s }
+             function g(n) { let s = 1; for (let i = 0; i < n; i++) s *= 2; return s }
+             f(10) + g(10)",
+        ))
+        .expect("runs interpreted");
+    super::memory::FAIL_TO_MAP.with(|fail| fail.set(false));
+    assert_eq!(value.as_number(), Some(45.0 + 1024.0));
+    assert_eq!(
+        super::jit_unavailable(),
+        Some(super::JitUnavailable::NoExecutableMemory)
+    );
+    let stats = context.jit_stats();
+    assert_eq!(stats.compiled, 0);
+    assert_eq!(stats.live_functions, 0);
+    super::latch::reset();
+}
+
+fn code_block(
+    emit: impl FnOnce(&mut crate::vm::opcode::BytecodeEmitter),
+    registers: u32,
+) -> crate::vm::CodeBlock {
+    let mut emitter = crate::vm::opcode::BytecodeEmitter::new();
+    emit(&mut emitter);
+    let mut code_block = crate::vm::CodeBlock::new(js_string!("t"), 0, true);
+    code_block.bytecode = emitter.into_bytecode();
+    code_block.register_count = registers;
+    code_block
+}
+
+#[test]
+fn malformed_bytecode_is_refused() {
+    use crate::vm::opcode::{Address, RegisterOperand};
+    let options = JitOptions {
+        threshold: 0,
+        ..JitOptions::default()
+    };
+    let live = std::rc::Rc::default();
+    let compiles = |code_block: &crate::vm::CodeBlock| {
+        super::compiler::compile(code_block, &options, &live).is_ok()
+    };
+    // Well-formed: stores, a jump to an instruction, a return.
+    assert!(compiles(&code_block(
+        |e| {
+            e.emit_store_zero(RegisterOperand::new(0));
+            e.emit_jump(Address::new(10));
+            e.emit_return();
+        },
+        1,
+    )));
+    // A jump into the middle of an instruction.
+    assert!(!compiles(&code_block(
+        |e| {
+            e.emit_store_zero(RegisterOperand::new(0));
+            e.emit_jump(Address::new(2));
+            e.emit_return();
+        },
+        1,
+    )));
+    // A jump past the end.
+    assert!(!compiles(&code_block(
+        |e| {
+            e.emit_jump(Address::new(1000));
+            e.emit_return();
+        },
+        1,
+    )));
+    // A register beyond the frame's.
+    assert!(!compiles(&code_block(
+        |e| {
+            e.emit_store_zero(RegisterOperand::new(1));
+            e.emit_return();
+        },
+        1,
+    )));
+    assert!(!compiles(&code_block(
+        |e| {
+            e.emit_move(RegisterOperand::new(0), RegisterOperand::new(u32::MAX));
+            e.emit_return();
+        },
+        1,
+    )));
+    // Inline code at the end, with nowhere to go on to.
+    assert!(!compiles(&code_block(
+        |e| e.emit_store_zero(RegisterOperand::new(0)),
+        1,
+    )));
+}
+
+#[test]
+fn compile_limits_hold_and_code_is_given_back() {
+    let source = "function f(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s }
+                  function g(n) { let s = 0; for (let i = 0; i < n; i++) s -= i; return s }
+                  f(10) + g(10)";
+    let mut context = fresh(Mode::Eager);
+    context.jit_options_mut().max_compiled_functions = 1;
+    context.eval(Source::from_bytes(source)).expect("runs");
+    assert_eq!(context.jit_stats().compiled, 1);
+
+    let mut context = fresh(Mode::Eager);
+    context.jit_options_mut().max_live_code_bytes = 1;
+    context.eval(Source::from_bytes(source)).expect("runs");
+    let stats = context.jit_stats();
+    assert_eq!(stats.compiled, 1, "{stats:?}");
+    assert!(stats.live_code_bytes >= 4096 && stats.code_bytes == stats.live_code_bytes);
+
+    // Code is counted in pages, and given back when its function is collected.
+    let mut context = fresh(Mode::Eager);
+    context
+        .eval(Source::from_bytes(
+            "(function () { const f = function (n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s }; return f(10) })()",
+        ))
+        .expect("runs");
+    let before = context.jit_stats();
+    assert!(before.live_functions >= 1, "{before:?}");
+    assert_eq!(before.code_bytes % 4096, 0);
+    boa_gc::force_collect();
+    let after = context.jit_stats();
+    assert!(
+        after.live_functions < before.live_functions,
+        "{before:?} {after:?}"
+    );
+    assert!(after.live_code_bytes < before.live_code_bytes);
+    assert_eq!(after.code_bytes, before.code_bytes);
+}

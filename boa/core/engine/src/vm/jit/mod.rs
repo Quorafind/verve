@@ -35,7 +35,9 @@ use std::{
     cell::{Cell, RefCell},
     fmt,
     ops::ControlFlow,
+    panic::{AssertUnwindSafe, catch_unwind},
     rc::Rc,
+    sync::atomic::{AtomicU8, Ordering},
     time::Duration,
 };
 
@@ -44,7 +46,11 @@ use crate::{
     vm::{CodeBlock, CompletionRecord},
 };
 
-use self::{memory::ExecutableCode, runtime::EntryFn};
+use self::{
+    compiler::CompileError,
+    memory::{ExecutableCode, LiveCode},
+    runtime::EntryFn,
+};
 
 /// How the JIT behaves. Set it with [`Context::jit_options_mut`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,8 +62,14 @@ pub struct JitOptions {
     pub threshold: u32,
     /// Functions with more bytecode than this, in bytes, are never compiled.
     pub max_bytecode_len: usize,
-    /// How much machine code, in bytes, a context may compile in all; past it, no more.
-    pub code_budget: usize,
+    /// How much machine code, in bytes rounded up to pages, may be mapped at once. Code is
+    /// unmapped when its function is collected, which gives the bytes back.
+    pub max_live_code_bytes: usize,
+    /// How much machine code, in bytes rounded up to pages, a context may compile in its
+    /// lifetime, given back or not: a bound on the time and memory compiling can take.
+    pub max_total_code_bytes: usize,
+    /// How many functions a context may compile in its lifetime.
+    pub max_compiled_functions: u64,
 }
 
 impl Default for JitOptions {
@@ -66,7 +78,9 @@ impl Default for JitOptions {
             enabled: true,
             threshold: 1000,
             max_bytecode_len: 32 * 1024,
-            code_budget: 64 * 1024 * 1024,
+            max_live_code_bytes: 64 * 1024 * 1024,
+            max_total_code_bytes: 256 * 1024 * 1024,
+            max_compiled_functions: 10_000,
         }
     }
 }
@@ -100,10 +114,86 @@ pub struct JitStats {
     pub rejected: u64,
     /// Times compiled code was entered.
     pub entries: u64,
-    /// Bytes of machine code compiled.
+    /// Bytes of machine code compiled in the context's lifetime, rounded up to pages.
     pub code_bytes: usize,
+    /// Bytes of machine code mapped now, rounded up to pages.
+    pub live_code_bytes: usize,
+    /// Functions whose machine code is mapped now.
+    pub live_functions: usize,
     /// Time spent compiling.
     pub compile_time: Duration,
+}
+
+/// Why the JIT is off for the whole process, whatever the options say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitUnavailable {
+    /// The code generator panicked once; it is not trusted again.
+    CompilerPanicked,
+    /// The host refused executable memory (a policy such as Windows' Arbitrary Code Guard, or
+    /// macOS' hardened runtime without the entitlement), or Cranelift has no backend for it.
+    NoExecutableMemory,
+}
+
+/// Why the JIT is off for the whole process, if it is. Once it is, it stays off: compiling
+/// would fail the same way again, at the cost of a full compile each time.
+#[must_use]
+pub fn jit_unavailable() -> Option<JitUnavailable> {
+    match latch::get() {
+        latch::COMPILER_PANICKED => Some(JitUnavailable::CompilerPanicked),
+        latch::NO_EXECUTABLE_MEMORY => Some(JitUnavailable::NoExecutableMemory),
+        _ => None,
+    }
+}
+
+/// The process-wide switch behind [`jit_unavailable`]. Tests keep it per thread, so a test that
+/// trips it does not switch the JIT off for the tests running beside it.
+mod latch {
+    pub(super) const AVAILABLE: u8 = 0;
+    pub(super) const COMPILER_PANICKED: u8 = 1;
+    pub(super) const NO_EXECUTABLE_MEMORY: u8 = 2;
+
+    #[cfg(not(test))]
+    static LATCH: super::AtomicU8 = super::AtomicU8::new(AVAILABLE);
+
+    #[cfg(not(test))]
+    pub(super) fn get() -> u8 {
+        LATCH.load(super::Ordering::Relaxed)
+    }
+
+    /// Switches the JIT off for good, keeping the first reason.
+    #[cfg(not(test))]
+    pub(super) fn set(reason: u8) {
+        let _ = LATCH.compare_exchange(
+            AVAILABLE,
+            reason,
+            super::Ordering::Relaxed,
+            super::Ordering::Relaxed,
+        );
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        static LATCH: std::cell::Cell<u8> = const { std::cell::Cell::new(AVAILABLE) };
+    }
+
+    #[cfg(test)]
+    pub(super) fn get() -> u8 {
+        LATCH.with(std::cell::Cell::get)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set(reason: u8) {
+        LATCH.with(|latch| {
+            if latch.get() == AVAILABLE {
+                latch.set(reason);
+            }
+        });
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset() {
+        LATCH.with(|latch| latch.set(AVAILABLE));
+    }
 }
 
 /// The JIT's state in a [`Vm`](crate::vm::Vm).
@@ -114,6 +204,9 @@ pub(crate) struct JitVm {
     /// Set when the frame on top may have changed or got hotter, so the interpreter's loop
     /// asks [`try_enter`] whether to run compiled code.
     pub(crate) pending: bool,
+    /// The machine code the context's functions have mapped now; each function's code gives
+    /// its pages back here when it is dropped.
+    live: Rc<LiveCode>,
 }
 
 impl JitVm {
@@ -122,7 +215,16 @@ impl JitVm {
             options: JitOptions::from_env(),
             stats: JitStats::default(),
             pending: false,
+            live: Rc::default(),
         }
+    }
+
+    /// Whether the limits leave room for another function.
+    fn has_room(&self) -> bool {
+        let options = &self.options;
+        self.stats.compiled < options.max_compiled_functions
+            && self.stats.code_bytes < options.max_total_code_bytes
+            && self.live.bytes() < options.max_live_code_bytes
     }
 }
 
@@ -240,24 +342,37 @@ pub(crate) fn try_enter(context: &mut Context) -> Option<ControlFlow<CompletionR
                 return None;
             }
             let jit = &mut context.vm.jit;
-            if jit.stats.code_bytes >= options.code_budget {
+            if latch::get() != latch::AVAILABLE || !jit.has_room() {
                 slot.tier.set(Tier::Rejected);
                 jit.stats.rejected += 1;
                 return None;
             }
             let start = std::time::Instant::now();
-            let compiled = compiler::compile(code_block, &options);
+            // A panic in the code generator is a bug in it, not in the script: the function
+            // stays interpreted, and nothing is compiled again in this process.
+            let compiled = catch_unwind(AssertUnwindSafe(|| {
+                compiler::compile(code_block, &options, &jit.live)
+            }));
             jit.stats.compile_time += start.elapsed();
             match compiled {
-                Ok(code) => {
+                Ok(Ok(code)) => {
                     jit.stats.compiled += 1;
-                    jit.stats.code_bytes += code.code.len();
+                    jit.stats.code_bytes += code.code.mapped_len();
                     let code = Rc::new(code);
                     slot.tier.set(Tier::Compiled);
                     *slot.code.borrow_mut() = Some(code.clone());
                     code
                 }
-                Err(_reason) => {
+                Ok(Err(error)) => {
+                    if let CompileError::Unavailable(_) = error {
+                        latch::set(latch::NO_EXECUTABLE_MEMORY);
+                    }
+                    slot.tier.set(Tier::Rejected);
+                    jit.stats.rejected += 1;
+                    return None;
+                }
+                Err(_panic) => {
+                    latch::set(latch::COMPILER_PANICKED);
                     slot.tier.set(Tier::Rejected);
                     jit.stats.rejected += 1;
                     return None;
@@ -285,6 +400,11 @@ impl Context {
     /// What the JIT has done in this context.
     #[must_use]
     pub fn jit_stats(&self) -> JitStats {
-        self.vm.jit.stats
+        let jit = &self.vm.jit;
+        JitStats {
+            live_code_bytes: jit.live.bytes(),
+            live_functions: jit.live.functions(),
+            ..jit.stats
+        }
     }
 }

@@ -68,6 +68,15 @@ data, parsers, diff and search loops.
 - **Leaders**: `pc` 0, every branch target and exception handler, and the instruction after
   every branch and after every instruction handed to the interpreter. Each leader is a Cranelift
   block and an entry point; a `br_table` on the `block` argument starts there.
+- **Validation**: the compiler does not trust the bytecode it is given. It refuses a code block
+  if:
+  - a branch, jump-table entry or exception handler points anywhere but the start of an
+    instruction;
+  - the last instruction could fall off the end of the code;
+  - a register that compiled code reads or writes itself is not below the code block's register
+    count, or the register file would not fit `i32` offsets.
+
+  Register offsets are computed with checked arithmetic.
 - **Inline instructions**, each with a fast path for the common types and, for any other types, a
   call that runs the instruction exactly as the interpreter does:
   - register `Move` and constant stores;
@@ -136,10 +145,17 @@ continues at `frame.pc`. Fallback happens at three levels:
 1. **Per operation**: unexpected types take the slow path, which is the interpreter's handler for
    that instruction.
 2. **Per instruction**: instructions without an inline form always run through `jit_step`.
-3. **Per function**: functions are not compiled when they are generators or async functions, when
-   they have more than `max_bytecode_len` bytes of bytecode (32 KB), when compiling them would not
-   pay (below), when the context's code budget (64 MB) is spent, or when the host cannot make
-   executable memory. Such a function is marked `Rejected` and stays interpreted for good.
+3. **Per function**: a function stays interpreted for good (it is marked `Rejected`) when:
+   - it is a generator or an async function;
+   - it has more than `max_bytecode_len` bytes of bytecode (32 KB);
+   - its bytecode fails validation (above);
+   - compiling it would not pay (below);
+   - one of the context's limits is reached (below).
+4. **Per process**: if the code generator panics, or the host refuses executable memory (or
+   Cranelift has no backend for it), the function stays interpreted and the JIT switches itself
+   off for the rest of the process, so no function pays for a compile that would fail the same
+   way. The panic is caught and does not unwind into the host. `boa_engine::vm::jit_unavailable()`
+   tells which of the two happened.
 
 ### Tier-up
 
@@ -160,6 +176,15 @@ Each `CodeBlock` carries a `JitSlot`: a hotness counter, a tier (`Interpreted`, 
   (`s = add(s, id(i))`) are left to the interpreter, where they are no slower.
 - `threshold = 0` compiles every function the first time it runs, profitable or not. It is a
   testing mode.
+- **Limits**, each settable through `jit_options_mut()`. Bytes are counted as mapped, rounded up to
+  pages:
+  - `max_live_code_bytes` (64 MB): the code mapped at once. The bytes are given back when a
+    function's code is dropped with its code block.
+  - `max_total_code_bytes` (256 MB): the code compiled in the context's lifetime, given back or
+    not. This bounds the time and memory compiling can take.
+  - `max_compiled_functions` (10 000): the functions compiled in the context's lifetime.
+
+  `jit_stats()` reports `code_bytes` (lifetime), `live_code_bytes` and `live_functions`.
 
 ### The garbage collector
 
@@ -193,7 +218,22 @@ because `frame.pc` is always current when anything can throw.
 
 **Panics**: there is no unwind information for compiled code, so no panic may unwind through it.
 Every helper runs under `catch_unwind`; compiled code returns, and `jit::runtime::execute` resumes
-the panic in Rust, where an isolate's own panic handling sees it as before.
+the panic in Rust, where an isolate's own panic handling sees it as before. A panic while
+*compiling* is caught the same way and switches the JIT off (above).
+
+**Unwind information**: compiled functions are not registered with the platform unwinder
+(`RtlAddFunctionTable` on Windows, `__register_frame` elsewhere).
+
+- Nothing needs it for correctness: no unwind passes through compiled code.
+- It does show in native backtraces. A crash dump, a debugger or a sampling profiler that stops
+  inside compiled code, or inside a helper it called, may be unable to step past the compiled
+  frame. Frame pointers are kept, so frame-pointer walkers (`perf --call-graph fp`, ETW with frame
+  pointers) still get through, but `RtlVirtualUnwind`-based tools such as Windows crash dumps and
+  WinDbg's `k` stop there.
+- Rust's own `std::backtrace` from a panic inside a helper shows the frames above compiled code
+  only up to it.
+
+Registering unwind info (Cranelift can emit it) is on the roadmap.
 
 ### Generators and async functions
 
@@ -220,22 +260,46 @@ JavaScript:
   compiler from Boa's own bytecode, never from bytes the program supplies, and all memory access
   from compiled code is to the frame's registers (indices fixed by the bytecode compiler) and to
   `JitState`.
-- **Limits**: hostile code can force compilations by making many hot functions. A context
-  compiles at most `code_budget` bytes (64 MB by default; Code Mode should set less), and never a
-  function above 32 KB of bytecode.
-- **Not yet done**: constant blinding. Integer constants from the program (`StoreInt32`) are
-  embedded in machine code as immediates — the classic JIT-spray surface. With W^X and ASLR the
-  exposure is small, but blinding untrusted constants is on the roadmap. Until then the
-  conservative choice for Code Mode is `set_jit_enabled(false)`, or a low `code_budget`.
+- **Limits**: hostile code can force compilations by making many hot functions. Per context:
+  - `max_live_code_bytes`, `max_total_code_bytes` and `max_compiled_functions` bound the memory
+    and the compile time (above);
+  - no function above 32 KB of bytecode is ever compiled.
+
+  Code Mode should set all three far lower than the defaults.
+- **Not yet done: constant blinding.** Every `Store*` constant from the program is embedded in
+  the machine code as an immediate, the classic JIT-spray surface:
+  - `StoreDouble` embeds a full 8-byte immediate the program chooses freely;
+  - `StoreFloat`, `StoreInt32`, `StoreInt16` and `StoreInt8` embed 4, 4, 2 and 1 bytes;
+  - the other constant stores embed fixed values the program cannot choose.
+
+  With W^X and ASLR the exposure is small, but it is not none. Blinding would emit `k ^ c` and
+  `xor` with `c` (a random key per function) instead of `k` for every program-chosen immediate.
+  It is on the roadmap. Until it lands, the conservative choice for Code Mode is
+  `set_jit_enabled(false)`, or low limits.
 - **Platforms**:
   - Windows and Linux allow RW→RX remapping by default.
-  - Windows processes with Arbitrary Code Guard cannot use the JIT.
-  - macOS under the hardened runtime needs the
-    `com.apple.security.cs.allow-unsigned-executable-memory` entitlement, since the JIT maps pages
-    without `MAP_JIT`.
+  - Windows processes with Arbitrary Code Guard (ACG) cannot use the JIT at all.
+  - macOS under the hardened runtime: the JIT maps pages with `mmap` and changes them with
+    `mprotect`, without `MAP_JIT`. It therefore needs the broader
+    `com.apple.security.cs.allow-unsigned-executable-memory` entitlement. The way to need only
+    `com.apple.security.cs.allow-jit` is to map code with `MAP_JIT` and toggle write access per
+    thread with `pthread_jit_write_protect_np` (on Apple silicon the toggle is what keeps W^X),
+    flushing with `sys_icache_invalidate`. That is on the roadmap.
+  - AArch64 Linux: after writing code, `pipeline_flush_mt` issues a `membarrier(2)`
+    (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE`) so that every thread's instruction stream sees
+    it.
+    - The process registers itself for that command the first time it is refused.
+    - Kernels before 4.16, which lack the command, get the much slower `MEMBARRIER_CMD_GLOBAL`.
+    - A seccomp filter that denies `membarrier` (some container profiles do) makes the flush
+      fail. Compiling then fails, and the JIT switches itself off (below) rather than run
+      possibly stale instructions.
 
-  In each case where the JIT cannot make executable memory, compilation fails, the function is
-  rejected, and everything runs interpreted. Nothing crashes.
+    x86-64 needs no such flush.
+
+  In each case where the JIT cannot make or publish executable memory, the first compile fails,
+  that function is rejected, and the JIT switches itself off for the process, so later hot
+  functions do not each pay a full compile to be refused. Everything runs interpreted. Nothing
+  crashes.
 
 ## Switching it on and off
 
@@ -243,8 +307,9 @@ JavaScript:
 |---|---|
 | `boa_engine` feature `jit` | Builds the JIT (Cranelift, `region`). Off by default. Needs 64-bit and NaN-boxing (not `jsvalue-enum`). |
 | `verve` feature `jit` | Turns on `boa_engine/jit`. Off by default. |
-| `Context::jit_options_mut()` | `JitOptions { enabled, threshold, max_bytecode_len, code_budget }`. |
-| `Context::jit_stats()` | `JitStats { compiled, rejected, entries, code_bytes, compile_time }`. |
+| `Context::jit_options_mut()` | `JitOptions { enabled, threshold, max_bytecode_len, max_live_code_bytes, max_total_code_bytes, max_compiled_functions }`. |
+| `Context::jit_stats()` | `JitStats { compiled, rejected, entries, code_bytes, live_code_bytes, live_functions, compile_time }`. |
+| `boa_engine::vm::jit_unavailable()` | `Some(CompilerPanicked \| NoExecutableMemory)` once the JIT has switched itself off for the process. |
 | `Runtime::set_jit_enabled(bool)`, `Runtime::jit_enabled()` | Always present; without the feature, off and a no-op. |
 | `Runtime::jit_options_mut()`, `Runtime::jit_stats()` | With the feature. |
 | `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>` | Read when a `Context` is made. |
@@ -269,6 +334,12 @@ With the feature built, the JIT is on unless switched off.
   caught, compared the same way. It runs 150 programs by default; `BOA_JIT_FUZZ_COUNT=3000` runs
   more. It found a real interpreter bug on its first long run: `i32::MIN % -1` panicked in builds
   with overflow checks, fixed in `value/operations.rs`.
+- **Hardening tests**:
+  - a panicking code generator leaves the function interpreted and switches the JIT off;
+  - refused executable memory switches it off after one try;
+  - malformed bytecode (targets inside instructions or past the end, registers out of range,
+    falling off the end) is refused;
+  - each limit holds, and code is given back when its function is collected.
 - **Behaviour tests**:
   - tier-up happens, and cold code is not compiled;
   - OSR enters a running loop;
@@ -344,8 +415,13 @@ aborts the tester process, interpreted or not.
    (`GetNameGlobal`, `PushFromRegister`, `Call`, `Return`, `SetAccumulator`), skipping the
    decode and the handler table.
 4. **Generators and async functions**, as above.
-5. **Constant blinding** for untrusted code, and an `untrusted` profile of `JitOptions` (blinding
-   on, a smaller budget) for Code Mode.
+5. **Constant blinding** of every program-chosen `Store*` immediate (`StoreDouble`, `StoreFloat`,
+   `StoreInt32`, `StoreInt16`, `StoreInt8`), and an `untrusted` profile of `JitOptions` (blinding
+   on, low limits) for Code Mode.
+6. **`MAP_JIT` on macOS**, with `pthread_jit_write_protect_np` and `sys_icache_invalidate`, so a
+   hardened-runtime app needs only `com.apple.security.cs.allow-jit`.
+7. **Unwind information** registered for compiled functions, so native debuggers, crash dumps and
+   profilers walk through them.
 
 **Phase 3: type feedback.** Record operand types per instruction in the interpreter and in
 baseline code. Then compile a second tier that keeps `int32` and `f64` values unboxed in machine
@@ -375,9 +451,10 @@ entirely. Background compilation on another thread fits here too, since `CodeBlo
   thread.
 - **Entry and exit cost** makes call-heavy code no faster in phase 1. The profitability check
   keeps it from being slower.
-- **Memory**: compiled code is a page or more per function, freed with its code block. Compiled
-  code is not shared between contexts.
+- **Memory**: compiled code is a page or more per function, counted in pages and freed with its
+  code block. Compiled code is not shared between contexts.
 - **Cranelift MSRV**: Cranelift's newest releases follow stable Rust closely. The pin must move
   with the toolchain.
 - **Hosts without executable memory** (Windows ACG, macOS hardened runtime without the
-  entitlement, iOS) run interpreted. This is correct, just not faster.
+  entitlement, iOS, AArch64 Linux with `membarrier` denied) run interpreted after one failed
+  compile. This is correct, just not faster.
