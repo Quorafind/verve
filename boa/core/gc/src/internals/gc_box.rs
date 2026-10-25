@@ -23,6 +23,13 @@ impl<T: Trace> GcBox<T> {
     }
 }
 
+impl<T: Trace> GcBox<T> {
+    /// The offset of the value in the allocation.
+    pub(crate) const fn value_offset() -> usize {
+        std::mem::offset_of!(Self, value)
+    }
+}
+
 impl<T: Trace + ?Sized> GcBox<T> {
     /// Returns a reference to the `GcBox`'s value.
     pub(crate) const fn value(&self) -> &T {

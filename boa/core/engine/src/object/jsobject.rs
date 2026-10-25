@@ -47,6 +47,13 @@ pub type RefMut<'a, T> = GcRefMut<'a, T>;
 
 pub(crate) type ErasedVTableObject = VTableObject<ErasedObjectData>;
 
+/// Where an object's vtable and its `GcRefCell<Object>` are in a [`VTableObject`], for the JIT.
+#[cfg(feature = "jit")]
+pub(crate) const VTABLE_OBJECT_OFFSETS: (usize, usize) = (
+    std::mem::offset_of!(ErasedVTableObject, vtable),
+    std::mem::offset_of!(ErasedVTableObject, object),
+);
+
 /// An `Object` with inner data set to `ErasedObjectData`.
 pub type ErasedObject = Object<ErasedObjectData>;
 

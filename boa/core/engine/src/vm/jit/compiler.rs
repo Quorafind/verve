@@ -46,7 +46,8 @@ use crate::{
 
 use super::{
     JitCode, JitOptions,
-    helpers::{self, HelperFn},
+    helpers::{self, HelperFn, SiteHelperFn},
+    layout::{ObjectLayout, SiteCache, object_layout},
     memory::{ExecutableCode, LiveCode},
     runtime::{
         EXIT, FRAME_OFFSET, INTERRUPT_OFFSET, LOOP_COUNT_OFFSET, LOOP_LIMIT_OFFSET, REGS_OFFSET,
@@ -169,7 +170,7 @@ pub(super) fn compile(
         if PANIC_IN_CODEGEN.with(std::cell::Cell::get) {
             panic!("code generator panic (test)");
         }
-        let function = translate(code_block, &block_pcs, isa);
+        let (function, sites) = translate(code_block, &block_pcs, isa);
         let mut context = ClifContext::for_function(function);
         let compiled = context
             .compile(&**isa, &mut ControlPlane::default())
@@ -184,6 +185,7 @@ pub(super) fn compile(
         Ok(JitCode {
             code,
             block_pcs: block_pcs.into_boxed_slice(),
+            sites: sites.into_boxed_slice(),
         })
     })
 }
@@ -255,6 +257,7 @@ fn kind(instruction: &Instruction) -> Kind {
         | Instruction::PopIntoRegister { .. }
         | Instruction::SetAccumulator { .. }
         | Instruction::GetArgument { .. }
+        | Instruction::GetName { .. }
         | Instruction::CheckReturn
         | Instruction::GetPropertyByName { .. }
         | Instruction::GetLengthProperty { .. }
@@ -303,7 +306,8 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
         | Instruction::StoreFalse { dst }
         | Instruction::StoreUndefined { dst }
         | Instruction::PopIntoRegister { dst }
-        | Instruction::GetArgument { dst, .. } => vec![dst.into()],
+        | Instruction::GetArgument { dst, .. }
+        | Instruction::GetName { dst, .. } => vec![dst.into()],
         Instruction::PushFromRegister { src } | Instruction::SetAccumulator { src } => {
             vec![src.into()]
         }
@@ -535,13 +539,24 @@ struct Translator<'a> {
     step_sig: SigRef,
     store_sig: SigRef,
     helper_sig: SigRef,
+    site_helper_sig: SigRef,
+    /// Where objects keep their shape and properties, if it checked out on this thread.
+    layout: Option<ObjectLayout>,
+    /// The caches of the property accesses compiled inline; the code keeps them.
+    #[allow(clippy::vec_box, reason = "each cache keeps its address, which the code holds")]
+    sites: Vec<Box<SiteCache>>,
     lookup_sig: SigRef,
     /// Blocks that run an instruction with [`jit_step`], emitted after the instructions (a
     /// block must be finished before the next is started).
     slow: Vec<(Block, u32, Vec<u32>)>,
 }
 
-fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) -> Function {
+#[allow(clippy::vec_box, reason = "each cache keeps its address, which the code holds")]
+fn translate(
+    code_block: &CodeBlock,
+    block_pcs: &[u32],
+    isa: &OwnedTargetIsa,
+) -> (Function, Vec<Box<SiteCache>>) {
     let call_conv = isa.default_call_conv();
     let ptr = isa.pointer_type();
     let mut signature = Signature::new(call_conv);
@@ -557,6 +572,8 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
         AbiParam::new(I32),
     ]);
     helper_signature.returns.push(AbiParam::new(I32));
+    let mut site_helper_signature = helper_signature.clone();
+    site_helper_signature.params.push(AbiParam::new(ptr));
     let mut store_signature = Signature::new(call_conv);
     store_signature
         .params
@@ -577,6 +594,7 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
     let lookup_sig = b.import_signature(signature);
     let store_sig = b.import_signature(store_signature);
     let helper_sig = b.import_signature(helper_signature);
+    let site_helper_sig = b.import_signature(site_helper_signature);
 
     b.switch_to_block(entry);
     let state = b.block_params(entry)[0];
@@ -598,6 +616,9 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
         step_sig,
         store_sig,
         helper_sig,
+        site_helper_sig,
+        layout: object_layout(),
+        sites: Vec::new(),
         lookup_sig,
         slow: Vec::new(),
     };
@@ -675,7 +696,8 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
 
     t.b.seal_all_blocks();
     t.b.finalize(isa.frontend_config());
-    function
+    let sites = t.sites;
+    (function, sites)
 }
 
 impl Translator<'_> {
@@ -725,9 +747,29 @@ impl Translator<'_> {
             .ins()
             .icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
         let fast = self.b.create_block();
+        let pointer = self.b.create_block();
+        let object = self.b.create_block();
         let slow = self.b.create_block();
         let done = self.b.create_block();
-        self.b.ins().brif(is_pointer, slow, &[], fast, &[]);
+        self.b.ins().brif(is_pointer, pointer, &[], fast, &[]);
+
+        // An object is dropped inline: one reference fewer. (Compiled code never runs while
+        // the collector drops, when a drop must not count.) Other pointers by `jit_store`.
+        self.b.switch_to_block(pointer);
+        let top = self.b.ins().ushr_imm_s(old, 48);
+        let is_object = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, top, bits::TOP16_OBJECT);
+        self.b.ins().brif(is_object, object, &[], slow, &[]);
+        self.b.switch_to_block(object);
+        let address = self.b.ins().band_imm_s(old, bits::POINTER_MASK);
+        let references = self.b.ins().load(I32, MemFlagsData::trusted(), address, 0);
+        let fewer = self.b.ins().iadd_imm_s(references, -1);
+        self.b
+            .ins()
+            .store(MemFlagsData::trusted(), fewer, address, 0);
+        self.b.ins().jump(fast, &[]);
 
         self.b.switch_to_block(fast);
         let regs = self.b.use_var(self.regs);
@@ -1013,8 +1055,6 @@ impl Translator<'_> {
                     .icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
                 let fast = self.b.create_block();
                 let pointer = self.b.create_block();
-                let object = self.b.create_block();
-                let count = self.b.create_block();
                 let clone = self.b.create_block();
                 let done = self.b.create_block();
                 self.b.ins().brif(is_pointer, pointer, &[], fast, &[]);
@@ -1023,26 +1063,7 @@ impl Translator<'_> {
                 self.b.ins().jump(done, &[]);
                 // An object: one more reference, unless the count would overflow.
                 self.b.switch_to_block(pointer);
-                let top = self.b.ins().ushr_imm_s(value, 48);
-                let is_object = self
-                    .b
-                    .ins()
-                    .icmp_imm_s(IntCC::Equal, top, bits::TOP16_OBJECT);
-                self.b.ins().brif(is_object, object, &[], clone, &[]);
-                self.b.switch_to_block(object);
-                let address = self.b.ins().band_imm_s(value, bits::POINTER_MASK);
-                let references = self.b.ins().load(I32, MemFlagsData::trusted(), address, 0);
-                let at_limit = self.b.ins().icmp_imm_s(
-                    IntCC::UnsignedGreaterThan,
-                    references,
-                    bits::MAX_REF_COUNT,
-                );
-                self.b.ins().brif(at_limit, clone, &[], count, &[]);
-                self.b.switch_to_block(count);
-                let counted = self.b.ins().iadd_imm_s(references, 1);
-                self.b
-                    .ins()
-                    .store(MemFlagsData::trusted(), counted, address, 0);
+                self.count_reference(value, clone);
                 self.store(dst.into(), value);
                 self.b.ins().jump(done, &[]);
                 // Other pointers: a clone, by a helper.
@@ -1073,6 +1094,10 @@ impl Translator<'_> {
                 let f = helpers::jit_get_argument;
                 self.fast(f, [index.into(), dst.into(), 0], Fast::Always, pc, next);
             }
+            Instruction::GetName { dst, binding_index } => {
+                let operands = [dst.into(), binding_index.into(), 0];
+                self.fast(helpers::jit_get_name, operands, Fast::MaySlow, pc, next);
+            }
             Instruction::CheckReturn => {
                 self.fast(helpers::jit_check_return, [0; 3], Fast::MaySlow, pc, next);
             }
@@ -1082,7 +1107,7 @@ impl Translator<'_> {
                 ic_index,
             } => {
                 let operands = [dst.into(), value.into(), ic_index.into()];
-                self.fast(helpers::jit_get_property, operands, Fast::MaySlow, pc, next);
+                self.get_property(operands, pc, next);
             }
             Instruction::GetLengthProperty {
                 dst,
@@ -1090,7 +1115,7 @@ impl Translator<'_> {
                 ic_index,
             } => {
                 let operands = [dst.into(), value.into(), ic_index.into()];
-                self.fast(helpers::jit_get_length, operands, Fast::MaySlow, pc, next);
+                self.get_length(operands, pc, next);
             }
             Instruction::SetPropertyByName {
                 value,
@@ -1098,7 +1123,7 @@ impl Translator<'_> {
                 ic_index,
             } => {
                 let operands = [value.into(), object.into(), ic_index.into()];
-                self.fast(helpers::jit_set_property, operands, Fast::MaySlow, pc, next);
+                self.set_property(operands, pc, next);
             }
             Instruction::GetPropertyByValue {
                 dst, key, object, ..
@@ -1319,6 +1344,305 @@ impl Translator<'_> {
         };
         let done = self.b.create_block();
         self.b.ins().brif(status, otherwise, &[], done, &[]);
+        self.b.switch_to_block(done);
+    }
+
+    /// Counts one more reference to `value`, a value that holds a pointer, if it is an object
+    /// whose count would not overflow; otherwise goes to `otherwise`. Leaves the builder in a
+    /// new block, after the count.
+    fn count_reference(&mut self, value: Value, otherwise: Block) {
+        let object = self.b.create_block();
+        let count = self.b.create_block();
+        let top = self.b.ins().ushr_imm_s(value, 48);
+        let is_object = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, top, bits::TOP16_OBJECT);
+        self.b.ins().brif(is_object, object, &[], otherwise, &[]);
+        self.b.switch_to_block(object);
+        let address = self.b.ins().band_imm_s(value, bits::POINTER_MASK);
+        let references = self.b.ins().load(I32, MemFlagsData::trusted(), address, 0);
+        let at_limit =
+            self.b
+                .ins()
+                .icmp_imm_s(IntCC::UnsignedGreaterThan, references, bits::MAX_REF_COUNT);
+        self.b.ins().brif(at_limit, otherwise, &[], count, &[]);
+        self.b.switch_to_block(count);
+        let counted = self.b.ins().iadd_imm_s(references, 1);
+        self.b
+            .ins()
+            .store(MemFlagsData::trusted(), counted, address, 0);
+    }
+
+    /// Branches to `yes` if `value` holds a pointer, to `no` otherwise.
+    fn branch_pointer(&mut self, value: Value, yes: Block, no: Block) {
+        let top = self.b.ins().ushr_imm_s(value, 50);
+        let is_pointer = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
+        self.b.ins().brif(is_pointer, yes, &[], no, &[]);
+    }
+
+    /// The address of the object `value` holds, or `miss` if it holds none. Leaves the builder
+    /// in a new block.
+    fn object_address(&mut self, value: Value, miss: Block) -> Value {
+        let top = self.b.ins().ushr_imm_s(value, 48);
+        let is_object = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, top, bits::TOP16_OBJECT);
+        let object = self.b.create_block();
+        self.b.ins().brif(is_object, object, &[], miss, &[]);
+        self.b.switch_to_block(object);
+        self.b.ins().band_imm_s(value, bits::POINTER_MASK)
+    }
+
+    fn load_at(&mut self, ty: cranelift_codegen::ir::Type, address: Value, offset: i32) -> Value {
+        self.b
+            .ins()
+            .load(ty, MemFlagsData::trusted(), address, offset)
+    }
+
+    /// Goes to `miss` unless the object at `address` has the shape `site` remembers, and no
+    /// collection has run since. Returns the address of the property's value in the object's
+    /// storage. Leaves the builder in a new block.
+    fn cached_slot(
+        &mut self,
+        layout: ObjectLayout,
+        address: Value,
+        site: Value,
+        miss: Block,
+    ) -> Value {
+        let tag = self.load_at(I64, address, layout.shape);
+        let pointer = self.load_at(I64, address, layout.shape + 8);
+        let cached_tag = self.load_at(I64, site, SiteCache::SHAPE);
+        let cached_pointer = self.load_at(I64, site, SiteCache::SHAPE + 8);
+        let cached_collections = self.load_at(I64, site, SiteCache::COLLECTIONS);
+        let counter = self.b.ins().iconst(I64, layout.collections as usize as i64);
+        let collections = self.load_at(I64, counter, 0);
+        let same_tag = self.b.ins().icmp(IntCC::Equal, tag, cached_tag);
+        let same_pointer = self.b.ins().icmp(IntCC::Equal, pointer, cached_pointer);
+        let same_collections = self
+            .b
+            .ins()
+            .icmp(IntCC::Equal, collections, cached_collections);
+        let same_shape = self.b.ins().band(same_tag, same_pointer);
+        let hit = self.b.ins().band(same_shape, same_collections);
+        let in_bounds = self.b.create_block();
+        self.b.ins().brif(hit, in_bounds, &[], miss, &[]);
+        // The slot is in the storage (it always is, for that shape).
+        self.b.switch_to_block(in_bounds);
+        let slot = self.load_at(I64, site, SiteCache::SLOT);
+        let len = self.load_at(I64, address, layout.storage_len);
+        let inside = self.b.ins().icmp(IntCC::UnsignedLessThan, slot, len);
+        let found = self.b.create_block();
+        self.b.ins().brif(inside, found, &[], miss, &[]);
+        self.b.switch_to_block(found);
+        let storage = self.load_at(I64, address, layout.storage_ptr);
+        let offset = self.b.ins().ishl_imm_u(slot, 3);
+        self.b.ins().iadd(storage, offset)
+    }
+
+    /// A new property cache for an access compiled inline, and its address.
+    fn new_site(&mut self) -> Value {
+        let site = Box::new(SiteCache::new());
+        let address = std::ptr::from_ref::<SiteCache>(&site) as i64;
+        self.sites.push(site);
+        self.b.ins().iconst(I64, address)
+    }
+
+    /// Calls a helper that also fills `site`, and goes on in `done`, or runs the instruction
+    /// with [`jit_step`] if the helper's fast path did not apply.
+    fn site_helper(
+        &mut self,
+        function: SiteHelperFn,
+        operands: [u32; 3],
+        site: Value,
+        pc: u32,
+        next: u32,
+        done: Block,
+    ) {
+        let mut args: Vec<Value> = operands
+            .iter()
+            .map(|&operand| self.b.ins().iconst(I32, i64::from(operand)))
+            .collect();
+        args.push(site);
+        let status = self.call(self.site_helper_sig, function as *const () as i64, &args);
+        let slow = self.slow_block(pc, &[next]);
+        self.b.ins().brif(status, slow, &[], done, &[]);
+    }
+
+    /// `GetPropertyByName`: an own data property of an object whose shape the site remembers,
+    /// read inline; anything else through the helper, which fills the site.
+    fn get_property(&mut self, [dst, object, ic]: [u32; 3], pc: u32, next: u32) {
+        let site = self.new_site();
+        let done = self.b.create_block();
+        let miss = self.b.create_block();
+        if let Some(layout) = self.layout {
+            let value = self.load(object);
+            let address = self.object_address(value, miss);
+            let flag = self.load_at(I64, address, layout.flag);
+            let writing = self.b.ins().icmp_imm_s(IntCC::Equal, flag, -1);
+            let readable = self.b.create_block();
+            self.b.ins().brif(writing, miss, &[], readable, &[]);
+            self.b.switch_to_block(readable);
+            let slot = self.cached_slot(layout, address, site, miss);
+            let property = self.load_at(I64, slot, 0);
+            let pointer = self.b.create_block();
+            let store = self.b.create_block();
+            self.branch_pointer(property, pointer, store);
+            self.b.switch_to_block(pointer);
+            self.count_reference(property, miss);
+            self.b.ins().jump(store, &[]);
+            self.b.switch_to_block(store);
+            self.store(dst, property);
+            self.b.ins().jump(done, &[]);
+        } else {
+            self.b.ins().jump(miss, &[]);
+        }
+        self.b.switch_to_block(miss);
+        self.site_helper(
+            helpers::jit_get_property,
+            [dst, object, ic],
+            site,
+            pc,
+            next,
+            done,
+        );
+        self.b.switch_to_block(done);
+    }
+
+    /// `GetLengthProperty`: of an array, read inline; anything else through the helper.
+    fn get_length(&mut self, [dst, object, ic]: [u32; 3], pc: u32, next: u32) {
+        let done = self.b.create_block();
+        let miss = self.b.create_block();
+        if let Some(layout) = self.layout {
+            let value = self.load(object);
+            let address = self.object_address(value, miss);
+            let vtable = self.load_at(I64, address, layout.vtable);
+            let array_vtable =
+                std::ptr::from_ref(&crate::builtins::array::ARRAY_EXOTIC_INTERNAL_METHODS) as i64;
+            let is_array = self.b.ins().icmp_imm_s(IntCC::Equal, vtable, array_vtable);
+            let array = self.b.create_block();
+            self.b.ins().brif(is_array, array, &[], miss, &[]);
+            self.b.switch_to_block(array);
+            let flag = self.load_at(I64, address, layout.flag);
+            let writing = self.b.ins().icmp_imm_s(IntCC::Equal, flag, -1);
+            let readable = self.b.create_block();
+            self.b.ins().brif(writing, miss, &[], readable, &[]);
+            // `length` is the first property of an array, always a number.
+            self.b.switch_to_block(readable);
+            let len = self.load_at(I64, address, layout.storage_len);
+            let has_length = self.b.create_block();
+            self.b.ins().brif(len, has_length, &[], miss, &[]);
+            self.b.switch_to_block(has_length);
+            let storage = self.load_at(I64, address, layout.storage_ptr);
+            let length = self.load_at(I64, storage, 0);
+            let store = self.b.create_block();
+            self.branch_pointer(length, miss, store);
+            self.b.switch_to_block(store);
+            self.store(dst, length);
+            self.b.ins().jump(done, &[]);
+        } else {
+            self.b.ins().jump(miss, &[]);
+        }
+        self.b.switch_to_block(miss);
+        let operands =
+            [dst, object, ic].map(|operand| self.b.ins().iconst(I32, i64::from(operand)));
+        let status = self.call(
+            self.helper_sig,
+            helpers::jit_get_length as *const () as i64,
+            &operands,
+        );
+        let slow = self.slow_block(pc, &[next]);
+        self.b.ins().brif(status, slow, &[], done, &[]);
+        self.b.switch_to_block(done);
+    }
+
+    /// `SetPropertyByName`: an own data property of an object whose (shared) shape the site
+    /// remembers, written inline when the old and new values are numbers, booleans, `null`,
+    /// `undefined` or objects; anything else through the helper, which fills the site.
+    fn set_property(&mut self, [value, object, ic]: [u32; 3], pc: u32, next: u32) {
+        let site = self.new_site();
+        let done = self.b.create_block();
+        let miss = self.b.create_block();
+        if let Some(layout) = self.layout {
+            let new = self.load(value);
+            let target = self.load(object);
+            let address = self.object_address(target, miss);
+            // Written only when not borrowed at all, as `borrow_mut` requires.
+            let flag = self.load_at(I64, address, layout.flag);
+            let unused = self.b.create_block();
+            self.b.ins().brif(flag, miss, &[], unused, &[]);
+            self.b.switch_to_block(unused);
+            let slot = self.cached_slot(layout, address, site, miss);
+            let old = self.load_at(I64, slot, 0);
+            // The old value: dropped inline only if it owns nothing or is an object.
+            let old_pointer = self.b.create_block();
+            let old_checked = self.b.create_block();
+            self.b.append_block_param(old_checked, I8);
+            let no = self.b.ins().iconst(I8, 0);
+            let top = self.b.ins().ushr_imm_s(old, 50);
+            let is_pointer = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
+            self.b.ins().brif(
+                is_pointer,
+                old_pointer,
+                &[],
+                old_checked,
+                &[BlockArg::Value(no)],
+            );
+            self.b.switch_to_block(old_pointer);
+            let top = self.b.ins().ushr_imm_s(old, 48);
+            let is_object = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, top, bits::TOP16_OBJECT);
+            let yes = self.b.ins().iconst(I8, 1);
+            self.b
+                .ins()
+                .brif(is_object, old_checked, &[BlockArg::Value(yes)], miss, &[]);
+            self.b.switch_to_block(old_checked);
+            let old_is_object = self.b.block_params(old_checked)[0];
+            // The new value: one more reference if it is an object.
+            let new_pointer = self.b.create_block();
+            let write = self.b.create_block();
+            self.branch_pointer(new, new_pointer, write);
+            self.b.switch_to_block(new_pointer);
+            self.count_reference(new, miss);
+            self.b.ins().jump(write, &[]);
+            self.b.switch_to_block(write);
+            let drop_old = self.b.create_block();
+            let written = self.b.create_block();
+            self.b
+                .ins()
+                .brif(old_is_object, drop_old, &[], written, &[]);
+            self.b.switch_to_block(drop_old);
+            let old_address = self.b.ins().band_imm_s(old, bits::POINTER_MASK);
+            let references = self.load_at(I32, old_address, 0);
+            let fewer = self.b.ins().iadd_imm_s(references, -1);
+            self.b
+                .ins()
+                .store(MemFlagsData::trusted(), fewer, old_address, 0);
+            self.b.ins().jump(written, &[]);
+            self.b.switch_to_block(written);
+            self.b.ins().store(MemFlagsData::trusted(), new, slot, 0);
+            self.b.ins().jump(done, &[]);
+        } else {
+            self.b.ins().jump(miss, &[]);
+        }
+        self.b.switch_to_block(miss);
+        self.site_helper(
+            helpers::jit_set_property,
+            [value, object, ic],
+            site,
+            pc,
+            next,
+            done,
+        );
         self.b.switch_to_block(done);
     }
 

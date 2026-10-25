@@ -26,6 +26,7 @@ compile_error!("the `jit` feature needs NaN-boxed values on a 64-bit target");
 
 mod compiler;
 mod helpers;
+mod layout;
 mod memory;
 mod runtime;
 
@@ -238,6 +239,9 @@ pub(crate) struct JitCode {
     code: ExecutableCode,
     /// The `pc` each block starts at, in order: a block's index is its position here.
     block_pcs: Box<[u32]>,
+    /// The caches of the property accesses the code does inline, which it points to.
+    #[allow(dead_code, reason = "kept for the code, which reads and writes them")]
+    sites: Box<[Box<layout::SiteCache>]>,
 }
 
 impl fmt::Debug for JitCode {
@@ -245,6 +249,7 @@ impl fmt::Debug for JitCode {
         f.debug_struct("JitCode")
             .field("code", &self.code)
             .field("blocks", &self.block_pcs.len())
+            .field("sites", &self.sites.len())
             .finish()
     }
 }

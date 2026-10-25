@@ -152,7 +152,10 @@ pub(crate) static STEPS: [StepFn; 256] = steps!(
 pub(crate) const MAX_NESTED: u32 = 64;
 
 // Inlined into each `jit_step::<OP>`, so that its handler is a direct call.
-#[allow(clippy::inline_always, reason = "the handler must be a direct call in each instance")]
+#[allow(
+    clippy::inline_always,
+    reason = "the handler must be a direct call in each instance"
+)]
 #[inline(always)]
 fn step(
     state: &mut JitState,

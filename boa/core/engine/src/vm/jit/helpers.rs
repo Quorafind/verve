@@ -15,9 +15,17 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::{Context, JsObject, JsValue, object::shape::slot::SlotAttributes, vm::CodeBlock};
+use boa_ast::scope::BindingLocatorScope;
 
-use super::runtime::JitState;
+use crate::{
+    Context, JsObject, JsValue, environments::Environment, object::shape::slot::SlotAttributes,
+    vm::CodeBlock,
+};
+
+use super::{
+    layout::{SiteCache, object_layout},
+    runtime::JitState,
+};
 
 /// The fast path applied.
 pub(crate) const DONE: u32 = 0;
@@ -26,6 +34,18 @@ pub(crate) const SLOW: u32 = 1;
 
 /// The signature of every fast helper: the state and up to three operands.
 pub(crate) type HelperFn = unsafe extern "C" fn(*mut JitState, u32, u32, u32) -> u32;
+
+/// A fast helper that also fills the cache of the access compiled inline.
+pub(crate) type SiteHelperFn =
+    unsafe extern "C" fn(*mut JitState, u32, u32, u32, *const SiteCache) -> u32;
+
+/// Remembers in `site` that `object`'s own data property at `slot` was accessed.
+fn fill(site: *const SiteCache, object: &JsObject, slot: u32) {
+    if let Some(layout) = object_layout() {
+        // SAFETY: compiled code passes one of its own sites, which it keeps alive.
+        unsafe { (*site).fill(object, slot, &layout) };
+    }
+}
 
 /// Runs `fast` with the context and the code block, turning a panic into [`SLOW`].
 #[inline]
@@ -159,9 +179,55 @@ pub(crate) unsafe extern "C" fn jit_check_return(
     })
 }
 
+/// `GetName` of a binding the interpreter finds where the bytecode compiler put it: in a
+/// declarative environment on the frame's chain, or the global declarative one, with no
+/// `with`, no binding an `eval` may have added, and not deleted. The binding must be
+/// initialized; anything else is the slow path's (it may throw).
+pub(crate) unsafe extern "C" fn jit_get_name(
+    state: *mut JitState,
+    dst: u32,
+    index: u32,
+    _: u32,
+) -> u32 {
+    guarded(state, |context, code_block, rp| {
+        let locator = code_block.bindings.get(index as usize)?;
+        // As `find_runtime_binding` decides it may leave the binding where it is.
+        if context.is_deleted_binding(locator) {
+            return None;
+        }
+        let frame = context.vm.frame();
+        let global = frame.realm.environment();
+        let current = frame.environments.current_declarative_ref(global)?;
+        if current.with() || current.poisoned() {
+            return None;
+        }
+        // As `get_binding` reads it.
+        let value = match locator.scope() {
+            BindingLocatorScope::GlobalDeclarative => global.get(locator.binding_index())?,
+            BindingLocatorScope::Stack(environment) => {
+                match context.environment_expect(environment) {
+                    Environment::Declarative(environment) => {
+                        environment.get(locator.binding_index())?
+                    }
+                    Environment::Object(_) => return None,
+                }
+            }
+            BindingLocatorScope::GlobalObject => return None,
+        };
+        set_register(context, rp, dst, value);
+        Some(())
+    })
+}
+
 /// The value of the data property `ic` caches for `object`, if the cache has its shape.
-/// Accessors are the slow path's: they call.
-fn cached_data_property(object: &JsValue, code_block: &CodeBlock, ic: u32) -> Option<JsValue> {
+/// Accessors are the slow path's: they call. An own property is remembered in `site`, if
+/// there is one.
+fn cached_data_property(
+    object: &JsValue,
+    code_block: &CodeBlock,
+    ic: u32,
+    site: Option<*const SiteCache>,
+) -> Option<JsValue> {
     let ic = code_block.ic.get(ic as usize)?;
     object.with_object(|object| {
         let borrowed = object.try_borrow().ok()?;
@@ -175,7 +241,11 @@ fn cached_data_property(object: &JsValue, code_block: &CodeBlock, ic: u32) -> Op
             let prototype = prototype.try_borrow().ok()?;
             prototype.properties().storage.get(index).cloned()
         } else {
-            borrowed.properties().storage.get(index).cloned()
+            let value = borrowed.properties().storage.get(index).cloned()?;
+            if let Some(site) = site {
+                fill(site, object, slot.index);
+            }
+            Some(value)
         }
     })?
 }
@@ -186,9 +256,11 @@ pub(crate) unsafe extern "C" fn jit_get_property(
     dst: u32,
     object: u32,
     ic: u32,
+    site: *const SiteCache,
 ) -> u32 {
     guarded(state, |context, code_block, rp| {
-        let value = cached_data_property(register(context, rp, object), code_block, ic)?;
+        let value =
+            cached_data_property(register(context, rp, object), code_block, ic, Some(site))?;
         set_register(context, rp, dst, value);
         Some(())
     })
@@ -216,7 +288,7 @@ pub(crate) unsafe extern "C" fn jit_get_length(
         } else if let Some(string) = base.as_string() {
             JsValue::from(string.len() as u32)
         } else {
-            cached_data_property(base, code_block, ic)?
+            cached_data_property(base, code_block, ic, None)?
         };
         set_register(context, rp, dst, value);
         Some(())
@@ -229,6 +301,7 @@ pub(crate) unsafe extern "C" fn jit_set_property(
     value: u32,
     object: u32,
     ic: u32,
+    site: *const SiteCache,
 ) -> u32 {
     guarded(state, |context, code_block, rp| {
         let ic = code_block.ic.get(ic as usize)?;
@@ -245,6 +318,8 @@ pub(crate) unsafe extern "C" fn jit_set_property(
                 .properties_mut()
                 .storage
                 .get_mut(slot.index as usize)? = value;
+            drop(borrowed);
+            fill(site, object, slot.index);
             Some(())
         })?
     })

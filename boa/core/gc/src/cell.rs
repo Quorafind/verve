@@ -31,8 +31,8 @@ enum BorrowState {
     Unused,
 }
 
-const WRITING: usize = !0;
-const UNUSED: usize = 0;
+pub(crate) const WRITING: usize = !0;
+pub(crate) const UNUSED: usize = 0;
 
 /// The base borrow flag init is rooted, and has no outstanding borrows.
 const BORROWFLAG_INIT: BorrowFlag = BorrowFlag(UNUSED);
@@ -98,6 +98,18 @@ pub struct GcRefCell<T: ?Sized + 'static> {
 }
 
 impl<T> GcRefCell<T> {
+    /// The offset of the borrow flag, a `usize`: [`raw::BORROW_UNUSED`](crate::raw) when the
+    /// value is not borrowed, [`raw::BORROW_WRITING`](crate::raw) when it is mutably, the count
+    /// of borrows otherwise.
+    pub(crate) const fn flag_offset() -> usize {
+        std::mem::offset_of!(Self, borrow)
+    }
+
+    /// The offset of the value.
+    pub(crate) const fn value_offset() -> usize {
+        std::mem::offset_of!(Self, cell)
+    }
+
     /// Creates a new `GcCell` containing `value`.
     pub const fn new(value: T) -> Self {
         Self {

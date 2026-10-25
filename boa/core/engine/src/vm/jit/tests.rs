@@ -906,3 +906,149 @@ fn garbage_collection_during_nested_calls() {
     assert!(results.windows(2).all(|w| w[0] == w[1]), "{results:?}");
     assert!(COLLECTIONS.load(Ordering::Relaxed) > 0);
 }
+
+/// `Array.prototype.push` onto dense arrays takes a shortcut; everything that must not take it
+/// (frozen, non-extensible and fixed-length arrays, holes, extra properties, subclasses, array
+/// likes, proxies, elements and setters on the prototypes, a proxy in the chain) behaves as
+/// the specification says. The expected output is Node's.
+#[test]
+fn push_matches_the_specification() {
+    let out = same(
+        r#"function show2(v) {
+           switch (typeof v) {
+             case 'number': return Object.is(v, -0) ? '-0' : String(v);
+             case 'string': return JSON.stringify(v);
+             case 'object':
+               if (v === null) return 'null';
+               if (Array.isArray(v)) return '[' + Array.from(v, show2).join(',') + ']';
+               return '{' + Object.keys(v).map(k => k + ':' + show2(v[k])).join(',') + '}';
+             default: return String(v);
+           }
+         }
+         const out = [];
+         const t = (f) => { try { out.push(show2(f())); } catch (e) { out.push(e.name); } };
+         t(() => { const a = [1, 2]; a.push(3, -0, 0.5, 'x', null); return a; });
+         t(() => { const a = []; return [a.push(), a.length]; });
+         t(() => { const a = Object.freeze([1]); return a.push(2); });
+         t(() => { const a = Object.preventExtensions([1]); a.push(2); return a; });
+         t(() => { const a = [1]; Object.defineProperty(a, 'length', { writable: false }); return a.push(2); });
+         t(() => { const a = [1, , 3]; a.push(4); return [a.length, 1 in a, a[3]]; });
+         t(() => { const a = []; a[100] = 1; a.push(2); return [a.length, a[101]]; });
+         t(() => { const a = [1]; a.extra = 'e'; a.push(2); return [a, a.extra]; });
+         t(() => { class X extends Array {} const a = new X(); a.push(1, 2); return [a.length, a instanceof X]; });
+         t(() => { const o = { length: 2 }; Array.prototype.push.call(o, 'a'); return o; });
+         t(() => { const p = new Proxy([], {}); p.push(1); return p.length; });
+         t(() => {
+           const log = [];
+           Object.defineProperty(Array.prototype, '1', { set(v) { log.push('setter ' + v); }, configurable: true });
+           const a = [0]; a.push(5); a.push(6);
+           delete Array.prototype[1];
+           return [a.length, a[1], a[2], log.join(';')];
+         });
+         t(() => {
+           Object.defineProperty(Object.prototype, '0', { value: 'ro', writable: false, configurable: true });
+           const a = []; let r;
+           try { a.push(1); r = 'pushed'; } catch (e) { r = e.name; }
+           delete Object.prototype[0];
+           return [r, a.length, a[0]];
+         });
+         t(() => {
+           const saved = Object.getPrototypeOf(Array.prototype);
+           Object.setPrototypeOf(Array.prototype, new Proxy({}, { set(t, k, v) { return true; } }));
+           const a = []; a.push(9);
+           Object.setPrototypeOf(Array.prototype, saved);
+           return [a.length, a[0]];
+         });
+         t(() => { const a = [1.5]; a.push(2); return a; });
+         t(() => { const a = [1]; a.push(2 ** 31, 2.5, {}, 'z'); return a; });
+         t(() => { const a = new Array(3); a.push(1); return [a.length, 0 in a, a[3]]; });
+         t(() => { const a = [1, 2, 3]; a.length = 1; a.push(9); return a; });
+         t(() => { const a = []; for (let i = 0; i < 100; i++) a.push(i * 0.5); return [a.length, a[99]]; });
+         out.join(' ')"#,
+    );
+    assert_eq!(
+        out,
+        r#"[1,2,3,-0,0.5,"x",null] [0,0] TypeError TypeError TypeError [4,false,4] [102,2] [[1,2],"e"] [2,true] {2:"a",length:3} 1 [3,undefined,6,"setter 5"] ["TypeError",0,undefined] [1,undefined] [1.5,2] [1,2147483648,2.5,{},"z"] [4,false,1] [1,9] [100,49.5]"#
+    );
+}
+
+/// Property accesses compile inline only if the object layout checks out on this thread.
+#[test]
+fn object_layout_checks_out() {
+    assert!(super::layout::object_layout().is_some());
+}
+
+/// A shape freed by a collection may have its address taken by a new shape; the caches of
+/// accesses compiled inline must not take the new one for the old.
+#[test]
+fn property_caches_survive_collections() {
+    let mut results = Vec::new();
+    for mode in [Mode::Interpreted, Mode::Eager, Mode::Hot] {
+        let mut context = context(mode);
+        context
+            .register_global_callable(
+                js_string!("gc"),
+                0,
+                NativeFunction::from_fn_ptr(|_, _, _| {
+                    boa_gc::force_collect();
+                    Ok(JsValue::undefined())
+                }),
+            )
+            .expect("registers");
+        let value = context
+            .eval(Source::from_bytes(
+                "function get(o) { return o.x; }
+                 function set(o, v) { o.x = v; }
+                 const out = [];
+                 for (let round = 0; round < 40; round++) {
+                   // A new shape each round, the property at a different slot each time.
+                   const o = {};
+                   for (let k = 0; k < round % 5; k++) o['k' + round + '_' + k] = k;
+                   o.x = round;
+                   for (let i = 0; i < 3; i++) { out.push(get(o)); set(o, get(o) + 1); }
+                   gc();
+                 }
+                 out.join(',')",
+            ))
+            .expect("runs");
+        results.push(value.display().to_string());
+    }
+    assert!(results.windows(2).all(|w| w[0] == w[1]), "{results:?}");
+}
+
+/// The inline path of a property access misses once after every collection (the shape it
+/// remembers may have been freed, and its address taken), and hits otherwise.
+#[test]
+fn collections_invalidate_property_caches() {
+    let mut context = fresh(Mode::Eager);
+    context
+        .register_global_callable(
+            js_string!("gc"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, _| {
+                boa_gc::force_collect();
+                Ok(JsValue::undefined())
+            }),
+        )
+        .expect("registers");
+    let fills = || super::layout::FILLS.with(std::cell::Cell::get);
+    let source = |collect: bool| {
+        format!(
+            "(function () {{
+               const o = {{ x: 1 }};
+               let s = 0;
+               for (let i = 0; i < 20; i++) {{ s += o.x; {} }}
+               return s;
+             }})()",
+            if collect { "gc();" } else { "" }
+        )
+    };
+    let before = fills();
+    context.eval(Source::from_bytes(&source(false))).expect("runs");
+    let quiet = fills() - before;
+    let before = fills();
+    context.eval(Source::from_bytes(&source(true))).expect("runs");
+    let collecting = fills() - before;
+    assert!(quiet <= 2, "a hot access fills its cache once: {quiet}");
+    assert!(collecting >= 15, "each collection costs one miss: {collecting}");
+}
