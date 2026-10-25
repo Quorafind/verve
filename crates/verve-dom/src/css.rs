@@ -581,7 +581,7 @@ impl<'a> Parser<'a> {
         // Comments count as space.
         if self.peek() == Some('/') && self.peek_at(1) == Some('*') {
             self.at += 2;
-            while !self.done() && !(self.peek() == Some('*') && self.peek_at(1) == Some('/')) {
+            while !self.done() && (self.peek() != Some('*') || self.peek_at(1) != Some('/')) {
                 self.at += 1;
             }
             self.at = (self.at + 2).min(self.chars.len());
@@ -1000,7 +1000,7 @@ impl<'a> Parser<'a> {
         while let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() || c == '+' || c == '-' || c.is_whitespace() {
                 // `of` begins the selector list.
-                if (c == 'o' || c == 'O') && text.trim().len() > 0 {
+                if (c == 'o' || c == 'O') && !text.trim().is_empty() {
                     break;
                 }
                 text.push(c);
@@ -1795,7 +1795,7 @@ fn own_style(dom: &Dom, styler: &Styler, id: NodeId, inherited: &Style) -> (Styl
         let rank = if declaration.important { 3 } else { 2 };
         matched.push(((rank, (u32::MAX, 0, 0), usize::MAX), declaration));
     }
-    matched.sort_by(|a, b| a.0.cmp(&b.0));
+    matched.sort_by_key(|a| a.0);
     // `hidden` is the user agent's `display: none`, under any author rule.
     if node.attr("hidden").is_some() && node.namespace == Namespace::Html {
         style.insert("display".into(), "none".into());

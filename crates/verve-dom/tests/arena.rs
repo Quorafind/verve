@@ -52,7 +52,7 @@ fn detached_trees_nothing_holds_are_reclaimed_and_the_rest_survive() {
         page.eval("held = null;");
         assert_eq!(page.document.sweep(&mut page.runtime), 2);
         assert_eq!(page.document.dom().len(), before + 2);
-        assert_eq!(page.document.update().changes.removed.len() >= 20002, true);
+        assert!(page.document.update().changes.removed.len() >= 20002);
     });
 }
 

@@ -88,7 +88,7 @@ impl Rect {
         (right >= x
             && bottom >= y
             && (right > x || bottom > y || self.width == 0. || self.height == 0.))
-            .then(|| Rect {
+            .then_some(Rect {
                 x,
                 y,
                 width: right - x,
@@ -1503,10 +1503,10 @@ impl Document {
             (None, false) => ordered.first(),
             (None, true) => ordered.last(),
         };
-        if let Some((_, _, next)) = next.copied() {
-            if let Err(error) = bind::events::set_focus_from(context, Some(next), true) {
-                verve::report(context, &error);
-            }
+        if let Some((_, _, next)) = next.copied()
+            && let Err(error) = bind::events::set_focus_from(context, Some(next), true)
+        {
+            verve::report(context, &error);
         }
     }
 

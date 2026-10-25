@@ -761,12 +761,10 @@ pub fn click(
             }
         }
         _ if !allowed => {}
-        Some("submit") => {
-            if read_dom(context, |dom| dom.is_connected(activator)) {
-                let form = form_of(context, activator);
-                if let Some(form) = form {
-                    submit(context, form, Some(activator))?;
-                }
+        Some("submit") if read_dom(context, |dom| dom.is_connected(activator)) => {
+            let form = form_of(context, activator);
+            if let Some(form) = form {
+                submit(context, form, Some(activator))?;
             }
         }
         Some("reset") => {

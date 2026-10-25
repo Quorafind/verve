@@ -1046,10 +1046,8 @@ pub fn form_entries(
                         _ => out.push((name.to_owned(), dom.value(control))),
                     }
                 }
-                Some("button") => {
-                    if submitter == Some(control) {
-                        out.push((name.to_owned(), node.attr("value").unwrap_or("").to_owned()));
-                    }
+                Some("button") if submitter == Some(control) => {
+                    out.push((name.to_owned(), node.attr("value").unwrap_or("").to_owned()));
                 }
                 Some("textarea") => out.push((name.to_owned(), dom.value(control))),
                 Some("select") => {

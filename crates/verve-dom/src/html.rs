@@ -204,7 +204,6 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
         rest = &rest[gt + 1..];
         if let Some(name) = inside.strip_prefix('/') {
             let name = name
-                .trim()
                 .split_whitespace()
                 .next()
                 .unwrap_or("")
@@ -249,16 +248,15 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
                     && matches!(
                         tag,
                         "meta" | "title" | "link" | "style" | "script" | "base" | "noscript"
-                    ) =>
+                    )
+                    && stack[0].id != head =>
                 {
-                    if stack[0].id != head {
-                        stack.truncate(1);
-                        stack[0] = Open {
-                            id: head,
-                            tag: "head".into(),
-                            namespace: Namespace::Html,
-                        };
-                    }
+                    stack.truncate(1);
+                    stack[0] = Open {
+                        id: head,
+                        tag: "head".into(),
+                        namespace: Namespace::Html,
+                    };
                 }
                 _ if !in_body => {
                     in_body = true;
@@ -415,13 +413,12 @@ fn imply_end_tags(dom: &Dom, stack: &mut Vec<Open>, tag: &str) {
             &["table"],
         ),
         "caption" | "colgroup" => close_nearest(stack, &["caption", "colgroup"], &["table"]),
-        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-            if stack
-                .last()
-                .is_some_and(|o| matches!(o.tag.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6"))
-            {
-                stack.pop();
-            }
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+            if stack.last().is_some_and(|o| {
+                matches!(o.tag.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+            }) =>
+        {
+            stack.pop();
         }
         _ => {}
     }

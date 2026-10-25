@@ -75,7 +75,7 @@ fn judge(context: &mut Context, walk: &JsValue, id: NodeId) -> JsResult<u32> {
     } else {
         call_method(&filter, "acceptNode", &[node], context)?
     };
-    Ok(answer.to_u32(context)?)
+    answer.to_u32(context)
 }
 
 fn what_to_show(walk: &JsValue, context: &mut Context) -> JsResult<u32> {

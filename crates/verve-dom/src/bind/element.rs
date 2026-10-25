@@ -3881,12 +3881,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         &[],
     )?;
     for (_, name) in SVG_CLASSES {
-        let parent = if *name == "SVGSVGElement" {
-            "SVGGraphicsElement"
-        } else {
-            "SVGGraphicsElement"
-        };
-        plain_class(context, name, parent)?;
+        plain_class(context, name, "SVGGraphicsElement")?;
     }
     let svg_svg = shared(context).borrow().prototype("SVGSVGElement");
     extend_prototype(context, &svg_svg, SVG_SVG_METHODS, &[])?;

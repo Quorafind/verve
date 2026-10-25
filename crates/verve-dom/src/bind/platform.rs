@@ -1051,10 +1051,7 @@ fn place_of(context: &mut Context, node: &JsValue) -> JsResult<Option<(JsValue, 
         let index = dom.children(parent).iter().position(|c| *c == id)?;
         Some((parent, index as u32))
     });
-    Ok(match found {
-        Some((parent, index)) => Some((wrap(context, parent), index)),
-        None => None,
-    })
+    Ok(found.map(|(parent, index)| (wrap(context, parent), index)))
 }
 
 const RANGE_ACCESSORS: &[Accessor] = &[
