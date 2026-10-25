@@ -268,6 +268,17 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Moves `out`'s events to where the embedder takes them; `true` when there were any.
+fn deliver<G: Guest>(shared: &Shared<G>, out: &mut Outbox<G::Event>) -> bool {
+    if out.is_empty() {
+        return false;
+    }
+    if let Ok(mut events) = shared.events.lock() {
+        events.append(&mut out.events);
+    }
+    true
+}
+
 /// The isolate's life on its thread.
 fn run<G: Guest>(
     make: impl FnOnce() -> G,
@@ -292,6 +303,12 @@ fn run<G: Guest>(
     }
     shared.busy_since.store(0, Ordering::SeqCst);
     let mut out = Outbox::default();
+    // What the guest said while it was being made — a script's first output, before its first
+    // timer — reaches the embedder now, not after a beat that may run long.
+    guest.drain(&mut out);
+    if deliver(shared, &mut out) {
+        (shared.wake)();
+    }
     let mut applied = 0;
     loop {
         let wait = guest.next_due().map_or(idle, |due| due.min(idle));
@@ -313,6 +330,10 @@ fn run<G: Guest>(
                 guest.drain(&mut out);
                 applied = n;
                 shared.applied.store(n, Ordering::SeqCst);
+            }
+            // What the jobs made happen is told before the beat, which may run long.
+            if deliver(shared, &mut out) {
+                (shared.wake)();
             }
             guest.tick();
             guest.drain(&mut out);

@@ -140,3 +140,72 @@ fn a_panic_ends_its_own_isolate_and_no_other() {
     assert_eq!(events_until(&other, 1), ["still here"]);
     assert_eq!(other.health(), Health::Alive);
 }
+
+/// A guest that says something as it is made, and whose beat takes a long while once asked to.
+struct Slow {
+    said: Vec<String>,
+    slow_beats: usize,
+}
+
+impl Guest for Slow {
+    type View = ();
+    type Event = String;
+
+    fn tick(&mut self) {
+        if self.slow_beats > 0 {
+            self.slow_beats -= 1;
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+
+    fn next_due(&self) -> Option<Duration> {
+        (self.slow_beats > 0).then_some(Duration::ZERO)
+    }
+
+    fn drain(&mut self, out: &mut Outbox<String>) {
+        for event in self.said.drain(..) {
+            out.push(event);
+        }
+    }
+
+    fn publish(&mut self, _: u64, _: bool) -> Option<()> {
+        None
+    }
+}
+
+/// What it said, waited for up to `within`.
+fn heard_within(isolate: &Isolate<Slow>, within: Duration) -> Vec<String> {
+    let started = Instant::now();
+    loop {
+        let events = isolate.take_events();
+        if !events.is_empty() || started.elapsed() >= within {
+            return events;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn what_a_guest_says_reaches_the_embedder_before_a_long_beat() {
+    let isolate = Isolate::spawn(
+        Options::default(),
+        || Slow {
+            said: vec!["made".into()],
+            slow_beats: 1,
+        },
+        || {},
+    )
+    .unwrap();
+    // Said while it was made, and its first beat is the slow one.
+    assert_eq!(heard_within(&isolate, Duration::from_millis(1500)), ["made"]);
+    // Said by a job, with another slow beat after it.
+    std::thread::sleep(Duration::from_millis(2500));
+    isolate.send(|guest, _| {
+        guest.said.push("from a job".into());
+        guest.slow_beats = 1;
+    });
+    assert_eq!(
+        heard_within(&isolate, Duration::from_millis(1500)),
+        ["from a job"]
+    );
+}
