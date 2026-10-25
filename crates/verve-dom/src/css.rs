@@ -1800,7 +1800,17 @@ fn own_style(dom: &Dom, styler: &Styler, id: NodeId, inherited: &Style) -> (Styl
     if node.attr("hidden").is_some() && node.namespace == Namespace::Html {
         style.insert("display".into(), "none".into());
     }
+    // The `font` shorthand is opened up once its `var()`s are resolved (below): the longhands
+    // this node declares after its own `font` win over it, as later declarations do.
+    let mut own_font = false;
+    let mut font_overridden: Vec<&str> = Vec::new();
     for (_, declaration) in matched {
+        if declaration.name == "font" {
+            own_font = true;
+            font_overridden.clear();
+        } else if own_font && FONT_LONGHANDS.contains(&declaration.name.as_str()) {
+            font_overridden.push(declaration.name.as_str());
+        }
         set_declared(&mut style, &declaration.name, &declaration.value, inherited);
     }
     // `var()` resolved against what this node holds, custom properties included.
@@ -1812,6 +1822,13 @@ fn own_style(dom: &Dom, styler: &Styler, id: NodeId, inherited: &Style) -> (Styl
     for value in style.values_mut() {
         if value.contains("var(") {
             *value = resolve_vars(value, &custom, 0);
+        }
+    }
+    if own_font && let Some(longhands) = style.get("font").and_then(|font| font_longhands(font)) {
+        for (name, value) in longhands {
+            if !font_overridden.contains(&name) {
+                style.insert(name.to_owned(), value);
+            }
         }
     }
     // A font size is computed to pixels, so what inherits it inherits the size and not `1.5em`
@@ -1826,6 +1843,66 @@ fn own_style(dom: &Dom, styler: &Styler, id: NodeId, inherited: &Style) -> (Styl
         style.insert("font-size".into(), format_px(px));
     }
     (style, pointer)
+}
+
+/// What the `font` shorthand sets.
+const FONT_LONGHANDS: &[&str] = &[
+    "font-style",
+    "font-variant",
+    "font-weight",
+    "font-stretch",
+    "font-size",
+    "line-height",
+    "font-family",
+];
+
+/// The `font` shorthand opened into its longhands: `[style] [variant] [weight] [stretch]
+/// size[/line-height] family`, every longhand it leaves out reset to `normal`. A system font
+/// (`caption`, `menu`…) or a value with no size answers `None`, and the shorthand is left as
+/// written.
+fn font_longhands(value: &str) -> Option<Vec<(&'static str, String)>> {
+    let mut style = "normal".to_owned();
+    let mut variant = "normal".to_owned();
+    let mut weight = "normal".to_owned();
+    let mut stretch = "normal".to_owned();
+    let words = split_outside(value.trim(), ' ');
+    let mut words = words.iter().map(|w| w.trim()).filter(|w| !w.is_empty());
+    for word in words.by_ref() {
+        match word {
+            "normal" => {}
+            "italic" | "oblique" => style = word.to_owned(),
+            "small-caps" => variant = word.to_owned(),
+            "bold" | "bolder" | "lighter" => weight = word.to_owned(),
+            "condensed" | "expanded" | "semi-condensed" | "semi-expanded" | "extra-condensed"
+            | "extra-expanded" | "ultra-condensed" | "ultra-expanded" => stretch = word.to_owned(),
+            w if w.parse::<f32>().is_ok_and(|n| (1. ..=1000.).contains(&n)) => {
+                weight = w.to_owned()
+            }
+            size => {
+                let (size, line_height) = match size.split_once('/') {
+                    Some((size, line)) => (size.to_owned(), line.to_owned()),
+                    None => (size.to_owned(), "normal".to_owned()),
+                };
+                if size.is_empty() {
+                    return None;
+                }
+                let family: Vec<&str> = words.collect();
+                if family.is_empty() {
+                    return None;
+                }
+                return Some(vec![
+                    ("font-style", style),
+                    ("font-variant", variant),
+                    ("font-weight", weight),
+                    ("font-stretch", stretch),
+                    ("font-size", size),
+                    ("line-height", line_height),
+                    ("font-family", family.join(" ")),
+                ]);
+            }
+        }
+    }
+    None
 }
 
 /// A font size in pixels, against the parent's: lengths, percentages, `em`, `rem`, and the
