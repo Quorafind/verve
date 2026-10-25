@@ -1311,7 +1311,7 @@ impl ContextBuilder {
 fn lazy_compile_default() -> bool {
     std::env::var("BOA_LAZY_COMPILE").is_ok_and(|value| {
         matches!(
-            value.trim().to_ascii_lowercase().as_str(),
+            cow_utils::CowUtils::cow_to_ascii_lowercase(value.trim()).as_ref(),
             "1" | "true" | "on" | "yes"
         )
     })
