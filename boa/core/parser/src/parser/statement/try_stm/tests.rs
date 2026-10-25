@@ -17,7 +17,7 @@ fn check_inline_with_empty_try_catch() {
     check_script_parser(
         "try { } catch(e) {}",
         vec![
-            Statement::Try(Try::new(
+            Statement::from(Try::new(
                 Block::default(),
                 ErrorHandler::Catch(Catch::new(
                     Some(
@@ -42,7 +42,7 @@ fn check_inline_with_var_decl_inside_try() {
     check_script_parser(
         "try { var x = 1; } catch(e) {}",
         vec![
-            Statement::Try(Try::new(
+            Statement::from(Try::new(
                 (
                     vec![
                         Statement::Var(VarDeclaration(
@@ -84,7 +84,7 @@ fn check_inline_with_var_decl_inside_catch() {
     check_script_parser(
         "try { var x = 1; } catch(e) { var x = 1; }",
         vec![
-            Statement::Try(Try::new(
+            Statement::from(Try::new(
                 (
                     vec![
                         Statement::Var(VarDeclaration(
@@ -143,7 +143,7 @@ fn check_inline_with_empty_try_catch_finally() {
     check_script_parser(
         "try {} catch(e) {} finally {}",
         vec![
-            Statement::Try(Try::new(
+            Statement::from(Try::new(
                 Block::default(),
                 ErrorHandler::Full(
                     Catch::new(
@@ -170,7 +170,7 @@ fn check_inline_with_empty_try_finally() {
     check_script_parser(
         "try {} finally {}",
         vec![
-            Statement::Try(Try::new(
+            Statement::from(Try::new(
                 Block::default(),
                 ErrorHandler::Finally(Finally::from(Block::default())),
             ))
@@ -186,7 +186,7 @@ fn check_inline_with_empty_try_var_decl_in_finally() {
     check_script_parser(
         "try {} finally { var x = 1; }",
         vec![
-            Statement::Try(Try::new(
+            Statement::from(Try::new(
                 Block::default(),
                 ErrorHandler::Finally(Finally::from(Block::from((
                     vec![StatementListItem::Statement(
@@ -218,7 +218,7 @@ fn check_inline_empty_try_paramless_catch() {
     check_script_parser(
         "try {} catch { var x = 1; }",
         vec![
-            Statement::Try(Try::new(
+            Statement::from(Try::new(
                 Block::default(),
                 ErrorHandler::Catch(Catch::new(
                     None,
@@ -255,7 +255,7 @@ fn check_inline_with_binding_pattern_object() {
     check_script_parser(
         "try {} catch ({ a, b: c }) {}",
         vec![
-            Statement::Try(Try::new(
+            Statement::from(Try::new(
                 Block::default(),
                 ErrorHandler::Catch(Catch::new(
                     Some(
@@ -299,7 +299,7 @@ fn check_inline_with_binding_pattern_array() {
     check_script_parser(
         "try {} catch ([a, b]) {}",
         vec![
-            Statement::Try(Try::new(
+            Statement::from(Try::new(
                 Block::from((vec![], PSEUDO_LINEAR_POS)),
                 ErrorHandler::Catch(Catch::new(
                     Some(
@@ -340,7 +340,7 @@ fn check_catch_with_var_redeclaration() {
     check_script_parser(
         "try {} catch(e) { var e = 'oh' }",
         vec![
-            Statement::Try(Try::new(
+            Statement::from(Try::new(
                 Block::from((vec![], PSEUDO_LINEAR_POS)),
                 ErrorHandler::Catch(Catch::new(
                     Some(
