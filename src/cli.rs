@@ -42,6 +42,7 @@
 //! | `--disable-proto=throw\|delete` | `Object.prototype.__proto__` throws, or is gone |
 //! | `--stack-size=<KiB>`, `--stack_size=<KiB>` | the script thread's stack, in KiB as V8's |
 //! | `--no-warnings` | `process.emitWarning` writes nothing |
+//! | `--jitless` | hot functions stay interpreted, whatever `VERVE_JIT` says (Node's flag) |
 //! | `--experimental-vm-modules`, `--no-addons` | accepted; nothing to change here |
 //! | `--max-old-space-size=<MiB>` | accepted and ignored: Boa has no heap cap; bound memory with the OS (a Job Object, `RLIMIT_AS`) |
 //!
@@ -83,7 +84,7 @@ const USAGE: &str = "usage: verve run [flags] <entry.js|.mjs|.cjs> [args...]
 flags: -A/--allow-all, --allow-read[=paths], --allow-fs-read=<path>, --allow-write[=paths],
        --allow-fs-write=<path>, --allow-net[=hosts], --allow-worker, --permission,
        --use-env-proxy,
-       --disable-proto=throw|delete, --stack-size=<KiB>, --no-warnings,
+       --disable-proto=throw|delete, --stack-size=<KiB>, --no-warnings, --jitless,
        --experimental-vm-modules, --no-addons, --max-old-space-size=<MiB>";
 
 /// What the command line asked for.
@@ -98,6 +99,7 @@ struct Options {
     stack_kib: Option<usize>,
     disable_proto: Option<Proto>,
     no_warnings: bool,
+    jitless: bool,
     eval: Option<String>,
     entry: Option<PathBuf>,
     args: Vec<String>,
@@ -232,6 +234,7 @@ fn parse(args: Vec<String>) -> Result<Command, String> {
             "--use-env-proxy" => options.use_env_proxy = true,
             "--permission" | "--experimental-permission" => {}
             "--no-warnings" => options.no_warnings = true,
+            "--jitless" => options.jitless = true,
             "--experimental-vm-modules" | "--no-addons" => {}
             "--max-old-space-size" => {
                 let size = needs_value("--max-old-space-size")?;
@@ -423,6 +426,9 @@ fn script(options: Options, argv0: String, embedder: Setup) -> i32 {
         Arc::new(move || signal.raise())
     };
     let mut runtime = Runtime::new();
+    if options.jitless {
+        runtime.set_jit_enabled(false);
+    }
     runtime.set_permissions(permissions.clone());
     runtime.set_worker_permissions(permissions);
     runtime.set_waker(Some(waker.clone()));
@@ -671,6 +677,27 @@ mod tests {
         };
         assert_eq!(run(embed), 42, "the script sees what setup defined");
         assert_eq!(run(|_| Err("no".into())), 70, "a failed setup ends the run");
+    }
+
+    #[test]
+    fn jitless_keeps_the_jit_off_whatever_the_environment_says() {
+        fn jit_off(runtime: &mut Runtime) -> Result<(), String> {
+            if runtime.jit_enabled() {
+                Err("the JIT is on".into())
+            } else {
+                Ok(())
+            }
+        }
+        let run = |args: &[&str]| script(options(args), "verve".into(), jit_off);
+        assert_eq!(run(&["--jitless", "-e", "0"]), 0);
+        #[cfg(feature = "jit")]
+        if std::env::var_os("VERVE_JIT").is_none() {
+            assert_eq!(
+                run(&["-e", "0"]),
+                70,
+                "without the flag a jit build compiles"
+            );
+        }
     }
 
     #[test]
