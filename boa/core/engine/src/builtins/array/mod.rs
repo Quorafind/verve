@@ -890,21 +890,28 @@ impl Array {
         Ok(len.into())
     }
 
-    /// `push` onto a plain array, when appending to its dense elements is all the steps of
-    /// `push` would do: the array has this realm's array shape (its one property a writable
-    /// `length`, its prototype this realm's `Array.prototype`), is extensible, and has its
-    /// elements dense up to its length; `Array.prototype` has no elements and this realm's
-    /// `Object.prototype` as its prototype, which has none either. Then each `Set` finds no
-    /// element on the prototype chain and defines one at the end, as
-    /// [`IndexedProperties::push_dense`] does, and `length` is set as `set_length` sets it.
-    /// Returns the new length, or `None` to take the steps.
-    fn push_dense(o: &JsObject, args: &[JsValue], context: &Context) -> Option<u64> {
+    /// Whether `Set` of an element of `o` at or below its count of elements can do no more than
+    /// write that element or append one, as `PropertyMap::set_dense_property` and
+    /// [`IndexedProperties::push_dense`] do: `o` is an array with this realm's array shape
+    /// (its one property a writable `length`, its prototype this realm's `Array.prototype`),
+    /// extensible, with dense elements; `Array.prototype` has no elements and this realm's
+    /// `Object.prototype` as its prototype, which has none either and a null prototype. Then
+    /// `Set` finds no element on the prototype chain, and defines one at the end. Returns `o`
+    /// borrowed, its length and its count of elements.
+    fn plain_dense_array<'a>(
+        o: &'a JsObject,
+        context: &Context,
+    ) -> Option<(
+        crate::object::RefMut<'a, crate::object::ErasedObject>,
+        f64,
+        usize,
+    )> {
         if !o.is_array() {
             return None;
         }
         let intrinsics = context.intrinsics();
         let array_shape = intrinsics.templates().array().shape().to_addr_usize();
-        let mut object = o.try_borrow_mut().ok()?;
+        let object = o.try_borrow_mut().ok()?;
         if !object.extensible || object.properties().shape.to_addr_usize() != array_shape {
             return None;
         }
@@ -926,7 +933,7 @@ impl Array {
         if !no_elements(&array_prototype) || !no_elements(&object_prototype) {
             return None;
         }
-        let properties = object.properties_mut();
+        let properties = object.properties();
         let len = properties.storage.first()?.as_number()?;
         let elements = match &properties.indexed_properties {
             IndexedProperties::DenseI32(vec) => vec.len(),
@@ -936,12 +943,20 @@ impl Array {
                 return None;
             }
         };
+        Some((object, len, elements))
+    }
+
+    /// `push` onto a [plain dense array](Self::plain_dense_array) whose length is its count of
+    /// elements: the steps append each value and then set `length`, as `set_length` sets it.
+    /// Returns the new length, or `None` to take the steps.
+    fn push_dense(o: &JsObject, args: &[JsValue], context: &Context) -> Option<u64> {
+        let (mut object, len, elements) = Self::plain_dense_array(o, context)?;
         let new_len = elements as u64 + args.len() as u64;
-        // The length of a dense array is the count of its elements; a length that is not an
-        // array index after the push takes the steps (which throw).
+        // A length that is not an array index after the push takes the steps (which throw).
         if len.to_bits() != (elements as f64).to_bits() || new_len >= u64::from(u32::MAX) {
             return None;
         }
+        let properties = object.properties_mut();
         for value in args {
             if !properties.indexed_properties.push_dense(value) {
                 return None;
@@ -950,6 +965,29 @@ impl Array {
         // NOTE: The "length" property is the first element.
         properties.storage[0] = JsValue::new(new_len);
         Some(new_len)
+    }
+
+    /// The loop of `fill` over `start..end` (within the length), on a
+    /// [plain dense array](Self::plain_dense_array) with no hole before `start`: each `Set`
+    /// writes an element or appends one, and `length` does not change. Returns `false`, having
+    /// changed nothing, to take the steps.
+    fn fill_dense(o: &JsObject, start: u64, end: u64, value: &JsValue, context: &Context) -> bool {
+        let Some((mut object, len, elements)) = Self::plain_dense_array(o, context) else {
+            return false;
+        };
+        if start > elements as u64 || end as f64 > len {
+            return false;
+        }
+        let properties = object.properties_mut();
+        for index in start..end {
+            let done = if index < elements as u64 {
+                properties.set_dense_property(index as u32, value)
+            } else {
+                properties.indexed_properties.push_dense(value)
+            };
+            debug_assert!(done, "dense elements stay dense");
+        }
+        true
     }
 
     /// `Array.prototype.pop()`
@@ -2052,6 +2090,10 @@ impl Array {
         let final_ = Self::get_relative_end(context, args.get_or_undefined(2), len)?;
 
         let value = args.get_or_undefined(0);
+
+        if k < final_ && Self::fill_dense(&o, k, final_, value, context) {
+            return Ok(o.into());
+        }
 
         // 11. Repeat, while k < final,
         while k < final_ {
