@@ -1,8 +1,11 @@
 # A JIT for Verve
 
 Verve runs JavaScript on Boa, a bytecode interpreter. This is the plan for compiling hot code to
-native code, and the record of its first phase, which is built: a baseline JIT on Cranelift in
-`boa/core/engine/src/vm/jit/`, behind the `jit` feature of `boa_engine` and of `verve`.
+native code, and the record of its first two phases, which are built: a baseline JIT on Cranelift
+in `boa/core/engine/src/vm/jit/`, behind the `jit` feature of `boa_engine` and of `verve`. Phase 1
+compiled arithmetic, comparisons and branches; phase 2 added property and element access, fast
+helpers for the frequent instructions, calls between compiled functions, and generators and
+async functions.
 
 ## What exists, and what was chosen
 
@@ -89,22 +92,89 @@ data, parsers, diff and search loops.
     identity;
   - `++ --` and `!`;
   - every jump, including the fused `JumpIfNot{Less,Greater}Than[OrEqual]`, `&&`, `||` and `??`;
-  - `IncrementLoopIteration`: the interrupt flag and the loop limit are checked inline.
+  - `IncrementLoopIteration`: the interrupt flag and the loop limit are checked inline;
+  - `%` of two `int32`s (phase 2), with `rem_fast`'s `-0`;
+  - `Move` of an object, and a store over one: the reference count is the first word of the
+    object's allocation, counted up and down inline (phase 2);
+  - property and element access, through caches (phase 2, below).
 
   Each fast path computes what the interpreter's fast path computes, **to the bit**
   (`value/operations.rs`: an `int32` stays an `int32`, a `NaN` is the canonical one, and `>>>`
   gives a `u32` that is an `int32` only when it fits).
-- **Everything else** — property access, calls, environments, iterators, classes, `typeof`,
-  strings — goes through `jit_step(state, pc)`. It runs the interpreter's own handler for the
-  instruction at `pc` (`OPCODE_HANDLERS`) and answers the `pc` to continue at. Compiled code
-  continues at the next instruction, a branch target, or any other leader (through `dispatch`). If
-  the frame changed, or there is no block at that `pc`, it returns to the interpreter.
+- **Fast helpers** (phase 2, `helpers.rs`): Rust functions with the operands decoded at compile
+  time, for the frequent instructions whose common case needs the engine's data structures (below).
+- **Everything else** — calls, environments, iterators, classes, `typeof`, strings — goes through
+  `jit_step::<OP>(state, pc)`. It runs the interpreter's own handler for the instruction at `pc`
+  and answers the `pc` to continue at. There is one instance per opcode (`STEPS`), so the handler
+  is a direct call and the opcode is not decoded again. Compiled code continues at the next
+  instruction, a branch target, or any other leader (through `dispatch`). If the frame changed,
+  or there is no block at that `pc`, it returns to the interpreter.
 - Helpers are called through absolute addresses, and Cranelift keeps constants and jump tables
   inside the function, so **there is nothing to relocate**. Code that would need relocation is
   refused.
 
 Cranelift settings: `opt_level=speed`, the verifier in debug builds, inline stack probes, and frame
 pointers kept so profilers and debuggers can walk compiled frames.
+
+### Fast helpers
+
+Each fast helper does exactly what the interpreter's handler does in the common case and answers
+*done*, or changes nothing and answers *slow*, after which compiled code runs the instruction with
+`jit_step`. So a fast path only has to be right about when it applies. None of them throws,
+calls JavaScript or reads `frame.pc`. A panic in one is caught, kept, and turned into *slow*;
+`jit_step` then returns at once and `execute` resumes the panic.
+
+| Instruction | Fast path |
+|---|---|
+| `PushFromRegister` (up to three in a row, one call) | push a clone; the registers' address is reloaded, the stack may have moved |
+| `PopIntoRegister`, `SetAccumulator`, `GetArgument`, `CheckReturn` | as the handler, when there is a value to pop / the frame is not a constructor's |
+| `GetName`, `GetNameGlobal` | when `find_runtime_binding` would leave the binding where the bytecode compiler put it (declarative current environment, no `with`, not poisoned by `eval`, not deleted): read it as `get_binding` does; a binding on the global object through the instruction's inline cache |
+| `GetPropertyByName`, `SetPropertyByName` | a hit of the instruction's inline cache on a data property (own or, for a read, on the prototype); fills the access's site cache |
+| `GetLengthProperty` | an array's `length`, a string's, or as `GetPropertyByName` |
+| `GetPropertyByValue`, `SetPropertyByValue` | a dense array by an `int32` index, as `get_dense_property` and `set_dense_property` |
+
+### Property caches and elements
+
+Boa's interpreter keeps an inline cache per property access (`vm/inline_cache`: up to four shapes,
+each with a slot, held weakly). Compiled code keeps its own, simpler cache per access, the *site
+cache* (`layout.rs`): the shape of the last object whose own data property it was (two words),
+the property's slot, and the count of garbage collections at the time. A site is filled by the
+helper, only from a hit of the interpreter's cache, and only for a **shared** shape, whose
+properties never change; a dictionary-mode (unique) shape is left to the helper.
+
+`GetPropertyByName` and `SetPropertyByName` check in machine code: the value is an object, its
+`GcRefCell` is not borrowed mutably (not borrowed at all, for a write), its shape's two words are
+the site's, no collection has run since the site was filled, and the slot is in the storage. Then
+they read or write the slot, counting references inline when the old or new value is an object
+(any other pointer — a string, a symbol, a bigint — takes the helper). On a miss the helper runs,
+and fills the site.
+
+**Why the count of collections**: a shape is freed only by a collection, and its address may then
+be taken by a new shape. `boa_gc` counts collections (`boa_gc::raw::collections`), before anything
+is freed; a site is trusted only while the count is the one it was filled at. After each
+collection every site misses once. The test `collections_invalidate_property_caches` checks that
+the check is there (it fails without it).
+
+`GetLengthProperty` of an array is inline (its vtable is the array's; `length` is its first
+slot). `GetPropertyByValue` and `SetPropertyByValue` of a dense array by a non-negative `int32`
+index are inline: the vtable, the borrow and `extensible` flags, the kind of the elements (`i32`,
+`f64` or values) and their length, then the element. A write that would change the kind of the
+elements (a float into `i32`s) takes the helper, which does what the interpreter does.
+
+**Layout**: the offsets come from `offset_of!` and from `boa_gc::raw` (the value in a `GcBox`, a
+`GcRefCell`'s flag and value). `Shape`'s representation is `repr(u64)` (a tag word and a pointer,
+no padding), and so is `IndexedProperties`'s. Where a `Vec` keeps its pointer and length, and a
+`ThinVec` its length and elements, Rust does not say: they are found by looking at real ones.
+Everything is checked on each thread, the first time it compiles, against a real object (the
+borrow flag in each state, the shape's words, the storage, the vtable, `extensible`, each kind of
+elements). If anything does not match, property and element accesses are compiled as helper calls
+only.
+
+Two builtins got the same kind of shortcut, in the interpreter as much as in compiled code:
+`Array.prototype.push` and `Array.prototype.fill` on a *plain dense array* — the realm's array
+shape (a writable `length`, nothing else), extensible, dense elements, and `Array.prototype` and
+`Object.prototype` as its prototypes with no elements (and a null prototype after them) —
+append or write the elements directly, which is all their specification steps would do there.
 
 ### Entering and leaving
 
@@ -125,18 +195,26 @@ Entering anywhere costs nothing extra, because the frame *is* the state.
 
 ### Calls
 
-A call never nests native code. A `Call` in compiled code runs through `jit_step`, which pushes the
-callee's frame. Compiled code sees the frame change and returns. The interpreter loop then enters
-the callee's compiled code, or interprets it. When the callee returns, the loop re-enters the
-caller's compiled code after the call.
+A `Call` in compiled code runs through `jit_step`, whose handler pushes the callee's frame as the
+interpreter does (`function_call`, the shadow stack, `this`, environments). Then, in phase 2:
 
-So native stack depth does not grow with JavaScript recursion. Recursion limits,
-`Maximum call stack size exceeded`, the shadow stack behind `error.stack` and
-`Error.captureStackTrace`, and every frame-walking feature behave exactly as they do interpreted.
+- if the callee's code is compiled (or gets hot enough now), `jit_step` runs it **nested**, on
+  the native stack under the caller's helper (`run_callees`), and when the caller's frame is back
+  on top it carries on after the call, in the caller's compiled code;
+- otherwise compiled code returns, the interpreter's loop runs the callee, and re-enters the
+  caller's compiled code after the call, as in phase 1.
 
-The price is an exit and an entry per call, about 15 ns together. A call-heavy function therefore
-gains nothing from compiling (see the profitability check below), which is why a JIT-to-JIT call
-path is the first item of phase 2.
+Nesting stops at 64 compiled frames (`MAX_NESTED`) and when the native stack used since the
+outermost run passes a quarter of `RuntimeLimits::native_stack_limit`; past either, calls go back
+to the loop. The frames are the interpreter's own in both cases, so recursion limits,
+`Maximum call stack size exceeded`, `error.stack` and every frame-walking feature behave exactly
+as interpreted. An exception thrown in a nested callee unwinds the frames as the interpreter
+does: if a compiled caller catches it, its helper carries on at the handler; if it unwinds past
+the caller, the caller returns too.
+
+A nested call saves the return to the loop and the two entries of phase 1. What is left of a call
+is Boa's own: pushing and popping the frame, `function_call` and `handle_return`, over 100 ns,
+which compiled code does not change (see the roadmap).
 
 ### Deoptimisation and fallback
 
@@ -148,7 +226,6 @@ continues at `frame.pc`. Fallback happens at three levels:
    that instruction.
 2. **Per instruction**: instructions without an inline form always run through `jit_step`.
 3. **Per function**: a function stays interpreted for good (it is marked `Rejected`) when:
-   - it is a generator or an async function;
    - it has more than `max_bytecode_len` bytes of bytecode (32 KB);
    - its bytecode fails validation (above);
    - compiling it would not pay (below);
@@ -158,6 +235,8 @@ continues at `frame.pc`. Fallback happens at three levels:
    off for the rest of the process, so no function pays for a compile that would fail the same
    way. The panic is caught and does not unwind into the host. `boa_engine::vm::jit_unavailable()`
    tells which of the two happened.
+5. **Per thread**: if the object layout does not check out (above), property and element
+   accesses compile to helper calls only.
 
 ### Tier-up
 
@@ -167,15 +246,16 @@ Each `CodeBlock` carries a `JitSlot`: a hotness counter, a tier (`Interpreted`, 
 - Hotness is incremented on every entry, every return into the function, and every loop
   iteration. A function is compiled when hotness passes `JitOptions::threshold` (1000 by
   default).
-- **Profitability**: a call to a JavaScript function costs an exit from compiled code and an entry
-  back, about 15 ns together. That is roughly what eight instructions done inline save. A
-  function is compiled only if
+- **Profitability**: a call to a JavaScript function that is not compiled costs an exit from
+  compiled code and an entry back, about 15 ns together (a compiled callee runs nested and costs
+  neither). That is roughly what eight instructions done inline save. A function is compiled
+  only if
   - its loop bodies (the spans of backward branches) do at least eight inline instructions per
     call in them, or
   - at least half its instructions are inline.
 
-  Straight-line glue code (`return a.b(c)`) and loops that mostly call out
-  (`s = add(s, id(i))`) are left to the interpreter, where they are no slower.
+  Since phase 2 an instruction done by a fast helper counts as inline, so most code passes;
+  straight-line glue made of what only `jit_step` does is still left to the interpreter.
 - `threshold = 0` compiles every function the first time it runs, profitable or not. It is a
   testing mode.
 - **Limits**, each settable through `jit_options_mut()`. Bytes are counted as mapped, rounded up to
@@ -193,12 +273,13 @@ Each `CodeBlock` carries a `JitSlot`: a hotness counter, a tier (`Interpreted`, 
 There is no new GC interaction to get right.
 
 - Values stay in the VM stack, which the collector already treats as roots.
-- Compiled code reads values as bits, only ever stores values that hold no pointer (numbers,
-  booleans, `null`, `undefined`), and never keeps a pointer in a machine register across a helper
-  call.
-- Overwriting a register that holds a pointer goes through `jit_store`, which drops the old value,
-  decrementing its reference count, as the interpreter would.
-- Copying a pointer value (`Move` of an object) goes through `jit_step`, which clones it.
+- Compiled code reads values as bits and never keeps a pointer in a machine register across a
+  helper call.
+- It stores objects (a `Move`, a property or element read) only after counting the new reference
+  inline, as `clone` does; other pointers (strings, symbols, bigints) are cloned by helpers.
+- Overwriting a register or a property slot that holds an object counts the reference down
+  inline, which is all dropping an object does (`boa_gc` frees only in collections, and compiled
+  code never runs while one is dropping). Other pointers are dropped by `jit_store` or a helper.
 - `boa_gc` never moves objects.
 
 Collections happen inside helpers (allocation), when compiled code holds nothing.
@@ -239,14 +320,12 @@ Registering unwind info (Cranelift can emit it) is on the roadmap.
 
 ### Generators and async functions
 
-They are not compiled in phase 1: code blocks flagged generator or async are rejected, as is any
-code with `Await`, the yield opcodes or `CreatePromiseCapability`.
-
-The design leaves them close, though. A suspended generator's state is its `CallFrame` and its
-registers, which compiled code shares. Running `Yield` and `Await` through `jit_step` (which pops
-the frame and leaves compiled code), and making the instruction after them a leader, would let a
-resumed generator re-enter compiled code like any returning call. That is in phase 2, behind the
-same differential tests.
+They are compiled since phase 2. A suspended generator's state is its `CallFrame` and its
+registers, which compiled code shares. `Generator`, `GeneratorYield`, `Await` and the async
+generator opcodes run through `jit_step`, take the frame off the stack and so make compiled code
+return. A resumed frame comes back with its registers on the stack (wherever they now are; `execute`
+reads `rp` from the frame), and the interpreter's loop enters it at the instruction after the
+suspend point, which starts a block as the instruction after every stepped one does.
 
 ### Executable memory and untrusted code
 
@@ -334,7 +413,18 @@ With the feature built, the JIT is on unless switched off.
   - `error.stack`;
   - closures, classes and accessors;
   - recursion to the limit;
-  - generators and async functions, which must stay interpreted.
+  - property caches: hits, misses, new shapes at a site, megamorphic sites, prototypes, accessors
+    (own and inherited), deletes, frozen and non-writable properties (sloppy and strict),
+    dictionary-mode objects, primitives, `null`, proxies, lengths;
+  - elements of each kind, holes, out of range, negative and non-integer indexes, non-extensible
+    arrays, setters on `Array.prototype`, typed arrays, strings;
+  - nested calls: past the nesting cap, exceptions through compiled callees caught at every
+    depth, `finally`, the recursion error, calls through generators and natives, `error.stack`;
+  - the GC during nested calls, and property caches across collections (shapes freed and new
+    ones made);
+  - generators (`yield*`, `return()`, `throw()`) and async functions and generators, with their
+    promise jobs run;
+  - `push` and `fill`, against Node's output.
 - **A generated-program fuzzer**: random expressions over every type, in loops, with exceptions
   caught, compared the same way. It runs 150 programs by default; `BOA_JIT_FUZZ_COUNT=3000` runs
   more. It found a real interpreter bug on its first long run: `i32::MIN % -1` panicked in builds
@@ -347,6 +437,9 @@ With the feature built, the JIT is on unless switched off.
   - each limit holds, and code is given back when its function is collected;
   - the slow path of string `+` stays in compiled code.
 - **Behaviour tests**:
+  - the object layout checks out on the test thread (else accesses would silently be helpers);
+  - a collection makes the next access through a site miss, and only then;
+  - a loop calling a compiled function does not return to the interpreter per call;
   - tier-up happens, and cold code is not compiled;
   - OSR enters a running loop;
   - the GC runs during compiled code;
@@ -402,30 +495,88 @@ Correctness at the end of phase 1:
 `test262/test/staging` is left out of the test262 comparison: one test there allocates 64 GB and
 aborts the tester process, interpreted or not.
 
+## Results (phase 2)
+
+Release `verve`, Windows x86-64 (32 threads), the same benchmarks; milliseconds, best of 7 to 15
+runs with the configurations interleaved at high priority. The machine was shared with other
+builds and test runs (50–85% busy), so the absolute numbers are higher than phase 1's table and
+differences under about 15% are noise; the columns were measured together and compare.
+
+| benchmark | Node 22 | phase 1 JIT | phase 2 JIT | phase 2, `VERVE_JIT=0` | phase 2 vs phase 1 |
+|---|---|---|---|---|---|
+| `loop` | 3 | 17 | 17 | 164 | 1.0× |
+| `bitops` | 9 | 27 | 24 | 237 | 1.1× |
+| `mandel` | 6 | 40 | 36 | 122 | 1.1× |
+| `fib(27)` | 3 | 140 | 94 | 113 | **1.5×** |
+| `objects`: `p.x = p.x + i` | 5 | 230 | 20 | 166 | **11.5×** |
+| `strings`: `+=` and `String.fromCharCode` | 5 | 159 | 109 | 135 | **1.5×** |
+| `sieve`: `fill` and element writes | 5 | 126 | 14 | 80 | **9.0×** |
+| `callLoop`: `s = add(s, id(i)) \| 0` | 9 | 851 | 522 | 657 | **1.6×** |
+| `propLoop`: `s = (s + o.a) \| 0` | 2 | 153 | 23 | 224 | **6.7×** |
+| `push`: `arr.push(i & 7)` | 18 | 355 | 116 | 163 | **3.1×** |
+
+- Property and element access, the rows that phase 1 left at interpreter speed (and `objects`
+  slower than interpreted), are now 3–12× faster than phase 1, within 3–11× of Node.
+- Calls are about 1.5× faster than phase 1 and 15–25% faster than the interpreter, and still
+  30–60× slower than Node, which inlines them: what is left is Boa's frame machinery (roadmap).
+- Some gains are the interpreter's too (`VERVE_JIT=0` column against phase 1's interpreter,
+  about 175–200 ms for `objects` and 150–175 for `sieve`): `push` and `fill` on plain dense arrays,
+  native calls popping their arguments without allocating, cheaper `Gc` drops
+  (`finalizer_safe`), and registers made without cloning.
+- Compiling: about 5 ms a function in a release build (the first on a thread includes the ISA
+  and the layout check), 57 KB mapped for the 5 functions of the numeric benchmarks. The release
+  binary is 0.6 MB larger than phase 1's (36.6 MB), mostly the per-opcode `jit_step`.
+
+Why `objects` was slower compiled than interpreted in phase 1: each of its four property accesses
+and two `Move`s of the object went through `jit_step`, which adds a call, a decode of the opcode
+and a check of the frame to the interpreter's own handler, about 40 cycles each, while the five
+instructions it did inline saved less than that.
+
+Correctness at the end of phase 2:
+
+| Suite | Result |
+|---|---|
+| `boa_engine` (1358 tests, 3 ignored) | Passes with the JIT forced (`BOA_JIT_THRESHOLD=0`), off, and at defaults. |
+| Generated programs | 3000 match the interpreter. |
+| Verve (322 tests, 10 ignored) | Passes at defaults, forced (`VERVE_JIT_THRESHOLD=0`) and off, with the `jit` feature. The `fetch_network` tests time out on a heavily loaded machine in every mode, JIT or not, and pass otherwise. |
+| test262 | 52,095 results compared one by one between interpreted and JIT-forced runs: **0 differ** but for two timing-dependent `Atomics.notify` tests (different ones on each run) that time out under load and pass in both modes when rerun alone. 49,895 pass in both. |
+
 ## Roadmap
 
 **Phase 1 (done)**: the baseline described above.
 
-**Phase 2: make calls and objects fast.** This is where plugin code spends its time.
+**Phase 2 (done): calls and objects.**
 
-1. **Property inline caches in compiled code.** Boa already has per-instruction inline caches
-   (`vm/inline_cache`: shape and slot). For `GetPropertyByName`, `SetPropertyByName` and
-   `GetLengthProperty`, emit the shape check and the slot load or store inline, with `jit_step` on
-   a miss. This needs a stable view of `JsObject`'s layout (shape pointer and property storage)
-   exported from `object/`.
-2. **JIT-to-JIT calls.** When the callee is compiled, push its frame through a helper and call its
-   code directly, nesting native frames under a depth cap (counted into `run_depth` and checked
-   against `native_stack_limit`). Exceeding the cap falls back to the trampoline. The aim is to
-   keep the recursion error semantics within the interpreter's limits.
-3. **Specialised helpers** with pre-decoded operands for the most common stepped instructions
-   (`GetNameGlobal`, `PushFromRegister`, `Call`, `Return`, `SetAccumulator`), skipping the
-   decode and the handler table.
-4. **Generators and async functions**, as above.
+1. Property caches in compiled code: own data properties of shared shapes inline, everything the
+   interpreter's cache holds through a fast helper.
+2. Calls between compiled functions, nested under a depth cap.
+3. Fast helpers for the frequent instructions, and `jit_step` instanced per opcode.
+4. Elements of dense arrays inline; `push` and `fill` shortcuts in the builtins.
+5. Generators and async functions compiled.
+
+**Phase 2, left over**, in the order the profiles suggest:
+
+1. **The cost of a call itself.** With the rest fast, a call is Boa's frame machinery: in the
+   `callLoop` profile, `handle_return` (dropping the frame's stack values and the `CallFrame`'s
+   handles) 10%, `push_frame` 8%, `function_call` 8%, `CallValue::resolve` 6%, the pushes of
+   `this`, the function and the arguments 7%. Options: a leaner `CallFrame` (fewer `Gc` handles
+   cloned and dropped per call: realm, active runnable, environments), a direct call path for
+   plain functions (no environment, no `arguments`) from compiled code, and keeping `this`/the
+   function out of the value stack.
+2. **Method calls**: `o.m()` reads `m` from the prototype through the helper and the
+   interpreter's cache; inline prototype reads need a check of the prototype's shape too (the
+   object's shape does not change when its prototype's properties do).
+3. **Dictionary-mode objects and the global object** (unique shapes) inline: a unique shape keeps
+   its identity when a property is added or its attributes change, so a cache needs a version
+   (`unique_shape.rs` has a `TODO: invalidate the pointer`).
+4. **Strings and native calls**: `+` of strings, `length` and indexing of strings, and the cost of
+   calling a native function (`native_function_call`: shadow stack, realm swap).
 5. **Constant blinding** of every program-chosen `Store*` immediate (`StoreDouble`, `StoreFloat`,
    `StoreInt32`, `StoreInt16`, `StoreInt8`), and an `untrusted` profile of `JitOptions` (blinding
-   on, low limits) for Code Mode.
+   on, low limits) for Code Mode, if Code Mode is ever to run with the JIT.
 6. **Unwind information** registered for compiled functions, so native debuggers, crash dumps and
    profilers walk through them.
+7. **Compile time**: phase 2 compiles more code inline per function (see Results).
 
 **Phase 3: type feedback.** Record operand types per instruction in the interpreter and in
 baseline code. Then compile a second tier that keeps `int32` and `f64` values unboxed in machine
@@ -448,13 +599,30 @@ entirely. Background compilation on another thread fits here too, since `CodeBlo
   interpreter boxes a result (for example `div_fast`, which returns `int32` `0` for `0 / -5`, where
   JavaScript gives `-0` — a Boa bug the JIT deliberately does not inline) must be mirrored. The
   differential tests and the fuzzer are the guard; run them on any change to `value/`.
-- **Compile time** is about 4 ms a function, on the JavaScript thread. The type checks of each
-  inline instruction expand into many small blocks. A threshold of 1000 and the profitability
-  check keep compiles rare, but a program that makes many hot functions pays 4 ms for each.
-  Phase 2 should try `opt_level=none`, share the slow paths, and consider compiling on another
-  thread.
-- **Entry and exit cost** makes call-heavy code no faster in phase 1. The profitability check
-  keeps it from being slower.
+- **Compile time** is about 5 ms a function, on the JavaScript thread. The type checks of each
+  inline instruction expand into many small blocks, and phase 2 added the property and element
+  accesses. A threshold of 1000 and the profitability check keep compiles rare, but a program
+  that makes many hot functions pays 5 ms for each. Next: try `opt_level=none`, share the slow
+  paths, and consider compiling on another thread.
+- **Layout knowledge.** Compiled code reads objects, shapes, borrow flags, property storage and
+  dense elements directly. The offsets come from the types (`offset_of!`, `repr`) or are found
+  by looking, and are all checked against a real object before use, so a change to those types
+  either keeps working or turns inline accesses off. What the checks cannot see is a change of
+  *meaning* — a new borrow state, a new kind of elements, a shape that changes its properties in
+  place — which needs the JIT changed with it. `layout.rs` lists what is relied on.
+- **The interpreter's caches decide.** Fast helpers hit only where the interpreter's inline cache
+  hits, and site caches are filled only from such hits; if the interpreter's cache is wrong (for
+  example a prototype property removed under a cached `PROTOTYPE` slot), compiled code is wrong
+  the same way. That is by design — the differential tests compare the two — but it means a fix
+  to the caches must be made in the interpreter.
+- **Builtin shortcuts** (`push`, `fill`) are exact only while their preconditions mirror the
+  specification's steps; a change to how arrays store `length` or elements must keep them in
+  step. Their tests compare against Node's output, not only the interpreter.
+- **Nested calls use native stack**: up to 64 compiled frames, within a quarter of
+  `native_stack_limit`. A host that runs scripts on a very small stack should lower the limit,
+  as it already must for nested runs.
+- **Call-heavy code** gains about 15–20% over the interpreter: the rest is Boa's frame machinery
+  (roadmap).
 - **Memory**: compiled code is a page or more per function, counted in pages and freed with its
   code block. Compiled code is not shared between contexts.
 - **Cranelift MSRV**: Cranelift's newest releases follow stable Rust closely. The pin must move

@@ -9,14 +9,16 @@
 //! - leaving compiled code for the interpreter, at any instruction, is just returning — there is
 //!   nothing to deoptimise;
 //! - calls, returns, exceptions, the shadow stack, generators and the garbage collector all work
-//!   as they do for the interpreter, because compiled code never makes a frame of its own: a call
-//!   returns to the interpreter's loop, which pushes the callee and enters *its* compiled code,
-//!   and re-enters the caller's when the callee returns. Native recursion does not grow with
-//!   JavaScript recursion.
+//!   as they do for the interpreter, because compiled code never makes a frame of its own: the
+//!   interpreter's handler pushes the callee's frame, and if the callee is compiled its code
+//!   runs nested under the caller's helper (to a bounded depth), else the caller returns to
+//!   the interpreter's loop, which re-enters it when the callee has returned.
 //!
 //! What compiled code does inline is where the interpreter spends its time on plain code:
-//! moving and storing registers, `int32` and `f64` arithmetic and comparisons, and branches,
-//! with no dispatch between instructions. See `docs/jit.md` in Verve for the plan beyond this.
+//! moving and storing registers, `int32` and `f64` arithmetic and comparisons, branches,
+//! property accesses through per-access caches, and elements of dense arrays, with no dispatch
+//! between instructions; fast helpers ([`helpers`]) do the common case of other frequent
+//! instructions. See `docs/jit.md` in Verve for the design and the plan.
 //!
 //! The JIT is off unless the `jit` feature is built, and then can be switched off at run time
 //! with [`JitOptions::enabled`] (or `BOA_JIT=0` in the environment).
@@ -25,6 +27,8 @@
 compile_error!("the `jit` feature needs NaN-boxed values on a 64-bit target");
 
 mod compiler;
+mod helpers;
+mod layout;
 mod memory;
 mod runtime;
 
@@ -32,7 +36,7 @@ mod runtime;
 mod tests;
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, OnceCell},
     fmt,
     ops::ControlFlow,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -204,6 +208,9 @@ pub(crate) struct JitVm {
     /// Set when the frame on top may have changed or got hotter, so the interpreter's loop
     /// asks [`try_enter`] whether to run compiled code.
     pub(crate) pending: bool,
+    /// How many compiled functions run nested on the native stack, called from compiled code
+    /// without returning to the interpreter's loop.
+    pub(crate) nested: u32,
     /// The machine code the context's functions have mapped now; each function's code gives
     /// its pages back here when it is dropped.
     live: Rc<LiveCode>,
@@ -215,6 +222,7 @@ impl JitVm {
             options: JitOptions::from_env(),
             stats: JitStats::default(),
             pending: false,
+            nested: 0,
             live: Rc::default(),
         }
     }
@@ -233,6 +241,9 @@ pub(crate) struct JitCode {
     code: ExecutableCode,
     /// The `pc` each block starts at, in order: a block's index is its position here.
     block_pcs: Box<[u32]>,
+    /// The caches of the property accesses the code does inline, which it points to.
+    #[allow(dead_code, reason = "kept for the code, which reads and writes them")]
+    sites: Box<[Box<layout::SiteCache>]>,
 }
 
 impl fmt::Debug for JitCode {
@@ -240,6 +251,7 @@ impl fmt::Debug for JitCode {
         f.debug_struct("JitCode")
             .field("code", &self.code)
             .field("blocks", &self.block_pcs.len())
+            .field("sites", &self.sites.len())
             .finish()
     }
 }
@@ -270,7 +282,7 @@ enum Tier {
 pub(crate) struct JitSlot {
     hotness: Cell<u32>,
     tier: Cell<Tier>,
-    code: RefCell<Option<Rc<JitCode>>>,
+    code: OnceCell<Rc<JitCode>>,
 }
 
 impl Default for JitSlot {
@@ -278,7 +290,7 @@ impl Default for JitSlot {
         Self {
             hotness: Cell::new(0),
             tier: Cell::new(Tier::Interpreted),
-            code: RefCell::new(None),
+            code: OnceCell::new(),
         }
     }
 }
@@ -312,6 +324,13 @@ impl JitSlot {
 /// its `pc`. `None` is to go on interpreting.
 #[inline(never)]
 pub(crate) fn try_enter(context: &mut Context) -> Option<ControlFlow<CompletionRecord>> {
+    let (code, block) = prepare(context)?;
+    Some(runtime::execute(context, &code, block))
+}
+
+/// Counts the frame on top hotter and compiles it when it is hot enough. Returns its compiled
+/// code and the block that starts at its `pc`, if it has both.
+pub(crate) fn prepare(context: &mut Context) -> Option<(Rc<JitCode>, u32)> {
     // Fuzzing counts instructions, which compiled code does not.
     if cfg!(feature = "fuzz") {
         return None;
@@ -321,9 +340,8 @@ pub(crate) fn try_enter(context: &mut Context) -> Option<ControlFlow<CompletionR
     if context.vm.trace {
         return None;
     }
-    let options = context.vm.jit.options;
     // The dummy frame at the bottom never runs code.
-    if !options.enabled || context.vm.frames.len() <= 1 {
+    if !context.vm.jit.options.enabled || context.vm.frames.len() <= 1 {
         return None;
     }
     let frame = context.vm.frame();
@@ -334,54 +352,63 @@ pub(crate) fn try_enter(context: &mut Context) -> Option<ControlFlow<CompletionR
     let slot = &code_block.jit;
     let code = match slot.tier.get() {
         Tier::Rejected => return None,
-        Tier::Compiled => slot.code.borrow().clone()?,
+        Tier::Compiled => slot.code.get()?.clone(),
         Tier::Interpreted => {
             let hotness = slot.hotness.get().saturating_add(1);
             slot.hotness.set(hotness);
-            if hotness <= options.threshold {
+            if hotness <= context.vm.jit.options.threshold {
                 return None;
             }
-            let jit = &mut context.vm.jit;
-            if latch::get() != latch::AVAILABLE || !jit.has_room() {
-                slot.tier.set(Tier::Rejected);
-                jit.stats.rejected += 1;
-                return None;
-            }
-            let start = std::time::Instant::now();
-            // A panic in the code generator is a bug in it, not in the script: the function
-            // stays interpreted, and nothing is compiled again in this process.
-            let compiled = catch_unwind(AssertUnwindSafe(|| {
-                compiler::compile(code_block, &options, &jit.live)
-            }));
-            jit.stats.compile_time += start.elapsed();
-            match compiled {
-                Ok(Ok(code)) => {
-                    jit.stats.compiled += 1;
-                    jit.stats.code_bytes += code.code.mapped_len();
-                    let code = Rc::new(code);
-                    slot.tier.set(Tier::Compiled);
-                    *slot.code.borrow_mut() = Some(code.clone());
-                    code
-                }
-                Ok(Err(error)) => {
-                    if let CompileError::Unavailable(_) = error {
-                        latch::set(latch::NO_EXECUTABLE_MEMORY);
-                    }
-                    slot.tier.set(Tier::Rejected);
-                    jit.stats.rejected += 1;
-                    return None;
-                }
-                Err(_panic) => {
-                    latch::set(latch::COMPILER_PANICKED);
-                    slot.tier.set(Tier::Rejected);
-                    jit.stats.rejected += 1;
-                    return None;
-                }
-            }
+            compile_slot(context, code_block)?
         }
     };
-    let block = code.block_for_pc(pc)?;
-    Some(runtime::execute(context, &code, block))
+    // A call enters at the start, which is always the first block.
+    let block = if pc == 0 { 0 } else { code.block_for_pc(pc)? };
+    Some((code, block))
+}
+
+/// Compiles a code block that got hot, or marks it rejected.
+#[cold]
+fn compile_slot(context: &mut Context, code_block: &CodeBlock) -> Option<Rc<JitCode>> {
+    let options = context.vm.jit.options;
+    let slot = &code_block.jit;
+    let jit = &mut context.vm.jit;
+    if latch::get() != latch::AVAILABLE || !jit.has_room() {
+        slot.tier.set(Tier::Rejected);
+        jit.stats.rejected += 1;
+        return None;
+    }
+    let start = std::time::Instant::now();
+    // A panic in the code generator is a bug in it, not in the script: the function
+    // stays interpreted, and nothing is compiled again in this process.
+    let compiled = catch_unwind(AssertUnwindSafe(|| {
+        compiler::compile(code_block, &options, &jit.live)
+    }));
+    jit.stats.compile_time += start.elapsed();
+    match compiled {
+        Ok(Ok(code)) => {
+            jit.stats.compiled += 1;
+            jit.stats.code_bytes += code.code.mapped_len();
+            let code = Rc::new(code);
+            slot.tier.set(Tier::Compiled);
+            slot.code.get_or_init(|| code.clone());
+            Some(code)
+        }
+        Ok(Err(error)) => {
+            if let CompileError::Unavailable(_) = error {
+                latch::set(latch::NO_EXECUTABLE_MEMORY);
+            }
+            slot.tier.set(Tier::Rejected);
+            jit.stats.rejected += 1;
+            None
+        }
+        Err(_panic) => {
+            latch::set(latch::COMPILER_PANICKED);
+            slot.tier.set(Tier::Rejected);
+            jit.stats.rejected += 1;
+            None
+        }
+    }
 }
 
 impl Context {

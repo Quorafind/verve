@@ -29,6 +29,7 @@ use std::{
     cell::{Cell, RefCell},
     mem,
     ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 pub use crate::trace::{Finalize, Trace, Tracer};
@@ -37,11 +38,52 @@ pub use cell::{GcRef, GcRefCell, GcRefMut};
 pub use internals::GcBox;
 pub use pointers::{Ephemeron, Gc, GcErased, WeakGc, WeakMap};
 
+/// The layout facts and counters a JIT reads from machine code. Not a stable interface: it is
+/// for Boa's own JIT, which checks them against real values before it relies on them.
+#[doc(hidden)]
+pub mod raw {
+    use super::{COLLECTIONS, Cell, GcBox, GcRefCell, Trace};
+
+    /// A [`GcRefCell`]'s borrow flag when nothing borrows it.
+    pub const BORROW_UNUSED: usize = super::cell::UNUSED;
+    /// A [`GcRefCell`]'s borrow flag when it is borrowed mutably.
+    pub const BORROW_WRITING: usize = super::cell::WRITING;
+
+    /// The offset of the value in a [`GcBox<T>`], from the start of the allocation, which is
+    /// where a `Gc<T>` points.
+    #[must_use]
+    pub const fn gc_box_value_offset<T: Trace + 'static>() -> usize {
+        GcBox::<T>::value_offset()
+    }
+
+    /// The offset of a [`GcRefCell<T>`]'s borrow flag (a `usize`).
+    #[must_use]
+    pub const fn ref_cell_flag_offset<T: 'static>() -> usize {
+        GcRefCell::<T>::flag_offset()
+    }
+
+    /// The offset of a [`GcRefCell<T>`]'s value.
+    #[must_use]
+    pub const fn ref_cell_value_offset<T: 'static>() -> usize {
+        GcRefCell::<T>::value_offset()
+    }
+
+    /// The number of collections this thread has run, which goes up before any of them frees
+    /// anything. An allocation's address is known to be that allocation's as long as the count
+    /// has not changed since it was alive. The cell lives as long as the thread.
+    #[must_use]
+    pub fn collections() -> *const Cell<u64> {
+        COLLECTIONS.with(std::ptr::from_ref)
+    }
+}
+
 type GcErasedPointer = NonNull<GcBox<NonTraceable>>;
 type EphemeronPointer = NonNull<dyn ErasedEphemeronBox>;
 type ErasedWeakMapBoxPointer = NonNull<dyn ErasedWeakMapBox>;
 
 thread_local!(static GC_DROPPING: Cell<bool> = const { Cell::new(false) });
+// Collections run on this thread; what `raw::collections` points to.
+thread_local!(static COLLECTIONS: Cell<u64> = const { Cell::new(0) });
 thread_local!(static BOA_GC: RefCell<BoaGc> = RefCell::new( BoaGc {
     config: GcConfig::default(),
     runtime: GcRuntimeData::default(),
@@ -106,11 +148,18 @@ impl Drop for BoaGc {
 /// `DropGuard` flags whether the Collector is currently running `Collector::sweep()` or `Collector::dump()`
 ///
 /// While the `DropGuard` is active, all `GcBox`s must not be dereferenced or accessed as it could cause Undefined Behavior
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct DropGuard;
+
+/// How many threads hold a [`DropGuard`]. While none does, no thread is dropping, and
+/// [`finalizer_safe`] answers without reading its thread-local: it is asked on every drop of a
+/// `Gc`, and a thread-local costs a call on some platforms.
+static THREADS_DROPPING: AtomicUsize = AtomicUsize::new(0);
 
 impl DropGuard {
     fn new() -> Self {
+        // Counted before the flag is set, so this thread sees the count when it is dropping.
+        THREADS_DROPPING.fetch_add(1, Ordering::Relaxed);
         GC_DROPPING.with(|dropping| dropping.set(true));
         Self
     }
@@ -119,6 +168,7 @@ impl DropGuard {
 impl Drop for DropGuard {
     fn drop(&mut self) {
         GC_DROPPING.with(|dropping| dropping.set(false));
+        THREADS_DROPPING.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -126,7 +176,9 @@ impl Drop for DropGuard {
 #[must_use]
 #[inline]
 pub fn finalizer_safe() -> bool {
-    GC_DROPPING.with(|dropping| !dropping.get())
+    // A thread reads its own writes to the counter in order, so when this thread is dropping
+    // the count is not zero and the thread-local decides.
+    THREADS_DROPPING.load(Ordering::Relaxed) == 0 || GC_DROPPING.with(|dropping| !dropping.get())
 }
 
 /// The Allocator handles allocation of garbage collected values.
@@ -237,6 +289,9 @@ impl Collector {
     /// Run a collection on the full heap.
     fn collect(gc: &mut BoaGc) {
         gc.runtime.collections += 1;
+        // Before anything is freed: whoever keeps addresses of allocations, checked against
+        // this count, sees them as possibly stale from here on.
+        COLLECTIONS.with(|count| count.set(count.get() + 1));
         // What the last collection left unfreed goes first: the heap walked below is only the
         // nodes still in it.
         // SAFETY: `unfreed` only holds nodes a collection found unreachable and finalized.

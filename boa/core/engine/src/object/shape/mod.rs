@@ -56,7 +56,11 @@ pub(crate) struct ChangeTransition<T> {
 }
 
 /// The internal representation of [`Shape`].
+///
+/// `repr(u64)`: a tag word and a pointer word, with no padding, so two shapes are the same
+/// exactly when their two words are; the JIT compares them so.
 #[derive(Debug, Trace, Finalize, Clone)]
+#[repr(u64)]
 enum Inner {
     Unique(UniqueShape),
     Shared(SharedShape),
@@ -81,6 +85,14 @@ impl Shape {
     ///
     /// NOTE: This only applies to [`SharedShape`].
     const TRANSITION_COUNT_MAX: u16 = 1024;
+
+    /// The two words of the shape: equal for two shapes exactly when they are the same.
+    #[cfg(feature = "jit")]
+    pub(crate) fn words(&self) -> [u64; 2] {
+        const _: () = assert!(size_of::<Shape>() == 16);
+        // SAFETY: a shape is two initialized words (`Inner` is `repr(u64)` over a pointer).
+        unsafe { std::ptr::from_ref(self).cast::<[u64; 2]>().read() }
+    }
 
     /// Returns `true` if it's a shared shape, `false` otherwise.
     #[inline]
@@ -245,6 +257,18 @@ impl WeakShape {
     #[must_use]
     pub(crate) fn to_addr_usize(&self) -> usize {
         self.upgrade().as_ref().map_or(0, Shape::to_addr_usize)
+    }
+
+    /// Whether this is a weak reference to `shape`, which is alive; changes no reference count.
+    #[cfg(feature = "jit")]
+    #[inline]
+    #[must_use]
+    pub(crate) fn points_to(&self, shape: &Shape) -> bool {
+        match (self, &shape.inner) {
+            (WeakShape::Shared(weak), Inner::Shared(shape)) => weak.points_to(shape),
+            (WeakShape::Unique(weak), Inner::Unique(shape)) => weak.points_to(shape),
+            _ => false,
+        }
     }
 
     /// Return location in memory of the [`Shape`].

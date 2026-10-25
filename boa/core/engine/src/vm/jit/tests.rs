@@ -161,18 +161,93 @@ fn disabled_jit_compiles_nothing() {
     assert_eq!(stats, JitStats::default());
 }
 
+/// Runs `source`, then the jobs it queued, then evaluates `result`, in every mode; the results
+/// must be the same.
+#[track_caller]
+fn same_after_jobs(source: &str, result: &str) -> String {
+    let run = |mode: Mode| {
+        let mut context = context(mode);
+        let mut out = match context.eval(Source::from_bytes(&format!("{SHOW}\n{source}"))) {
+            Ok(_) => String::new(),
+            Err(error) => format!("uncaught {error}; "),
+        };
+        if let Err(error) = context.run_jobs() {
+            out.push_str(&format!("job error {error}; "));
+        }
+        match context.eval(Source::from_bytes(result)) {
+            Ok(value) => out.push_str(&value.display().to_string()),
+            Err(error) => out.push_str(&format!("uncaught {error}")),
+        }
+        (out, context.jit_stats())
+    };
+    let (interpreted, _) = run(Mode::Interpreted);
+    for mode in [Mode::Eager, Mode::Hot] {
+        let (compiled, stats) = run(mode);
+        assert_eq!(
+            interpreted, compiled,
+            "{mode:?} differs from the interpreter for:\n{source}"
+        );
+        assert!(stats.compiled > 0, "{stats:?}");
+    }
+    interpreted
+}
+
+/// Generators are compiled: they yield from compiled code and are resumed into it, with
+/// `yield*`, `return()`, `throw()`, `finally`, and resumes from compiled callers.
 #[test]
-fn generators_and_async_functions_stay_interpreted() {
+fn generators_are_compiled() {
     let out = same(
-        "function* g(n) { for (let i = 0; i < n; i++) yield i * 2; }
-         async function a(x) { let y = await x; return y + 1; }
-         let s = 0; for (const v of g(100)) s += v;
-         let p; a(41).then(v => { p = v; });
-         [s, typeof p].map(show).join(' ')",
+        "function* g(n) { for (let i = 0; i < n; i++) yield i * 2; return 'end'; }
+         function* inner() { try { yield 1; yield 2; } finally { log.push('inner finally'); } }
+         function* outer() { yield 0; const r = yield* inner(); yield 3; return r; }
+         function* echo() { let x = 0; while (true) { try { x = yield x * 10; } catch (e) { log.push('caught ' + e); x = -1; } } }
+         const log = [];
+         let s = 0; for (const v of g(200)) s += v;
+         const it = g(3); const steps = [it.next(), it.next(), it.next(), it.next(), it.next()];
+         const o = outer(); const os = [o.next(), o.next(), o.return('early'), o.next()];
+         const e = echo(); const es = [e.next(), e.next(1), e.next(2), e.throw('boom'), e.next(5), e.return(9)];
+         function sum(gen) { let t = 0; for (const v of gen) t += v; return t; }
+         let total = 0; for (let k = 0; k < 50; k++) total += sum(g(k));
+         [s, total, [...outer()].join(','),
+          steps.map(r => show(r.value) + '/' + r.done).join(' '),
+          os.map(r => show(r.value) + '/' + r.done).join(' '),
+          es.map(r => show(r.value) + '/' + r.done).join(' '), log.join(';')].join(' | ')",
     );
-    assert_eq!(out, "9900 \"undefined\"");
+    assert!(out.starts_with("39800 | "), "{out}");
     let (_, stats) = run("function* g() { yield 1 } [...g()]; 1", Mode::Eager);
-    assert!(stats.rejected >= 1, "{stats:?}");
+    assert_eq!(stats.rejected, 0, "{stats:?}");
+}
+
+/// Async functions and async generators are compiled: they await from compiled code and are
+/// resumed into it by promise jobs, with rejections caught at awaits, `finally`, async
+/// callers, `for await`, and an async generator's `return()`.
+#[test]
+fn async_functions_are_compiled() {
+    let out = same_after_jobs(
+        "async function add(a, b) { await null; return a + b; }
+         async function fails(x) { await null; throw new Error('no ' + x); }
+         async function loop(n) {
+           let s = 0;
+           for (let i = 0; i < n; i++) {
+             s += await add(i, 1);
+             try { await fails(i); } catch (e) { if (i % 10 === 0) log.push(e.message); }
+             finally { s += 1; }
+           }
+           return s;
+         }
+         async function* ticks(n) { for (let i = 0; i < n; i++) { await null; yield i; } }
+         async function consume() { let t = 0; for await (const v of ticks(20)) t += v; return t; }
+         async function early() { const it = ticks(5); await it.next(); const r = await it.return('r'); return r.value + r.done; }
+         const log = [];
+         var results = [];
+         loop(100).then(v => results.push('loop ' + v));
+         consume().then(v => results.push('consume ' + v));
+         early().then(v => results.push('early ' + v));
+         Promise.all([add(1, 2), add(3, 4)]).then(v => results.push('all ' + v.join(',')));
+         fails('top').catch(e => results.push(e.message));",
+        "results.join(' | ') + ' | ' + log.join(';')",
+    );
+    assert!(out.contains("loop 5150"), "{out}");
 }
 
 #[test]
@@ -713,4 +788,401 @@ fn slow_paths_stay_in_compiled_code() {
     assert_eq!(value.as_number(), Some(1000.0));
     let stats = context.jit_stats();
     assert!(stats.entries < 50, "{stats:?}");
+}
+
+// ---- Phase 2: property caches, element access, nested calls ----
+
+/// Property reads and writes through the inline caches, with everything that must miss them:
+/// new shapes, prototypes, accessors, deletes, frozen and non-writable properties, and objects
+/// in dictionary mode.
+#[test]
+fn property_caches_match_the_interpreter() {
+    same(
+        "function get(o) { return o.x; }
+         function set(o, v) { o.x = v; return o.x; }
+         const out = [];
+         // Monomorphic, then a new shape at the same site, then many (megamorphic).
+         const a = { x: 1 }, b = { y: 0, x: 2 }, shapes = [];
+         for (let k = 0; k < 8; k++) { const o = {}; o['p' + k] = k; o.x = k * 10; shapes.push(o); }
+         for (let i = 0; i < 60; i++) {
+           out.push(get(a), get(b), get(shapes[i % 8]));
+           out.push(set(a, i), set(shapes[i % 8], -i));
+         }
+         // A property added in the loop changes the shape under the cache.
+         const grow = { x: 0 };
+         for (let i = 0; i < 40; i++) { if (i === 20) grow.z = 1; out.push(get(grow)); set(grow, i); }
+         // Deleted mid-loop: the site must see the miss (and undefined).
+         const del = { x: 5, w: 6 };
+         for (let i = 0; i < 40; i++) { if (i === 25) delete del.x; out.push(show(get(del))); }
+         // Prototype data and methods, then shadowed by an own property.
+         const proto = { x: 'proto', m() { return 'm' + this.x; } };
+         const child = Object.create(proto);
+         for (let i = 0; i < 40; i++) {
+           if (i === 30) child.x = 'own';
+           out.push(get(child), child.m());
+           if (i === 35) proto.x = 'changed';
+         }
+         // Accessors, own and inherited; a setter that counts.
+         let sets = 0;
+         const acc = { get x() { return 'getter'; }, set x(v) { sets += v; } };
+         const inh = Object.create(acc);
+         for (let i = 0; i < 30; i++) { out.push(get(acc), get(inh)); set(acc, 1); set(inh, 2); }
+         out.push(sets);
+         // Frozen and non-writable: sloppy writes are ignored, strict ones throw.
+         const frozen = Object.freeze({ x: 'f' });
+         const fixed = { x: 'n' }; Object.defineProperty(fixed, 'x', { writable: false });
+         const later = { x: 0 };
+         for (let i = 0; i < 30; i++) {
+           out.push(set(frozen, i), set(fixed, i));
+           if (i === 15) Object.freeze(later);
+           out.push(set(later, i));
+         }
+         function strictSet(o, v) { 'use strict'; o.x = v; return o.x; }
+         for (let i = 0; i < 20; i++) {
+           try { out.push(strictSet(i < 10 ? a : frozen, i)); } catch (e) { out.push(e.name); }
+         }
+         // Dictionary mode (many deletes), primitives, null and undefined.
+         const dict = {}; for (let k = 0; k < 40; k++) dict['k' + k] = k;
+         for (let k = 0; k < 30; k++) delete dict['k' + k];
+         dict.x = 'dict';
+         for (let i = 0; i < 30; i++) {
+           out.push(get(dict), set(dict, 'd' + i), get('str'), get(5), get(true));
+           try { get(i % 2 ? null : undefined); } catch (e) { out.push(e.name); }
+           try { set(null, 1); } catch (e) { out.push(e.name); }
+         }
+         // Proxies and lengths.
+         const proxy = new Proxy({ x: 'target' }, { get(t, k) { return 'trap ' + String(k); } });
+         const lens = [[1, 2, 3], 'four', { length: 'own' }, function f(p, q) {}, new Uint8Array(5)];
+         for (let i = 0; i < 30; i++) {
+           out.push(get(proxy));
+           for (const v of lens) out.push(v.length);
+         }
+         out.map(show).join(' ')",
+    );
+}
+
+/// Elements of arrays by `int32` index: dense arrays of each kind, holes, out of range,
+/// negative and non-integer indexes, non-extensible arrays, setters on the prototype, typed
+/// arrays and strings.
+#[test]
+fn element_access_matches_the_interpreter() {
+    same(
+        "const out = [];
+         function read(a, i) { return a[i]; }
+         function write(a, i, v) { a[i] = v; return a[i]; }
+         const ints = [1, 2, 3, 4], floats = [0.5, 1.5, 2.5], mixed = [1, 'two', null, {}];
+         const holey = [1, , 3]; holey[10] = 'far';
+         const sealed = Object.preventExtensions([7, 8, 9]);
+         const typed = new Int16Array([5, 6, 7]);
+         for (let i = -2; i < 14; i++) {
+           for (const a of [ints, floats, mixed, holey, sealed, typed, 'text']) out.push(show(read(a, i)));
+           out.push(show(read(ints, i + 0.5)), show(read(ints, String(i))));
+         }
+         for (let i = 0; i < 12; i++) {
+           out.push(show(write(ints, i % 6, i * 3)), show(write(floats, i % 3, i % 2 ? 'str' : i / 4)));
+           out.push(show(write(sealed, i % 5, i)), show(write(typed, i % 4, i * 1000)));
+           out.push(show(write(mixed, -1, i)));
+         }
+         Object.defineProperty(Array.prototype, '20', { set(v) { out.push('setter ' + v); }, configurable: true });
+         const short = [];
+         for (let i = 0; i < 25; i++) write(short, i, i);
+         delete Array.prototype[20];
+         out.push(show(short), show(ints), show(floats), show(mixed), mixed[-1], show(sealed), show([...typed]));
+         let s = 0; const big = new Array(1000).fill(1);
+         for (let i = 0; i < big.length; i++) { big[i] = big[i] + i; s += big[i]; }
+         out.push(s);
+         out.join(' ')",
+    );
+}
+
+/// Compiled functions call compiled functions nested on the native stack: deep recursion past
+/// the nesting cap, exceptions thrown through compiled callees and caught at every depth,
+/// `finally`, the recursion limit, and calls through interpreted frames (generators, natives
+/// calling back) in between.
+#[test]
+fn nested_compiled_calls_match_the_interpreter() {
+    same(
+        "function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+         function depth(n) { return n === 0 ? 0 : 1 + depth(n - 1); }
+         function thrower(n) { if (n % 7 === 3) throw new Error('at ' + n); return n; }
+         function middle(n) { try { return thrower(n) * 2; } finally { log.push('f' + n); } }
+         function outer(n) { let s = 0; for (let i = 0; i < n; i++) { try { s += middle(i); } catch (e) { s -= 1; log.push(e.message); } } return s; }
+         function* gen(n) { for (let i = 0; i < n; i++) yield depth(i); }
+         function viaNative(n) { return [1, 2, 3].map(x => depth(x + n)).reduce((a, b) => a + b); }
+         function rec(n) { if (n === 0) throw new RangeError('bottom'); return rec(n - 1); }
+         const log = [];
+         const out = [fib(18), depth(200), depth(3000), outer(40), [...gen(30)].join(','), viaNative(50)];
+         for (let d of [10, 100, 1000]) { try { rec(d); } catch (e) { out.push(e.name + ':' + e.message); } }
+         try { depth(1e6); } catch (e) { out.push(e.name, e.message); }
+         out.push(depth(100));
+         out.concat(log).map(show).join(' ')",
+    );
+}
+
+/// Errors thrown deep in nested compiled calls carry the same stack as interpreted.
+#[test]
+fn nested_calls_keep_error_stacks() {
+    same(
+        "function a(n) { if (n === 0) throw new Error('deep'); return b(n - 1) + 1; }
+         function b(n) { return a(n) + 0; }
+         let stack;
+         for (let i = 0; i < 30; i++) { try { a(8); } catch (e) { stack = e.stack; } }
+         stack",
+    );
+}
+
+/// A loop calling a compiled function stays in compiled code: the callee is entered nested,
+/// and the caller is not entered again after each call.
+#[test]
+fn calls_between_compiled_functions_do_not_return_to_the_interpreter() {
+    let mut context = fresh(Mode::Eager);
+    let value = context
+        .eval(Source::from_bytes(
+            "function add(a, b) { return a + b; }
+             function loop(n) { let s = 0; for (let i = 0; i < n; i++) s = add(s, i) | 0; return s; }
+             loop(1000)",
+        ))
+        .expect("runs");
+    assert_eq!(value.as_number(), Some(499_500.0));
+    let stats = context.jit_stats();
+    // About one entry per call of `add`; returning to the interpreter would be two.
+    assert!(stats.entries < 1100, "{stats:?}");
+}
+
+/// The garbage collector runs inside nested compiled calls, with objects in the registers and
+/// on the stack of every frame.
+#[test]
+fn garbage_collection_during_nested_calls() {
+    static COLLECTIONS: AtomicUsize = AtomicUsize::new(0);
+    let mut results = Vec::new();
+    for mode in [Mode::Interpreted, Mode::Eager, Mode::Hot] {
+        let mut context = context(mode);
+        context
+            .register_global_callable(
+                js_string!("gc"),
+                0,
+                NativeFunction::from_fn_ptr(|_, _, _| {
+                    boa_gc::force_collect();
+                    COLLECTIONS.fetch_add(1, Ordering::Relaxed);
+                    Ok(JsValue::undefined())
+                }),
+            )
+            .expect("registers");
+        let value = context
+            .eval(Source::from_bytes(
+                "function leaf(o, i) { if (i % 16 === 0) gc(); return { v: o.v + i, s: o.s + i }; }
+                 function mid(o, n) { let r = o; for (let i = 0; i < n; i++) r = leaf(r, i); return r; }
+                 function top(n) { let acc = { v: 0, s: '' }; for (let k = 0; k < n; k++) acc = mid(acc, 20); return acc; }
+                 const r = top(40); r.v + ':' + r.s.length",
+            ))
+            .expect("runs");
+        results.push(value.display().to_string());
+    }
+    assert!(results.windows(2).all(|w| w[0] == w[1]), "{results:?}");
+    assert!(COLLECTIONS.load(Ordering::Relaxed) > 0);
+}
+
+/// `Array.prototype.push` onto dense arrays takes a shortcut; everything that must not take it
+/// (frozen, non-extensible and fixed-length arrays, holes, extra properties, subclasses, array
+/// likes, proxies, elements and setters on the prototypes, a proxy in the chain) behaves as
+/// the specification says. The expected output is Node's.
+#[test]
+fn push_matches_the_specification() {
+    let out = same(
+        r#"function show2(v) {
+           switch (typeof v) {
+             case 'number': return Object.is(v, -0) ? '-0' : String(v);
+             case 'string': return JSON.stringify(v);
+             case 'object':
+               if (v === null) return 'null';
+               if (Array.isArray(v)) return '[' + Array.from(v, show2).join(',') + ']';
+               return '{' + Object.keys(v).map(k => k + ':' + show2(v[k])).join(',') + '}';
+             default: return String(v);
+           }
+         }
+         const out = [];
+         const t = (f) => { try { out.push(show2(f())); } catch (e) { out.push(e.name); } };
+         t(() => { const a = [1, 2]; a.push(3, -0, 0.5, 'x', null); return a; });
+         t(() => { const a = []; return [a.push(), a.length]; });
+         t(() => { const a = Object.freeze([1]); return a.push(2); });
+         t(() => { const a = Object.preventExtensions([1]); a.push(2); return a; });
+         t(() => { const a = [1]; Object.defineProperty(a, 'length', { writable: false }); return a.push(2); });
+         t(() => { const a = [1, , 3]; a.push(4); return [a.length, 1 in a, a[3]]; });
+         t(() => { const a = []; a[100] = 1; a.push(2); return [a.length, a[101]]; });
+         t(() => { const a = [1]; a.extra = 'e'; a.push(2); return [a, a.extra]; });
+         t(() => { class X extends Array {} const a = new X(); a.push(1, 2); return [a.length, a instanceof X]; });
+         t(() => { const o = { length: 2 }; Array.prototype.push.call(o, 'a'); return o; });
+         t(() => { const p = new Proxy([], {}); p.push(1); return p.length; });
+         t(() => {
+           const log = [];
+           Object.defineProperty(Array.prototype, '1', { set(v) { log.push('setter ' + v); }, configurable: true });
+           const a = [0]; a.push(5); a.push(6);
+           delete Array.prototype[1];
+           return [a.length, a[1], a[2], log.join(';')];
+         });
+         t(() => {
+           Object.defineProperty(Object.prototype, '0', { value: 'ro', writable: false, configurable: true });
+           const a = []; let r;
+           try { a.push(1); r = 'pushed'; } catch (e) { r = e.name; }
+           delete Object.prototype[0];
+           return [r, a.length, a[0]];
+         });
+         t(() => {
+           const saved = Object.getPrototypeOf(Array.prototype);
+           Object.setPrototypeOf(Array.prototype, new Proxy({}, { set(t, k, v) { return true; } }));
+           const a = []; a.push(9);
+           Object.setPrototypeOf(Array.prototype, saved);
+           return [a.length, a[0]];
+         });
+         t(() => { const a = [1.5]; a.push(2); return a; });
+         t(() => { const a = [1]; a.push(2 ** 31, 2.5, {}, 'z'); return a; });
+         t(() => { const a = new Array(3); a.push(1); return [a.length, 0 in a, a[3]]; });
+         t(() => { const a = [1, 2, 3]; a.length = 1; a.push(9); return a; });
+         t(() => { const a = []; for (let i = 0; i < 100; i++) a.push(i * 0.5); return [a.length, a[99]]; });
+         out.join(' ')"#,
+    );
+    assert_eq!(
+        out,
+        r#"[1,2,3,-0,0.5,"x",null] [0,0] TypeError TypeError TypeError [4,false,4] [102,2] [[1,2],"e"] [2,true] {2:"a",length:3} 1 [3,undefined,6,"setter 5"] ["TypeError",0,undefined] [1,undefined] [1.5,2] [1,2147483648,2.5,{},"z"] [4,false,1] [1,9] [100,49.5]"#
+    );
+}
+
+/// Property accesses compile inline only if the object layout checks out on this thread.
+#[test]
+fn object_layout_checks_out() {
+    assert!(super::layout::object_layout().is_some());
+}
+
+/// A shape freed by a collection may have its address taken by a new shape; the caches of
+/// accesses compiled inline must not take the new one for the old.
+#[test]
+fn property_caches_survive_collections() {
+    let mut results = Vec::new();
+    for mode in [Mode::Interpreted, Mode::Eager, Mode::Hot] {
+        let mut context = context(mode);
+        context
+            .register_global_callable(
+                js_string!("gc"),
+                0,
+                NativeFunction::from_fn_ptr(|_, _, _| {
+                    boa_gc::force_collect();
+                    Ok(JsValue::undefined())
+                }),
+            )
+            .expect("registers");
+        let value = context
+            .eval(Source::from_bytes(
+                "function get(o) { return o.x; }
+                 function set(o, v) { o.x = v; }
+                 const out = [];
+                 for (let round = 0; round < 40; round++) {
+                   // A new shape each round, the property at a different slot each time.
+                   const o = {};
+                   for (let k = 0; k < round % 5; k++) o['k' + round + '_' + k] = k;
+                   o.x = round;
+                   for (let i = 0; i < 3; i++) { out.push(get(o)); set(o, get(o) + 1); }
+                   gc();
+                 }
+                 out.join(',')",
+            ))
+            .expect("runs");
+        results.push(value.display().to_string());
+    }
+    assert!(results.windows(2).all(|w| w[0] == w[1]), "{results:?}");
+}
+
+/// The inline path of a property access misses once after every collection (the shape it
+/// remembers may have been freed, and its address taken), and hits otherwise.
+#[test]
+fn collections_invalidate_property_caches() {
+    let mut context = fresh(Mode::Eager);
+    context
+        .register_global_callable(
+            js_string!("gc"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, _| {
+                boa_gc::force_collect();
+                Ok(JsValue::undefined())
+            }),
+        )
+        .expect("registers");
+    let fills = || super::layout::FILLS.with(std::cell::Cell::get);
+    let source = |collect: bool| {
+        format!(
+            "(function () {{
+               const o = {{ x: 1 }};
+               let s = 0;
+               for (let i = 0; i < 20; i++) {{ s += o.x; {} }}
+               return s;
+             }})()",
+            if collect { "gc();" } else { "" }
+        )
+    };
+    let before = fills();
+    context
+        .eval(Source::from_bytes(&source(false)))
+        .expect("runs");
+    let quiet = fills() - before;
+    let before = fills();
+    context
+        .eval(Source::from_bytes(&source(true)))
+        .expect("runs");
+    let collecting = fills() - before;
+    assert!(quiet <= 2, "a hot access fills its cache once: {quiet}");
+    assert!(
+        collecting >= 15,
+        "each collection costs one miss: {collecting}"
+    );
+}
+
+/// `Array.prototype.fill` of plain dense arrays takes a shortcut; ranges, holes, frozen,
+/// non-extensible and fixed-length arrays, side effects of the bounds, setters on the prototype,
+/// array-likes, typed arrays and subclasses behave as the specification says. The expected
+/// output is Node's.
+#[test]
+fn fill_matches_the_specification() {
+    let out = same(
+        r#"function show2(v) {
+           switch (typeof v) {
+             case 'number': return Object.is(v, -0) ? '-0' : String(v);
+             case 'string': return JSON.stringify(v);
+             case 'object':
+               if (v === null) return 'null';
+               if (Array.isArray(v)) return '[' + Array.from(v, (x, i) => (i in v ? show2(x) : '_')).join(',') + ']';
+               return '{' + Object.keys(v).map(k => k + ':' + show2(v[k])).join(',') + '}';
+             default: return String(v);
+           }
+         }
+         const out = [];
+         const t = (f) => { try { out.push(show2(f())); } catch (e) { out.push(e.name); } };
+         t(() => new Array(5).fill(true));
+         t(() => new Array(5).fill(0.5, 1, 3));
+         t(() => [1, 2, 3, 4].fill(-0, -2));
+         t(() => [1, 2, 3].fill('x', 5));
+         t(() => [1, 2, 3].fill(null, 1, -5));
+         t(() => { const a = new Array(4); a[0] = 1; return a.fill(9, 2); });
+         t(() => [1, , 3].fill(7));
+         t(() => Object.freeze([1, 2]).fill(0));
+         t(() => { const a = Object.preventExtensions(new Array(3)); return a.fill(1); });
+         t(() => { const a = [1, 2]; Object.defineProperty(a, 'length', { writable: false }); return a.fill(5); });
+         t(() => { const log = []; const a = [1, 2, 3]; a.fill(0, { valueOf() { log.push('start'); return 1; } }, { valueOf() { log.push('end'); return 2; } }); return [a, log.join()]; });
+         t(() => {
+           const log = [];
+           Object.defineProperty(Array.prototype, '2', { set(v) { log.push('setter ' + v); }, configurable: true });
+           const a = new Array(4).fill('z');
+           delete Array.prototype[2];
+           return [a, log.join()];
+         });
+         t(() => { const o = { length: 3 }; Array.prototype.fill.call(o, 'a', 1); return o; });
+         t(() => new Int8Array(3).fill(200));
+         t(() => { class X extends Array {} return X.from([1, 2]).fill(0) instanceof X; });
+         t(() => { const a = [{}, {}]; const o = { k: 1 }; a.fill(o); return [a[0] === a[1], a[1] === o]; });
+         t(() => new Array(3).fill(NaN));
+         t(() => { const a = []; a.length = 3; a.fill(1, 0, 2); return [a, a.length]; });
+         out.join(' ')"#,
+    );
+    assert_eq!(
+        out,
+        r#"[true,true,true,true,true] [_,0.5,0.5,_,_] [1,2,-0,-0] [1,2,3] [1,2,3] [1,_,9,9] [7,7,7] TypeError TypeError [5,5] [[1,0,3],"start,end"] [["z","z",_,"z"],"setter z"] {1:"a",2:"a",length:3} {0:-56,1:-56,2:-56} true [true,true] [NaN,NaN,NaN] [[1,1,_],3]"#
+    );
 }

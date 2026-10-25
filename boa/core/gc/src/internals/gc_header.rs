@@ -12,6 +12,10 @@ const NON_ROOTS_MAX: u32 = NON_ROOTS_MASK;
 ///
 /// The next node is set by the `Allocator` during initialization and by the
 /// `Collector` during the sweep phase.
+///
+/// `repr(C)`: `ref_count` comes first, so it is the first word of a [`GcBox`](super::GcBox),
+/// where Boa's JIT increments it to clone an object without a call.
+#[repr(C)]
 pub(crate) struct GcHeader {
     ref_count: Cell<u32>,
     non_root_count: Cell<u32>,

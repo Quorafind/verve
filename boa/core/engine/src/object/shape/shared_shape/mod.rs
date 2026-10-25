@@ -480,6 +480,13 @@ pub(crate) struct WeakSharedShape {
 }
 
 impl WeakSharedShape {
+    /// Whether this is a weak reference to `shape`.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) fn points_to(&self, shape: &SharedShape) -> bool {
+        self.inner.points_to(&shape.inner)
+    }
+
     /// Upgrade returns a [`SharedShape`] pointer for the internal value if the pointer is still live,
     /// or [`None`] if the value was already garbage collected.
     #[inline]
