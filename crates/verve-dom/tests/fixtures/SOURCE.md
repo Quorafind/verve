@@ -14,4 +14,4 @@ They were fetched with `npm pack <name>@<version>` and copied unchanged. Only th
 builds are kept, so the scripts that load them set `process.env.NODE_ENV = 'production'` first;
 `tests/react_dev.rs` runs React's development builds, fetched from npm when it runs.
 
-`react-app.js` and `dsh-page.mjs` are the tests' own.
+`react-app.js`, `react-form.js` and `dsh-page.mjs` are the tests' own.

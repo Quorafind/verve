@@ -154,3 +154,103 @@ fn unmounting_cleans_up() {
         assert_eq!(page.console(), "");
     });
 }
+
+/// A page with `react-form.js` rendered.
+fn form() -> Page {
+    let mut page = Page::new(Options::default());
+    page.eval("process.env.NODE_ENV = 'production'");
+    let path = fixture("react-form.js");
+    let source = std::fs::read_to_string(&path).unwrap();
+    if let Err(error) = page.runtime.load_module(&path, &source) {
+        panic!("the form failed to load: {error}\n{}", page.console());
+    }
+    page.settle();
+    page
+}
+
+#[test]
+fn portals_svg_selects_textareas_hover_focus_keys_and_submit() {
+    on_page(|| {
+        let mut page = form();
+        assert_eq!(text(&page, "#status"), "pear|first|none|0");
+        // A portal into the body; SVG in its namespace; raw HTML.
+        assert_eq!(
+            page.eval("document.getElementById('portal').parentNode === document.body"),
+            "true"
+        );
+        assert_eq!(
+            page.eval("(() => { const p = document.querySelector('#icon path'); return [p.namespaceURI, p.getAttribute('stroke-width'), p.getAttribute('class'), document.getElementById('icon').getAttribute('viewBox')].join(' ') })()"),
+            "http://www.w3.org/2000/svg 2 line 0 0 10 10"
+        );
+        assert_eq!(
+            page.eval("document.getElementById('raw').innerHTML"),
+            "<b>bold</b> &amp; plain"
+        );
+        assert_eq!(page.eval("document.getElementById('fruit').value"), "pear");
+        // The layout, reported: a layout effect reads it at the next render.
+        let hover = page.find("#hover");
+        page.document.set_layout(
+            &mut page.runtime,
+            [(hover, verve_dom::Rect::new(0., 50., 120., 20.))],
+        );
+        // A controlled select, chosen.
+        let fruit = page.find("#fruit");
+        page.document.choose(&mut page.runtime, fruit, "plum");
+        page.settle();
+        assert_eq!(text(&page, "#status"), "plum|first|none|120");
+        // Hover through React's enter and leave, which it makes from mouseover and mouseout.
+        page.document.pointer_move(
+            &mut page.runtime,
+            &verve_dom::Pointer {
+                x: 10.,
+                y: 60.,
+                ..Default::default()
+            },
+        );
+        page.settle();
+        assert_eq!(text(&page, "#hover"), "in");
+        page.document.pointer_move(
+            &mut page.runtime,
+            &verve_dom::Pointer {
+                x: 500.,
+                y: 500.,
+                ..Default::default()
+            },
+        );
+        page.settle();
+        assert_eq!(text(&page, "#hover"), "out");
+        // A controlled textarea: focus, typing, a key handler, blur.
+        let notes = page.find("#notes");
+        page.document.focus(&mut page.runtime, Some(notes));
+        page.settle();
+        assert!(text(&page, "#status").contains("|notes|"));
+        page.document
+            .key_down(&mut page.runtime, &Key::named("End"));
+        page.document.type_text(&mut page.runtime, " line\nnext");
+        page.document
+            .key_down(&mut page.runtime, &Key::named("Escape"));
+        page.document.focus(&mut page.runtime, None);
+        page.settle();
+        assert_eq!(
+            text(&page, "#status"),
+            "plum|first line\nnext|left notes|120"
+        );
+        // The submit button submits the form, which React hears and prevents.
+        let submit = page.find("#submit");
+        page.document.take_requests();
+        page.document.press(&mut page.runtime, submit);
+        page.settle();
+        assert_eq!(
+            page.eval("log.join(',')"),
+            "escape,submit plum first line\nnext"
+        );
+        assert!(
+            !page
+                .document
+                .take_requests()
+                .iter()
+                .any(|r| matches!(r, verve_dom::Request::Submit(_)))
+        );
+        assert_eq!(page.console(), "");
+    });
+}
