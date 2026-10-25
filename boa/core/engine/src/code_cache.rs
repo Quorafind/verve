@@ -130,12 +130,27 @@ fn global_digest(global: &Scope) -> u64 {
     let parts = global.parts();
     let mut hash = Fnv::new();
     hash.write(&parts.index.to_le_bytes());
-    for binding in &parts.bindings {
+    // The bindings code can find: not those of a script parsed but not run.
+    let visible = parts.bindings.iter().filter(|binding| {
+        global
+            .get_binding(&binding.name)
+            .is_some_and(|found| found.binding_index() == binding.index)
+    });
+    for binding in visible {
         write_digest_string(&mut hash, &binding.name);
         hash.write(&binding.index.to_le_bytes());
         hash.write(&[binding.flags]);
     }
     hash.finish()
+}
+
+/// A digest of the global scope of `context`'s realm, as it is now: the bindings code compiled
+/// now finds by index. Code written down against one digest is only read back against the
+/// same; an embedder can mix it into its own key for a cache entry, so realms whose global
+/// scopes differ keep entries of their own.
+#[must_use]
+pub fn global_scope_fingerprint(context: &crate::Context) -> u64 {
+    global_digest(context.realm().scope())
 }
 
 fn write_digest_string(hash: &mut Fnv, string: &JsString) {
@@ -707,6 +722,27 @@ impl<'a> Reader<'a> {
         for _ in 0..count {
             star_export_entries.push(self.request()?);
         }
+        // Linking looks every import and re-export up among the modules it requests.
+        let requested = |module_request: Sym, attributes: &[AstImportAttribute]| {
+            let request = ModuleRequest::from_ast(
+                module_request.to_js_string(interner),
+                attributes,
+                interner,
+            );
+            requested_modules.contains(&request)
+        };
+        if !import_entries
+            .iter()
+            .all(|entry| requested(entry.module_request(), entry.attributes()))
+            || !indirect_export_entries
+                .iter()
+                .all(|entry| requested(entry.module_request(), entry.attributes()))
+            || !star_export_entries
+                .iter()
+                .all(|request| requested_modules.contains(request))
+        {
+            return Err("an import or export of a module the module does not request");
+        }
         Ok(ModuleCode {
             has_tla,
             requested_modules,
@@ -1080,7 +1116,7 @@ fn skim_code(
     for _ in 0..reader.count(1)? {
         reader.u32()?;
     }
-    let starts = verify_bytecode(reader.bytes()?, register_count)?;
+    let (starts, indices) = verify_bytecode(reader.bytes()?, register_count)?;
 
     // What kind each constant is: 0 a string, 1 a function, 2 a bigint, 3 a scope.
     let n = reader.count(2)?;
@@ -1112,7 +1148,8 @@ fn skim_code(
         }
         kinds.push(kind);
     }
-    for _ in 0..reader.count(4)? {
+    let bindings = reader.count(4)?;
+    for _ in 0..bindings {
         let name = reader.raw_string()?;
         let scope = reader.u32()?;
         let binding_index = reader.u32()?;
@@ -1134,9 +1171,11 @@ fn skim_code(
             return Err("an exception handler outside the code");
         }
     }
-    for _ in 0..reader.count(2)? {
+    let ics = reader.count(2)?;
+    for _ in 0..ics {
         reader.raw_string()?;
     }
+    check_indices(&indices, &kinds, bindings, ics)?;
     let mut last_pc = 0;
     for _ in 0..reader.count(2)? {
         let pc = reader.u32()?;
@@ -1195,29 +1234,115 @@ fn skim_code(
     ))
 }
 
-/// Checks that bytecode can run without reading outside what it has: every instruction whole,
-/// each register below `register_count`, each jump to the start of an instruction, and the
-/// last instruction a return, so it does not run past the end. Answers where instructions start.
-fn verify_bytecode(bytes: &[u8], register_count: u32) -> Read<Vec<bool>> {
+/// Checks each index the instructions hold against the table their instruction reads it from:
+/// `kinds` the kinds of the constants (0 a string, 1 a function, 2 a bigint, 3 a scope), and how
+/// many bindings and inline caches there are.
+fn check_indices(indices: &[(Table, u32)], kinds: &[u8], bindings: usize, ics: usize) -> Read<()> {
+    for (table, value) in indices {
+        let value = *value as usize;
+        let fits = match table {
+            Table::Binding => value < bindings,
+            Table::InlineCache => value < ics,
+            Table::String => kinds.get(value) == Some(&0),
+            Table::Function => kinds.get(value) == Some(&1),
+            Table::StringOrBigInt => matches!(kinds.get(value), Some(0 | 2)),
+            Table::Scope => kinds.get(value) == Some(&3),
+        };
+        if !fits {
+            return Err("an instruction's index outside its table, or of the wrong kind");
+        }
+    }
+    Ok(())
+}
+
+/// What an index operand of an instruction indexes: a table of its code block, or a kind of
+/// constant.
+#[derive(Debug, Clone, Copy)]
+enum Table {
+    Binding,
+    InlineCache,
+    String,
+    StringOrBigInt,
+    Function,
+    Scope,
+}
+
+/// What an index operand (or plain `u32`) of an instruction is, as the handlers in `vm/opcode`
+/// read it.
+enum Use {
+    /// An index into one of the code block's tables.
+    Index(Table),
+    /// A register, held as a plain number.
+    Register,
+    /// A count or a flag: nothing it could reach outside.
+    Plain,
+}
+
+/// What the operand `field` of `opcode` is; `None` for one this verifier does not know, which
+/// refuses the code rather than run what it cannot check.
+fn operand_use(opcode: Opcode, field: &str) -> Option<Use> {
+    Some(match (opcode, field) {
+        (_, "binding_index") | (Opcode::ThisForObjectEnvironmentName, "index") => {
+            Use::Index(Table::Binding)
+        }
+        (_, "ic_index") => Use::Index(Table::InlineCache),
+        (_, "scope_index") => Use::Index(Table::Scope),
+        (_, "name_index" | "pattern_index" | "flags_index" | "message" | "name_indices")
+        | (Opcode::InPrivate | Opcode::ThrowMutateImmutable, "index") => Use::Index(Table::String),
+        (Opcode::StoreLiteral, "index") => Use::Index(Table::StringOrBigInt),
+        (Opcode::GetFunction, "index") => Use::Index(Table::Function),
+        (Opcode::JumpTable, "index") | (Opcode::TemplateCreate, "values") => Use::Register,
+        (_, "argument_count" | "done" | "is_anonymous_function" | "phase" | "prefix")
+        | (Opcode::GetArgument, "index") => Use::Plain,
+        _ => return None,
+    })
+}
+
+/// Checks that bytecode can run without reading outside what it has: every instruction whole
+/// and not a reserved one, each register below `register_count`, each jump to the start of an
+/// instruction, and the last instruction a return, so it does not run past the end. Answers
+/// where instructions start, and the indices into the code block's tables its instructions
+/// hold, to check once the tables are read.
+/// Where instructions start, and the table indices they hold.
+type Verified = (Vec<bool>, Vec<(Table, u32)>);
+
+fn verify_bytecode(bytes: &[u8], register_count: u32) -> Read<Verified> {
     let len = bytes.len();
     if len == 0 || len > u32::MAX as usize {
         return Err("no bytecode, or too much");
     }
     let mut starts = vec![false; len];
     let mut targets = Vec::new();
-    let mut bad_register = false;
+    let mut indices = Vec::new();
+    let mut operands = Vec::new();
     let mut pc = 0;
     let mut last = None;
     while pc < len {
         starts[pc] = true;
+        operands.clear();
         let (opcode, next) =
-            Bytecode::check_instruction_in(bytes, pc, &mut |operand| match operand {
-                Operand::Register(register) => bad_register |= register >= register_count,
+            Bytecode::check_instruction_in(bytes, pc, &mut |operand| operands.push(operand))
+                .ok_or("an instruction cut short")?;
+        if opcode.as_str() == "Reserved" {
+            return Err("a reserved opcode");
+        }
+        for operand in &operands {
+            match *operand {
+                Operand::Register(register) => {
+                    if register >= register_count {
+                        return Err("a register outside the frame");
+                    }
+                }
                 Operand::Address(address) => targets.push(address),
-            })
-            .ok_or("an instruction cut short")?;
-        if bad_register {
-            return Err("a register outside the frame");
+                Operand::Index { field, value } => match operand_use(opcode, field) {
+                    Some(Use::Index(table)) => indices.push((table, value)),
+                    Some(Use::Register) if value >= register_count => {
+                        return Err("a register outside the frame");
+                    }
+                    Some(Use::Plain | Use::Register) => {}
+                    None => return Err("an operand the verifier does not know"),
+                },
+            }
         }
         last = Some(opcode);
         pc = next;
@@ -1231,7 +1356,7 @@ fn verify_bytecode(bytes: &[u8], register_count: u32) -> Read<Vec<bool>> {
     {
         return Err("a jump to the middle of an instruction or past the end");
     }
-    Ok(starts)
+    Ok((starts, indices))
 }
 
 fn read_code(
@@ -1384,4 +1509,70 @@ fn check_global_binding(locator: &BindingLocator, global: &Scope) -> Read<()> {
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Table, check_indices, verify_bytecode};
+    use crate::vm::opcode::{BytecodeEmitter, IndexOperand, RegisterOperand};
+    use thin_vec::thin_vec;
+
+    fn bytes(emit: impl FnOnce(&mut BytecodeEmitter)) -> Box<[u8]> {
+        let mut emitter = BytecodeEmitter::new();
+        emit(&mut emitter);
+        emitter.emit_return();
+        emitter.into_bytecode().bytes
+    }
+
+    #[test]
+    fn index_operands_are_checked_against_their_tables() {
+        let code = bytes(|e| {
+            e.emit_get_name(RegisterOperand::new(0), IndexOperand::new(1));
+            e.emit_store_literal(RegisterOperand::new(0), IndexOperand::new(0));
+            e.emit_get_function(RegisterOperand::new(0), IndexOperand::new(1));
+        });
+        let (_, indices) = verify_bytecode(&code, 1).unwrap();
+        assert!(matches!(
+            indices.as_slice(),
+            [
+                (Table::Binding, 1),
+                (Table::StringOrBigInt, 0),
+                (Table::Function, 1)
+            ]
+        ));
+        // A string, then a function; two bindings.
+        assert!(check_indices(&indices, &[0, 1], 2, 0).is_ok());
+        assert!(
+            check_indices(&indices, &[0, 1], 1, 0).is_err(),
+            "binding 1 of 1"
+        );
+        assert!(
+            check_indices(&indices, &[1, 1], 2, 0).is_err(),
+            "a literal that is a function"
+        );
+        assert!(
+            check_indices(&indices, &[0, 0], 2, 0).is_err(),
+            "a function that is a string"
+        );
+    }
+
+    #[test]
+    fn registers_held_as_numbers_are_checked() {
+        let jump = bytes(|e| e.emit_jump_table(5, thin_vec![]));
+        assert!(verify_bytecode(&jump, 6).is_ok());
+        assert!(verify_bytecode(&jump, 5).is_err());
+        let template =
+            bytes(|e| e.emit_template_create(0, RegisterOperand::new(0), thin_vec![0, 9]));
+        assert!(verify_bytecode(&template, 10).is_ok());
+        assert!(verify_bytecode(&template, 9).is_err());
+    }
+
+    #[test]
+    fn reserved_opcodes_are_refused() {
+        let reserved = (0..=u8::MAX)
+            .find(|op| crate::vm::opcode::Opcode::decode(*op).as_str() == "Reserved")
+            .expect("the opcode table has reserved slots");
+        let code = [reserved, crate::vm::opcode::Opcode::Return as u8];
+        assert_eq!(verify_bytecode(&code, 1).unwrap_err(), "a reserved opcode");
+    }
 }

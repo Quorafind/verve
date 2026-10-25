@@ -82,9 +82,16 @@ pub(crate) trait Argument: Sized + std::fmt::Debug {
 /// An operand a verifier checks: a register must be within the frame, an address the start of
 /// an instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(variant_size_differences)]
 pub(crate) enum Operand {
     Register(u32),
     Address(u32),
+    /// An index operand, or a plain `u32`: what it indexes depends on the instruction and the
+    /// field (`field`, filled in by `check_instruction_in`).
+    Index {
+        field: &'static str,
+        value: u32,
+    },
 }
 
 /// Reads a `T` at `offset`, or `None` if the bytes end first.
@@ -191,8 +198,28 @@ impl Argument for IndexOperand {
         (arg1.into(), pos)
     }
 
-    fn check(bytes: &[u8], pos: usize, _: &mut dyn FnMut(Operand)) -> Option<usize> {
-        read_checked::<u32>(bytes, pos).map(|(_, pos)| pos)
+    fn check(bytes: &[u8], pos: usize, operand: &mut dyn FnMut(Operand)) -> Option<usize> {
+        let (value, pos) = read_checked::<u32>(bytes, pos)?;
+        operand(Operand::Index { field: "", value });
+        Some(pos)
+    }
+}
+
+impl Argument for u32 {
+    #[inline(always)]
+    fn encode(self, bytes: &mut Vec<u8>) {
+        write_u32(bytes, self);
+    }
+
+    #[inline(always)]
+    fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
+        read::<u32>(bytes, pos)
+    }
+
+    fn check(bytes: &[u8], pos: usize, operand: &mut dyn FnMut(Operand)) -> Option<usize> {
+        let (value, pos) = read_checked::<u32>(bytes, pos)?;
+        operand(Operand::Index { field: "", value });
+        Some(pos)
     }
 }
 
@@ -285,7 +312,7 @@ macro_rules! impl_argument_for_int {
     };
 }
 
-impl_argument_for_int!(u8 u16 u32 u64 i8 i16 i32 f32 f64);
+impl_argument_for_int!(u8 u16 u64 i8 i16 i32 f32 f64);
 
 #[cfg(test)]
 mod tests {

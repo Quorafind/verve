@@ -535,7 +535,20 @@ macro_rules! generate_opcodes {
                 let next = match opcode {
                     $(
                         Opcode::$Variant => {
-                            <($($($FieldType),*)?)>::check(bytes, pc + 1, operand)?
+                            #[allow(unused_mut)]
+                            let mut pos = pc + 1;
+                            $($(
+                                pos = <$FieldType>::check(bytes, pos, &mut |found| {
+                                    operand(match found {
+                                        Operand::Index { value, .. } => Operand::Index {
+                                            field: stringify!($FieldName),
+                                            value,
+                                        },
+                                        other => other,
+                                    })
+                                })?;
+                            )*)?
+                            pos
                         }
                     ),*
                 };
