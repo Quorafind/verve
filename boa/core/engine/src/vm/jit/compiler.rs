@@ -46,10 +46,11 @@ use crate::{
 
 use super::{
     JitCode, JitOptions,
+    helpers::{self, HelperFn},
     memory::{ExecutableCode, LiveCode},
     runtime::{
         EXIT, FRAME_OFFSET, INTERRUPT_OFFSET, LOOP_COUNT_OFFSET, LOOP_LIMIT_OFFSET, REGS_OFFSET,
-        jit_lookup, jit_step, jit_store,
+        STEPS, jit_lookup, jit_store,
     },
 };
 
@@ -62,6 +63,11 @@ pub(super) mod bits {
     pub(crate) const BOOLEAN: i64 = 0x7FFA_0000_0000_0000;
     pub(crate) const FALSE: i64 = BOOLEAN;
     pub(crate) const TRUE: i64 = BOOLEAN | 1;
+    /// The pointer bits of a value that holds one.
+    pub(crate) const POINTER_MASK: i64 = 0x0000_FFFF_FFFF_FFFF;
+    /// An object's reference count is the first `u32` of its allocation (`GcHeader`, `repr(C)`
+    /// first in the `repr(C)` `GcBox`). Above this, `inc_ref_count` panics: a call does it.
+    pub(crate) const MAX_REF_COUNT: i64 = 0x7FFF_FFFE;
     /// `null`; `undefined` is `OTHER | 1`.
     pub(crate) const OTHER: i64 = 0x7FFB_0000_0000_0000;
     pub(crate) const UNDEFINED: i64 = OTHER | 1;
@@ -244,7 +250,17 @@ fn kind(instruction: &Instruction) -> Kind {
         | Instruction::StrictNotEq { .. }
         | Instruction::Inc { .. }
         | Instruction::Dec { .. }
-        | Instruction::LogicalNot { .. } => Kind::Inline,
+        | Instruction::LogicalNot { .. }
+        | Instruction::PushFromRegister { .. }
+        | Instruction::PopIntoRegister { .. }
+        | Instruction::SetAccumulator { .. }
+        | Instruction::GetArgument { .. }
+        | Instruction::CheckReturn
+        | Instruction::GetPropertyByName { .. }
+        | Instruction::GetLengthProperty { .. }
+        | Instruction::SetPropertyByName { .. }
+        | Instruction::GetPropertyByValue { .. }
+        | Instruction::SetPropertyByValue { .. } => Kind::Inline,
         Instruction::Jump { address } => Kind::Jump(address.as_u32()),
         Instruction::JumpIfTrue { address, .. }
         | Instruction::JumpIfFalse { address, .. }
@@ -285,7 +301,21 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
         | Instruction::StoreNull { dst }
         | Instruction::StoreTrue { dst }
         | Instruction::StoreFalse { dst }
-        | Instruction::StoreUndefined { dst } => vec![dst.into()],
+        | Instruction::StoreUndefined { dst }
+        | Instruction::PopIntoRegister { dst }
+        | Instruction::GetArgument { dst, .. } => vec![dst.into()],
+        Instruction::PushFromRegister { src } | Instruction::SetAccumulator { src } => {
+            vec![src.into()]
+        }
+        Instruction::GetPropertyByName { dst, value, .. }
+        | Instruction::GetLengthProperty { dst, value, .. } => vec![dst.into(), value.into()],
+        Instruction::SetPropertyByName { value, object, .. } => vec![value.into(), object.into()],
+        Instruction::GetPropertyByValue {
+            dst, key, object, ..
+        } => vec![dst.into(), key.into(), object.into()],
+        Instruction::SetPropertyByValue {
+            value, key, object, ..
+        } => vec![value.into(), key.into(), object.into()],
         Instruction::Move { dst, src }
         | Instruction::Inc { dst, src }
         | Instruction::Dec { dst, src } => vec![dst.into(), src.into()],
@@ -323,11 +353,15 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
 }
 
 /// Whether an inline instruction has a slow path through [`jit_step`]: all but the stores of
-/// constants.
+/// constants and the instructions whose fast helper always applies.
 fn has_slow_path(instruction: &Instruction) -> bool {
     !matches!(
         instruction,
-        Instruction::StoreZero { .. }
+        Instruction::Move { .. }
+            | Instruction::PushFromRegister { .. }
+            | Instruction::SetAccumulator { .. }
+            | Instruction::GetArgument { .. }
+            | Instruction::StoreZero { .. }
             | Instruction::StoreOne { .. }
             | Instruction::StoreInt8 { .. }
             | Instruction::StoreInt16 { .. }
@@ -491,6 +525,8 @@ fn leaders(code_block: &CodeBlock) -> Result<(Vec<u32>, Profile), String> {
 /// The machine-code side of a code block in translation.
 struct Translator<'a> {
     b: FunctionBuilder<'a>,
+    /// The code block's bytecode.
+    bytes: &'a [u8],
     state: Value,
     regs: Variable,
     blocks: BTreeMap<u32, Block>,
@@ -498,6 +534,7 @@ struct Translator<'a> {
     dispatch: Block,
     step_sig: SigRef,
     store_sig: SigRef,
+    helper_sig: SigRef,
     lookup_sig: SigRef,
     /// Blocks that run an instruction with [`jit_step`], emitted after the instructions (a
     /// block must be finished before the next is started).
@@ -512,6 +549,14 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
         .params
         .extend([AbiParam::new(ptr), AbiParam::new(I32)]);
     signature.returns.push(AbiParam::new(I32));
+    let mut helper_signature = Signature::new(call_conv);
+    helper_signature.params.extend([
+        AbiParam::new(ptr),
+        AbiParam::new(I32),
+        AbiParam::new(I32),
+        AbiParam::new(I32),
+    ]);
+    helper_signature.returns.push(AbiParam::new(I32));
     let mut store_signature = Signature::new(call_conv);
     store_signature
         .params
@@ -531,6 +576,7 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
     let step_sig = b.import_signature(signature.clone());
     let lookup_sig = b.import_signature(signature);
     let store_sig = b.import_signature(store_signature);
+    let helper_sig = b.import_signature(helper_signature);
 
     b.switch_to_block(entry);
     let state = b.block_params(entry)[0];
@@ -543,6 +589,7 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
 
     let mut t = Translator {
         b,
+        bytes: &code_block.bytecode.bytes,
         state,
         regs,
         blocks,
@@ -550,6 +597,7 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
         dispatch,
         step_sig,
         store_sig,
+        helper_sig,
         lookup_sig,
         slow: Vec::new(),
     };
@@ -586,6 +634,31 @@ fn translate(code_block: &CodeBlock, block_pcs: &[u32], isa: &OwnedTargetIsa) ->
         } else if filled {
             // Unreachable: after a jump, and no branch comes here.
             pc = next;
+            continue;
+        }
+        // Pushes in a row (a call's `this`, function and arguments) are one helper call.
+        if let Instruction::PushFromRegister { src } = instruction {
+            let mut sources = vec![u32::from(src)];
+            let mut end = next;
+            while sources.len() < 3 && end < len && !t.blocks.contains_key(&(end as u32)) {
+                let (following, after) = bytecode.next_instruction(end);
+                let Instruction::PushFromRegister { src } = following else {
+                    break;
+                };
+                sources.push(src.into());
+                end = after;
+            }
+            let mut operands = [helpers::NO_REGISTER; 3];
+            operands[..sources.len()].copy_from_slice(&sources);
+            t.fast(
+                helpers::jit_push,
+                operands,
+                Fast::MovesStack,
+                pc32,
+                end as u32,
+            );
+            filled = false;
+            pc = end;
             continue;
         }
         let terminated = t.instruction(&instruction, pc32, next32);
@@ -641,8 +714,9 @@ impl Translator<'_> {
         )
     }
 
-    /// Stores `bits`, a value without a pointer, in `register`: in place if what is there holds
-    /// no pointer either, otherwise through [`jit_store`], which drops it.
+    /// Stores `bits` in `register`: in place if what is there holds no pointer, otherwise
+    /// through [`jit_store`], which drops it. `bits` is a value without a pointer, or one whose
+    /// reference compiled code owns and hands over to the register.
     fn store(&mut self, register: u32, bits: Value) {
         let old = self.load(register);
         let top = self.b.ins().ushr_imm_s(old, 50);
@@ -685,7 +759,9 @@ impl Translator<'_> {
     /// `expected` (the next instruction first), or through `dispatch`.
     fn step(&mut self, pc: u32, expected: &[u32]) {
         let pc_value = self.b.ins().iconst(I32, i64::from(pc));
-        let next = self.call(self.step_sig, jit_step as *const () as i64, &[pc_value]);
+        let opcode = Opcode::decode(self.bytes[pc as usize]);
+        let step = STEPS[opcode as usize];
+        let next = self.call(self.step_sig, step as *const () as i64, &[pc_value]);
         let regs = self
             .b
             .ins()
@@ -935,11 +1011,106 @@ impl Translator<'_> {
                     .b
                     .ins()
                     .icmp_imm_s(IntCC::Equal, top, bits::POINTER_TOP14);
-                let slow = self.slow_block(pc, &[next]);
                 let fast = self.b.create_block();
-                self.b.ins().brif(is_pointer, slow, &[], fast, &[]);
+                let pointer = self.b.create_block();
+                let object = self.b.create_block();
+                let count = self.b.create_block();
+                let clone = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.ins().brif(is_pointer, pointer, &[], fast, &[]);
                 self.b.switch_to_block(fast);
                 self.store(dst.into(), value);
+                self.b.ins().jump(done, &[]);
+                // An object: one more reference, unless the count would overflow.
+                self.b.switch_to_block(pointer);
+                let top = self.b.ins().ushr_imm_s(value, 48);
+                let is_object = self
+                    .b
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, top, bits::TOP16_OBJECT);
+                self.b.ins().brif(is_object, object, &[], clone, &[]);
+                self.b.switch_to_block(object);
+                let address = self.b.ins().band_imm_s(value, bits::POINTER_MASK);
+                let references = self.b.ins().load(I32, MemFlagsData::trusted(), address, 0);
+                let at_limit = self.b.ins().icmp_imm_s(
+                    IntCC::UnsignedGreaterThan,
+                    references,
+                    bits::MAX_REF_COUNT,
+                );
+                self.b.ins().brif(at_limit, clone, &[], count, &[]);
+                self.b.switch_to_block(count);
+                let counted = self.b.ins().iadd_imm_s(references, 1);
+                self.b
+                    .ins()
+                    .store(MemFlagsData::trusted(), counted, address, 0);
+                self.store(dst.into(), value);
+                self.b.ins().jump(done, &[]);
+                // Other pointers: a clone, by a helper.
+                self.b.switch_to_block(clone);
+                let operands = [dst.into(), src.into(), 0];
+                self.fast(helpers::jit_move, operands, Fast::Always, pc, next);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+            }
+            Instruction::PushFromRegister { src } => {
+                let operands = [src.into(), helpers::NO_REGISTER, helpers::NO_REGISTER];
+                self.fast(helpers::jit_push, operands, Fast::MovesStack, pc, next);
+            }
+            Instruction::PopIntoRegister { dst } => {
+                self.fast(
+                    helpers::jit_pop,
+                    [dst.into(), 0, 0],
+                    Fast::MaySlow,
+                    pc,
+                    next,
+                );
+            }
+            Instruction::SetAccumulator { src } => {
+                let f = helpers::jit_set_accumulator;
+                self.fast(f, [src.into(), 0, 0], Fast::Always, pc, next);
+            }
+            Instruction::GetArgument { index, dst } => {
+                let f = helpers::jit_get_argument;
+                self.fast(f, [index.into(), dst.into(), 0], Fast::Always, pc, next);
+            }
+            Instruction::CheckReturn => {
+                self.fast(helpers::jit_check_return, [0; 3], Fast::MaySlow, pc, next);
+            }
+            Instruction::GetPropertyByName {
+                dst,
+                value,
+                ic_index,
+            } => {
+                let operands = [dst.into(), value.into(), ic_index.into()];
+                self.fast(helpers::jit_get_property, operands, Fast::MaySlow, pc, next);
+            }
+            Instruction::GetLengthProperty {
+                dst,
+                value,
+                ic_index,
+            } => {
+                let operands = [dst.into(), value.into(), ic_index.into()];
+                self.fast(helpers::jit_get_length, operands, Fast::MaySlow, pc, next);
+            }
+            Instruction::SetPropertyByName {
+                value,
+                object,
+                ic_index,
+            } => {
+                let operands = [value.into(), object.into(), ic_index.into()];
+                self.fast(helpers::jit_set_property, operands, Fast::MaySlow, pc, next);
+            }
+            Instruction::GetPropertyByValue {
+                dst, key, object, ..
+            } => {
+                let operands = [dst.into(), key.into(), object.into()];
+                self.fast(helpers::jit_get_element, operands, Fast::MaySlow, pc, next);
+            }
+            Instruction::SetPropertyByValue {
+                value, key, object, ..
+            } => {
+                let operands = [value.into(), key.into(), object.into()];
+                self.fast(helpers::jit_set_element, operands, Fast::MaySlow, pc, next);
             }
             Instruction::Add { dst, lhs, rhs } => {
                 self.arithmetic(Arith::Add, dst.into(), lhs.into(), rhs.into(), pc, next);
@@ -1125,6 +1296,30 @@ impl Translator<'_> {
             }
         }
         false
+    }
+
+    /// Calls a fast helper with its operands, then goes on in a new block. If the helper
+    /// answers anything but `DONE`, its fast path did not apply: compiled code runs the
+    /// instruction with [`jit_step`] (`MaySlow`), or the helper panicked and compiled code
+    /// returns, for `execute` to resume the panic (the others).
+    fn fast(&mut self, function: HelperFn, operands: [u32; 3], fast: Fast, pc: u32, next: u32) {
+        let operands = operands.map(|operand| self.b.ins().iconst(I32, i64::from(operand)));
+        let status = self.call(self.helper_sig, function as *const () as i64, &operands);
+        if fast == Fast::MovesStack {
+            let regs = self
+                .b
+                .ins()
+                .load(I64, MemFlagsData::trusted(), self.state, REGS_OFFSET);
+            self.b.def_var(self.regs, regs);
+        }
+        let otherwise = if fast == Fast::MaySlow {
+            self.slow_block(pc, &[next])
+        } else {
+            self.exit
+        };
+        let done = self.b.create_block();
+        self.b.ins().brif(status, otherwise, &[], done, &[]);
+        self.b.switch_to_block(done);
     }
 
     /// Goes on to the next instruction from the current block.
@@ -1413,6 +1608,17 @@ impl Translator<'_> {
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(done);
     }
+}
+
+/// What a fast helper may answer besides `DONE`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fast {
+    /// Its fast path always applies; it fails only by panicking.
+    Always,
+    /// As `Always`, and it may move the VM stack, so the registers' address is reloaded.
+    MovesStack,
+    /// Its fast path may not apply.
+    MaySlow,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

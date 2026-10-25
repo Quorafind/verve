@@ -83,6 +83,20 @@ impl InlineCache {
         }
     }
 
+    /// The cached slot for `shape`, if the cache has it, leaving the cache as it is: compiled
+    /// code's fast path, which falls back to the interpreter (and [`Self::get`]) on a miss.
+    #[cfg(feature = "jit")]
+    pub(crate) fn slot_for(&self, shape: &Shape) -> Option<Slot> {
+        if self.megamorphic.get() {
+            return None;
+        }
+        let entries = self.entries.try_borrow().ok()?;
+        entries
+            .iter()
+            .find(|entry| entry.shape.points_to(shape))
+            .map(|entry| entry.slot)
+    }
+
     /// Returns the cached `(Shape, Slot)` if a matching shape exists in the inline cache.
     ///
     /// Opportunistically cleans up stale weak shape references during lookup.

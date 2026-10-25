@@ -344,6 +344,20 @@ impl JsValue {
         self.0.as_object()
     }
 
+    /// Runs `f` with the object the value holds, if it holds one, without cloning it.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) fn with_object<R>(&self, f: impl FnOnce(&JsObject) -> R) -> Option<R> {
+        self.0.with_object(f)
+    }
+
+    /// The value as an `int32`, if it is stored as one (a number stored as an `f64` is not).
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) fn as_integer32(&self) -> Option<i32> {
+        self.0.as_integer32()
+    }
+
     /// Consumes the value and return the inner object if it was an object.
     ///
     /// # Examples

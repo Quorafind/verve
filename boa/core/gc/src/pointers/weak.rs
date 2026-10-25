@@ -29,6 +29,15 @@ impl<T: Trace + ?Sized> WeakGc<T> {
         self.inner.key()
     }
 
+    /// Whether this points to `value`'s allocation (which is then alive): what
+    /// `upgrade().is_some_and(|v| Gc::ptr_eq(&v, value))` answers, without touching reference
+    /// counts.
+    #[inline]
+    #[must_use]
+    pub fn points_to(&self, value: &Gc<T>) -> bool {
+        self.inner.key_is(value)
+    }
+
     /// Check if the [`WeakGc`] can be upgraded.
     #[inline]
     #[must_use]

@@ -1152,7 +1152,7 @@ impl Context {
 /// Where the native stack is now: the address of a local. The stack grows down on every
 /// platform Boa runs on, so what a nested call has taken is the base minus this.
 #[inline(never)]
-fn native_stack_position() -> usize {
+pub(crate) fn native_stack_position() -> usize {
     let marker = 0u8;
     std::hint::black_box(&raw const marker) as usize
 }

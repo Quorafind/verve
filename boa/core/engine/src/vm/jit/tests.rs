@@ -714,3 +714,195 @@ fn slow_paths_stay_in_compiled_code() {
     let stats = context.jit_stats();
     assert!(stats.entries < 50, "{stats:?}");
 }
+
+// ---- Phase 2: property caches, element access, nested calls ----
+
+/// Property reads and writes through the inline caches, with everything that must miss them:
+/// new shapes, prototypes, accessors, deletes, frozen and non-writable properties, and objects
+/// in dictionary mode.
+#[test]
+fn property_caches_match_the_interpreter() {
+    same(
+        "function get(o) { return o.x; }
+         function set(o, v) { o.x = v; return o.x; }
+         const out = [];
+         // Monomorphic, then a new shape at the same site, then many (megamorphic).
+         const a = { x: 1 }, b = { y: 0, x: 2 }, shapes = [];
+         for (let k = 0; k < 8; k++) { const o = {}; o['p' + k] = k; o.x = k * 10; shapes.push(o); }
+         for (let i = 0; i < 60; i++) {
+           out.push(get(a), get(b), get(shapes[i % 8]));
+           out.push(set(a, i), set(shapes[i % 8], -i));
+         }
+         // A property added in the loop changes the shape under the cache.
+         const grow = { x: 0 };
+         for (let i = 0; i < 40; i++) { if (i === 20) grow.z = 1; out.push(get(grow)); set(grow, i); }
+         // Deleted mid-loop: the site must see the miss (and undefined).
+         const del = { x: 5, w: 6 };
+         for (let i = 0; i < 40; i++) { if (i === 25) delete del.x; out.push(show(get(del))); }
+         // Prototype data and methods, then shadowed by an own property.
+         const proto = { x: 'proto', m() { return 'm' + this.x; } };
+         const child = Object.create(proto);
+         for (let i = 0; i < 40; i++) {
+           if (i === 30) child.x = 'own';
+           out.push(get(child), child.m());
+           if (i === 35) proto.x = 'changed';
+         }
+         // Accessors, own and inherited; a setter that counts.
+         let sets = 0;
+         const acc = { get x() { return 'getter'; }, set x(v) { sets += v; } };
+         const inh = Object.create(acc);
+         for (let i = 0; i < 30; i++) { out.push(get(acc), get(inh)); set(acc, 1); set(inh, 2); }
+         out.push(sets);
+         // Frozen and non-writable: sloppy writes are ignored, strict ones throw.
+         const frozen = Object.freeze({ x: 'f' });
+         const fixed = { x: 'n' }; Object.defineProperty(fixed, 'x', { writable: false });
+         const later = { x: 0 };
+         for (let i = 0; i < 30; i++) {
+           out.push(set(frozen, i), set(fixed, i));
+           if (i === 15) Object.freeze(later);
+           out.push(set(later, i));
+         }
+         function strictSet(o, v) { 'use strict'; o.x = v; return o.x; }
+         for (let i = 0; i < 20; i++) {
+           try { out.push(strictSet(i < 10 ? a : frozen, i)); } catch (e) { out.push(e.name); }
+         }
+         // Dictionary mode (many deletes), primitives, null and undefined.
+         const dict = {}; for (let k = 0; k < 40; k++) dict['k' + k] = k;
+         for (let k = 0; k < 30; k++) delete dict['k' + k];
+         dict.x = 'dict';
+         for (let i = 0; i < 30; i++) {
+           out.push(get(dict), set(dict, 'd' + i), get('str'), get(5), get(true));
+           try { get(i % 2 ? null : undefined); } catch (e) { out.push(e.name); }
+           try { set(null, 1); } catch (e) { out.push(e.name); }
+         }
+         // Proxies and lengths.
+         const proxy = new Proxy({ x: 'target' }, { get(t, k) { return 'trap ' + String(k); } });
+         const lens = [[1, 2, 3], 'four', { length: 'own' }, function f(p, q) {}, new Uint8Array(5)];
+         for (let i = 0; i < 30; i++) {
+           out.push(get(proxy));
+           for (const v of lens) out.push(v.length);
+         }
+         out.map(show).join(' ')",
+    );
+}
+
+/// Elements of arrays by `int32` index: dense arrays of each kind, holes, out of range,
+/// negative and non-integer indexes, non-extensible arrays, setters on the prototype, typed
+/// arrays and strings.
+#[test]
+fn element_access_matches_the_interpreter() {
+    same(
+        "const out = [];
+         function read(a, i) { return a[i]; }
+         function write(a, i, v) { a[i] = v; return a[i]; }
+         const ints = [1, 2, 3, 4], floats = [0.5, 1.5, 2.5], mixed = [1, 'two', null, {}];
+         const holey = [1, , 3]; holey[10] = 'far';
+         const sealed = Object.preventExtensions([7, 8, 9]);
+         const typed = new Int16Array([5, 6, 7]);
+         for (let i = -2; i < 14; i++) {
+           for (const a of [ints, floats, mixed, holey, sealed, typed, 'text']) out.push(show(read(a, i)));
+           out.push(show(read(ints, i + 0.5)), show(read(ints, String(i))));
+         }
+         for (let i = 0; i < 12; i++) {
+           out.push(show(write(ints, i % 6, i * 3)), show(write(floats, i % 3, i % 2 ? 'str' : i / 4)));
+           out.push(show(write(sealed, i % 5, i)), show(write(typed, i % 4, i * 1000)));
+           out.push(show(write(mixed, -1, i)));
+         }
+         Object.defineProperty(Array.prototype, '20', { set(v) { out.push('setter ' + v); }, configurable: true });
+         const short = [];
+         for (let i = 0; i < 25; i++) write(short, i, i);
+         delete Array.prototype[20];
+         out.push(show(short), show(ints), show(floats), show(mixed), mixed[-1], show(sealed), show([...typed]));
+         let s = 0; const big = new Array(1000).fill(1);
+         for (let i = 0; i < big.length; i++) { big[i] = big[i] + i; s += big[i]; }
+         out.push(s);
+         out.join(' ')",
+    );
+}
+
+/// Compiled functions call compiled functions nested on the native stack: deep recursion past
+/// the nesting cap, exceptions thrown through compiled callees and caught at every depth,
+/// `finally`, the recursion limit, and calls through interpreted frames (generators, natives
+/// calling back) in between.
+#[test]
+fn nested_compiled_calls_match_the_interpreter() {
+    same(
+        "function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+         function depth(n) { return n === 0 ? 0 : 1 + depth(n - 1); }
+         function thrower(n) { if (n % 7 === 3) throw new Error('at ' + n); return n; }
+         function middle(n) { try { return thrower(n) * 2; } finally { log.push('f' + n); } }
+         function outer(n) { let s = 0; for (let i = 0; i < n; i++) { try { s += middle(i); } catch (e) { s -= 1; log.push(e.message); } } return s; }
+         function* gen(n) { for (let i = 0; i < n; i++) yield depth(i); }
+         function viaNative(n) { return [1, 2, 3].map(x => depth(x + n)).reduce((a, b) => a + b); }
+         function rec(n) { if (n === 0) throw new RangeError('bottom'); return rec(n - 1); }
+         const log = [];
+         const out = [fib(18), depth(200), depth(3000), outer(40), [...gen(30)].join(','), viaNative(50)];
+         for (let d of [10, 100, 1000]) { try { rec(d); } catch (e) { out.push(e.name + ':' + e.message); } }
+         try { depth(1e6); } catch (e) { out.push(e.name, e.message); }
+         out.push(depth(100));
+         out.concat(log).map(show).join(' ')",
+    );
+}
+
+/// Errors thrown deep in nested compiled calls carry the same stack as interpreted.
+#[test]
+fn nested_calls_keep_error_stacks() {
+    same(
+        "function a(n) { if (n === 0) throw new Error('deep'); return b(n - 1) + 1; }
+         function b(n) { return a(n) + 0; }
+         let stack;
+         for (let i = 0; i < 30; i++) { try { a(8); } catch (e) { stack = e.stack; } }
+         stack",
+    );
+}
+
+/// A loop calling a compiled function stays in compiled code: the callee is entered nested,
+/// and the caller is not entered again after each call.
+#[test]
+fn calls_between_compiled_functions_do_not_return_to_the_interpreter() {
+    let mut context = fresh(Mode::Eager);
+    let value = context
+        .eval(Source::from_bytes(
+            "function add(a, b) { return a + b; }
+             function loop(n) { let s = 0; for (let i = 0; i < n; i++) s = add(s, i) | 0; return s; }
+             loop(1000)",
+        ))
+        .expect("runs");
+    assert_eq!(value.as_number(), Some(499_500.0));
+    let stats = context.jit_stats();
+    // About one entry per call of `add`; returning to the interpreter would be two.
+    assert!(stats.entries < 1100, "{stats:?}");
+}
+
+/// The garbage collector runs inside nested compiled calls, with objects in the registers and
+/// on the stack of every frame.
+#[test]
+fn garbage_collection_during_nested_calls() {
+    static COLLECTIONS: AtomicUsize = AtomicUsize::new(0);
+    let mut results = Vec::new();
+    for mode in [Mode::Interpreted, Mode::Eager, Mode::Hot] {
+        let mut context = context(mode);
+        context
+            .register_global_callable(
+                js_string!("gc"),
+                0,
+                NativeFunction::from_fn_ptr(|_, _, _| {
+                    boa_gc::force_collect();
+                    COLLECTIONS.fetch_add(1, Ordering::Relaxed);
+                    Ok(JsValue::undefined())
+                }),
+            )
+            .expect("registers");
+        let value = context
+            .eval(Source::from_bytes(
+                "function leaf(o, i) { if (i % 16 === 0) gc(); return { v: o.v + i, s: o.s + i }; }
+                 function mid(o, n) { let r = o; for (let i = 0; i < n; i++) r = leaf(r, i); return r; }
+                 function top(n) { let acc = { v: 0, s: '' }; for (let k = 0; k < n; k++) acc = mid(acc, 20); return acc; }
+                 const r = top(40); r.v + ':' + r.s.length",
+            ))
+            .expect("runs");
+        results.push(value.display().to_string());
+    }
+    assert!(results.windows(2).all(|w| w[0] == w[1]), "{results:?}");
+    assert!(COLLECTIONS.load(Ordering::Relaxed) > 0);
+}
