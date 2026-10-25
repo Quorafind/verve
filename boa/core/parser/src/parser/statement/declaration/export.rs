@@ -109,12 +109,17 @@ where
             TokenKind::Punctuator(Punctuator::OpenBlock) => {
                 let names = NamedExports.parse(cursor, interner)?;
 
-                let next = cursor.peek(0, interner).or_abrupt()?;
+                // The end of the module may follow the list: automatic semicolon
+                // insertion closes `export { a }` there, so no token is not an
+                // abrupt end.
+                let reexport = cursor.peek(0, interner)?.is_some_and(|next| {
+                    matches!(
+                        next.kind(),
+                        TokenKind::IdentifierName((Sym::FROM, ContainsEscapeSequence(false)))
+                    )
+                });
 
-                if matches!(
-                    next.kind(),
-                    TokenKind::IdentifierName((Sym::FROM, ContainsEscapeSequence(false)))
-                ) {
+                if reexport {
                     let specifier =
                         FromClause::new("export declaration").parse(cursor, interner)?;
                     let attributes =

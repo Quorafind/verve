@@ -513,6 +513,43 @@ fn module_export_reserved() {
     );
 }
 
+/// A named export list is a complete statement at the end of a module: automatic
+/// semicolon insertion closes it, with or without a line terminator after it.
+#[test]
+fn module_named_exports_at_end_of_input() {
+    for js in [
+        "const val = 1;\nexport { val }",
+        "const val = 1;\nexport { val }\n",
+    ] {
+        let interner = &mut Interner::default();
+        let val = interner.get_or_intern_static("val", utf16!("val"));
+        check_module_parser(
+            js,
+            vec![
+                ModuleItem::StatementListItem(
+                    Declaration::Lexical(LexicalDeclaration::Const(
+                        vec![Variable::from_identifier(
+                            Identifier::new(val, Span::new((1, 7), (1, 10))),
+                            Some(
+                                Literal::new(LiteralKind::Int(1), Span::new((1, 13), (1, 14)))
+                                    .into(),
+                            ),
+                        )]
+                        .try_into()
+                        .unwrap(),
+                    ))
+                    .into(),
+                ),
+                ModuleItem::ExportDeclaration(
+                    ExportDeclaration::List(vec![ExportSpecifier::new(val, val, false)].into())
+                        .into(),
+                ),
+            ],
+            interner,
+        );
+    }
+}
+
 /// Checks import declaration with a single attribute.
 #[test]
 fn import_with_single_attribute() {
