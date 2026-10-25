@@ -465,3 +465,33 @@ fn test_megamorphic_inline_cache() -> JsResult<()> {
 
     Ok(())
 }
+
+#[test]
+fn a_cached_length_set_still_runs_array_set_length() {
+    let context = &mut Context::default();
+    let result = context
+        .eval(Source::from_bytes(
+            r#"
+            function setLen(o, v) { o.length = v; }
+            for (let i = 0; i < 10; i++) setLen([1, 2, 3, 4, 5], 2);
+            const fake = Object.create(Array.prototype);
+            Object.defineProperty(fake, 'length', { value: 0, writable: true });
+            setLen(fake, 1);
+            const a = [1, 2, 3, 4, 5];
+            setLen(a, 2);
+            let threw = '';
+            try { setLen([1, 2], -1); } catch (e) { threw = e.name; }
+            const b = [1, 2];
+            try { setLen(b, {}); } catch (e) { threw += e.name; }
+            `${a.length}:${a[3]}:${threw}:${b.length}`
+            "#,
+        ))
+        .expect("the script runs");
+    assert_eq!(
+        result
+            .to_string(context)
+            .expect("a string")
+            .to_std_string_escaped(),
+        "2:undefined:RangeErrorRangeError:2"
+    );
+}
