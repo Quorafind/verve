@@ -69,14 +69,35 @@ struct Located {
 
 /// A directory of compiled modules, and the secret its entries are signed with.
 pub(crate) struct CodeCache {
-    dir: PathBuf,
     pack: PathBuf,
-    /// Files JavaScript may not reach besides the directory: the secret's, for `verve run`.
-    protected: Vec<PathBuf>,
+    /// 已解析的受保护路径；无论当前执行环境是否启用缓存，都禁止 JavaScript 访问。
+    protection: Protection,
     secret: [u8; 32],
     fingerprint: [u8; 32],
     state: RefCell<Pack>,
     stats: std::cell::Cell<CodeCacheStats>,
+}
+
+/// 跨 Worker 边界只传递禁止访问的路径，不传递密钥、缓存包句柄或缓存状态。
+#[derive(Clone, Default)]
+pub(crate) struct Protection {
+    roots: Vec<PathBuf>,
+}
+
+impl Protection {
+    pub(crate) fn inherit(&mut self, parent: Self) {
+        for root in parent.roots {
+            if !self.roots.contains(&root) {
+                self.roots.push(root);
+            }
+        }
+    }
+
+    fn protects(&self, path: &Path, subtree: bool) -> bool {
+        self.roots
+            .iter()
+            .any(|root| within(path, root) || (subtree && within(root, path)))
+    }
 }
 
 /// What a runtime's code cache has done since it was set: see
@@ -131,18 +152,22 @@ impl CodeCache {
     /// If the directory cannot be made, or is not private to the user.
     pub(crate) fn open(dir: &Path, secret: [u8; 32], protected: Vec<PathBuf>) -> io::Result<Self> {
         create_private_dir(dir)?;
-        check_private(dir)?;
+        check_private(dir, false)?;
         let fingerprint = build_fingerprint();
         let mut name = hex(&fingerprint[..8]);
         name.push_str(".pack");
         let dir = crate::permission::real(dir, true);
         Ok(Self {
             pack: dir.join(name),
-            dir,
-            protected: protected
-                .iter()
-                .map(|path| crate::permission::real(path, true))
-                .collect(),
+            protection: Protection {
+                roots: std::iter::once(dir)
+                    .chain(
+                        protected
+                            .iter()
+                            .map(|path| crate::permission::real(path, true)),
+                    )
+                    .collect(),
+            },
             secret,
             fingerprint,
             state: RefCell::default(),
@@ -150,10 +175,9 @@ impl CodeCache {
         })
     }
 
-    /// Whether `path` (resolved as the permission model resolves it) is the cache directory,
-    /// inside it, or a file of its secret.
-    fn protects(&self, path: &Path) -> bool {
-        within(path, &self.dir) || self.protected.iter().any(|file| within(path, file))
+    /// 仅继承访问拒绝规则，不会启用缓存或共享密钥。
+    pub(crate) fn protection(&self) -> Protection {
+        self.protection.clone()
     }
 
     /// The key of the entry for `source`, compiled against a global scope of digest `global`.
@@ -511,7 +535,7 @@ pub(crate) fn user_secret() -> io::Result<([u8; 32], PathBuf)> {
     }
     .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no per-user folder for the secret"))?;
     create_private_dir(&base)?;
-    check_private(&base)?;
+    check_private(&base, false)?;
     let path = base.join("code-cache-secret");
     Ok((private_secret(&path)?, path))
 }
@@ -521,17 +545,9 @@ pub(crate) fn user_secret() -> io::Result<([u8; 32], PathBuf)> {
 /// first secret made is the one every process uses.
 fn private_secret(path: &Path) -> io::Result<[u8; 32]> {
     let read = |path: &Path| -> io::Result<[u8; 32]> {
-        use std::io::Read as _;
-        check_private(path)?;
         let mut file = open_no_follow(path)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "the code cache secret is not 32 bytes",
-            )
-        })
+        check_private_file(&file, path, true)?;
+        read_secret_bytes(&mut file)
     };
     if fs::symlink_metadata(path).is_ok() {
         return read(path);
@@ -550,14 +566,27 @@ fn private_secret(path: &Path) -> io::Result<[u8; 32]> {
         drop(file);
         match fs::hard_link(&temp, path) {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-            // Where links cannot be made, the last secret renamed into place wins.
-            Err(_) => fs::rename(&temp, path),
-            Ok(()) => Ok(()),
+            // 即使文件系统不支持硬链接，也不能替换并发创建成功的密钥。
+            // 无法安全创建密钥时禁用缓存，而不是更换已有密钥。
+            other => other,
         }
     })();
     let _ = fs::remove_file(&temp);
     made?;
     read(path)
+}
+
+/// 最多读取 32 字节密钥及 1 字节超长探测数据，即使读取期间文件增长也不会多读。
+fn read_secret_bytes(reader: impl io::Read) -> io::Result<[u8; 32]> {
+    use std::io::Read as _;
+    let mut bytes = Vec::with_capacity(33);
+    reader.take(33).read_to_end(&mut bytes)?;
+    bytes.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the code cache secret is not 32 bytes",
+        )
+    })
 }
 
 /// Whether `path` is `root` or inside it, as paths compare where they are (without case on
@@ -581,6 +610,11 @@ fn open_no_follow(path: &Path) -> io::Result<fs::File> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
     }
     options.open(path)
 }
@@ -655,33 +689,196 @@ fn make_private_dir(path: &Path) -> io::Result<()> {
     fs::create_dir(path)
 }
 
-/// Refuses `path` unless only its owner — the user this runs as — can change it: on Unix, not a
-/// link, owned by the effective user, and not writable by its group or others. Windows folders
-/// this makes are owner-only by their DACL.
-fn check_private(path: &Path) -> io::Result<()> {
+/// 校验已打开的对象，确保密钥权限与读取的字节来自同一文件。
+fn check_private(path: &Path, secret: bool) -> io::Result<()> {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?
+    };
+    #[cfg(not(windows))]
+    let file = open_no_follow(path)?;
+    check_private_file(&file, path, secret)
+}
+
+fn not_private(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("{} is not private to this user", path.display()),
+    )
+}
+
+fn check_private_file(file: &fs::File, path: &Path, secret: bool) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if (secret && !metadata.is_file()) || (!secret && !metadata.is_dir()) {
+        return Err(not_private(path));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let metadata = fs::symlink_metadata(path)?;
         // Safety: `geteuid` only reads the process's credentials.
         let euid = unsafe { libc::geteuid() };
-        if metadata.file_type().is_symlink()
-            || metadata.uid() != euid
-            || metadata.mode() & 0o022 != 0
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "{} is not private to this user (owned by them alone, not a link, and \
-                     writable by no one else)",
-                    path.display()
-                ),
-            ));
+        let forbidden = if secret { 0o077 } else { 0o022 };
+        if metadata.uid() != euid || metadata.mode() & forbidden != 0 {
+            return Err(not_private(path));
         }
     }
-    #[cfg(not(unix))]
-    let _ = path;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !windows_private(file, secret)?
+        {
+            return Err(not_private(path));
+        }
+    }
     Ok(())
+}
+
+/// 空指针或缺失的 DACL 允许所有人访问。对实际的 DACL，拒绝任何授予非所有者
+/// 修改对象（含子项）或读取密钥的权限。
+/// 遇到未知 ACE 类型时拒绝访问；不能因存在拒绝项而接受过宽的允许项。
+#[cfg(windows)]
+fn windows_private(file: &fs::File, secret: bool) -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE, LocalFree},
+        Security::{
+            ACCESS_ALLOWED_ACE, ACE_HEADER,
+            Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
+            DACL_SECURITY_INFORMATION, EqualSid, GetAce, IsValidAcl, IsValidSid, IsWellKnownSid,
+            OWNER_SECURITY_INFORMATION, WinCreatorOwnerRightsSid,
+        },
+        Storage::FileSystem::{
+            DELETE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_EXECUTE, FILE_READ_DATA,
+            FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, WRITE_DAC, WRITE_OWNER,
+        },
+        System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE},
+    };
+    let mut owner = std::ptr::null_mut();
+    let mut dacl = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: 文件句柄保持打开；返回的指针指向下方才释放的 `descriptor` 内部。
+    let status = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &raw mut owner,
+            std::ptr::null_mut(),
+            &raw mut dacl,
+            std::ptr::null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let result = (|| {
+        // SAFETY: 指针由安全 API 返回，且安全描述符尚未释放。
+        if owner.is_null()
+            || dacl.is_null()
+            || unsafe { IsValidSid(owner) == 0 || IsValidAcl(dacl) == 0 }
+            || !current_user_owns(owner)?
+        {
+            return Ok(false);
+        }
+        let mut forbidden = GENERIC_ALL
+            | GENERIC_WRITE
+            | DELETE
+            | WRITE_DAC
+            | WRITE_OWNER
+            | FILE_WRITE_DATA
+            | FILE_APPEND_DATA
+            | FILE_WRITE_EA
+            | FILE_WRITE_ATTRIBUTES
+            | FILE_DELETE_CHILD;
+        if secret {
+            forbidden |= GENERIC_READ | GENERIC_EXECUTE | FILE_READ_DATA | FILE_EXECUTE;
+        }
+        // SAFETY: `dacl` 已在上方校验，且其所属的 `descriptor` 尚未释放。
+        for index in 0..unsafe { (*dacl).AceCount } {
+            let mut ace = std::ptr::null_mut();
+            // SAFETY: 索引位于 ACL 范围内；`ace` 指向尚未释放的安全描述符内部。
+            if unsafe { GetAce(dacl, u32::from(index), &raw mut ace) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: GetAce 返回的是已校验 ACL 中的 ACE。
+            let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+            match u32::from(header.AceType) {
+                ACCESS_DENIED_ACE_TYPE => continue,
+                ACCESS_ALLOWED_ACE_TYPE => {}
+                _ => return Ok(false),
+            }
+            // SAFETY: 普通允许项 ACE 使用此布局，其 SID 从 SidStart 开始。
+            let allow = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+            let sid = (&raw const allow.SidStart).cast_mut().cast();
+            // SAFETY: SID 属于此已校验的 ACE；所有者 SID 在整个调用期间有效。
+            let is_owner = unsafe {
+                IsValidSid(sid) != 0
+                    && (EqualSid(sid, owner) != 0
+                        || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0)
+            };
+            if allow.Mask & forbidden != 0 && !is_owner {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })();
+    // SAFETY: `descriptor` 由 GetSecurityInfo 分配，且指向其内部的引用不会逃逸此调用。
+    unsafe { LocalFree(descriptor) };
+    result
+}
+
+#[cfg(windows)]
+fn current_user_owns(owner: windows_sys::Win32::Security::PSID) -> io::Result<bool> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        Security::{EqualSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+    let mut token = std::ptr::null_mut();
+    // SAFETY: 当前进程句柄有效，`token` 接收的句柄会在下方关闭。
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = (|| {
+        let mut len = 0;
+        // SAFETY: 传入空缓冲区仅查询所需大小。
+        unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &raw mut len) };
+        if len == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // 为 TOKEN_USER 及其后的 SID 提供按指针对齐的存储。
+        let mut buffer = vec![0usize; (len as usize).div_ceil(size_of::<usize>())];
+        // SAFETY: 缓冲区至少有 `len` 字节，且在使用 SID 期间始终有效。
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                len,
+                &raw mut len,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: 令牌查询在此缓冲区中返回 TOKEN_USER 及紧随其后的 SID。
+        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        // SAFETY: 两个 SID 均来自尚未释放的安全描述符或令牌缓冲区。
+        Ok(unsafe { EqualSid(owner, user.User.Sid) } != 0)
+    })();
+    // SAFETY: 此句柄由 OpenProcessToken 返回，且仅关闭一次。
+    unsafe { CloseHandle(token) };
+    result
 }
 
 /// What compiled code depends on besides its source: Boa's format and opcodes, Verve's
@@ -736,19 +933,13 @@ pub(crate) fn module(source: &str, path: &Path, context: &mut Context) -> JsResu
     Ok(module)
 }
 
-/// Whether the runtime keeps a code cache.
-pub(crate) fn is_on(context: &Context) -> bool {
-    crate::shared(context).code_cache.borrow().is_some()
-}
-
-/// Whether `path` (resolved as the permission model resolves it) is out of JavaScript's reach:
-/// the runtime's code cache directory or its secret's file.
-pub(crate) fn protects(context: &Context, path: &Path) -> bool {
-    crate::shared(context)
-        .code_cache
-        .borrow()
-        .as_ref()
-        .is_some_and(|cache| cache.protects(path))
+/// 判断路径是否受保护；移动或删除目录树时，也保护其祖先路径。
+/// 常规未启用缓存且无继承保护规则的场景无需解析路径。
+pub(crate) fn protects(context: &Context, path: &Path, follow: bool, subtree: bool) -> bool {
+    let state = crate::shared(context);
+    let protection = state.code_cache_protection.borrow();
+    !protection.roots.is_empty()
+        && protection.protects(&crate::permission::real(path, follow), subtree)
 }
 
 /// Writes what the runtime's cache has to write: everything if `settled` (the process is
@@ -776,4 +967,508 @@ pub(crate) fn stats(context: &Context) -> Option<CodeCacheStats> {
         .borrow()
         .as_ref()
         .map(|cache| cache.stats())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "verve-code-cache-boundary-{name}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            create_private_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn ancestor_probe(name: &str, secret: bool, operation: &str, renamed: bool) -> String {
+        let fixture = Fixture::new(name);
+        let ancestor = fixture.0.join("ancestor");
+        let moved = fixture.0.join("moved");
+        let (dir, file, protected) = if secret {
+            let base = ancestor.join("nested");
+            create_private_dir(&base).unwrap();
+            let file = base.join("code-cache-secret");
+            private_secret(&file).unwrap();
+            (fixture.0.join("cache"), file.clone(), vec![file])
+        } else {
+            let dir = ancestor.join("nested/cache");
+            (dir.clone(), dir.join("entry"), Vec::new())
+        };
+        let mut runtime = crate::Runtime::new();
+        runtime.set_code_cache(&dir, [0x5e; 32], protected).unwrap();
+        if !secret {
+            fs::write(&file, [0x5e; 32]).unwrap();
+        }
+        let moved_file = moved.join(file.strip_prefix(&ancestor).unwrap());
+        let path = |path: &Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+        let source = format!(
+            r#"
+            const fs = require('fs');
+            const ancestor = {ancestor};
+            const moved = {moved};
+            globalThis.result = 'pending';
+            (async () => {{
+                try {{
+                    {operation};
+                    globalThis.result = {allowed};
+                }} catch (e) {{
+                    globalThis.result = e.code + ':' + (e.permission || '');
+                }}
+            }})().catch(e => {{ globalThis.result = 'probe-error:' + e; }});
+            "#,
+            ancestor = path(&ancestor),
+            moved = path(&moved),
+            allowed = if renamed {
+                format!(
+                    "'allowed:read-' + fs.readFileSync({}).length",
+                    path(&moved_file)
+                )
+            } else {
+                "'allowed'".to_owned()
+            },
+        );
+        runtime
+            .load_module(&fixture.0.join("probe.cjs"), &source)
+            .unwrap();
+        for _ in 0..100 {
+            runtime.run_microtasks();
+            runtime.run_due();
+            if probe_result(&mut runtime) != "pending" {
+                break;
+            }
+        }
+        let result = probe_result(&mut runtime);
+        if result == "ERR_ACCESS_DENIED:FileSystemWrite" {
+            assert!(
+                file.exists(),
+                "a refusal must leave the protected file intact"
+            );
+            assert!(!moved.exists(), "a refusal must not rename the ancestor");
+        }
+        result
+    }
+
+    fn probe_result(runtime: &mut crate::Runtime) -> String {
+        crate::print(&runtime.eval("globalThis.result").unwrap())
+    }
+
+    fn assert_ancestor_renames_denied(secret: bool) {
+        let mut results = Vec::new();
+        for (family, operation) in [
+            ("sync", "fs.renameSync(ancestor, moved)"),
+            ("promise", "await fs.promises.rename(ancestor, moved)"),
+            (
+                "callback",
+                "await new Promise((resolve, reject) => fs.rename(ancestor, moved, e => e ? reject(e) : resolve()))",
+            ),
+        ] {
+            let result = ancestor_probe(
+                &format!("rename-{secret}-{family}"),
+                secret,
+                operation,
+                true,
+            );
+            results.push((family, result));
+        }
+        assert!(
+            results
+                .iter()
+                .all(|(_, result)| result == "ERR_ACCESS_DENIED:FileSystemWrite"),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn javascript_cannot_rename_cache_ancestors() {
+        assert_ancestor_renames_denied(false);
+    }
+
+    #[test]
+    fn javascript_cannot_rename_secret_ancestors() {
+        assert_ancestor_renames_denied(true);
+    }
+
+    fn assert_ancestor_removals_denied(secret: bool) {
+        let mut results = Vec::new();
+        for (family, operation) in [
+            (
+                "rm-sync",
+                "fs.rmSync(ancestor, { recursive: true, force: true })",
+            ),
+            ("rmdir-sync", "fs.rmdirSync(ancestor, { recursive: true })"),
+            (
+                "rm-promise",
+                "await fs.promises.rm(ancestor, { recursive: true, force: true })",
+            ),
+            (
+                "rmdir-promise",
+                "await fs.promises.rmdir(ancestor, { recursive: true })",
+            ),
+            (
+                "rm-callback",
+                "await new Promise((resolve, reject) => fs.rm(ancestor, { recursive: true, force: true }, e => e ? reject(e) : resolve()))",
+            ),
+            (
+                "rmdir-callback",
+                "await new Promise((resolve, reject) => fs.rmdir(ancestor, { recursive: true }, e => e ? reject(e) : resolve()))",
+            ),
+        ] {
+            let result = ancestor_probe(
+                &format!("remove-{secret}-{family}"),
+                secret,
+                operation,
+                false,
+            );
+            results.push((family, result));
+        }
+        assert!(
+            results
+                .iter()
+                .all(|(_, result)| result == "ERR_ACCESS_DENIED:FileSystemWrite"),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn javascript_cannot_recursively_remove_cache_ancestors() {
+        assert_ancestor_removals_denied(false);
+    }
+
+    #[test]
+    fn javascript_cannot_recursively_remove_secret_ancestors() {
+        assert_ancestor_removals_denied(true);
+    }
+
+    #[test]
+    fn workers_and_descendants_inherit_cache_denials() {
+        let fixture = Fixture::new("worker-protection");
+        let dir = fixture.0.join("cache");
+        let secret_file = fixture.0.join("code-cache-secret");
+        let secret = private_secret(&secret_file).unwrap();
+        let cache_file = dir.join("entry");
+        let ordinary_file = fixture.0.join("ordinary");
+        let mut runtime = crate::Runtime::new();
+        runtime
+            .set_code_cache(&dir, secret, vec![secret_file.clone()])
+            .unwrap();
+        fs::write(&cache_file, b"cache-entry").unwrap();
+        fs::write(&ordinary_file, b"ordinary-ok").unwrap();
+        // 此处刻意使用 FsAccess::All：访问拒绝规则必须独立于普通文件系统授权继承，
+        // 且不能因此在任一 Worker 中启用代码缓存。
+        assert_eq!(runtime.permissions().fs_read, crate::FsAccess::All);
+        let paths = serde_json::json!({
+            "cache": cache_file.to_string_lossy(),
+            "secret": secret_file.to_string_lossy(),
+            "ordinary": ordinary_file.to_string_lossy(),
+        });
+        let probe = format!(
+            r#"
+            function readProbe() {{
+                const fs = process.getBuiltinModule('fs');
+                const report = {{}};
+                for (const [name, path] of Object.entries({paths})) {{
+                    try {{ report[name] = 'allowed:read-' + fs.readFileSync(path, 'hex'); }}
+                    catch (e) {{ report[name] = e.code + ':' + (e.permission || ''); }}
+                    try {{
+                        fs.appendFileSync(path, name === 'ordinary' ? '!' : 'forbidden');
+                        report[name + 'Write'] = 'allowed';
+                    }} catch (e) {{ report[name + 'Write'] = e.code + ':' + (e.permission || ''); }}
+                }}
+                return report;
+            }}
+            "#,
+        );
+        let expected = serde_json::json!({
+            "cache": "ERR_ACCESS_DENIED:FileSystemRead",
+            "secret": "ERR_ACCESS_DENIED:FileSystemRead",
+            "ordinary": format!("allowed:read-{}", hex(b"ordinary-ok")),
+            "cacheWrite": "ERR_ACCESS_DENIED:FileSystemWrite",
+            "secretWrite": "ERR_ACCESS_DENIED:FileSystemWrite",
+            "ordinaryWrite": "allowed",
+        });
+        // 先确认这个父运行时本身已拒绝读取受保护路径。
+        let parent = runtime
+            .eval(&format!("{probe}\nJSON.stringify(readProbe())"))
+            .unwrap();
+        let parent: serde_json::Value = serde_json::from_str(&crate::print(&parent)).unwrap();
+        assert_eq!(parent, expected);
+        fs::write(&ordinary_file, b"ordinary-ok").unwrap();
+
+        let child =
+            format!("{probe}\npostMessage({{ realm: 'child', report: readProbe() }}); close();");
+        let worker = format!(
+            r#"
+            {probe}
+            const report = readProbe();
+            postMessage({{ realm: 'worker', report }});
+            process.getBuiltinModule('fs').writeFileSync({ordinary}, 'ordinary-ok');
+            const child = new Worker('data:text/javascript,' + encodeURIComponent({child}));
+            child.onmessage = e => {{ postMessage(e.data); child.terminate(); close(); }};
+            "#,
+            child = serde_json::to_string(&child).unwrap(),
+            ordinary = serde_json::to_string(&ordinary_file.to_string_lossy()).unwrap(),
+        );
+        runtime
+            .eval(&format!(
+                r#"
+                globalThis.result = {{}};
+                globalThis.worker = new Worker('data:text/javascript,' + encodeURIComponent({worker}));
+                worker.onmessage = e => {{
+                    result[e.data.realm] = e.data.report;
+                    if (Object.keys(result).length === 2) worker.terminate();
+                }};
+                "#,
+                worker = serde_json::to_string(&worker).unwrap(),
+            ))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            runtime.wait_for_workers(Duration::from_millis(20));
+            runtime.run_workers();
+            if runtime
+                .eval("Object.keys(result).length === 2")
+                .unwrap()
+                .to_boolean()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        runtime.eval("worker.terminate()").unwrap();
+        let reports = runtime.eval("JSON.stringify(result)").unwrap();
+        let reports: serde_json::Value = serde_json::from_str(&crate::print(&reports)).unwrap();
+        let console: Vec<_> = runtime
+            .take_console()
+            .into_iter()
+            .map(|line| line.text)
+            .collect();
+        assert_eq!(
+            reports,
+            serde_json::json!({ "worker": expected.clone(), "child": expected }),
+            "both workers must answer through postMessage; console: {console:?}"
+        );
+        assert_eq!(fs::read(&secret_file).unwrap(), secret);
+        assert_eq!(fs::read(&cache_file).unwrap(), b"cache-entry");
+        assert_eq!(fs::read(&ordinary_file).unwrap(), b"ordinary-ok!");
+    }
+
+    #[test]
+    fn ordinary_siblings_can_be_written_renamed_and_removed() {
+        let fixture = Fixture::new("ordinary-siblings");
+        let secret_file = fixture.0.join("secret");
+        let secret = private_secret(&secret_file).unwrap();
+        let mut runtime = crate::Runtime::new();
+        runtime
+            .set_code_cache(&fixture.0.join("cache"), secret, vec![secret_file.clone()])
+            .unwrap();
+        let source = format!(
+            r#"
+            const fs = require('fs');
+            const root = {root};
+            globalThis.result = 'pending';
+            (async () => {{
+                for (const family of ['sync', 'promise', 'callback']) {{
+                    const invoke = (name, ...args) => {{
+                        if (family === 'sync') return fs[name + 'Sync'](...args);
+                        if (family === 'promise') return fs.promises[name](...args);
+                        return new Promise((resolve, reject) =>
+                            fs[name](...args, e => e ? reject(e) : resolve()));
+                    }};
+                    const from = root + '/ordinary-' + family;
+                    const to = from + '-moved';
+                    await invoke('mkdir', from);
+                    await invoke('writeFile', from + '/entry', 'ordinary-ok');
+                    if (fs.readFileSync(from + '/entry', 'utf8') !== 'ordinary-ok')
+                        throw new Error('ordinary read failed');
+                    await invoke('rename', from, to);
+                    await invoke('rm', to, {{ recursive: true, force: true }});
+                    await invoke('mkdir', from);
+                    await invoke('writeFile', from + '/entry', 'ordinary-ok');
+                    await invoke('rmdir', from, {{ recursive: true }});
+                }}
+                globalThis.result = 'allowed';
+            }})().catch(e => {{ globalThis.result = e.code + ':' + e; }});
+            "#,
+            root = serde_json::to_string(&fixture.0.to_string_lossy()).unwrap(),
+        );
+        runtime
+            .load_module(&fixture.0.join("ordinary.cjs"), &source)
+            .unwrap();
+        for _ in 0..100 {
+            runtime.run_microtasks();
+            runtime.run_due();
+            if probe_result(&mut runtime) != "pending" {
+                break;
+            }
+        }
+        assert_eq!(probe_result(&mut runtime), "allowed");
+        assert_eq!(fs::read(&secret_file).unwrap(), secret);
+        assert!(fixture.0.join("cache").is_dir());
+        for family in ["sync", "promise", "callback"] {
+            assert!(!fixture.0.join(format!("ordinary-{family}")).exists());
+            assert!(!fixture.0.join(format!("ordinary-{family}-moved")).exists());
+        }
+    }
+
+    #[test]
+    fn concurrent_first_secret_creation_agrees() {
+        let fixture = Fixture::new("secret-concurrent");
+        let path = fixture.0.join("secret");
+        let start = std::sync::Barrier::new(2);
+        let secrets = std::thread::scope(|scope| {
+            let create = || {
+                start.wait();
+                private_secret(&path).unwrap()
+            };
+            let a = scope.spawn(create);
+            let b = scope.spawn(create);
+            [a.join().unwrap(), b.join().unwrap()]
+        });
+        assert_eq!(secrets[0], secrets[1]);
+        assert_eq!(private_secret(&path).unwrap(), secrets[0]);
+        assert_eq!(fs::read(&path).unwrap(), secrets[0]);
+    }
+
+    #[test]
+    fn secret_length_probe_reads_at_most_33_bytes() {
+        let mut reader = io::Cursor::new(vec![0x5e; 4096]);
+        assert_eq!(
+            read_secret_bytes(&mut reader).unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+        );
+        assert_eq!(reader.position(), 33);
+    }
+
+    #[test]
+    fn a_private_secret_is_reused_and_must_have_exactly_32_bytes() {
+        let fixture = Fixture::new("secret-length");
+        let path = fixture.0.join("secret");
+        let secret = private_secret(&path).unwrap();
+        assert_eq!(private_secret(&path).unwrap(), secret);
+        for len in [0, 1, 31, 33, 4096] {
+            fs::write(&path, vec![0x5e; len]).unwrap();
+            assert_eq!(
+                private_secret(&path).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "length {len}"
+            );
+        }
+        fs::write(&path, [0x5e; 32]).unwrap();
+        assert_eq!(private_secret(&path).unwrap(), [0x5e; 32]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_readable_by_group_or_others_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new("secret-mode");
+        let path = fixture.0.join("secret");
+        private_secret(&path).unwrap();
+        let mut results = Vec::new();
+        for mode in [0o640, 0o604, 0o644] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            results.push((mode, private_secret(&path).err().map(|error| error.kind())));
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(private_secret(&path).is_ok());
+        assert!(
+            results
+                .iter()
+                .all(|(_, error)| *error == Some(io::ErrorKind::PermissionDenied)),
+            "{results:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    fn replace_dacl(path: &Path, sddl: &str) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::{
+                Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
+            },
+        };
+        let sddl: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
+        let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: 两个字符串均以 NUL 结尾，系统分配的描述符在调用后释放。
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &raw mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(converted, 0, "{}", io::Error::last_os_error());
+        // SAFETY: 路径和描述符在本次调用期间有效。
+        let changed = unsafe {
+            SetFileSecurityW(
+                path.as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+        };
+        let error = io::Error::last_os_error();
+        // SAFETY: 描述符由系统转换函数分配，且仅释放一次。
+        unsafe { LocalFree(descriptor) };
+        assert_ne!(changed, 0, "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_existing_cache_directory_writable_by_everyone_is_refused() {
+        let fixture = Fixture::new("cache-dacl");
+        let dir = fixture.0.join("cache");
+        create_private_dir(&dir).unwrap();
+        assert!(CodeCache::open(&dir, [0x5e; 32], Vec::new()).is_ok());
+        replace_dacl(&dir, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;WD)");
+        assert_eq!(
+            CodeCache::open(&dir, [0x5e; 32], Vec::new())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied,
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_secret_readable_by_everyone_is_refused() {
+        let fixture = Fixture::new("secret-dacl");
+        let path = fixture.0.join("secret");
+        let secret = private_secret(&path).unwrap();
+        assert_eq!(private_secret(&path).unwrap(), secret);
+        replace_dacl(&path, "D:P(A;;FA;;;OW)(A;;FR;;;WD)");
+        assert_eq!(
+            private_secret(&path).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied,
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_secret_with_a_null_dacl_is_refused() {
+        let fixture = Fixture::new("secret-null-dacl");
+        let path = fixture.0.join("secret");
+        private_secret(&path).unwrap();
+        replace_dacl(&path, "D:NO_ACCESS_CONTROL");
+        assert_eq!(
+            private_secret(&path).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied,
+        );
+    }
 }

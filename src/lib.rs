@@ -221,6 +221,8 @@ struct Shared {
     profile: RefCell<Option<Rc<process::Profile>>>,
     /// Where compiled modules are kept between runs, if anywhere: see `code_cache`.
     code_cache: RefCell<code_cache::Shared>,
+    /// 即使 Worker 自身不启用缓存，也会继承这些访问拒绝规则。
+    code_cache_protection: RefCell<code_cache::Protection>,
 }
 
 /// The microtask queue: promise reactions, `queueMicrotask`, `process.nextTick`.
@@ -462,7 +464,11 @@ impl Runtime {
             })
             .map(Rc::new);
         #[cfg(not(feature = "code-cache-env"))]
-        let code_cache = None;
+        let code_cache: code_cache::Shared = None;
+        let code_cache_protection = code_cache
+            .as_ref()
+            .map(|cache| cache.protection())
+            .unwrap_or_default();
         // Functions compile when first called, unless `VERVE_LAZY_COMPILE=0`.
         context.set_lazy_compile(!std::env::var("VERVE_LAZY_COMPILE").is_ok_and(|value| {
             matches!(
@@ -498,6 +504,7 @@ impl Runtime {
             wake: std::sync::Arc::default(),
             profile: RefCell::new(None),
             code_cache: RefCell::new(code_cache),
+            code_cache_protection: RefCell::new(code_cache_protection),
         }));
         install_globals(&mut context).expect("the globals install");
         Self { context }
@@ -516,8 +523,8 @@ impl Runtime {
     /// in later runs instead of parsing and compiling the same source again. Off by default.
     /// Entries are signed with `secret`, and only an authentic entry for the very source text,
     /// build and global scope is read. `dir` is made private to the user if it is not there
-    /// (owner-only on Windows, `0700` elsewhere), and refused on Unix unless the user owns it and
-    /// no one else can write it; JavaScript this runtime runs cannot read or write it.
+    /// (owner-only on Windows, `0700` elsewhere), and refused unless the user owns it and no
+    /// one else can write it; JavaScript this runtime and its workers run cannot read or write it.
     ///
     /// Whoever holds `secret` can make every module this runtime loads run code of their
     /// choosing: keep it where code less trusted than those modules cannot read it, never in
@@ -542,7 +549,9 @@ impl Runtime {
         protected: Vec<PathBuf>,
     ) -> std::io::Result<()> {
         let cache = code_cache::CodeCache::open(dir, secret, protected)?;
-        *shared(&self.context).code_cache.borrow_mut() = Some(Rc::new(cache));
+        let state = shared(&self.context);
+        *state.code_cache_protection.borrow_mut() = cache.protection();
+        *state.code_cache.borrow_mut() = Some(Rc::new(cache));
         Ok(())
     }
 

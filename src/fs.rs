@@ -872,6 +872,9 @@ fn remove(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         flag(&options, "recursive", context)?,
         flag(&options, "force", context)?,
     );
+    if recursive {
+        crate::permission::write_tree(context, &path)?;
+    }
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(e) if force && e.kind() == std::io::ErrorKind::NotFound => {
@@ -895,6 +898,7 @@ fn remove_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     crate::permission::write_here(context, &path)?;
     let outcome = if flag(&arg(args, 1), "recursive", context)? {
+        crate::permission::write_tree(context, &path)?;
         std::fs::remove_dir_all(&path)
     } else {
         std::fs::remove_dir(&path)
@@ -1375,8 +1379,8 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         |_, args, cx| {
             let from = path_arg(args, 0, cx)?;
             let to = path_arg(args, 1, cx)?;
-            crate::permission::write_here(cx, &from)?;
-            crate::permission::write_here(cx, &to)?;
+            crate::permission::write_tree(cx, &from)?;
+            crate::permission::write_tree(cx, &to)?;
             std::fs::rename(&from, &to).map_err(|e| io_error2(cx, e, "rename", &from, &to))?;
             Ok(JsValue::undefined())
         },
