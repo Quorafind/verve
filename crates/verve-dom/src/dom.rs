@@ -249,6 +249,8 @@ pub struct Dom {
     /// Nodes changed since the last [`Dom::take_changes`], in the order they changed.
     changed: Vec<NodeId>,
     changed_set: HashSet<NodeId>,
+    /// 媒体绑定独立消费的变更，不能依赖观察者是否启用，也不能抢走绘制变化。
+    media_changed: HashSet<NodeId>,
     /// Subtrees whose place in the document changed: `true` connected, `false` disconnected.
     moved: Vec<(NodeId, bool)>,
     /// Nodes whose parent changed since the bindings last looked: their objects' links follow.
@@ -303,6 +305,7 @@ impl Dom {
             revision: 0,
             changed: Vec::new(),
             changed_set: HashSet::new(),
+            media_changed: HashSet::new(),
             moved: Vec::new(),
             relinked: Vec::new(),
             mutations: Vec::new(),
@@ -371,6 +374,7 @@ impl Dom {
             }
         };
         self.roots.insert(id);
+        self.mark_media(id);
         id
     }
 
@@ -388,6 +392,7 @@ impl Dom {
 
     /// Marks `id` changed.
     pub fn mark(&mut self, id: NodeId) {
+        self.mark_media(id);
         self.revision = self.revision.wrapping_add(1);
         if !self.styles.is_empty()
             && (self.styles.contains(&id)
@@ -398,6 +403,20 @@ impl Dom {
         if self.changed_set.insert(id) {
             self.changed.push(id);
         }
+    }
+
+    fn mark_media(&mut self, id: NodeId) {
+        if self.get(id).is_some_and(|n| {
+            n.namespace == Namespace::Html && matches!(n.tag(), Some("video" | "audio"))
+        }) {
+            self.media_changed.insert(id);
+        }
+    }
+
+    pub(crate) fn take_media_changes(&mut self) -> Vec<NodeId> {
+        let mut nodes: Vec<_> = self.media_changed.drain().collect();
+        nodes.sort_unstable();
+        nodes
     }
 
     /// What changed since the last time this was asked, and forgets it.
@@ -716,6 +735,11 @@ impl Dom {
             if let Some(node) = &slot.node {
                 style |= node.tag() == Some("style");
                 stack.extend(node.children.iter().copied());
+                if node.namespace == Namespace::Html
+                    && matches!(node.tag(), Some("video" | "audio"))
+                {
+                    self.media_changed.insert(at);
+                }
             }
         }
         if style {

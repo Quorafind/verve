@@ -512,6 +512,14 @@ impl Runtime {
             .set_native_stack_limit(bytes);
     }
 
+    /// 复制当前 realm 的 `URL.createObjectURL` 已有存储中的字节。
+    ///
+    /// 撤销后不再提供新副本；已交给解码器的副本由宿主管理。本接口不获取远程地址，
+    /// 也不授予网络权限，非 blob URL 或不存在的 URL 返回 `None`。
+    pub fn object_url_bytes(&self, url: &str) -> Option<Vec<u8>> {
+        shared(&self.context).blobs.borrow().get(url).cloned()
+    }
+
     /// The realm itself, for a host defining natives of its own in it.
     pub fn context(&mut self) -> &mut Context {
         &mut self.context
