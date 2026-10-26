@@ -502,6 +502,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// A new file only its owner can read and write, where the platform says who can.
+#[cfg(not(windows))]
 fn private_file(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -511,6 +512,38 @@ fn private_file(path: &Path) -> io::Result<fs::File> {
         options.mode(0o600);
     }
     options.open(path)
+}
+
+#[cfg(windows)]
+fn private_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{
+            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        },
+    };
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    with_private_security(|attributes| {
+        // SAFETY: 路径以 NUL 结尾，安全描述符在创建期间有效；CREATE_NEW 不打开已有对象。
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: 创建成功的句柄只交给 File 一次，由 File 负责关闭。
+        Ok(unsafe { fs::File::from_raw_handle(handle) })
+    })
 }
 
 /// The user's own code cache secret, for `verve run`: 32 random bytes in a file only they can
@@ -644,44 +677,83 @@ fn make_private_dir(path: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn make_private_dir(path: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    with_private_security(|attributes| {
+        // Safety: `wide` is a NUL-terminated wide path and `attributes` points at a valid
+        // descriptor for the length of the call.
+        // SAFETY: 路径和安全描述符在此调用期间有效，所有者和 DACL 随目录原子创建。
+        let made = unsafe { CreateDirectoryW(wide.as_ptr(), attributes) };
+        if made == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    })
+}
+
+#[cfg(windows)]
+fn with_private_security<T>(
+    create: impl FnOnce(&windows_sys::Win32::Security::SECURITY_ATTRIBUTES) -> io::Result<T>,
+) -> io::Result<T> {
     use windows_sys::Win32::{
         Foundation::LocalFree,
         Security::{
-            Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            Authorization::{
+                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            },
             SECURITY_ATTRIBUTES,
         },
-        Storage::FileSystem::CreateDirectoryW,
     };
-    // Protected (no inherited entries), full access for the folder's owner, inherited by what
-    // is made in it.
-    let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)\0".encode_utf16().collect();
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-    let mut descriptor = std::ptr::null_mut();
-    // Safety: `sddl` is a NUL-terminated wide string; `descriptor` receives a descriptor
-    // allocated by the system, freed below.
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &raw mut descriptor,
-            std::ptr::null_mut(),
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    let attributes = SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: descriptor,
-        bInheritHandle: 0,
-    };
-    // Safety: `wide` is a NUL-terminated wide path and `attributes` points at a valid
-    // descriptor for the length of the call.
-    let made = unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) };
-    let error = io::Error::last_os_error();
-    // Safety: `descriptor` was allocated by the conversion above.
-    unsafe { LocalFree(descriptor) };
-    if made == 0 { Err(error) } else { Ok(()) }
+    with_current_user_sid(|sid| {
+        let mut text = std::ptr::null_mut();
+        // SAFETY: SID 属于尚未释放的令牌缓冲区；系统分配的字符串在复制后释放。
+        if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut len = 0;
+        // SAFETY: 转换成功返回以 NUL 结尾的 UTF-16 字符串。
+        while unsafe { *text.add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: 已确定字符串长度，复制后不再引用这块系统分配的内存。
+        let sid = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
+        // SAFETY: 字符串由 ConvertSidToStringSidW 分配，且仅释放一次。
+        unsafe { LocalFree(text.cast()) };
+        // 默认 TokenOwner 可能是 Administrators，而校验要求 TokenUser；必须在创建时
+        // 显式指定用户所有者，不能先暴露对象再改 owner，也不能继承父目录的宽权限。
+        // Protected (no inherited entries), full access for the folder's owner, inherited by what
+        // is made in it.
+        let sddl: Vec<u16> = format!("O:{sid}D:P(A;OICI;FA;;;{sid})\0")
+            .encode_utf16()
+            .collect();
+        let mut descriptor = std::ptr::null_mut();
+        // Safety: `sddl` is a NUL-terminated wide string; `descriptor` receives a descriptor
+        // allocated by the system, freed below.
+        // SAFETY: 描述符含独立的 SID 副本，存活至文件或目录创建调用结束。
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &raw mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        // 创建路径先保存系统错误为 io::Error，再释放描述符，避免清理覆盖错误码。
+        let result = create(&attributes);
+        // Safety: `descriptor` was allocated by the conversion above.
+        // SAFETY: 创建调用已结束，描述符及其中的 SID 不再被引用，且仅释放一次。
+        unsafe { LocalFree(descriptor) };
+        result
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -839,9 +911,21 @@ fn windows_private(file: &fs::File, secret: bool) -> io::Result<bool> {
 
 #[cfg(windows)]
 fn current_user_owns(owner: windows_sys::Win32::Security::PSID) -> io::Result<bool> {
+    use windows_sys::Win32::Security::EqualSid;
+    with_current_user_sid(|sid| {
+        // SAFETY: 两个 SID 均来自尚未释放的安全描述符或令牌缓冲区。
+        Ok(unsafe { EqualSid(owner, sid) } != 0)
+    })
+}
+
+/// 创建和校验共用 TokenUser 查询，避免误用可能指向 Administrators 的 TokenOwner。
+#[cfg(windows)]
+fn with_current_user_sid<T>(
+    use_sid: impl FnOnce(windows_sys::Win32::Security::PSID) -> io::Result<T>,
+) -> io::Result<T> {
     use windows_sys::Win32::{
         Foundation::CloseHandle,
-        Security::{EqualSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser},
+        Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser},
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
     let mut token = std::ptr::null_mut();
@@ -873,8 +957,8 @@ fn current_user_owns(owner: windows_sys::Win32::Security::PSID) -> io::Result<bo
         }
         // SAFETY: 令牌查询在此缓冲区中返回 TOKEN_USER 及紧随其后的 SID。
         let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
-        // SAFETY: 两个 SID 均来自尚未释放的安全描述符或令牌缓冲区。
-        Ok(unsafe { EqualSid(owner, user.User.Sid) } != 0)
+        // SID 仅在回调期间使用，不得逃逸令牌缓冲区的生命周期。
+        use_sid(user.User.Sid)
     })();
     // SAFETY: 此句柄由 OpenProcessToken 返回，且仅关闭一次。
     unsafe { CloseHandle(token) };
@@ -1427,6 +1511,116 @@ mod tests {
         // SAFETY: 描述符由系统转换函数分配，且仅释放一次。
         unsafe { LocalFree(descriptor) };
         assert_ne!(changed, 0, "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_new_private_file_has_the_user_owner_and_no_inherited_access() {
+        let fixture = Fixture::new("new-file-owner");
+        // 刻意给父目录宽权限，确保文件在创建时自带用户 owner 和受保护 DACL，
+        // 而不是依赖父目录恰好私密或创建后再收紧权限。
+        replace_dacl(&fixture.0, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;WD)");
+        let path = fixture.0.join("secret");
+        let mut file = private_file(&path).unwrap();
+        file.write_all(b"private").unwrap();
+        check_private_file(&file, &path, true).unwrap();
+        drop(file);
+        check_private(&path, true).unwrap();
+        assert_eq!(
+            private_file(&path).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists,
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"private");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_new_private_directory_has_the_user_owner_and_no_inherited_access() {
+        let fixture = Fixture::new("new-dir-owner");
+        replace_dacl(&fixture.0, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;WD)");
+        let path = fixture.0.join("cache");
+        make_private_dir(&path).unwrap();
+        check_private(&path, false).unwrap();
+        assert_eq!(
+            make_private_dir(&path).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists,
+        );
+    }
+
+    #[cfg(windows)]
+    fn inherited_dacl_is_user_only(path: &Path) -> io::Result<bool> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::{
+                ACCESS_ALLOWED_ACE, ACE_HEADER,
+                Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
+                DACL_SECURITY_INFORMATION, GetAce, INHERITED_ACE, IsValidAcl,
+            },
+            Storage::FileSystem::FILE_ALL_ACCESS,
+            System::SystemServices::ACCESS_ALLOWED_ACE_TYPE,
+        };
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut dacl = std::ptr::null_mut();
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: 路径以 NUL 结尾；DACL 指向下方才释放的系统描述符内部。
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &raw mut dacl,
+                std::ptr::null_mut(),
+                &raw mut descriptor,
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let result = (|| {
+            // SAFETY: DACL 来自系统安全 API，描述符在整个检查期间有效。
+            if dacl.is_null() || unsafe { IsValidAcl(dacl) == 0 || (*dacl).AceCount != 1 } {
+                return Ok(false);
+            }
+            let mut ace = std::ptr::null_mut();
+            // SAFETY: 已确认 DACL 有且只有一个 ACE，系统返回的指针不逃逸此调用。
+            if unsafe { GetAce(dacl, 0, &raw mut ace) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: GetAce 返回已校验 ACL 内的 ACE，先确认类型再读取普通允许项。
+            let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+            if u32::from(header.AceType) != ACCESS_ALLOWED_ACE_TYPE
+                || u32::from(header.AceFlags) & INHERITED_ACE == 0
+            {
+                return Ok(false);
+            }
+            // SAFETY: ACE 类型已确认，其 SID 与描述符的生命周期一致。
+            let allow = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+            let sid = (&raw const allow.SidStart).cast_mut().cast();
+            Ok(allow.Mask == FILE_ALL_ACCESS && current_user_owns(sid)?)
+        })();
+        // SAFETY: 描述符由 GetNamedSecurityInfoW 分配，结果不保留内部指针。
+        unsafe { LocalFree(descriptor) };
+        result
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_children_inherit_access_only_for_the_current_user() {
+        let fixture = Fixture::new("inherited-user-access");
+        let dir = fixture.0.join("ordinary-dir");
+        let file = fixture.0.join("ordinary-file");
+        let nested = dir.join("nested-file");
+        fs::create_dir(&dir).unwrap();
+        fs::write(&file, b"ordinary").unwrap();
+        fs::write(&nested, b"nested").unwrap();
+        // 普通创建仍可能使用默认 TokenOwner；此处检查继承的授权 SID 必须是用户，
+        // 而不是动态 owner、Administrators 或 Everyone，且不能丢失对子目录的继承。
+        for path in [&dir, &file, &nested] {
+            assert!(inherited_dacl_is_user_only(path).unwrap(), "{path:?}");
+        }
     }
 
     #[cfg(windows)]
