@@ -308,3 +308,117 @@ fn file_streams_pipe_through_zlib_and_back() {
     );
     assert_eq!(result, ["undefined", "true", "line", "true", "true"]);
 }
+
+#[cfg(unix)]
+#[test]
+fn posix_directory_descriptors_support_sync_without_reading_contents() {
+    let dir = folder("directory-sync");
+    let mut rt = Runtime::new();
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        const fs = require('node:fs');
+        const fd = fs.openSync(__dirname, 'r');
+        const directory = fs.fstatSync(fd).isDirectory();
+        fs.fsyncSync(fd);
+        fs.closeSync(fd);
+        let closed, read, write;
+        try { fs.fstatSync(fd) } catch (error) { closed = error.code }
+        try { fs.readFileSync(__dirname) } catch (error) { read = error.code }
+        try { fs.openSync(__dirname, 'w') } catch (error) { write = error.code }
+        exports.result = [directory, closed, read, write];
+        "#,
+    );
+    assert_eq!(result, ["true", "EBADF", "EISDIR", "EISDIR"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_directory_descriptors_support_callback_sync_and_close() {
+    let dir = folder("directory-callback");
+    let mut rt = Runtime::new();
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        const fs = require('node:fs');
+        exports.result = ['pending'];
+        fs.open(__dirname, 'r', (error, fd) => {
+            if (error) { exports.result = ['open', error.code]; return }
+            fs.fsync(fd, error => {
+                if (error) { exports.result = ['sync', error.code]; return }
+                fs.close(fd, error => {
+                    exports.result = [error === null];
+                    try { fs.fstatSync(fd) } catch (error) { exports.result.push(error.code) }
+                });
+            });
+        });
+        "#,
+    );
+    assert_eq!(result, ["true", "EBADF"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_directory_file_handles_support_the_atomic_publish_protocol() {
+    let dir = folder("directory-promise");
+    let mut rt = Runtime::new();
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        const fs = require('node:fs/promises');
+        const path = require('node:path');
+        exports.result = ['pending'];
+        (async () => {
+            const temporary = path.join(__dirname, 'temporary.json');
+            const destination = path.join(__dirname, 'unit.json');
+            const file = await fs.open(temporary, 'wx');
+            try { await file.writeFile('{"n":42}'); await file.sync() }
+            finally { await file.close() }
+            await fs.rename(temporary, destination);
+            const directory = await fs.open(__dirname, 'r');
+            try { await directory.sync() } finally { await directory.close() }
+            exports.result = [await fs.readFile(destination, 'utf8')];
+        })().catch(error => { exports.result = ['error', error.code] });
+        "#,
+    );
+    assert_eq!(result, [r#"{"n":42}"#]);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_directory_opens_keep_the_node_error() {
+    let dir = folder("directory-windows");
+    let mut rt = Runtime::new();
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        const fs = require('node:fs');
+        exports.result = [];
+        try { fs.openSync(__dirname, 'r') } catch (error) { exports.result.push(error.code) }
+        fs.open(__dirname, 'r', error => exports.result.push(error.code));
+        fs.promises.open(__dirname, 'r').catch(error => exports.result.push(error.code));
+        "#,
+    );
+    assert_eq!(result, ["EISDIR", "EISDIR", "EISDIR"]);
+}
+
+#[test]
+fn directory_open_still_requires_read_permission() {
+    let dir = folder("directory-permission");
+    let mut rt = Runtime::new();
+    rt.set_permissions(verve::Permissions::none());
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        exports.result = [];
+        try { require('node:fs').openSync(__dirname, 'r') }
+        catch (error) { exports.result.push(error.code) }
+        "#,
+    );
+    assert_eq!(result, ["ERR_ACCESS_DENIED"]);
+}

@@ -1105,6 +1105,7 @@ fn open(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     let flags = flags_of(&arg(args, 1), "r", context)?;
     opening(context, &path, flags)?;
+    #[cfg(windows)]
     if flags.read && !flags.write && Path::new(&path).is_dir() {
         return Err(fs_error(context, "EISDIR", "open", Some(&path), None));
     }
