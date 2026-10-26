@@ -169,6 +169,15 @@ const DOCUMENT_METHODS: &[Method] = &[
     ("hasFocus", 0, |_, _, _| Ok(true.into())),
     ("importNode", 2, |_, args, cx| {
         let id = super::node_arg(args, 0, "importNode", "Document")?;
+        if read_dom(cx, |dom| {
+            matches!(dom.get(id).map(|n| &n.kind), Some(NodeKind::Document))
+        }) {
+            return Err(super::dom_error(
+                cx,
+                "不能导入文档节点",
+                "NotSupportedError",
+            ));
+        }
         let deep = arg(args, 1).to_boolean();
         let copy = with_dom(cx, |dom| dom.clone_node(id, deep));
         Ok(wrap_opt(cx, copy))
@@ -176,6 +185,15 @@ const DOCUMENT_METHODS: &[Method] = &[
     ("adoptNode", 1, |_, args, cx| {
         let node = arg(args, 0);
         let id = super::node_arg(args, 0, "adoptNode", "Document")?;
+        if read_dom(cx, |dom| {
+            matches!(dom.get(id).map(|n| &n.kind), Some(NodeKind::Document))
+        }) {
+            return Err(super::dom_error(
+                cx,
+                "不能转移文档节点",
+                "NotSupportedError",
+            ));
+        }
         with_dom(cx, |dom| dom.detach(id));
         Ok(node)
     }),

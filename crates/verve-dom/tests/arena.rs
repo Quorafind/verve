@@ -8,6 +8,73 @@ use common::{Page, on_page};
 use verve_dom::Options;
 
 #[test]
+fn review_generation_exhaustion_never_aliases_a_stale_handle() {
+    let mut dom = verve_dom::dom::Dom::new();
+    let stale: u32 = dom.create_element("i");
+    dom.free(stale);
+    for _ in 0..1024 {
+        let node = dom.create_element("b");
+        assert_ne!(node, stale);
+        assert!(!dom.exists(stale));
+        dom.free(node);
+    }
+}
+
+#[test]
+fn review_stale_classlist_cannot_edit_a_reused_slot() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        page.eval("globalThis.stale = (() => { const node = document.createElement('div'); return node.classList; })()");
+        page.document.sweep(&mut page.runtime);
+        for _ in 0..300 {
+            page.eval("globalThis.victim = document.createElement('p'); stale.add('pwned')");
+            assert_eq!(page.eval("victim.className"), "");
+            page.eval("victim = null");
+            page.document.sweep(&mut page.runtime);
+        }
+    });
+}
+
+#[test]
+fn review_discarded_shadow_and_observer_trees_are_reclaimed() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        let before = page.document.dom().len();
+        page.eval(r#"
+            (() => {
+                for (let n = 0; n < 500; n++) {
+                    const host = document.createElement('div');
+                    host.attachShadow({mode: 'closed'}).innerHTML = '<b>x</b>';
+                    const target = document.createElement('p');
+                    new MutationObserver(() => target.textContent).observe(target, {attributes: true});
+                    new ResizeObserver(() => target.textContent).observe(target);
+                    new IntersectionObserver(() => target.textContent).observe(target);
+                }
+            })();
+        "#);
+        page.document.sweep(&mut page.runtime);
+        page.document.sweep(&mut page.runtime);
+        assert_eq!(page.document.dom().len(), before);
+        page.eval(
+            r#"
+            globalThis.shadowLeaf = (() => {
+                const host = document.createElement('div');
+                host.mark = '保留';
+                const root = host.attachShadow({mode: 'closed'});
+                root.innerHTML = '<b>x</b>';
+                return root.firstChild;
+            })();
+        "#,
+        );
+        page.document.sweep(&mut page.runtime);
+        assert_eq!(page.eval("shadowLeaf.getRootNode().host.mark"), "保留");
+        page.eval("shadowLeaf = null");
+        page.document.sweep(&mut page.runtime);
+        assert_eq!(page.document.dom().len(), before);
+    });
+}
+
+#[test]
 fn detached_trees_nothing_holds_are_reclaimed_and_the_rest_survive() {
     on_page(|| {
         let mut page = Page::new(Options::default());

@@ -2478,10 +2478,7 @@ const FORM_METHODS: &[Method] = &[
     // `submit()` sends no `submit` event, as a browser's does not; the drawer hears it.
     ("submit", 0, |this, _, cx| {
         let id = node_of(this)?;
-        shared(cx)
-            .borrow_mut()
-            .requests
-            .push(crate::Request::Submit(id));
+        super::events::queue_submit(cx, id)?;
         Ok(JsValue::undefined())
     }),
     ("requestSubmit", 1, |this, args, cx| {

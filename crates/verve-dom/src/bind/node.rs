@@ -47,6 +47,7 @@ pub fn with_dom<R>(context: &mut Context, f: impl FnOnce(&mut Dom) -> R) -> R {
         };
         (result, state.dom.has_relinked(), mutated, moved)
     };
+    super::observers::distribute(context);
     if relink_due {
         relink(context);
     }
@@ -102,19 +103,30 @@ pub fn wrap(context: &mut Context, id: NodeId) -> JsValue {
     if let Some(object) = existing_wrapper(context, id) {
         return object.into();
     }
+    let Some(object) = make_wrapper(context, id) else {
+        return JsValue::null();
+    };
+    link(context, id, &object);
+    object.into()
+}
+
+fn make_wrapper(context: &mut Context, id: NodeId) -> Option<JsObject> {
     let prototype = {
         let state = shared(context);
         let state = state.borrow();
         let is_shadow_root = state.shadow_hosts.contains_key(&id);
         match class_name(&state.dom, id) {
-            None => return JsValue::null(),
+            None => return None,
             Some(_) if is_shadow_root => state.prototype("ShadowRoot"),
             Some(name) => state.prototype(name),
         }
     };
     let object = verve::dom_events::host_target(prototype, host_id_of(id));
-    adopt(context, id, &object);
-    object.into()
+    shared(context)
+        .borrow_mut()
+        .wrappers
+        .insert(id, object.downgrade());
+    Some(object)
 }
 
 pub fn wrap_opt(context: &mut Context, id: Option<NodeId>) -> JsValue {
@@ -153,20 +165,26 @@ pub fn adopt(context: &mut Context, id: NodeId, object: &JsObject) {
     link(context, id, object);
 }
 
-fn link(context: &mut Context, id: NodeId, object: &JsObject) {
-    let parent = read_dom(context, |dom| dom.parent(id));
-    match parent {
-        Some(parent) => {
-            let Some(parent_object) = wrap(context, parent).as_object() else {
-                return;
-            };
-            verve::dom_events::hold(object, |held| held.push(parent_object.clone()));
-            verve::dom_events::hold(&parent_object, |held| held.push(object.clone()));
-            shared(context).borrow_mut().links.insert(id, parent);
-        }
-        None => {
+fn link(context: &mut Context, mut id: NodeId, object: &JsObject) {
+    let mut object = object.clone();
+    loop {
+        let Some(parent) = read_dom(context, |dom| dom.parent(id)) else {
             shared(context).borrow_mut().links.remove(&id);
+            break;
+        };
+        let existing = existing_wrapper(context, parent);
+        let fresh = existing.is_none();
+        let Some(parent_object) = existing.or_else(|| make_wrapper(context, parent)) else {
+            break;
+        };
+        verve::dom_events::hold(&object, |held| held.push(parent_object.clone()));
+        verve::dom_events::hold(&parent_object, |held| held.push(object.clone()));
+        shared(context).borrow_mut().links.insert(id, parent);
+        if !fresh {
+            break;
         }
+        id = parent;
+        object = parent_object;
     }
 }
 
@@ -175,6 +193,9 @@ fn link(context: &mut Context, id: NodeId, object: &JsObject) {
 pub fn relink(context: &mut Context) {
     let moved = shared(context).borrow_mut().dom.take_relinked();
     let mut seen = std::collections::HashSet::new();
+    let mut due = Vec::new();
+    let mut removed =
+        std::collections::HashMap::<NodeId, std::collections::HashSet<JsObject>>::new();
     for id in moved {
         if !seen.insert(id) {
             continue;
@@ -190,20 +211,21 @@ pub fn relink(context: &mut Context) {
         if old == new {
             continue;
         }
-        if let Some(old) = old
-            && let Some(old_object) = existing_wrapper(context, old)
-        {
-            verve::dom_events::hold(&old_object, |held| {
-                if let Some(at) = held.iter().position(|o| JsObject::equals(o, &object)) {
-                    held.swap_remove(at);
-                }
-            });
-            verve::dom_events::hold(&object, |held| {
-                if let Some(at) = held.iter().position(|o| JsObject::equals(o, &old_object)) {
-                    held.swap_remove(at);
-                }
-            });
+        if let Some(old) = old {
+            removed.entry(old).or_default().insert(object.clone());
+            if let Some(old_object) = existing_wrapper(context, old) {
+                verve::dom_events::hold(&object, |held| held.retain(|o| o != &old_object));
+            }
         }
+        due.push((id, object));
+    }
+    // 同一父节点的 JS 保活边也一次删除，否则批量 DOM 搬移仍会退化成平方级。
+    for (parent, removed) in removed {
+        if let Some(object) = existing_wrapper(context, parent) {
+            verve::dom_events::hold(&object, |held| held.retain(|o| !removed.contains(o)));
+        }
+    }
+    for (id, object) in due {
         link(context, id, &object);
     }
 }
@@ -218,23 +240,107 @@ pub fn node_or_text(value: &JsValue, context: &mut Context) -> JsResult<NodeId> 
 }
 
 /// `nodes` — nodes or strings — as one node: the node itself, or a fragment of them.
-fn convert_nodes(args: &[JsValue], context: &mut Context) -> JsResult<NodeId> {
-    if let [only] = args
-        && let Some(id) = node_id(only)
-    {
-        return Ok(id);
-    }
+fn convert_nodes(
+    args: &[JsValue],
+    parent: NodeId,
+    removing: &[NodeId],
+    context: &mut Context,
+) -> JsResult<NodeId> {
     let mut ids = Vec::new();
+    let mut fragments = std::collections::HashSet::new();
+    let mut ancestor = false;
     for value in args {
-        ids.push(node_or_text(value, context)?);
+        let id = node_or_text(value, context)?;
+        read_dom(context, |dom| {
+            ancestor |= id == parent || (!dom.children(id).is_empty() && dom.contains(id, parent));
+            if matches!(dom.get(id).map(|n| &n.kind), Some(NodeKind::Fragment)) {
+                if fragments.insert(id) {
+                    ids.extend_from_slice(dom.children(id));
+                }
+            } else {
+                ids.push(id);
+            }
+        });
+    }
+    // 同一节点出现多次时只保留最后一次，等同于依次移入临时片段。
+    let mut seen = std::collections::HashSet::new();
+    ids.reverse();
+    ids.retain(|id| seen.insert(*id));
+    ids.reverse();
+    let single_node = args.len() == 1 && node_id(&args[0]).is_some();
+    let allowed = !ancestor
+        && read_dom(context, |dom| {
+            if !single_node
+                && ids
+                    .iter()
+                    .any(|id| matches!(dom.get(*id).map(|n| &n.kind), Some(NodeKind::Doctype(_))))
+            {
+                return false;
+            }
+            if matches!(dom.get(parent).map(|n| &n.kind), Some(NodeKind::Document)) {
+                let mut final_nodes: Vec<NodeId> = dom
+                    .children(parent)
+                    .iter()
+                    .copied()
+                    .filter(|id| !seen.contains(id) && !removing.contains(id))
+                    .collect();
+                final_nodes.extend(ids.iter().copied());
+                let elements = final_nodes
+                    .iter()
+                    .filter(|id| dom.get(**id).is_some_and(|n| n.is_element()))
+                    .count();
+                let doctypes = final_nodes
+                    .iter()
+                    .filter(|id| {
+                        matches!(dom.get(**id).map(|n| &n.kind), Some(NodeKind::Doctype(_)))
+                    })
+                    .count();
+                elements <= 1
+                    && doctypes <= 1
+                    && ids.iter().all(|id| {
+                        !dom.contains(*id, parent)
+                            && matches!(
+                                dom.get(*id).map(|n| &n.kind),
+                                Some(
+                                    NodeKind::Element(_)
+                                        | NodeKind::Doctype(_)
+                                        | NodeKind::Comment(_)
+                                )
+                            )
+                    })
+            } else {
+                ids.iter().all(|id| dom.may_insert(parent, *id))
+            }
+        });
+    if !allowed {
+        return Err(dom_error(
+            context,
+            "转换的节点不能插入此父节点",
+            "HierarchyRequestError",
+        ));
+    }
+    if let [only] = args {
+        return Ok(node_id(only).unwrap_or_else(|| ids[0]));
     }
     Ok(with_dom(context, |dom| {
         let fragment = dom.create_fragment();
+        dom.detach_many(&ids);
         for id in ids {
             dom.append(fragment, id);
         }
         fragment
     }))
+}
+
+fn viable_sibling(context: &Context, id: NodeId, args: &[JsValue], step: isize) -> Option<NodeId> {
+    let nodes: std::collections::HashSet<NodeId> = args.iter().filter_map(node_id).collect();
+    read_dom(context, |dom| {
+        let mut next = dom.sibling(id, step, false);
+        while next.is_some_and(|id| nodes.contains(&id)) {
+            next = dom.sibling(next.expect("兄弟存在"), step, false);
+        }
+        next
+    })
 }
 
 /// Inserts `child` into `parent` before `before`, as `insertBefore` does: the DOM's errors for
@@ -483,6 +589,7 @@ const NODE_METHODS: &[Method] = &[
             ));
         }
         if fresh != old {
+            convert_nodes(&args[..1], parent, &[old], cx)?;
             let next = read_dom(cx, |dom| dom.sibling(old, 1, false));
             with_dom(cx, |dom| dom.detach(old));
             let next = if next == Some(fresh) {
@@ -661,20 +768,21 @@ fn equal_nodes(dom: &Dom, a: NodeId, b: NodeId) -> bool {
 pub const PARENT_NODE_METHODS: &[Method] = &[
     ("append", 0, |this, args, cx| {
         let parent = node_of(this)?;
-        let node = convert_nodes(args, cx)?;
+        let node = convert_nodes(args, parent, &[], cx)?;
         insert(cx, parent, node, None, "append")?;
         Ok(JsValue::undefined())
     }),
     ("prepend", 0, |this, args, cx| {
         let parent = node_of(this)?;
-        let node = convert_nodes(args, cx)?;
+        let node = convert_nodes(args, parent, &[], cx)?;
         let first = read_dom(cx, |dom| dom.children(parent).first().copied());
         insert(cx, parent, node, first, "prepend")?;
         Ok(JsValue::undefined())
     }),
     ("replaceChildren", 0, |this, args, cx| {
         let parent = node_of(this)?;
-        let node = convert_nodes(args, cx)?;
+        let removing = read_dom(cx, |dom| dom.children(parent).to_vec());
+        let node = convert_nodes(args, parent, &removing, cx)?;
         with_dom(cx, |dom| dom.empty(parent));
         insert(cx, parent, node, None, "replaceChildren")?;
         Ok(JsValue::undefined())
@@ -684,9 +792,10 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
         let selector = query_selector(args, cx)?;
         let found = read_dom(cx, |dom| {
             let scope = dom.scope_of(id);
-            dom.descendants(id)
+            selector
+                .select(dom, dom.descendants(id), Some(scope), true)
                 .into_iter()
-                .find(|n| selector.matches_in(dom, *n, Some(scope)))
+                .next()
         });
         Ok(wrap_opt(cx, found))
     }),
@@ -695,10 +804,7 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
         let selector = query_selector(args, cx)?;
         let found = read_dom(cx, |dom| {
             let scope = dom.scope_of(id);
-            dom.descendants(id)
-                .into_iter()
-                .filter(|n| selector.matches_in(dom, *n, Some(scope)))
-                .collect()
+            selector.select(dom, dom.descendants(id), Some(scope), false)
         });
         Ok(node_list(found, cx))
     }),
@@ -819,8 +925,15 @@ pub const CHILD_NODE_METHODS: &[Method] = &[
         let Some(parent) = read_dom(cx, |dom| dom.parent(id)) else {
             return Ok(JsValue::undefined());
         };
-        let node = convert_nodes(args, cx)?;
-        insert(cx, parent, node, Some(id), "before")?;
+        let previous = viable_sibling(cx, id, args, -1);
+        let node = convert_nodes(args, parent, &[], cx)?;
+        let next = read_dom(cx, |dom| {
+            previous.map_or_else(
+                || dom.children(parent).first().copied(),
+                |p| dom.sibling(p, 1, false),
+            )
+        });
+        insert(cx, parent, node, next, "before")?;
         Ok(JsValue::undefined())
     }),
     ("after", 0, |this, args, cx| {
@@ -828,13 +941,8 @@ pub const CHILD_NODE_METHODS: &[Method] = &[
         let Some(parent) = read_dom(cx, |dom| dom.parent(id)) else {
             return Ok(JsValue::undefined());
         };
-        let node = convert_nodes(args, cx)?;
-        let next = read_dom(cx, |dom| dom.sibling(id, 1, false));
-        let next = if next == Some(node) {
-            read_dom(cx, |dom| dom.sibling(node, 1, false))
-        } else {
-            next
-        };
+        let next = viable_sibling(cx, id, args, 1);
+        let node = convert_nodes(args, parent, &[], cx)?;
         insert(cx, parent, node, next, "after")?;
         Ok(JsValue::undefined())
     }),
@@ -843,11 +951,13 @@ pub const CHILD_NODE_METHODS: &[Method] = &[
         let Some(parent) = read_dom(cx, |dom| dom.parent(id)) else {
             return Ok(JsValue::undefined());
         };
-        let node = convert_nodes(args, cx)?;
+        let next = viable_sibling(cx, id, args, 1);
+        let node = convert_nodes(args, parent, &[id], cx)?;
         if node != id {
-            let next = read_dom(cx, |dom| dom.sibling(id, 1, false));
-            with_dom(cx, |dom| dom.detach(id));
-            insert(cx, parent, node, next.filter(|n| *n != node), "replaceWith")?;
+            if read_dom(cx, |dom| dom.parent(id)) == Some(parent) {
+                with_dom(cx, |dom| dom.detach(id));
+            }
+            insert(cx, parent, node, next, "replaceWith")?;
         }
         Ok(JsValue::undefined())
     }),
@@ -939,6 +1049,9 @@ const CHARACTER_DATA_METHODS: &[Method] = &[
         let (id, data) = data_of(this, cx)?;
         let (offset, count) = (arg(args, 0).to_number(cx)?, arg(args, 1).to_number(cx)?);
         let units = utf16(&data);
+        if offset > units.len() as f64 {
+            return Err(dom_error(cx, "字符偏移超出数据长度", "IndexSizeError"));
+        }
         let (start, end) = span(&units, offset, count);
         let kept = format!(
             "{}{}",

@@ -351,16 +351,20 @@ fn current(stack: &[Open]) -> NodeId {
 
 /// Where `</name` begins in `text`, or its end.
 fn find_end_tag(text: &str, name: &str) -> usize {
-    let lower = text.to_ascii_lowercase();
     let needle = format!("</{name}");
     let mut from = 0;
-    while let Some(at) = lower[from..].find(&needle) {
+    while let Some(at) = text[from..].find('<') {
         let at = from + at;
-        let after = lower[at + needle.len()..].chars().next();
-        if after.is_none_or(|c| c == '>' || c.is_whitespace() || c == '/') {
-            return at;
+        if text
+            .get(at..at + needle.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(&needle))
+        {
+            let after = text[at + needle.len()..].chars().next();
+            if after.is_none_or(|c| c == '>' || c.is_whitespace() || c == '/') {
+                return at;
+            }
         }
-        from = at + needle.len();
+        from = at + 1;
     }
     text.len()
 }
@@ -379,7 +383,9 @@ fn imply_end_tags(dom: &Dom, stack: &mut Vec<Open>, tag: &str) {
             if names.contains(&o.tag.as_str()) {
                 return Some(i);
             }
-            if fence.contains(&o.tag.as_str()) {
+            if fence.contains(&o.tag.as_str())
+                || (names == ["p"].as_slice() && CLOSES_P.contains(&o.tag.as_str()))
+            {
                 return None;
             }
         }
@@ -596,10 +602,9 @@ fn push_text(
     let parent = current(stack);
     // Next to a text node already there, the text joins it, as a parser's does.
     if let Some(last) = dom.children(parent).last().copied()
-        && let Some(NodeKind::Text(existing)) = dom.get(last).map(|n| &n.kind)
+        && dom.get(last).is_some_and(|n| n.is_text())
     {
-        let joined = format!("{existing}{text}");
-        dom.set_text(last, &joined);
+        dom.append_text(last, &text);
         return;
     }
     let node = dom.create_text(&text);
@@ -616,7 +621,11 @@ pub fn decode(text: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp..];
-        let window = &rest[1..rest.len().min(40)];
+        let mut end = rest.len().min(40);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let window = &rest[1..end];
         let semi = window.find(';');
         let entity = semi.map(|s| &window[..s]);
         let decoded = entity.and_then(|entity| {
@@ -990,51 +999,55 @@ pub fn outer(dom: &Dom, id: NodeId) -> String {
 }
 
 fn write(dom: &Dom, id: NodeId, out: &mut String, raw: bool) {
-    let Some(node) = dom.get(id) else { return };
-    match &node.kind {
-        NodeKind::Text(text) if raw => out.push_str(text),
-        NodeKind::Text(text) => out.push_str(&escape(text, false)),
-        NodeKind::Comment(data) => {
-            out.push_str("<!--");
-            out.push_str(data);
-            out.push_str("-->");
-        }
-        NodeKind::Doctype(name) => {
-            out.push_str("<!DOCTYPE ");
-            out.push_str(name);
-            out.push('>');
-        }
-        NodeKind::Element(tag) => {
-            let name = qualified_name(dom, id, false);
-            out.push('<');
-            out.push_str(&name);
-            for (key, value) in dom.attributes(id) {
-                out.push(' ');
-                out.push_str(&key);
-                out.push_str("=\"");
-                out.push_str(&escape(&value, true));
-                out.push('"');
-            }
-            let html = node.namespace == Namespace::Html;
-            if !html && node.children.is_empty() {
-                out.push_str("/>");
-                return;
-            }
-            out.push('>');
-            if html && VOID.contains(&tag.as_str()) {
-                return;
-            }
-            let raw = html && raw_text(tag) == Some(false);
-            for child in &node.children {
-                write(dom, *child, out, raw);
-            }
+    // 结束标签也放入显式栈，树的深度不再占用原生调用栈。
+    let mut stack = vec![(id, raw, false)];
+    while let Some((id, raw, closing)) = stack.pop() {
+        let Some(node) = dom.get(id) else { continue };
+        if closing {
             out.push_str("</");
-            out.push_str(&name);
+            out.push_str(&qualified_name(dom, id, false));
             out.push('>');
+            continue;
         }
-        NodeKind::Document | NodeKind::Fragment => {
-            for child in &node.children {
-                write(dom, *child, out, raw);
+        match &node.kind {
+            NodeKind::Text(text) if raw => out.push_str(text),
+            NodeKind::Text(text) => out.push_str(&escape(text, false)),
+            NodeKind::Comment(data) => {
+                out.push_str("<!--");
+                out.push_str(data);
+                out.push_str("-->");
+            }
+            NodeKind::Doctype(name) => {
+                out.push_str("<!DOCTYPE ");
+                out.push_str(name);
+                out.push('>');
+            }
+            NodeKind::Element(tag) => {
+                let name = qualified_name(dom, id, false);
+                out.push('<');
+                out.push_str(&name);
+                for (key, value) in dom.attributes(id) {
+                    out.push(' ');
+                    out.push_str(&key);
+                    out.push_str("=\"");
+                    out.push_str(&escape(&value, true));
+                    out.push('"');
+                }
+                let html = node.namespace == Namespace::Html;
+                if !html && node.children.is_empty() {
+                    out.push_str("/>");
+                    continue;
+                }
+                out.push('>');
+                if html && VOID.contains(&tag.as_str()) {
+                    continue;
+                }
+                stack.push((id, false, true));
+                let raw = html && raw_text(tag) == Some(false);
+                stack.extend(node.children.iter().rev().map(|child| (*child, raw, false)));
+            }
+            NodeKind::Document | NodeKind::Fragment => {
+                stack.extend(node.children.iter().rev().map(|child| (*child, raw, false)));
             }
         }
     }

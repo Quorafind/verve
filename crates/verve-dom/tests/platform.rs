@@ -7,6 +7,40 @@ use common::{Page, on_page};
 use verve_dom::Options;
 
 #[test]
+fn review_navigation_and_forms_only_queue_http_urls() {
+    on_page(|| {
+        let mut page = Page::new(Options {
+            url: "https://example.test/app/".into(),
+            ..Options::default()
+        });
+        page.eval(r#"
+            for (const url of ['javascript:alert(1)', 'file:///C:/Windows/win.ini', 'data:text/html,x', 'custom:x', 'http://[']) {
+                try { location.href = url; } catch (_) {}
+                try { window.open(url); } catch (_) {}
+                const a = document.createElement('a'); a.href = url;
+                try { a.click(); } catch (_) {}
+                const f = document.createElement('form'); f.action = url;
+                try { f.submit(); } catch (_) {}
+                try { f.requestSubmit(); } catch (_) {}
+            }
+        "#);
+        assert!(page.document.take_requests().is_empty());
+        page.eval("location.href = '/next'; window.open('https://example.test/ok'); const f = document.createElement('form'); f.action = '/send'; f.submit()");
+        let requests = page.document.take_requests();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            matches!(&requests[0], verve_dom::Request::Navigate { url, .. } if url == "https://example.test/next")
+        );
+        assert!(
+            matches!(&requests[1], verve_dom::Request::Open(url) if url == "https://example.test/ok")
+        );
+        assert!(matches!(&requests[2], verve_dom::Request::Submit(_)));
+        page.eval("f.submit(); f.action = 'file:///C:/Windows/win.ini'");
+        assert!(page.document.take_requests().is_empty());
+    });
+}
+
+#[test]
 fn the_webs_pieces_libraries_test_for_are_there() {
     on_page(|| {
         let mut page = Page::new(Options {

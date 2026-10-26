@@ -7,6 +7,142 @@ mod common;
 use common::{Page, on_page};
 use verve_dom::{Options, Pointer, Rect};
 
+#[test]
+fn review_relative_has_and_selector_backtracking() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        assert_eq!(page.eval(r#"
+            (() => {
+                const root = document.createElement('section');
+                root.innerHTML = '<div id=a><p><span></span></p></div><a></a><b><i></i></b>';
+                const outside = document.createElement('p');
+                outside.innerHTML = '<div id=b><span></span></div>';
+                root.append(outside);
+                const a = root.querySelector('#a'), b = root.querySelector('#b');
+                const out = [a.matches('div:has(> p span)'), b.matches('div:has(> p span)'),
+                    root.querySelector('a').matches('a:has(+ b i)'), b.matches(':has(p span)')];
+                try { root.querySelector(':has(:is(:has(i)))'); out.push(false); }
+                catch (e) { out.push(e.name === 'SyntaxError'); }
+                root.innerHTML = '<b>'.repeat(80);
+                out.push(root.querySelectorAll('b')[79].matches('x ' + Array(40).fill('b').join(' ')));
+                return out.join('|');
+            })()
+        "#), "true|false|true|false|true|false");
+    });
+}
+
+#[test]
+fn review_variables_cycles_fallback_and_expansion_limit() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        assert_eq!(page.eval(r#"
+            (() => {
+                const p = document.createElement('div');
+                p.style.cssText = '--a: var(--b); --b: var(--a); color: var(--a, red); --ok: ; width: var(--missing, 3px)';
+                document.body.appendChild(p);
+                const out = [getComputedStyle(p).color, getComputedStyle(p).width];
+                p.style.cssText = '--a: var(--a) var(--a); color: var(--a, blue)';
+                out.push(getComputedStyle(p).color);
+                p.style.cssText = '--a: var(--missing, var(--a)); color: var(--a, green)';
+                out.push(getComputedStyle(p).color);
+                p.style.cssText = '--a: var(--b, var(--c)); --b: var(--a); --c: var(--b, red); --safe: var(--c, orange); color: var(--c, purple); background-color: var(--safe)';
+                out.push(getComputedStyle(p).color, getComputedStyle(p).backgroundColor);
+                let at = p;
+                p.style.cssText = '--v0: x';
+                for (let n = 1; n <= 24; n++) {
+                    const next = document.createElement('div');
+                    next.style.cssText = '--v' + n + ': var(--v' + (n-1) + ') var(--v' + (n-1) + ')';
+                    at.appendChild(next); at = next;
+                }
+                at.style.color = 'var(--v24, purple)';
+                out.push(getComputedStyle(at).color);
+                return out.join('|');
+            })()
+        "#), "red|3px|blue|green|purple|orange|purple");
+    });
+}
+
+#[test]
+fn the_font_shorthand_opens_into_its_longhands_after_var() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        page.eval(
+            r#"
+            document.head.innerHTML = `<style>
+              :root { --type: 500 13px/20px "Segoe UI", sans-serif; }
+              .scale { font: var(--type); }
+              .later { font: italic 12px/18px mono; font-size: 20px; }
+              .earlier { font-weight: 300; font: 14px serif; }
+            </style>`;
+            document.body.innerHTML = `
+              <div id="scale" class="scale"><span id="child">child</span></div>
+              <div id="later" class="later">later</div>
+              <div id="earlier" class="earlier">earlier</div>`;
+        "#,
+        );
+        let style = |page: &mut Page, id: &str, property: &str| {
+            page.eval(&format!(
+                "getComputedStyle(document.getElementById('{id}')).getPropertyValue('{property}')"
+            ))
+        };
+        assert_eq!(style(&mut page, "scale", "font-size"), "13px");
+        assert_eq!(style(&mut page, "scale", "line-height"), "20px");
+        assert_eq!(style(&mut page, "scale", "font-weight"), "500");
+        assert_eq!(
+            style(&mut page, "scale", "font-family"),
+            "\"Segoe UI\", sans-serif"
+        );
+        // 简写设置的长属性正常继承，简写之后的长属性优先，之前的则重置。
+        assert_eq!(style(&mut page, "child", "font-size"), "13px");
+        assert_eq!(style(&mut page, "child", "font-weight"), "500");
+        assert_eq!(style(&mut page, "later", "font-size"), "20px");
+        assert_eq!(style(&mut page, "later", "font-style"), "italic");
+        assert_eq!(style(&mut page, "earlier", "font-weight"), "normal");
+        assert_eq!(style(&mut page, "earlier", "font-size"), "14px");
+        let snapshot = page.document.update().snapshot;
+        assert_eq!(
+            snapshot.style(page.find("#scale"), "font-size"),
+            Some("13px")
+        );
+        assert_eq!(page.console(), "");
+    });
+}
+
+#[test]
+fn review_stylesheets_and_sibling_indices_remain_fresh() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        assert_eq!(
+            page.eval(
+                r#"
+            (() => {
+                for (let n = 0; n < 1000; n++) {
+                    const style = document.createElement('style');
+                    style.textContent = '#target { color: red }';
+                    document.head.appendChild(style);
+                }
+                document.body.innerHTML = '<div id=target></div>';
+                const target = document.getElementById('target');
+                for (let n = 0; n < 20; n++) {
+                    if (getComputedStyle(target).color !== 'red') throw Error('样式缓存');
+                }
+                const last = document.head.lastChild;
+                last.firstChild.data = '#target { color: blue }';
+                const out = [getComputedStyle(target).color];
+                document.head.prepend(last);
+                out.push(getComputedStyle(target).color);
+                target.innerHTML = '<i class=ok></i>'.repeat(4000);
+                out.push(target.querySelectorAll('x ~ i').length);
+                out.push(target.querySelectorAll(':nth-child(2n of .ok)').length);
+                return out.join('|');
+            })()
+        "#
+            ),
+            "blue|red|0|2000"
+        );
+    });
+}
+
 const PAGE: &str = r#"
 document.head.innerHTML = `<style>
   :root { --accent: rgb(0, 128, 0); --pad: 6px; }

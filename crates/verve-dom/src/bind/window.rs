@@ -25,22 +25,24 @@ use crate::state::{FrameClock, shared};
 
 /// Goes to `href`: within the page (only the fragment differs) the address changes and
 /// `hashchange` is heard; anywhere else, the embedder is asked.
-pub fn navigate(context: &mut Context, href: &str, replace: bool) -> JsResult<()> {
-    let (old, new) = {
-        let state = shared(context);
-        let state = state.borrow();
-        let new = state.url.join(href).ok();
-        (state.url.clone(), new)
-    };
-    let Some(new) = new else {
-        return Err(dom_error(
+pub(crate) fn http_url(context: &mut Context, href: &str) -> JsResult<url::Url> {
+    let resolved = shared(context).borrow().url.join(href).ok();
+    match resolved {
+        Some(url) if matches!(url.scheme(), "http" | "https") => Ok(url),
+        _ => Err(dom_error(
             context,
-            &format!(
-                "Failed to set the 'href' property on 'Location': '{href}' is not a valid URL."
-            ),
-            "SyntaxError",
-        ));
+            "只允许有效的 HTTP(S) 目标地址",
+            "SecurityError",
+        )),
+    }
+}
+
+pub fn navigate(context: &mut Context, href: &str, replace: bool) -> JsResult<()> {
+    let resolved = shared(context).borrow().url.join(href).ok();
+    let Some(new) = resolved else {
+        return Err(dom_error(context, "目标地址无效", "SyntaxError"));
     };
+    let old = shared(context).borrow().url.clone();
     let same_page = {
         let mut a = old.clone();
         let mut b = new.clone();
@@ -49,6 +51,7 @@ pub fn navigate(context: &mut Context, href: &str, replace: bool) -> JsResult<()
         a == b && new.fragment().is_some()
     };
     if !same_page {
+        http_url(context, new.as_str())?;
         let state = shared(context);
         let mut state = state.borrow_mut();
         state.requests.push(crate::Request::Navigate {
@@ -742,12 +745,7 @@ const WINDOW_FUNCTIONS: &[Method] = &[
     }),
     ("open", 3, |_, args, cx| {
         let url = opt_string(args, 0, cx)?.unwrap_or_default();
-        let resolved = shared(cx)
-            .borrow()
-            .url
-            .join(&url)
-            .map(|u| u.to_string())
-            .unwrap_or(url);
+        let resolved = http_url(cx, &url)?.to_string();
         shared(cx)
             .borrow_mut()
             .requests

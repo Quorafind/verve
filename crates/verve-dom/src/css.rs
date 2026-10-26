@@ -133,6 +133,14 @@ pub struct MatchContext {
     pub hover_probe: Option<NodeId>,
 }
 
+#[derive(Default)]
+struct MatchCache {
+    // 缓存只活在一次查询内；节点、样式或 scope 改变后不复用。
+    states: HashMap<(usize, NodeId, usize, u8), bool>,
+    relative: HashMap<(usize, NodeId), bool>,
+    nth: HashMap<(usize, NodeId, String), HashMap<NodeId, i32>>,
+}
+
 impl SelectorList {
     /// `a, b > c` as its two selectors.
     pub fn parse(text: &str) -> Result<Self, SelectorError> {
@@ -162,7 +170,41 @@ impl SelectorList {
     }
 
     pub fn matches_with(&self, dom: &Dom, id: NodeId, cx: &MatchContext) -> bool {
-        self.0.iter().any(|s| s.matches_with(dom, id, cx))
+        self.matches_cached(dom, id, cx, &mut MatchCache::default())
+    }
+
+    fn matches_cached(
+        &self,
+        dom: &Dom,
+        id: NodeId,
+        cx: &MatchContext,
+        cache: &mut MatchCache,
+    ) -> bool {
+        self.0.iter().any(|s| s.matches_cached(dom, id, cx, cache))
+    }
+
+    pub(crate) fn select(
+        &self,
+        dom: &Dom,
+        nodes: impl IntoIterator<Item = NodeId>,
+        scope: Option<NodeId>,
+        first: bool,
+    ) -> Vec<NodeId> {
+        let cx = MatchContext {
+            scope,
+            hover_probe: None,
+        };
+        let mut cache = MatchCache::default();
+        let mut found = Vec::new();
+        for id in nodes {
+            if self.matches_cached(dom, id, &cx, &mut cache) {
+                found.push(id);
+                if first {
+                    break;
+                }
+            }
+        }
+        found
     }
 
     fn says(&self, f: &dyn Fn(&Pseudo) -> bool) -> bool {
@@ -172,84 +214,121 @@ impl SelectorList {
 
 impl Selector {
     pub fn matches_with(&self, dom: &Dom, id: NodeId, cx: &MatchContext) -> bool {
-        self.matches_from(dom, id, 0, cx)
+        self.matches_cached(dom, id, cx, &mut MatchCache::default())
     }
 
-    fn matches_from(&self, dom: &Dom, id: NodeId, part: usize, cx: &MatchContext) -> bool {
-        let Some((compound, hop)) = self.parts.get(part) else {
-            return true;
-        };
-        if !compound.matches(dom, id, cx) {
-            return false;
-        }
-        if part + 1 == self.parts.len() {
-            return true;
-        }
-        match hop {
-            Combinator::Child => dom
-                .parent_element(id)
-                .is_some_and(|parent| self.matches_from(dom, parent, part + 1, cx)),
-            Combinator::Descendant | Combinator::None => {
-                let mut at = dom.parent_element(id);
-                while let Some(ancestor) = at {
-                    if self.matches_from(dom, ancestor, part + 1, cx) {
-                        return true;
+    fn matches_cached(
+        &self,
+        dom: &Dom,
+        id: NodeId,
+        cx: &MatchContext,
+        cache: &mut MatchCache,
+    ) -> bool {
+        let key = self as *const Self as usize;
+        // axis 为 1/2 时分别沿祖先/前兄弟寻找候选；每个状态至多求值一次。
+        let mut stack = vec![(id, 0, 0, false)];
+        while let Some((at, part, axis, finish)) = stack.pop() {
+            let state = (key, at, part, axis);
+            if cache.states.contains_key(&state) {
+                continue;
+            }
+            if axis == 0 && !finish {
+                if !self.parts[part].0.matches(dom, at, cx, cache) {
+                    cache.states.insert(state, false);
+                    continue;
+                }
+                if part + 1 == self.parts.len() {
+                    cache.states.insert(state, true);
+                    continue;
+                }
+            }
+            let steps = if axis != 0 {
+                let next = if axis == 1 {
+                    dom.parent_element(at)
+                } else {
+                    dom.sibling(at, -1, true)
+                };
+                [(Some(at), part, 0), (next, part, axis)]
+            } else {
+                let (next, axis) = match self.parts[part].1 {
+                    Combinator::Child => (dom.parent_element(at), 0),
+                    Combinator::Descendant | Combinator::None => (dom.parent_element(at), 1),
+                    Combinator::Next => (dom.sibling(at, -1, true), 0),
+                    Combinator::Subsequent => (dom.sibling(at, -1, true), 2),
+                };
+                [(next, part + 1, axis), (None, part, 0)]
+            };
+            if finish {
+                let matched = steps.iter().any(|(node, part, axis)| {
+                    node.is_some_and(|node| {
+                        cache.states.get(&(key, node, *part, *axis)) == Some(&true)
+                    })
+                });
+                cache.states.insert(state, matched);
+            } else {
+                stack.push((at, part, axis, true));
+                for (node, part, axis) in steps {
+                    if let Some(node) = node {
+                        stack.push((node, part, axis, false));
                     }
-                    at = dom.parent_element(ancestor);
                 }
-                false
             }
-            Combinator::Next => dom
-                .sibling(id, -1, true)
-                .is_some_and(|before| self.matches_from(dom, before, part + 1, cx)),
-            Combinator::Subsequent => {
-                let mut at = dom.sibling(id, -1, true);
-                while let Some(before) = at {
-                    if self.matches_from(dom, before, part + 1, cx) {
-                        return true;
+        }
+        cache.states.get(&(key, id, 0, 0)) == Some(&true)
+    }
+
+    /// 从锚点向右匹配相对选择器，左端不能越过锚点借用外部祖先。
+    fn matches_relative(
+        &self,
+        dom: &Dom,
+        anchor: NodeId,
+        cx: &MatchContext,
+        cache: &mut MatchCache,
+    ) -> bool {
+        let key = (self as *const Self as usize, anchor);
+        if let Some(found) = cache.relative.get(&key) {
+            return *found;
+        }
+        let mut frontier = vec![anchor];
+        for part in (0..self.parts.len()).rev() {
+            let hop = if part + 1 == self.parts.len() {
+                self.relative.unwrap_or(Combinator::Descendant)
+            } else {
+                self.parts[part].1
+            };
+            let mut pending = Vec::new();
+            for at in frontier {
+                match hop {
+                    Combinator::Next | Combinator::Subsequent => {
+                        pending.extend(dom.sibling(at, 1, true))
                     }
-                    at = dom.sibling(before, -1, true);
+                    _ => pending.extend(dom.children(at).iter().copied()),
                 }
-                false
+            }
+            let mut seen = HashSet::new();
+            frontier = Vec::new();
+            while let Some(at) = pending.pop() {
+                if !seen.insert(at) {
+                    continue;
+                }
+                match hop {
+                    Combinator::Descendant | Combinator::None => {
+                        pending.extend(dom.children(at).iter().copied())
+                    }
+                    Combinator::Subsequent => pending.extend(dom.sibling(at, 1, true)),
+                    _ => {}
+                }
+                if self.parts[part].0.matches(dom, at, cx, cache) {
+                    frontier.push(at);
+                }
+            }
+            if frontier.is_empty() {
+                break;
             }
         }
-    }
-
-    /// For a relative selector (`:has(…)`), whether it matches something from `anchor`.
-    fn matches_relative(&self, dom: &Dom, anchor: NodeId, cx: &MatchContext) -> bool {
-        let candidates: Vec<NodeId> = match self.relative.unwrap_or(Combinator::Descendant) {
-            Combinator::Child => dom
-                .children(anchor)
-                .iter()
-                .copied()
-                .filter(|c| dom.get(*c).is_some_and(|n| n.is_element()))
-                .collect(),
-            Combinator::Next => dom.sibling(anchor, 1, true).into_iter().collect(),
-            Combinator::Subsequent => {
-                let mut out = Vec::new();
-                let mut at = dom.sibling(anchor, 1, true);
-                while let Some(next) = at {
-                    out.push(next);
-                    at = dom.sibling(next, 1, true);
-                }
-                out
-            }
-            _ => dom.descendants(anchor),
-        };
-        // The leftmost part must stand where the combinator says from the anchor; matching
-        // right to left from each candidate, the chain must end at one of those.
-        candidates.into_iter().any(|candidate| {
-            self.matches_with(dom, candidate, cx) && self.reaches(dom, candidate, anchor, cx)
-        })
-    }
-
-    /// Whether the chain matched from `id` can end at a part standing right of `anchor`.
-    fn reaches(&self, dom: &Dom, id: NodeId, anchor: NodeId, _cx: &MatchContext) -> bool {
-        // A single compound: the candidate itself stands where it must.
-        if self.parts.len() == 1 {
-            return true;
-        }
-        dom.contains(anchor, id) || dom.parent(anchor) == dom.parent(id)
+        let found = !frontier.is_empty();
+        cache.relative.insert(key, found);
+        found
     }
 
     fn specificity(&self) -> (u32, u32, u32) {
@@ -300,7 +379,7 @@ fn is_field(tag: &str) -> bool {
 }
 
 impl Compound {
-    fn matches(&self, dom: &Dom, id: NodeId, cx: &MatchContext) -> bool {
+    fn matches(&self, dom: &Dom, id: NodeId, cx: &MatchContext, cache: &mut MatchCache) -> bool {
         if self.element {
             return false;
         }
@@ -416,29 +495,48 @@ impl Compound {
                 let Some(parent) = dom.parent(id) else {
                     return false;
                 };
-                let siblings: Vec<NodeId> = dom
-                    .children(parent)
-                    .iter()
-                    .copied()
-                    .filter(|c| {
-                        dom.get(*c).is_some_and(|n| {
-                            n.is_element() && (!*of_type || n.tag() == Some(tag.as_str()))
-                        }) && of.as_ref().is_none_or(|of| of.matches_with(dom, *c, cx))
-                    })
-                    .collect();
-                let Some(position) = siblings.iter().position(|c| *c == id) else {
-                    return false;
-                };
-                let index = if *last {
-                    (siblings.len() - position) as i32
-                } else {
-                    position as i32 + 1
-                };
-                nth(*a, *b, index)
+                let key = (
+                    pseudo as *const Pseudo as usize,
+                    parent,
+                    if *of_type { tag.clone() } else { String::new() },
+                );
+                if !cache.nth.contains_key(&key) {
+                    let siblings: Vec<NodeId> = dom
+                        .children(parent)
+                        .iter()
+                        .copied()
+                        .filter(|c| {
+                            dom.get(*c).is_some_and(|n| {
+                                n.is_element() && (!*of_type || n.tag() == Some(tag.as_str()))
+                            }) && of
+                                .as_ref()
+                                .is_none_or(|of| of.matches_cached(dom, *c, cx, cache))
+                        })
+                        .collect();
+                    let indices = siblings
+                        .iter()
+                        .enumerate()
+                        .map(|(i, node)| {
+                            let index = if *last {
+                                (siblings.len() - i) as i32
+                            } else {
+                                i as i32 + 1
+                            };
+                            (*node, index)
+                        })
+                        .collect();
+                    cache.nth.insert(key.clone(), indices);
+                }
+                cache.nth[&key]
+                    .get(&id)
+                    .is_some_and(|index| nth(*a, *b, *index))
             }
-            Pseudo::Not(list) => !list.matches_with(dom, id, cx),
-            Pseudo::Is(list) | Pseudo::Where(list) => list.matches_with(dom, id, cx),
-            Pseudo::Has(list) => list.0.iter().any(|s| s.matches_relative(dom, id, cx)),
+            Pseudo::Not(list) => !list.matches_cached(dom, id, cx, cache),
+            Pseudo::Is(list) | Pseudo::Where(list) => list.matches_cached(dom, id, cx, cache),
+            Pseudo::Has(list) => list
+                .0
+                .iter()
+                .any(|s| s.matches_relative(dom, id, cx, cache)),
             Pseudo::Lang(want) => {
                 let mut at = Some(id);
                 while let Some(node) = at {
@@ -546,6 +644,7 @@ struct Parser<'a> {
     chars: Vec<char>,
     at: usize,
     text: &'a str,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -554,6 +653,7 @@ impl<'a> Parser<'a> {
             chars: text.chars().collect(),
             at: 0,
             text,
+            depth: 0,
         }
     }
 
@@ -575,22 +675,28 @@ impl<'a> Parser<'a> {
 
     fn skip_space(&mut self) -> bool {
         let start = self.at;
-        while self.peek().is_some_and(char::is_whitespace) {
-            self.at += 1;
-        }
-        // Comments count as space.
-        if self.peek() == Some('/') && self.peek_at(1) == Some('*') {
+        loop {
+            while self.peek().is_some_and(char::is_whitespace) {
+                self.at += 1;
+            }
+            // Comments count as space.
+            if self.peek() != Some('/') || self.peek_at(1) != Some('*') {
+                break;
+            }
             self.at += 2;
             while !self.done() && (self.peek() != Some('*') || self.peek_at(1) != Some('/')) {
                 self.at += 1;
             }
             self.at = (self.at + 2).min(self.chars.len());
-            self.skip_space();
         }
         self.at > start
     }
 
     fn list(&mut self, relative: bool) -> Result<SelectorList, SelectorError> {
+        if self.depth >= 64 {
+            return Err(self.error());
+        }
+        self.depth += 1;
         let mut out = Vec::new();
         loop {
             self.skip_space();
@@ -602,6 +708,7 @@ impl<'a> Parser<'a> {
             }
             break;
         }
+        self.depth -= 1;
         Ok(SelectorList(out))
     }
 
@@ -883,7 +990,13 @@ impl<'a> Parser<'a> {
                 "not" => Pseudo::Not(self.list(false)?),
                 "is" | "matches" | "-webkit-any" | "any" => Pseudo::Is(self.list(false)?),
                 "where" => Pseudo::Where(self.list(false)?),
-                "has" => Pseudo::Has(self.list(true)?),
+                "has" => {
+                    let list = self.list(true)?;
+                    if list.says(&|p| matches!(p, Pseudo::Has(_))) {
+                        return Err(self.error());
+                    }
+                    Pseudo::Has(list)
+                }
                 "nth-child" | "nth-last-child" | "nth-of-type" | "nth-last-of-type" => {
                     let (a, b) = self.an_plus_b()?;
                     self.skip_space();
@@ -1708,8 +1821,9 @@ impl Computed {
     fn subtree(&mut self, dom: &Dom, styler: &Styler, root: NodeId, inherited: &Style) -> usize {
         let mut count = 0;
         let mut stack = vec![(root, inherited.clone())];
+        let mut cache = MatchCache::default();
         while let Some((id, inherited)) = stack.pop() {
-            let (style, pointer) = own_style(dom, styler, id, &inherited);
+            let (style, pointer) = own_style(dom, styler, id, &inherited, &mut cache);
             for child in dom.children(id) {
                 stack.push((*child, style.clone()));
             }
@@ -1735,13 +1849,20 @@ pub fn style_of(dom: &Dom, styler: &Styler, id: NodeId) -> Style {
         at = dom.parent(node);
     }
     let mut style = Style::new();
+    let mut cache = MatchCache::default();
     for node in chain.into_iter().rev() {
-        style = own_style(dom, styler, node, &style).0;
+        style = own_style(dom, styler, node, &style, &mut cache).0;
     }
     style
 }
 
-fn own_style(dom: &Dom, styler: &Styler, id: NodeId, inherited: &Style) -> (Style, bool) {
+fn own_style(
+    dom: &Dom,
+    styler: &Styler,
+    id: NodeId,
+    inherited: &Style,
+    cache: &mut MatchCache,
+) -> (Style, bool) {
     let mut style = Style::new();
     for (key, value) in inherited {
         if is_inherited(key) {
@@ -1761,7 +1882,7 @@ fn own_style(dom: &Dom, styler: &Styler, id: NodeId, inherited: &Style) -> (Styl
     for (index, k) in styler.candidates(dom, id) {
         let (origin, order, rule) = &styler.rules[index];
         let selector = &rule.selectors.0[k];
-        if selector.matches_with(dom, id, &cx) {
+        if selector.matches_cached(dom, id, &cx, cache) {
             let specificity = selector.specificity();
             for declaration in &rule.declarations {
                 let rank = match (declaration.important, origin) {
@@ -1800,7 +1921,16 @@ fn own_style(dom: &Dom, styler: &Styler, id: NodeId, inherited: &Style) -> (Styl
     if node.attr("hidden").is_some() && node.namespace == Namespace::Html {
         style.insert("display".into(), "none".into());
     }
+    // 先记下本节点 font 后出现的长属性；变量替换后展开 font 时不能覆盖它们。
+    let mut own_font = false;
+    let mut font_overridden: Vec<&str> = Vec::new();
     for (_, declaration) in matched {
+        if declaration.name == "font" {
+            own_font = true;
+            font_overridden.clear();
+        } else if own_font && FONT_LONGHANDS.contains(&declaration.name.as_str()) {
+            font_overridden.push(declaration.name.as_str());
+        }
         set_declared(&mut style, &declaration.name, &declaration.value, inherited);
     }
     // `var()` resolved against what this node holds, custom properties included.
@@ -1809,9 +1939,35 @@ fn own_style(dom: &Dom, styler: &Styler, id: NodeId, inherited: &Style) -> (Styl
         .filter(|(k, _)| k.starts_with("--"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    for value in style.values_mut() {
-        if value.contains("var(") {
-            *value = resolve_vars(value, &custom, 0);
+    let custom = resolve_custom(&custom);
+    let keys: Vec<String> = style.keys().cloned().collect();
+    for key in keys {
+        let resolved = if key.starts_with("--") {
+            custom.get(&key).cloned()
+        } else if style[&key].contains("var(") {
+            substitute(&style[&key], &custom, 0)
+        } else {
+            Some(style[&key].clone())
+        };
+        match resolved {
+            Some(value) => {
+                style.insert(key, value);
+            }
+            None => {
+                style.remove(&key);
+                if !key.starts_with("--") && is_inherited(&key) {
+                    if let Some(value) = inherited.get(&key) {
+                        style.insert(key, value.clone());
+                    }
+                }
+            }
+        }
+    }
+    if own_font && let Some(longhands) = style.get("font").and_then(|font| font_longhands(font)) {
+        for (name, value) in longhands {
+            if !font_overridden.contains(&name) {
+                style.insert(name.to_owned(), value);
+            }
         }
     }
     // A font size is computed to pixels, so what inherits it inherits the size and not `1.5em`
@@ -1826,6 +1982,62 @@ fn own_style(dom: &Dom, styler: &Styler, id: NodeId, inherited: &Style) -> (Styl
         style.insert("font-size".into(), format_px(px));
     }
     (style, pointer)
+}
+
+/// font 简写展开后的属性，未给出的项重置为 normal。
+const FONT_LONGHANDS: &[&str] = &[
+    "font-style",
+    "font-variant",
+    "font-weight",
+    "font-stretch",
+    "font-size",
+    "line-height",
+    "font-family",
+];
+
+fn font_longhands(value: &str) -> Option<Vec<(&'static str, String)>> {
+    let mut style = "normal".to_owned();
+    let mut variant = "normal".to_owned();
+    let mut weight = "normal".to_owned();
+    let mut stretch = "normal".to_owned();
+    let words = split_outside(value.trim(), ' ');
+    let mut words = words.iter().map(|w| w.trim()).filter(|w| !w.is_empty());
+    for word in words.by_ref() {
+        match word {
+            "normal" => {}
+            "italic" | "oblique" => style = word.to_owned(),
+            "small-caps" => variant = word.to_owned(),
+            "bold" | "bolder" | "lighter" => weight = word.to_owned(),
+            "condensed" | "expanded" | "semi-condensed" | "semi-expanded" | "extra-condensed"
+            | "extra-expanded" | "ultra-condensed" | "ultra-expanded" => stretch = word.to_owned(),
+            w if w.parse::<f32>().is_ok_and(|n| (1. ..=1000.).contains(&n)) => {
+                weight = w.to_owned()
+            }
+            size => {
+                let (size, line_height) = match size.split_once('/') {
+                    Some((size, line)) => (size.to_owned(), line.to_owned()),
+                    None => (size.to_owned(), "normal".to_owned()),
+                };
+                if size.is_empty() {
+                    return None;
+                }
+                let family: Vec<&str> = words.collect();
+                if family.is_empty() {
+                    return None;
+                }
+                return Some(vec![
+                    ("font-style", style),
+                    ("font-variant", variant),
+                    ("font-weight", weight),
+                    ("font-stretch", stretch),
+                    ("font-size", size),
+                    ("line-height", line_height),
+                    ("font-family", family.join(" ")),
+                ]);
+            }
+        }
+    }
+    None
 }
 
 /// A font size in pixels, against the parent's: lengths, percentages, `em`, `rem`, and the
@@ -2070,47 +2282,177 @@ fn box_sides(value: &str) -> [String; 4] {
     }
 }
 
-fn resolve_vars(value: &str, custom: &HashMap<String, String>, depth: u32) -> String {
-    if depth > 16 {
-        return value.to_owned();
-    }
-    let Some(start) = value.find("var(") else {
-        return value.to_owned();
-    };
-    let inner_start = start + 4;
-    let mut paren = 1;
-    let mut end = value.len();
-    for (offset, c) in value[inner_start..].char_indices() {
-        match c {
-            '(' => paren += 1,
-            ')' => {
-                paren -= 1;
-                if paren == 0 {
-                    end = inner_start + offset;
-                    break;
-                }
+// 单个替换结果最多 64 KiB；循环依赖或超限均按无效值处理，不能把膨胀传给后代。
+const MAX_VARIABLE_BYTES: usize = 64 * 1024;
+
+fn next_var(value: &str, from: usize) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (offset, c) in value[from..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
             }
-            _ => {}
+        } else if matches!(c, '\'' | '"') {
+            quote = Some(c);
+        } else if value[from + offset..].starts_with("var(") {
+            return Some(from + offset);
         }
     }
-    let inner = &value[inner_start..end];
-    let (name, fallback) = match inner.split_once(',') {
-        Some((name, fallback)) => (name.trim(), Some(fallback.trim())),
-        None => (inner.trim(), None),
-    };
-    let replaced = custom
-        .get(name)
-        .map(String::as_str)
-        .filter(|v| !v.trim().is_empty())
-        .or(fallback)
-        .unwrap_or("");
-    let replaced = resolve_vars(replaced, custom, depth + 1);
-    let rest = value.get(end + 1..).unwrap_or("");
-    resolve_vars(
-        &format!("{}{}{}", &value[..start], replaced, rest),
-        custom,
-        depth + 1,
-    )
+    None
+}
+
+fn resolve_custom(custom: &HashMap<String, String>) -> HashMap<String, String> {
+    let dependencies: HashMap<String, Vec<String>> = custom
+        .iter()
+        .map(|(name, value)| {
+            let mut dependencies = Vec::new();
+            let mut from = 0;
+            while let Some(start) = next_var(value, from) {
+                from = start + 4;
+                let name = value[from..].split([',', ')']).next().unwrap_or("").trim();
+                if custom.contains_key(name) {
+                    dependencies.push(name.to_owned());
+                }
+            }
+            (name.clone(), dependencies)
+        })
+        .collect();
+    let mut visited = HashSet::new();
+    let mut order = Vec::new();
+    for name in custom.keys() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let mut stack = vec![(name.clone(), 0)];
+        while let Some((name, index)) = stack.last().cloned() {
+            if let Some(next) = dependencies[&name].get(index) {
+                stack.last_mut().expect("依赖栈非空").1 += 1;
+                if visited.insert(next.clone()) {
+                    stack.push((next.clone(), 0));
+                }
+            } else {
+                stack.pop();
+                order.push(name);
+            }
+        }
+    }
+    // 反向遍历完整强连通分量，不能只标记某一次回边经过的路径。
+    let mut reversed = HashMap::<String, Vec<String>>::new();
+    for (name, dependencies) in &dependencies {
+        for dependency in dependencies {
+            reversed
+                .entry(dependency.clone())
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    visited.clear();
+    let mut invalid = HashSet::new();
+    for name in order.iter().rev() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let mut component = Vec::new();
+        let mut stack = vec![name.clone()];
+        while let Some(at) = stack.pop() {
+            component.push(at.clone());
+            if let Some(next) = reversed.get(&at) {
+                for next in next {
+                    if visited.insert(next.clone()) {
+                        stack.push(next.clone());
+                    }
+                }
+            }
+        }
+        if component.len() > 1 || dependencies[name].contains(name) {
+            invalid.extend(component);
+        }
+    }
+    let mut resolved = HashMap::new();
+    for name in order {
+        if !invalid.contains(&name)
+            && let Some(value) = substitute(&custom[&name], &resolved, 0)
+        {
+            resolved.insert(name, value);
+        }
+    }
+    resolved
+}
+
+fn substitute(value: &str, custom: &HashMap<String, String>, depth: usize) -> Option<String> {
+    if value.len() > MAX_VARIABLE_BYTES || depth >= 64 {
+        return None;
+    }
+    let mut out = String::new();
+    let mut from = 0;
+    while let Some(start) = next_var(value, from) {
+        out.push_str(&value[from..start]);
+        let inner_start = start + 4;
+        let mut paren = 1;
+        let mut end = None;
+        let mut quote = None;
+        let mut escaped = false;
+        for (offset, c) in value[inner_start..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match c {
+                '\'' | '"' => quote = Some(c),
+                '(' => paren += 1,
+                ')' => {
+                    paren -= 1;
+                    if paren == 0 {
+                        end = Some(inner_start + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end?;
+        let inner = &value[inner_start..end];
+        let (name, fallback) = match inner.split_once(',') {
+            Some((name, fallback)) => (name.trim(), Some(fallback.trim())),
+            None => (inner.trim(), None),
+        };
+        if !name.starts_with("--") {
+            return None;
+        }
+        let replacement = match custom.get(name) {
+            Some(value) => value.clone(),
+            None => substitute(fallback?, custom, depth + 1)?,
+        };
+        if out.len().saturating_add(replacement.len()) > MAX_VARIABLE_BYTES {
+            return None;
+        }
+        out.push_str(&replacement);
+        from = end + 1;
+    }
+    if out.len().saturating_add(value.len() - from) > MAX_VARIABLE_BYTES {
+        return None;
+    }
+    out.push_str(&value[from..]);
+    Some(out)
 }
 
 /// What a property is when nothing set it, as `getComputedStyle` answers it.

@@ -839,6 +839,16 @@ fn form_of(context: &Context, id: NodeId) -> Option<NodeId> {
 
 /// The form submitted: its `submit` event, and — when nothing prevented it — the submission,
 /// which the drawer hears as a [`crate::Request::Submit`].
+pub(crate) fn queue_submit(context: &mut Context, form: NodeId) -> JsResult<()> {
+    let action = read_dom(context, |dom| dom.get_attr(form, "action")).unwrap_or_default();
+    super::window::http_url(context, &action)?;
+    shared(context)
+        .borrow_mut()
+        .requests
+        .push(crate::Request::Submit(form));
+    Ok(())
+}
+
 pub fn submit(context: &mut Context, form: NodeId, submitter: Option<NodeId>) -> JsResult<()> {
     let submitter = submitter.map_or(JsValue::null(), |s| wrap(context, s));
     let allowed = fire_at(
@@ -850,10 +860,7 @@ pub fn submit(context: &mut Context, form: NodeId, submitter: Option<NodeId>) ->
         false,
     )?;
     if allowed {
-        shared(context)
-            .borrow_mut()
-            .requests
-            .push(crate::Request::Submit(form));
+        queue_submit(context, form)?;
     }
     Ok(())
 }

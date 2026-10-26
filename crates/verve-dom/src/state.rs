@@ -40,8 +40,10 @@ pub enum SheetOwner {
 pub struct ObserverRecord {
     pub id: u32,
     pub watch: Watch,
-    pub object: JsObject,
-    pub callback: JsValue,
+    pub object: WeakJsObject,
+    /// 只有待交付记录临时保活观察者和记录引用的节点。
+    pub kept: Vec<JsObject>,
+    pub transient: Vec<(NodeId, MutationOptions)>,
     pub targets: Vec<ObservedTarget>,
     /// Mutation records not yet delivered (`takeRecords` takes them).
     pub records: Vec<crate::dom::Mutation>,
@@ -64,7 +66,7 @@ pub struct ObservedTarget {
 }
 
 /// What `MutationObserver.observe` was asked to watch.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MutationOptions {
     pub child_list: bool,
     pub attributes: bool,
@@ -100,6 +102,7 @@ pub struct State {
     pub sheets_key: u64,
     /// What the `<style>` elements held when they were last read.
     pub style_texts: Vec<(NodeId, String)>,
+    pub style_revision: Option<u64>,
     pub styler: Option<(u64, Rc<Styler>)>,
     pub env: Environment,
     /// Each `new CSSStyleSheet()`'s rules, by its number; and which the document adopted.
@@ -149,6 +152,7 @@ impl State {
             sheets: Vec::new(),
             sheets_key: 1,
             style_texts: Vec::new(),
+            style_revision: None,
             styler: None,
             env: Environment::default(),
             constructed_sheets: HashMap::new(),
@@ -202,9 +206,14 @@ impl State {
     /// Reads the `<style>` elements and the adopted sheets again, when what they hold changed:
     /// answers whether the cascade's sheets changed.
     pub fn read_style_elements(&mut self) -> bool {
-        let mut found = self.dom.style_sheets();
+        let revision = self.dom.styles_revision();
+        let found = if self.style_revision == Some(revision) {
+            None
+        } else {
+            Some(self.dom.style_sheets())
+        };
+        self.style_revision = Some(revision);
         // A `<style>` in a document a script made (`DOMParser`) is no sheet of the window's.
-        found.retain(|(id, _)| self.dom.is_connected(*id));
         let adopted: Vec<(u32, String)> = self
             .adopted_sheets
             .iter()
@@ -218,9 +227,14 @@ impl State {
                 _ => None,
             })
             .collect();
-        if found == self.style_texts && adopted == known_adopted {
+        if found
+            .as_ref()
+            .is_none_or(|found| *found == self.style_texts)
+            && adopted == known_adopted
+        {
             return false;
         }
+        let found = found.unwrap_or_else(|| self.style_texts.clone());
         self.sheets
             .retain(|r| !matches!(r.owner, SheetOwner::Element(_) | SheetOwner::Adopted(_)));
         for (id, text) in &found {

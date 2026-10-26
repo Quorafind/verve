@@ -14,6 +14,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  dom:
+    name: DOM (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: DOM, React and security regressions
+        run: cargo test --locked -p verve-dom --no-fail-fast
+
   probe:
     name: Probe (${{ matrix.target }})
     runs-on: macos-14

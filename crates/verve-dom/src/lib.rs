@@ -32,7 +32,7 @@ pub mod html;
 mod state;
 
 use std::cell::{Ref, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -115,6 +115,9 @@ pub enum ScrollRequest {
 }
 
 /// What a script asked of the window that only the embedder can do.
+///
+/// 地址和剪贴板内容来自不可信脚本；即使地址限于 HTTP(S)，宿主仍须检查网络权限和用户授权。
+/// Submit 保留稳定的节点 API，宿主执行时须重新校验当时的 action，不能把它当作网络授权。
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
     /// Go to another page (`location.href = …`, a link pressed); in-page fragments are the
@@ -632,7 +635,22 @@ impl Document {
 
     /// What scripts asked of the window since this was last asked.
     pub fn take_requests(&self) -> Vec<Request> {
-        std::mem::take(&mut self.state.borrow_mut().requests)
+        let mut state = self.state.borrow_mut();
+        let mut requests = std::mem::take(&mut state.requests);
+        requests.retain(|request| {
+            if let Request::Submit(form) = request {
+                if !state.dom.exists(*form) {
+                    return false;
+                }
+                let action = state.dom.get_attr(*form, "action").unwrap_or_default();
+                return state
+                    .url
+                    .join(&action)
+                    .is_ok_and(|url| matches!(url.scheme(), "http" | "https"));
+            }
+            true
+        });
+        requests
     }
 
     /// Whether `node` has a listener for any of `kinds` (`click`, `pointerdown`…): what makes a
@@ -835,19 +853,44 @@ impl Document {
         runtime.run_microtasks();
         runtime.collect_garbage();
         let roots = self.state.borrow().dom.detached_roots();
+        let alive = {
+            let state = self.state.borrow();
+            let mut alive = HashSet::from([state.dom.document]);
+            for root in &roots {
+                if state.dom.subtree(*root).iter().any(|id| {
+                    state.dom.is_pinned(*id) || state.wrappers.get(id).is_some_and(|w| w.is_alive())
+                }) {
+                    alive.insert(*root);
+                }
+            }
+            // 只沿真实所有权边保活附属树；影子根不是永久根，闭合影子树同样可回收。
+            let mut edges = HashMap::<NodeId, Vec<NodeId>>::new();
+            for (host, (root, _)) in &state.shadow_roots {
+                let host = state.dom.root_of(*host);
+                edges.entry(host).or_default().push(*root);
+                edges.entry(*root).or_default().push(host);
+            }
+            for (template, content) in &state.template_contents {
+                edges
+                    .entry(state.dom.root_of(*template))
+                    .or_default()
+                    .push(*content);
+            }
+            let mut pending: Vec<NodeId> = alive.iter().copied().collect();
+            while let Some(root) = pending.pop() {
+                if let Some(next) = edges.get(&root) {
+                    for root in next {
+                        if alive.insert(*root) {
+                            pending.push(*root);
+                        }
+                    }
+                }
+            }
+            alive
+        };
         let mut freed_all = Vec::new();
         for root in roots {
-            let alive = {
-                let state = self.state.borrow();
-                state
-                    .dom
-                    .subtree(root)
-                    .iter()
-                    .any(|id| state.wrappers.get(id).is_some_and(|w| w.is_alive()))
-                    || state.template_contents.values().any(|f| *f == root)
-                    || state.shadow_hosts.contains_key(&root)
-            };
-            if alive {
+            if alive.contains(&root) {
                 continue;
             }
             let freed = self.state.borrow_mut().dom.free(root);
@@ -869,9 +912,26 @@ impl Document {
             state
                 .template_contents
                 .retain(|t, f| !gone.contains(t) && !gone.contains(f));
+            state
+                .shadow_roots
+                .retain(|host, (root, _)| !gone.contains(host) && !gone.contains(root));
+            state
+                .shadow_hosts
+                .retain(|root, host| !gone.contains(root) && !gone.contains(host));
+            if state.fullscreen.is_some_and(|id| gone.contains(&id)) {
+                state.fullscreen = None;
+            }
             for observer in &mut state.observers {
                 observer.targets.retain(|t| !gone.contains(&t.node));
+                observer.transient.retain(|(node, _)| !gone.contains(node));
             }
+            state.observers.retain(|o| {
+                o.object.is_alive() && (!o.targets.is_empty() || !o.records.is_empty())
+            });
+            state.dom.record_mutations = state
+                .observers
+                .iter()
+                .any(|o| o.watch == state::Watch::Mutation && !o.targets.is_empty());
         }
         let mut view = self.view.borrow_mut();
         view.computed.forget(&freed_all);

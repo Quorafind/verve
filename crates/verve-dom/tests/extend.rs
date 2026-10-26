@@ -106,3 +106,35 @@ fn an_embedder_adds_its_own_methods_to_the_dom() {
         assert_eq!(page.eval("heard.join(',')"), "2");
     });
 }
+
+#[test]
+fn an_embedder_empty_keeps_per_child_mutations_and_siblings() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        host::extend(page.runtime.context(), "Element", METHODS, ACCESSORS).unwrap();
+        let out = page.eval(
+            r#"
+            const list = document.body.createEl('ul');
+            const children = ['a', 'b', 'c'].map(text => list.createEl('li', { text }));
+            const observer = new MutationObserver(() => {});
+            observer.observe(list, { childList: true });
+            list.empty();
+            const records = observer.takeRecords();
+            const answer = [
+                list.childCount,
+                records.length,
+                records.every((r, i) => r.type === 'childList' && r.target === list &&
+                    r.addedNodes.length === 0 && r.removedNodes.length === 1 &&
+                    r.removedNodes[0] === children[i] && r.previousSibling === null &&
+                    r.nextSibling === (children[i + 1] || null)),
+                children.every(child => child.parentNode === null && !child.isConnected),
+            ];
+            list.empty();
+            answer.push(observer.takeRecords().length);
+            observer.disconnect();
+            answer.join(' ')
+            "#,
+        );
+        assert_eq!(out, "0 3 true true 0");
+    });
+}

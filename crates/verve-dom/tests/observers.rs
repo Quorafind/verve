@@ -7,6 +7,32 @@ use common::{Page, on_page};
 use verve_dom::{Options, Rect};
 
 #[test]
+fn review_mutation_recipients_are_frozen_before_delivery() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        assert_eq!(page.eval(r#"
+            (() => {
+                const root = document.createElement('div');
+                const inside = document.createElement('i'), outside = document.createElement('b');
+                root.appendChild(inside);
+                const observer = new MutationObserver(() => {});
+                observer.observe(root, {subtree: true, attributes: true, attributeOldValue: true});
+                inside.setAttribute('x', '1');
+                inside.remove();
+                inside.setAttribute('transient', '2');
+                outside.setAttribute('y', '1');
+                root.appendChild(outside);
+                const late = new MutationObserver(() => {});
+                late.observe(outside, {attributes: true});
+                const result = observer.takeRecords().map(r => r.attributeName).join(',') + '|' + late.takeRecords().length;
+                observer.disconnect(); late.disconnect();
+                return result;
+            })()
+        "#), "x,transient|0");
+    });
+}
+
+#[test]
 fn a_mutation_observer_hears_child_lists_attributes_and_text() {
     on_page(|| {
         let mut page = Page::new(Options::default());

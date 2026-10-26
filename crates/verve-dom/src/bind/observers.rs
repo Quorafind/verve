@@ -95,14 +95,14 @@ fn record_id(this: &JsValue, context: &mut Context) -> JsResult<u32> {
         .iter()
         .any(|o| o.id == id);
     if !known {
-        let callback = get(this, "__callback", context)?;
         let watch = watch_of(get(this, "__watch", context)?.to_u32(context)?);
         let object = this.as_object().expect("an observer");
         shared(context).borrow_mut().observers.push(ObserverRecord {
             id,
             watch,
-            object,
-            callback,
+            object: object.downgrade(),
+            kept: Vec::new(),
+            transient: Vec::new(),
             targets: Vec::new(),
             records: Vec::new(),
         });
@@ -133,6 +133,15 @@ fn let_go_if_idle(id: u32, context: &Context) {
         .iter()
         .any(|o| o.watch == Watch::Mutation && !o.targets.is_empty());
     state.dom.record_mutations = recording;
+}
+
+fn release_target(context: &Context, node: NodeId, observer: &JsValue) {
+    if let (Some(target), Some(observer)) = (
+        super::node::existing_wrapper(context, node),
+        observer.as_object(),
+    ) {
+        verve::dom_events::hold(&target, |held| held.retain(|object| object != &observer));
+    }
 }
 
 fn flag(options: &JsValue, name: &str, context: &mut Context) -> JsResult<Option<bool>> {
@@ -176,6 +185,7 @@ fn mutation_options(options: &JsValue, context: &mut Context) -> JsResult<Mutati
 
 const OBSERVER_METHODS: &[Method] = &[
     ("observe", 2, |this, args, cx| {
+        distribute(cx);
         let node = super::node_arg(args, 0, "observe", "Observer")?;
         let id = record_id(this, cx)?;
         let watch = watch_of(get(this, "__watch", cx)?.to_u32(cx)?);
@@ -194,6 +204,13 @@ const OBSERVER_METHODS: &[Method] = &[
                 options,
             });
         });
+        if let (Some(target), Some(observer)) = (wrap(cx, node).as_object(), this.as_object()) {
+            verve::dom_events::hold(&target, |held| {
+                if !held.contains(&observer) {
+                    held.push(observer);
+                }
+            });
+        }
         if watch == Watch::Mutation {
             shared(cx).borrow_mut().dom.record_mutations = true;
         } else {
@@ -204,17 +221,29 @@ const OBSERVER_METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     ("unobserve", 1, |this, args, cx| {
+        distribute(cx);
         let node = node_of(&arg(args, 0))?;
         let id = record_id(this, cx)?;
+        release_target(cx, node, this);
         with_record(id, cx, |record| record.targets.retain(|t| t.node != node));
         let_go_if_idle(id, cx);
         Ok(JsValue::undefined())
     }),
     ("disconnect", 0, |this, _, cx| {
+        distribute(cx);
         let id = record_id(this, cx)?;
+        let targets = with_record(id, cx, |record| {
+            record.targets.iter().map(|t| t.node).collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+        for node in targets {
+            release_target(cx, node, this);
+        }
         with_record(id, cx, |record| {
             record.targets.clear();
             record.records.clear();
+            record.transient.clear();
+            record.kept.clear();
         });
         let_go_if_idle(id, cx);
         Ok(JsValue::undefined())
@@ -223,8 +252,13 @@ const OBSERVER_METHODS: &[Method] = &[
         let id = record_id(this, cx)?;
         // What the document recorded and has not yet handed out is this observer's too.
         distribute(cx);
-        let records =
-            with_record(id, cx, |record| std::mem::take(&mut record.records)).unwrap_or_default();
+        let (records, _kept) = with_record(id, cx, |record| {
+            (
+                std::mem::take(&mut record.records),
+                std::mem::take(&mut record.kept),
+            )
+        })
+        .unwrap_or_default();
         let mut out = Vec::new();
         for mutation in records {
             out.push(mutation_record(cx, &mutation)?);
@@ -251,14 +285,9 @@ pub fn queue_delivery(context: &mut Context) {
 }
 
 /// Whether `observer` (with `options` on `target`) hears `mutation`.
-fn hears(
-    dom: &crate::dom::Dom,
-    target: NodeId,
-    options: &MutationOptions,
-    mutation: &Mutation,
-) -> bool {
+fn hears(path: &[NodeId], target: NodeId, options: &MutationOptions, mutation: &Mutation) -> bool {
     let at = mutation.target();
-    let reaches = at == target || (options.subtree && dom.contains(target, at));
+    let reaches = at == target || (options.subtree && path.contains(&target));
     if !reaches {
         return false;
     }
@@ -276,41 +305,101 @@ fn hears(
 }
 
 /// Hands the document's recorded mutations to the observers that hear them.
-fn distribute(context: &mut Context) {
-    let state = shared(context);
-    let mut state = state.borrow_mut();
-    let mutations = state.dom.take_mutations();
-    if mutations.is_empty() {
-        return;
-    }
-    let state = &mut *state;
-    for observer in state
-        .observers
-        .iter_mut()
-        .filter(|o| o.watch == Watch::Mutation)
+pub(crate) fn distribute(context: &mut Context) {
+    let mut keep = Vec::new();
     {
-        for mutation in &mutations {
-            let heard = observer
-                .targets
-                .iter()
-                .find(|t| hears(&state.dom, t.node, &t.options, mutation));
-            if let Some(target) = heard {
+        let state = shared(context);
+        let mut state = state.borrow_mut();
+        let mutations = state.dom.take_mutation_paths();
+        for (mutation, path) in &mutations {
+            for observer in state
+                .observers
+                .iter_mut()
+                .filter(|o| o.watch == Watch::Mutation)
+            {
+                let options: Vec<MutationOptions> = observer
+                    .targets
+                    .iter()
+                    .map(|t| (t.node, &t.options))
+                    .chain(
+                        observer
+                            .transient
+                            .iter()
+                            .map(|(node, options)| (*node, options)),
+                    )
+                    .filter(|(target, options)| hears(path, *target, options, mutation))
+                    .map(|(_, options)| options.clone())
+                    .collect();
+                // 移除后的子树在本次交付前仍受原 subtree 注册观察，不要求观察 childList。
+                if let Mutation::ChildList { removed, .. } = mutation {
+                    let inherited: Vec<MutationOptions> = observer
+                        .targets
+                        .iter()
+                        .map(|t| (t.node, &t.options))
+                        .chain(
+                            observer
+                                .transient
+                                .iter()
+                                .map(|(node, options)| (*node, options)),
+                        )
+                        .filter(|(target, options)| options.subtree && path.contains(target))
+                        .map(|(_, options)| options.clone())
+                        .collect();
+                    for removed in removed {
+                        for options in &inherited {
+                            if !observer
+                                .transient
+                                .iter()
+                                .any(|(node, known)| node == removed && known == options)
+                            {
+                                observer.transient.push((*removed, options.clone()));
+                            }
+                        }
+                    }
+                }
+                if options.is_empty() {
+                    continue;
+                }
                 let mut kept = mutation.clone();
-                // Old values only for whoever asked for them.
                 match &mut kept {
-                    Mutation::Attributes { old, .. } if !target.options.attribute_old_value => {
+                    Mutation::Attributes { old, .. }
+                        if !options.iter().any(|o| o.attribute_old_value) =>
+                    {
                         *old = None
                     }
                     Mutation::CharacterData { old, .. }
-                        if !target.options.character_data_old_value =>
+                        if !options.iter().any(|o| o.character_data_old_value) =>
                     {
                         old.clear()
                     }
                     _ => {}
                 }
+                let mut nodes = vec![kept.target()];
+                if let Mutation::ChildList {
+                    added,
+                    removed,
+                    previous,
+                    next,
+                    ..
+                } = &kept
+                {
+                    nodes.extend(added.iter().chain(removed.iter()).copied());
+                    nodes.extend(previous.iter().chain(next.iter()).copied());
+                }
                 observer.records.push(kept);
+                keep.push((observer.id, observer.object.upgrade(), nodes));
             }
         }
+    }
+    // 只有尚未交付的记录由宿主强持有；普通注册的保活边在目标 JS 对象上，可被 GC 一起回收。
+    for (id, observer, nodes) in keep {
+        let mut objects: Vec<JsObject> = observer.into_iter().collect();
+        objects.extend(
+            nodes
+                .into_iter()
+                .filter_map(|node| wrap(context, node).as_object()),
+        );
+        with_record(id, context, |record| record.kept.extend(objects));
     }
 }
 
@@ -383,23 +472,29 @@ fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsVal
 pub fn deliver_mutations(context: &mut Context) -> JsResult<()> {
     shared(context).borrow_mut().mutation_queued = false;
     distribute(context);
-    let due: Vec<(JsValue, JsObject, Vec<Mutation>)> = {
-        let state = shared(context);
-        let mut state = state.borrow_mut();
-        state
-            .observers
-            .iter_mut()
-            .filter(|o| o.watch == Watch::Mutation && !o.records.is_empty())
-            .map(|o| {
+    let due: Vec<u32> = shared(context)
+        .borrow()
+        .observers
+        .iter()
+        .filter(|o| o.watch == Watch::Mutation)
+        .map(|o| o.id)
+        .collect();
+    for id in due {
+        let record = with_record(id, context, |o| {
+            o.transient.clear();
+            o.object.upgrade().map(|object| {
                 (
-                    o.callback.clone(),
-                    o.object.clone(),
+                    object,
                     std::mem::take(&mut o.records),
+                    std::mem::take(&mut o.kept),
                 )
             })
-            .collect()
-    };
-    for (callback, observer, mutations) in due {
+        })
+        .flatten();
+        let Some((observer, mutations, _kept)) = record else {
+            continue;
+        };
+        let callback = observer.get(js_string!("__callback"), context)?;
         let mut records = Vec::new();
         for mutation in &mutations {
             // A record about a node freed since says nothing.
@@ -475,8 +570,9 @@ pub fn deliver_layout(context: &mut Context) -> JsResult<bool> {
         if entries.is_empty() {
             continue;
         }
-        let found = with_record(id, context, |o| (o.callback.clone(), o.object.clone()));
-        if let Some((callback, object)) = found {
+        let found = with_record(id, context, |o| o.object.upgrade()).flatten();
+        if let Some(object) = found {
+            let callback = object.get(js_string!("__callback"), context)?;
             told = true;
             let list = array(entries, context);
             if let Err(error) = verve::call(
@@ -545,7 +641,7 @@ fn intersection_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>
         with_record(id, context, |o| {
             (
                 o.targets.iter().map(|t| (t.node, t.intersecting)).collect(),
-                Some(o.object.clone()),
+                o.object.upgrade(),
             )
         })
         .unwrap_or_default();

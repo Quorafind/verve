@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::field::Draft;
 
-/// A node's number: its place in the arena and that place's generation (see [`Dom`]).
+/// 节点编号保持 32 位：低 24 位是槽位，高 8 位是代数；代数耗尽的槽位不再复用。
 pub type NodeId = u32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,18 +162,31 @@ impl Node {
 ///
 /// The node is held by an `Arc`: a copy of the arena — the snapshot a drawer reads, on another
 /// thread — shares every node with it, and a node changed afterwards is copied then.
+///
+/// A place whose generation has run out is retired, never reused: no id is ever given twice.
 #[derive(Clone, Debug, Default)]
 struct Slot {
-    generation: u8,
+    generation: u32,
+    /// The node is in the window's document — kept here so asking is not a walk to the root.
+    connected: bool,
     node: Option<Arc<Node>>,
 }
 
 const INDEX_BITS: u32 = 24;
 const INDEX_MASK: u32 = (1 << INDEX_BITS) - 1;
+/// 代数耗尽时退休槽位，避免旧句柄指向后来创建的节点。
+const MAX_GENERATION: u32 = u8::MAX as u32;
 
-fn split(id: NodeId) -> (usize, u8) {
-    ((id & INDEX_MASK) as usize, (id >> INDEX_BITS) as u8)
+fn split(id: NodeId) -> (usize, u32) {
+    ((id & INDEX_MASK) as usize, (id >> INDEX_BITS) as u32)
 }
+
+fn join(index: usize, generation: u32) -> NodeId {
+    (generation << INDEX_BITS) | index as u32
+}
+
+/// How many nodes an arena holds at most, unless told otherwise ([`Dom::max_nodes`]).
+pub const DEFAULT_MAX_NODES: usize = 1 << 24;
 
 /// What a script's change was, as a `MutationObserver` hears it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -241,7 +254,7 @@ pub struct Dom {
     /// Nodes whose parent changed since the bindings last looked: their objects' links follow.
     relinked: Vec<NodeId>,
     /// What changed, as observers hear it — kept only while [`Dom::record_mutations`] says.
-    mutations: Vec<Mutation>,
+    mutations: Vec<(Mutation, Vec<NodeId>)>,
     /// Whether to keep [`Mutation`]s: while a `MutationObserver` watches.
     pub record_mutations: bool,
     /// Trees in no tree: candidates for reclaiming.
@@ -252,6 +265,13 @@ pub struct Dom {
     partitions: HashSet<NodeId>,
     /// Every `<style>` element made: the ones in the document are stylesheets.
     styles: HashSet<NodeId>,
+    /// Moves when what a `<style>` holds, or which are in the document, may have changed.
+    styles_revision: u64,
+    /// Where the last child looked up was among its parent's children: walking siblings one
+    /// by one finds each next to the last, not by a search. Only a hint, always checked.
+    sibling_hint: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// 宿主建议的节点上限；创建前可通过 [`Dom::is_full`] 检查。
+    pub max_nodes: usize,
 }
 
 /// What changed since the arena was last asked.
@@ -291,8 +311,13 @@ impl Dom {
             pinned: HashSet::new(),
             partitions: HashSet::new(),
             styles: HashSet::new(),
+            styles_revision: 0,
+            sibling_hint: Default::default(),
+            max_nodes: DEFAULT_MAX_NODES,
         };
-        let (document, html, head, body) = dom.create_html_document();
+        let document = dom.create_document();
+        dom.slots[split(document).0].connected = true;
+        let (html, head, body) = dom.fill_html_document(document);
         dom.document = document;
         dom.html = html;
         dom.head = head;
@@ -309,13 +334,18 @@ impl Dom {
     /// A document with `<html>`, `<head>` and `<body>` in it: answers the four.
     pub fn create_html_document(&mut self) -> (NodeId, NodeId, NodeId, NodeId) {
         let document = self.create_document();
+        let (html, head, body) = self.fill_html_document(document);
+        (document, html, head, body)
+    }
+
+    fn fill_html_document(&mut self, document: NodeId) -> (NodeId, NodeId, NodeId) {
         let html = self.create_element("html");
         let head = self.create_element("head");
         let body = self.create_element("body");
         self.append(document, html);
         self.append(html, head);
         self.append(html, body);
-        (document, html, head, body)
+        (html, head, body)
     }
 
     fn insert(&mut self, node: Node) -> NodeId {
@@ -325,25 +355,46 @@ impl Dom {
             Some(index) => {
                 let slot = &mut self.slots[index as usize];
                 slot.node = Some(Arc::new(node));
-                (u32::from(slot.generation) << INDEX_BITS) | index
+                slot.connected = false;
+                join(index as usize, slot.generation)
             }
             None => {
-                let index = self.slots.len() as u32;
-                assert!(index <= INDEX_MASK, "the DOM arena is full");
+                // 槽位编号不能侵入代数位；耗尽的槽位永不复用。
+                let index = self.slots.len();
+                assert!(index <= INDEX_MASK as usize, "DOM 槽位已耗尽");
                 self.slots.push(Slot {
                     generation: 0,
+                    connected: false,
                     node: Some(Arc::new(node)),
                 });
-                index
+                join(index, 0)
             }
         };
         self.roots.insert(id);
         id
     }
 
+    /// 是否达到建议节点上限，或已无可编码且未退役的槽位。
+    pub fn is_full(&self) -> bool {
+        self.live >= self.max_nodes
+            || (self.free.is_empty() && self.slots.len() > INDEX_MASK as usize)
+    }
+
+    /// Moves when a `<style>`'s text, or which `<style>`s are in the document, may have
+    /// changed: when it has not, the sheets read last are still the sheets.
+    pub fn styles_revision(&self) -> u64 {
+        self.styles_revision
+    }
+
     /// Marks `id` changed.
     pub fn mark(&mut self, id: NodeId) {
         self.revision = self.revision.wrapping_add(1);
+        if !self.styles.is_empty()
+            && (self.styles.contains(&id)
+                || self.parent(id).is_some_and(|p| self.styles.contains(&p)))
+        {
+            self.styles_revision = self.styles_revision.wrapping_add(1);
+        }
         if self.changed_set.insert(id) {
             self.changed.push(id);
         }
@@ -377,6 +428,14 @@ impl Dom {
 
     /// The mutations recorded since this was last asked.
     pub fn take_mutations(&mut self) -> Vec<Mutation> {
+        self.take_mutation_paths()
+            .into_iter()
+            .map(|(mutation, _)| mutation)
+            .collect()
+    }
+
+    /// 祖先链在变更发生时冻结，绑定层据此确定接收者，而不是等微任务时重查树。
+    pub(crate) fn take_mutation_paths(&mut self) -> Vec<(Mutation, Vec<NodeId>)> {
         std::mem::take(&mut self.mutations)
     }
 
@@ -386,7 +445,13 @@ impl Dom {
 
     fn record(&mut self, mutation: Mutation) {
         if self.record_mutations {
-            self.mutations.push(mutation);
+            let mut path = Vec::new();
+            let mut at = Some(mutation.target());
+            while let Some(node) = at {
+                path.push(node);
+                at = self.parent(node);
+            }
+            self.mutations.push((mutation, path));
         }
     }
 
@@ -419,28 +484,51 @@ impl Dom {
             .filter(|id| self.exists(*id) && self.is_connected(*id))
             .map(|id| (id, self.text_content(id)))
             .collect();
-        out.sort_by(|(a, _), (b, _)| self.order(*a, *b));
+        let order: std::collections::HashMap<NodeId, usize> = self
+            .subtree(self.document)
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+        out.sort_by_key(|(id, _)| order.get(id).copied().unwrap_or(usize::MAX));
+        out
+    }
+
+    /// Where the node is in its tree: its place among its parent's children, and its
+    /// parent's, and so on up, read from the top.
+    fn tree_path(&self, id: NodeId) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut at = id;
+        while let Some(parent) = self.parent(at) {
+            out.push(self.index_of(parent, at).unwrap_or(0));
+            at = parent;
+        }
+        out.reverse();
         out
     }
 
     /// Document order of two nodes in one tree.
     pub fn order(&self, a: NodeId, b: NodeId) -> std::cmp::Ordering {
-        let path = |id: NodeId| {
-            let mut out = Vec::new();
-            let mut at = id;
-            while let Some(parent) = self.parent(at) {
-                let index = self
-                    .children(parent)
-                    .iter()
-                    .position(|c| *c == at)
-                    .unwrap_or(0);
-                out.push(index);
-                at = parent;
-            }
-            out.reverse();
-            out
-        };
-        path(a).cmp(&path(b))
+        self.tree_path(a).cmp(&self.tree_path(b))
+    }
+
+    /// Where `child` is among `parent`'s children: next to the last one looked up when it is
+    /// there (walking siblings), searched for otherwise.
+    pub fn index_of(&self, parent: NodeId, child: NodeId) -> Option<usize> {
+        use std::sync::atomic::Ordering;
+        let children = self.children(parent);
+        let hint = self.sibling_hint.load(Ordering::Relaxed);
+        let found = [
+            hint,
+            hint.wrapping_add(1),
+            hint.wrapping_sub(1),
+            hint.wrapping_add(2),
+        ]
+        .into_iter()
+        .find(|at| children.get(*at) == Some(&child))
+        .or_else(|| children.iter().position(|c| *c == child))?;
+        self.sibling_hint.store(found, Ordering::Relaxed);
+        Some(found)
     }
 
     pub fn create_comment(&mut self, data: &str) -> NodeId {
@@ -532,7 +620,7 @@ impl Dom {
     pub fn sibling(&self, id: NodeId, step: isize, elements_only: bool) -> Option<NodeId> {
         let parent = self.parent(id)?;
         let children = self.children(parent);
-        let mut at = children.iter().position(|c| *c == id)? as isize;
+        let mut at = self.index_of(parent, id)? as isize;
         loop {
             at += step;
             if at < 0 || at as usize >= children.len() {
@@ -540,6 +628,8 @@ impl Dom {
             }
             let candidate = children[at as usize];
             if !elements_only || self.get(candidate).is_some_and(Node::is_element) {
+                self.sibling_hint
+                    .store(at as usize, std::sync::atomic::Ordering::Relaxed);
                 return Some(candidate);
             }
         }
@@ -601,7 +691,36 @@ impl Dom {
 
     /// Whether the node is in the window's document.
     pub fn is_connected(&self, id: NodeId) -> bool {
-        self.root_of(id) == self.document
+        let (index, generation) = split(id);
+        self.slots
+            .get(index)
+            .is_some_and(|s| s.generation == generation && s.node.is_some() && s.connected)
+    }
+
+    /// Marks `id`'s subtree in or out of the window's document, when that changed.
+    fn set_connected(&mut self, id: NodeId, connected: bool) {
+        if self.is_connected(id) == connected {
+            return;
+        }
+        let mut stack = vec![id];
+        let mut style = false;
+        while let Some(at) = stack.pop() {
+            let (index, generation) = split(at);
+            let Some(slot) = self.slots.get_mut(index) else {
+                continue;
+            };
+            if slot.generation != generation {
+                continue;
+            }
+            slot.connected = connected;
+            if let Some(node) = &slot.node {
+                style |= node.tag() == Some("style");
+                stack.extend(node.children.iter().copied());
+            }
+        }
+        if style {
+            self.styles_revision = self.styles_revision.wrapping_add(1);
+        }
     }
 
     /// The host holds `id` itself: it is never reclaimed.
@@ -650,15 +769,80 @@ impl Dom {
         let Some(parent) = self.parent(id) else {
             return;
         };
-        let was_connected = self.is_connected(parent);
+        let Some(at) = self.index_of(parent, id) else {
+            return;
+        };
         let (previous, next) = if self.record_mutations {
-            (self.sibling(id, -1, false), self.sibling(id, 1, false))
+            let children = self.children(parent);
+            (
+                at.checked_sub(1).map(|i| children[i]),
+                children.get(at + 1).copied(),
+            )
         } else {
             (None, None)
         };
         if let Some(node) = self.node_mut(parent) {
-            node.children.retain(|child| *child != id);
+            node.children.remove(at);
         }
+        self.unlink(id);
+        self.mark(parent);
+        self.record(Mutation::ChildList {
+            target: parent,
+            added: Vec::new(),
+            removed: vec![id],
+            previous,
+            next,
+        });
+    }
+
+    /// 多节点转换一次移走同一父节点中的成员，避免每次搬移都扫描和移动整条兄弟列表。
+    pub(crate) fn detach_many(&mut self, ids: &[NodeId]) {
+        let selected: HashSet<NodeId> = ids.iter().copied().collect();
+        let parents: HashSet<NodeId> = ids.iter().filter_map(|id| self.parent(*id)).collect();
+        let mut links = std::collections::HashMap::new();
+        for parent in &parents {
+            let children = self.children(*parent);
+            for (at, id) in children.iter().enumerate() {
+                links.insert(
+                    *id,
+                    (
+                        *parent,
+                        at.checked_sub(1).map(|i| children[i]),
+                        children.get(at + 1).copied(),
+                    ),
+                );
+            }
+        }
+        for parent in parents {
+            if let Some(node) = self.node_mut(parent) {
+                node.children.retain(|id| !selected.contains(id));
+            }
+        }
+        for id in ids {
+            let Some((parent, previous, next)) = links.remove(id) else {
+                continue;
+            };
+            if let Some(previous) = previous.and_then(|id| links.get_mut(&id)) {
+                previous.2 = next;
+            }
+            if let Some(next) = next.and_then(|id| links.get_mut(&id)) {
+                next.1 = previous;
+            }
+            self.unlink(*id);
+            self.mark(parent);
+            self.record(Mutation::ChildList {
+                target: parent,
+                added: Vec::new(),
+                removed: vec![*id],
+                previous,
+                next,
+            });
+        }
+    }
+
+    /// What taking `id` out of its parent does to `id`, once its parent no longer lists it.
+    fn unlink(&mut self, id: NodeId) {
+        let was_connected = self.is_connected(id);
         if let Some(node) = self.node_mut(id) {
             node.parent = None;
         }
@@ -671,19 +855,12 @@ impl Dom {
         if self.active.is_some_and(|active| self.contains(id, active)) {
             self.active = None;
         }
-        self.mark(parent);
         self.roots.insert(id);
         self.relinked.push(id);
         if was_connected {
+            self.set_connected(id, false);
             self.moved.push((id, false));
         }
-        self.record(Mutation::ChildList {
-            target: parent,
-            added: Vec::new(),
-            removed: vec![id],
-            previous,
-            next,
-        });
     }
 
     /// Puts `child` last in `parent`. A fragment gives up its children instead of itself, as the
@@ -695,71 +872,165 @@ impl Dom {
     /// Whether `child` may go in `parent`: what `appendChild` refuses with a
     /// `HierarchyRequestError`.
     pub fn may_insert(&self, parent: NodeId, child: NodeId) -> bool {
-        if !self.exists(parent) || !self.exists(child) || self.contains(child, parent) {
+        if !self.exists(parent) || !self.exists(child) || child == parent {
+            return false;
+        }
+        // Only what has children can hold the parent; a fresh leaf, the usual child, cannot.
+        if !self.children(child).is_empty() && self.contains(child, parent) {
             return false;
         }
         let parent_kind = &self.get(parent).expect("checked").kind;
         let child_kind = &self.get(child).expect("checked").kind;
-        !matches!(
+        if matches!(
             parent_kind,
             NodeKind::Text(_) | NodeKind::Comment(_) | NodeKind::Doctype(_)
-        ) && !matches!(child_kind, NodeKind::Document)
-    }
-
-    /// Puts `child` in `parent` before `before`, or last. Refuses what would make a loop.
-    pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: Option<NodeId>) -> bool {
-        if !self.may_insert(parent, child) {
+        ) || matches!(child_kind, NodeKind::Document)
+        {
             return false;
         }
-        if matches!(self.get(child).map(|n| &n.kind), Some(NodeKind::Fragment)) {
-            let moved: Vec<NodeId> = self.children(child).to_vec();
-            for grandchild in moved {
-                self.insert_before(parent, grandchild, before);
-            }
-            return true;
+        if matches!(child_kind, NodeKind::Doctype(_)) && !matches!(parent_kind, NodeKind::Document)
+        {
+            return false;
         }
-        // Before itself is before what follows it.
-        let before = if before == Some(child) {
-            self.sibling(child, 1, false)
-        } else {
-            before
-        };
-        self.detach(child);
-        let connected = self.is_connected(parent);
-        let node = self.node_mut(parent).expect("checked above");
-        let at = before
-            .and_then(|before| node.children.iter().position(|c| *c == before))
-            .unwrap_or(node.children.len());
-        node.children.insert(at, child);
-        if let Some(node) = self.node_mut(child) {
-            node.parent = Some(parent);
-        }
-        self.roots.remove(&child);
-        self.relinked.push(child);
-        self.mark(parent);
-        self.mark(child);
-        if connected {
-            self.moved.push((child, true));
-        }
-        if self.record_mutations {
-            let previous = self.sibling(child, -1, false);
-            let next = self.sibling(child, 1, false);
-            self.record(Mutation::ChildList {
-                target: parent,
-                added: vec![child],
-                removed: Vec::new(),
-                previous,
-                next,
-            });
+        if matches!(parent_kind, NodeKind::Document) {
+            return self.may_go_in_document(parent, child);
         }
         true
     }
 
-    /// Takes every child out of `id`.
-    pub fn empty(&mut self, id: NodeId) {
-        for child in self.children(id).to_vec() {
-            self.detach(child);
+    /// A document holds one element and one doctype at most, and no text.
+    fn may_go_in_document(&self, document: NodeId, child: NodeId) -> bool {
+        let others = |what: fn(&Node) -> bool| {
+            self.children(document)
+                .iter()
+                .any(|c| *c != child && self.get(*c).is_some_and(what))
+        };
+        let is_doctype = |n: &Node| matches!(n.kind, NodeKind::Doctype(_));
+        match &self.get(child).expect("checked").kind {
+            NodeKind::Text(_) => false,
+            NodeKind::Element(_) => !others(Node::is_element),
+            NodeKind::Doctype(_) => !others(is_doctype),
+            NodeKind::Fragment => {
+                let kids = self.children(child);
+                let elements = kids
+                    .iter()
+                    .filter(|c| self.get(**c).is_some_and(Node::is_element))
+                    .count();
+                !kids.iter().any(|c| self.get(*c).is_some_and(Node::is_text))
+                    && elements <= 1
+                    && (elements == 0 || !others(Node::is_element))
+            }
+            _ => true,
         }
+    }
+
+    /// Puts `child` in `parent` before `before`, or last. Refuses what would make a loop.
+    pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: Option<NodeId>) -> bool {
+        if !self.may_insert(parent, child)
+            || before.is_some_and(|id| self.parent(id) != Some(parent))
+        {
+            return false;
+        }
+        let nodes = if matches!(self.get(child).map(|n| &n.kind), Some(NodeKind::Fragment)) {
+            // A fragment gives up all its children at once, heard as one change of each list.
+            let moved = match self.node_mut(child) {
+                Some(fragment) => std::mem::take(&mut fragment.children),
+                None => Vec::new(),
+            };
+            if moved.is_empty() {
+                return true;
+            }
+            for node in &moved {
+                if let Some(node) = self.node_mut(*node) {
+                    node.parent = None;
+                }
+            }
+            self.mark(child);
+            self.record(Mutation::ChildList {
+                target: child,
+                added: Vec::new(),
+                removed: moved.clone(),
+                previous: None,
+                next: None,
+            });
+            moved
+        } else {
+            // Before itself is before what follows it.
+            let before = if before == Some(child) {
+                self.sibling(child, 1, false)
+            } else {
+                before
+            };
+            self.detach(child);
+            return self.place(parent, vec![child], before);
+        };
+        let before = before.filter(|b| !nodes.contains(b));
+        self.place(parent, nodes, before)
+    }
+
+    /// Puts `nodes`, in no tree now, in `parent` before `before` (or last), as one change.
+    fn place(&mut self, parent: NodeId, nodes: Vec<NodeId>, before: Option<NodeId>) -> bool {
+        let connected = self.is_connected(parent);
+        let at = before
+            .and_then(|before| self.index_of(parent, before))
+            .unwrap_or(self.children(parent).len());
+        let Some(node) = self.node_mut(parent) else {
+            return false;
+        };
+        node.children.splice(at..at, nodes.iter().copied());
+        let (previous, next) = if self.record_mutations {
+            let children = self.children(parent);
+            (
+                at.checked_sub(1).map(|i| children[i]),
+                children.get(at + nodes.len()).copied(),
+            )
+        } else {
+            (None, None)
+        };
+        for child in &nodes {
+            let child = *child;
+            if let Some(node) = self.node_mut(child) {
+                node.parent = Some(parent);
+            }
+            self.roots.remove(&child);
+            self.relinked.push(child);
+            self.mark(child);
+            if connected {
+                self.set_connected(child, true);
+                self.moved.push((child, true));
+            }
+        }
+        self.mark(parent);
+        self.record(Mutation::ChildList {
+            target: parent,
+            added: nodes,
+            removed: Vec::new(),
+            previous,
+            next,
+        });
+        true
+    }
+
+    /// Takes every child out of `id`, recording each removal in document order.
+    pub fn empty(&mut self, id: NodeId) {
+        let children = match self.node_mut(id) {
+            Some(node) if !node.children.is_empty() => std::mem::take(&mut node.children),
+            _ => return,
+        };
+        for (at, child) in children.iter().enumerate() {
+            self.unlink(*child);
+            if self.record_mutations {
+                // Like removing the first child repeatedly, without shifting the wide list.
+                self.record(Mutation::ChildList {
+                    target: id,
+                    added: Vec::new(),
+                    removed: vec![*child],
+                    previous: None,
+                    next: children.get(at + 1).copied(),
+                });
+            }
+        }
+        self.mark(id);
     }
 
     /// The text of the node and everything in it, as `textContent` reads it.
@@ -774,14 +1045,13 @@ impl Dom {
     }
 
     fn collect_text(&self, id: NodeId, out: &mut String) {
-        let Some(node) = self.get(id) else { return };
-        match &node.kind {
-            NodeKind::Text(text) => out.push_str(text),
-            NodeKind::Comment(_) | NodeKind::Doctype(_) => {}
-            _ => {
-                for child in &node.children {
-                    self.collect_text(*child, out);
-                }
+        let mut stack = vec![id];
+        while let Some(at) = stack.pop() {
+            let Some(node) = self.get(at) else { continue };
+            match &node.kind {
+                NodeKind::Text(text) => out.push_str(text),
+                NodeKind::Comment(_) | NodeKind::Doctype(_) => {}
+                _ => stack.extend(node.children.iter().rev()),
             }
         }
     }
@@ -812,6 +1082,24 @@ impl Dom {
         if !text.is_empty() {
             let run = self.create_text(text);
             self.append(id, run);
+        }
+    }
+
+    /// 解析器追加相邻文本时只扩展尾部，不反复复制已有内容。
+    pub(crate) fn append_text(&mut self, id: NodeId, text: &str) {
+        let old = self
+            .record_mutations
+            .then(|| self.get(id).and_then(Node::data).unwrap_or("").to_owned());
+        if let Some(Node {
+            kind: NodeKind::Text(own),
+            ..
+        }) = self.node_mut(id)
+        {
+            own.push_str(text);
+            self.mark(id);
+            if let Some(old) = old {
+                self.record(Mutation::CharacterData { target: id, old });
+            }
         }
     }
 
@@ -1162,9 +1450,10 @@ impl Dom {
     pub fn query(&self, root: NodeId, selector: &str) -> Option<NodeId> {
         let selector = crate::css::SelectorList::parse(selector).ok()?;
         let scope = self.scope_of(root);
-        self.descendants(root)
+        selector
+            .select(self, self.descendants(root), Some(scope), true)
             .into_iter()
-            .find(|id| selector.matches_in(self, *id, Some(scope)))
+            .next()
     }
 
     pub fn query_all(&self, root: NodeId, selector: &str) -> Vec<NodeId> {
@@ -1172,28 +1461,45 @@ impl Dom {
             return Vec::new();
         };
         let scope = self.scope_of(root);
-        self.descendants(root)
-            .into_iter()
-            .filter(|id| selector.matches_in(self, *id, Some(scope)))
-            .collect()
+        selector.select(self, self.descendants(root), Some(scope), false)
     }
 
     /// A copy of the node — and of everything in it, when `deep`. The copy is in no tree.
     pub fn clone_node(&mut self, id: NodeId, deep: bool) -> Option<NodeId> {
+        let copy = self.clone_one(id)?;
+        if deep {
+            // A loop, not a recursion: a tree of any depth is copied.
+            let mut stack = vec![(id, copy)];
+            while let Some((from, to)) = stack.pop() {
+                let children = self.children(from).to_vec();
+                let mut copies = Vec::with_capacity(children.len());
+                for child in children {
+                    if let Some(made) = self.clone_one(child) {
+                        if let Some(node) = self.node_mut(made) {
+                            node.parent = Some(to);
+                        }
+                        self.roots.remove(&made);
+                        copies.push(made);
+                        stack.push((child, made));
+                    }
+                }
+                if let Some(node) = self.node_mut(to) {
+                    node.children = copies;
+                }
+            }
+        }
+        Some(copy)
+    }
+
+    /// A copy of the node alone, in no tree.
+    fn clone_one(&mut self, id: NodeId) -> Option<NodeId> {
         let mut node = self.get(id)?.clone();
+        node.children = Vec::new();
         node.parent = None;
-        let children = std::mem::take(&mut node.children);
         let style = node.tag() == Some("style");
         let copy = self.insert(node);
         if style {
             self.styles.insert(copy);
-        }
-        if deep {
-            for child in children {
-                if let Some(child) = self.clone_node(child, true) {
-                    self.append(copy, child);
-                }
-            }
         }
         Some(copy)
     }
@@ -1237,24 +1543,42 @@ impl Dom {
                 continue;
             }
             if let Some(node) = slot.node.take() {
-                let node = Arc::unwrap_or_clone(node);
-                slot.generation = slot.generation.wrapping_add(1);
-                self.free.push(index as u32);
+                match Arc::try_unwrap(node) {
+                    Ok(node) => stack.extend(node.children),
+                    Err(shared) => stack.extend(shared.children.iter().copied()),
+                }
+                slot.connected = false;
+                // A place whose generations ran out is retired: no id is ever given twice.
+                if slot.generation < MAX_GENERATION {
+                    slot.generation += 1;
+                    self.free.push(index as u32);
+                }
                 self.live -= 1;
-                stack.extend(node.children);
                 self.roots.remove(&at);
                 self.partitions.remove(&at);
                 self.styles.remove(&at);
                 self.pinned.remove(&at);
-                self.hovered.retain(|h| *h != at);
-                if self.changed_set.remove(&at) {
-                    self.changed.retain(|c| *c != at);
-                }
                 freed.push(at);
             }
         }
-        self.relinked.retain(|r| !freed.contains(r));
-        self.mutations.retain(|m| !freed.contains(&m.target()));
+        let gone: HashSet<NodeId> = freed.iter().copied().collect();
+        self.hovered.retain(|h| !gone.contains(h));
+        if self.focused.is_some_and(|f| gone.contains(&f)) {
+            self.focused = None;
+        }
+        if self.active.is_some_and(|a| gone.contains(&a)) {
+            self.active = None;
+        }
+        let mut was_changed = false;
+        for id in &freed {
+            was_changed |= self.changed_set.remove(id);
+        }
+        if was_changed {
+            self.changed.retain(|c| !gone.contains(c));
+        }
+        self.relinked.retain(|r| !gone.contains(r));
+        self.moved.retain(|(id, _)| !gone.contains(id));
+        self.mutations.retain(|(m, _)| !gone.contains(&m.target()));
         self.revision = self.revision.wrapping_add(1);
         freed
     }
