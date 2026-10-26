@@ -497,6 +497,84 @@ fn http_close_all_connections_closes_active_transport() {
     );
 }
 #[test]
+fn http_peer_close_destroys_pending_response_before_late_end() {
+    assert_eq!(
+        run(
+            r#"
+        const http=require('http'),net=require('net');let client,closed=0,finished=0;const errors=[];
+        const server=http.createServer((req,res)=>{
+            res.on('close',()=>{closed++;res.destroy()});
+            res.on('finish',()=>finished++);res.on('error',e=>errors.push(e.code));
+            req.socket.on('close',()=>{
+                const destroyed=res.destroyed;res.end('late');
+                setImmediate(()=>server.close(()=>globalThis.result=[destroyed,closed,finished,errors,res.headersSent]));
+            });
+            client.destroy();
+        });
+        server.listen(0,'127.0.0.1',()=>{
+            client=net.connect(server.address().port,'127.0.0.1');
+            client.on('connect',()=>client.write('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'));
+        });
+    "#,
+            granted()
+        ),
+        "[true,1,0,[],false]"
+    );
+}
+#[test]
+fn http_peer_close_destroys_streaming_response_without_late_error() {
+    assert_eq!(
+        run(
+            r#"
+        const http=require('http'),net=require('net');let client,closed=0,finished=0;const errors=[];
+        const server=http.createServer((req,res)=>{
+            res.on('close',()=>closed++);res.on('finish',()=>finished++);
+            res.on('error',e=>errors.push(e.code));
+            req.socket.on('close',()=>{
+                const destroyed=res.destroyed;res.end('late');
+                setImmediate(()=>server.close(()=>globalThis.result=[destroyed,closed,finished,errors,res.headersSent]));
+            });
+            res.write('ready');
+        });
+        server.listen(0,'127.0.0.1',()=>{
+            client=net.connect(server.address().port,'127.0.0.1');
+            client.on('connect',()=>client.write('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'));
+            client.on('data',()=>client.destroy());
+        });
+    "#,
+            granted()
+        ),
+        "[true,1,0,[],true]"
+    );
+}
+#[test]
+fn http_response_close_is_once_per_keepalive_request() {
+    assert_eq!(
+        run(
+            r#"
+        const http=require('http'),agent=new http.Agent({keepAlive:true});
+        let connections=0;const responses=[],closed=[],finished=[],errors=[],bodies=[];
+        const server=http.createServer((req,res)=>{
+            const i=responses.length;responses.push(res);closed.push(0);finished.push(0);
+            res.on('close',()=>closed[i]++);res.on('finish',()=>finished[i]++);
+            res.on('error',e=>errors.push(e.code));res.end(req.url);
+        });server.on('connection',()=>connections++);
+        server.listen(0,'127.0.0.1',()=>{
+            function get(n){http.get({host:'127.0.0.1',port:server.address().port,path:'/'+n,agent},res=>{
+                let body='';res.on('data',b=>body+=b);res.on('end',()=>setImmediate(()=>{
+                    bodies.push(body);if(n===1)get(2);else{
+                        agent.destroy();server.close(()=>setImmediate(()=>globalThis.result=[connections,bodies,closed,finished,errors,responses.every(r=>r.destroyed)]));
+                    }
+                }));
+            })}get(1);
+        });
+    "#,
+            granted()
+        ),
+        r#"[1,["/1","/2"],[1,1],[1,1],[],true]"#
+    );
+}
+#[test]
 fn http_upgrade_completes_messages_without_aborting_them_on_close() {
     assert_eq!(
         run(

@@ -856,6 +856,9 @@ fn on_data(socket: &JsValue, data: Vec<u8>, cx: &mut Context) -> JsResult<()> {
                     let keep = connection.as_deref() != Some("close")
                         && (head.version == 1 || connection.as_deref() == Some("keep-alive"));
                     put(&response, "__httpKeepAlive", keep, cx)?;
+                    let finished =
+                        function(cx, "", 0, |this, _, cx| invoke(this, "destroy", &[], cx));
+                    invoke(&response, "once", &[js_text("finish"), finished.into()], cx)?;
                     emit(&server, "request", &[message, response], cx)?;
                 }
             }
@@ -958,6 +961,10 @@ fn attach(socket: &JsValue, response: bool, server: JsValue, cx: &mut Context) -
             let key = text_of(&get(socket, "__httpPoolKey", cx)?, cx)?;
             for map in ["sockets", "freeSockets"] {
                 pool_remove(&agent, map, &key, socket, cx)?;
+            }
+            let response = get(socket, "__httpResponse", cx)?;
+            if response.is_object() {
+                invoke(&response, "destroy", &[], cx)?;
             }
             let message = get(socket, "__httpMessage", cx)?;
             if message.is_object()
