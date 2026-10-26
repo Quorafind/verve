@@ -12,6 +12,7 @@
 pub mod document;
 pub mod element;
 pub mod events;
+pub mod fetch;
 pub mod node;
 pub mod observers;
 pub mod platform;

@@ -2747,71 +2747,11 @@ const IMAGE_REFLECTED: &[(&str, &str, Reflect)] = &[
     ("referrerPolicy", "referrerpolicy", Reflect::Text),
 ];
 
-const MEDIA_METHODS: &[Method] = &[
-    ("play", 0, |this, _, cx| {
-        if let Some(object) = this.as_object() {
-            super::hidden(&object, js_string!("__paused"), false, cx)?;
-        }
-        super::events::fire(cx, this, "Event", "play", &[])?;
-        super::resolved(JsValue::undefined(), cx)
-    }),
-    ("pause", 0, |this, _, cx| {
-        if let Some(object) = this.as_object() {
-            super::hidden(&object, js_string!("__paused"), true, cx)?;
-        }
-        super::events::fire(cx, this, "Event", "pause", &[])?;
-        Ok(JsValue::undefined())
-    }),
-    ("load", 0, |_, _, _| Ok(JsValue::undefined())),
-    ("canPlayType", 1, |_, _, _| Ok(text(""))),
-    ("fastSeek", 1, |_, _, _| Ok(JsValue::undefined())),
-    ("addTextTrack", 3, |_, _, cx| Ok(plain_object(cx).into())),
-];
-
-const MEDIA_ACCESSORS: &[Accessor] = &[
-    (
-        "paused",
-        Some(|this, _, cx| {
-            let paused = get(this, "__paused", cx)?;
-            Ok((paused.is_undefined() || paused.to_boolean()).into())
-        }),
-        None,
-    ),
-    ("duration", Some(|_, _, _| Ok(f64::NAN.into())), None),
-    ("readyState", Some(|_, _, _| Ok(0.into())), None),
-    ("networkState", Some(|_, _, _| Ok(0.into())), None),
-    ("ended", Some(|_, _, _| Ok(false.into())), None),
-    ("seeking", Some(|_, _, _| Ok(false.into())), None),
-    (
-        "buffered",
-        Some(|_, _, cx| super::platform::empty_ranges(cx)),
-        None,
-    ),
-    (
-        "played",
-        Some(|_, _, cx| super::platform::empty_ranges(cx)),
-        None,
-    ),
-    (
-        "seekable",
-        Some(|_, _, cx| super::platform::empty_ranges(cx)),
-        None,
-    ),
-    (
-        "textTracks",
-        Some(|_, _, cx| Ok(array(Vec::new(), cx))),
-        None,
-    ),
-    ("videoWidth", Some(|_, _, _| Ok(0.into())), None),
-    ("videoHeight", Some(|_, _, _| Ok(0.into())), None),
-];
-
 const MEDIA_REFLECTED: &[(&str, &str, Reflect)] = &[
     ("src", "src", Reflect::Url),
     ("autoplay", "autoplay", Reflect::Flag),
     ("loop", "loop", Reflect::Flag),
     ("controls", "controls", Reflect::Flag),
-    ("muted", "muted", Reflect::Flag),
     ("defaultMuted", "muted", Reflect::Flag),
     ("preload", "preload", Reflect::Keyword("auto")),
     ("poster", "poster", Reflect::Url),
@@ -3526,19 +3466,12 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         context,
         "HTMLMediaElement",
         "HTMLElement",
-        MEDIA_METHODS,
-        MEDIA_ACCESSORS,
+        crate::media::METHODS,
+        crate::media::ACCESSORS,
         MEDIA_REFLECTED,
     )?;
     let media = shared(context).borrow().prototype("HTMLMediaElement");
-    for (name, value) in [
-        ("currentTime", JsValue::from(0)),
-        ("volume", 1.into()),
-        ("playbackRate", 1.into()),
-        ("defaultPlaybackRate", 1.into()),
-    ] {
-        media.set(JsString::from(name), value, false, context)?;
-    }
+    media.set(js_string!("defaultPlaybackRate"), 1, false, context)?;
     full_class(
         context,
         "HTMLVideoElement",

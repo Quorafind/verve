@@ -29,6 +29,7 @@ pub mod css;
 pub mod dom;
 pub mod field;
 pub mod html;
+mod media;
 mod state;
 
 use std::cell::{Ref, RefCell};
@@ -42,6 +43,9 @@ use boa_engine::{Context, JsResult, JsValue, js_string};
 pub use css::{Computed, Environment, Style};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
 pub use field::Draft;
+pub use media::{
+    MediaCommand, MediaCommandKind, MediaError, MediaSettings, MediaState, MediaUpdate,
+};
 pub use state::FrameClock;
 
 use state::{Shared, SheetOwner, SheetRecord, State, shared};
@@ -272,6 +276,7 @@ fn install_classes(context: &mut Context, options: &Options) -> JsResult<()> {
     bind::element::install(context)?;
     bind::document::install(context)?;
     bind::window::install(context, options)?;
+    bind::fetch::install(context)?;
     bind::platform::install(context)?;
     bind::observers::install(context)?;
     bind::xhr::install(context)?;
@@ -339,6 +344,8 @@ pub struct SnapshotData {
     pub viewport: (f32, f32),
     pub url: String,
     pub scroll_offsets: std::collections::HashMap<NodeId, [f32; 2]>,
+    /// 活跃媒体代的元数据；移除、空源和回收的节点不在这里，不保存像素。
+    pub media: HashMap<NodeId, MediaState>,
 }
 
 impl std::ops::Deref for Snapshot {
@@ -558,6 +565,7 @@ impl Document {
             viewport: (state.env.width, state.env.height),
             url: state.url.to_string(),
             scroll_offsets: state.scroll_offsets.clone(),
+            media: state.media.snapshot(),
         }))
     }
 
@@ -900,6 +908,12 @@ impl Document {
             return 0;
         }
         let gone: HashSet<NodeId> = freed_all.iter().copied().collect();
+        for id in &freed_all {
+            if let Err(error) = media::forget(runtime.context(), *id) {
+                verve::report(runtime.context(), &error);
+            }
+        }
+        runtime.run_microtasks();
         {
             let mut state = self.state.borrow_mut();
             for id in &freed_all {

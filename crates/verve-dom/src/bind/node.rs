@@ -47,6 +47,9 @@ pub fn with_dom<R>(context: &mut Context, f: impl FnOnce(&mut Dom) -> R) -> R {
         };
         (result, state.dom.has_relinked(), mutated, moved)
     };
+    if let Err(error) = crate::media::sync(context) {
+        verve::report(context, &error);
+    }
     super::observers::distribute(context);
     if relink_due {
         relink(context);
