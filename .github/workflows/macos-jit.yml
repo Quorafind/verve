@@ -43,6 +43,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: POSIX directory descriptors and atomic storage writes
+        run: cargo test --release --test fs
       - name: Verve's JIT tests, forced and at defaults
         run: |
           VERVE_JIT_THRESHOLD=0 cargo test --release --features jit --test jit

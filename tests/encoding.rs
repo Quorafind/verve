@@ -242,6 +242,12 @@ fn web_globals_answer_as_a_browser_does() {
             "refused",
         ),
         ("typeof performance.now()", "number"),
+        // Node's resource-timing hook, which undici's `fetch` calls as each
+        // response body ends; Verve keeps no timeline, so it records nothing.
+        (
+            "[typeof performance.markResourceTiming, performance.getEntries().length, performance.getEntriesByType('resource').length].join()",
+            "function,0,0",
+        ),
         (
             "(() => { const c = new AbortController(); const heard = []; c.signal.addEventListener('abort', () => heard.push('heard')); c.abort(); return [c.signal.aborted, c.signal.reason.name, heard.join()].join() })()",
             "true,AbortError,heard",

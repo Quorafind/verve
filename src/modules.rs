@@ -296,7 +296,8 @@ fn cache(context: &Context) -> JsObject {
     crate::shared(context).module_cache.clone()
 }
 
-/// A file required: answered from the cache, or read and run (or, a `.json`, parsed).
+/// A file required: answered from the cache, or read and run (or, a `.json`, parsed; a
+/// `.node` addon, refused).
 pub(crate) fn load_file(
     context: &mut Context,
     path: &Path,
@@ -306,6 +307,15 @@ pub(crate) fn load_file(
     let cached = cache(context).get(key.clone(), context)?;
     if cached.is_object() {
         return get(&cached, "exports", context);
+    }
+    if path.extension().is_some_and(|ext| ext == "node") {
+        // What Node says under `--no-addons`: there is no native code to load
+        // here, and a package that falls back from its addon checks this code.
+        return Err(crate::native::coded_error(
+            context,
+            "Cannot load native addon because loading addons is disabled.",
+            "ERR_DLOPEN_DISABLED",
+        ));
     }
     crate::permission::read(context, path)?;
     let text = std::fs::read_to_string(path).map_err(|error| {
