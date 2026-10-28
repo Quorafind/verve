@@ -336,6 +336,10 @@ fn worker_runtime(name: &str, grant: Grant) -> JsResult<Runtime> {
     }
     runtime.set_proxy_env(grant.proxy);
     let context = runtime.context();
+    shared(context)
+        .code_cache_protection
+        .borrow_mut()
+        .inherit(grant.code_cache_protection);
     *shared(context).port.borrow_mut() = Some(Port::default());
     let global = context.global_object();
     global.set(js_string!("self"), global.clone(), false, context)?;
@@ -507,6 +511,7 @@ const WORKER_STACK: usize = 16 * 1024 * 1024;
 /// What a worker's realm is granted, as its page's embedder set it for the page's workers.
 struct Grant {
     permissions: crate::Permissions,
+    code_cache_protection: crate::code_cache::Protection,
     trusted: Vec<Vec<u8>>,
     proxy: Option<crate::ProxyEnv>,
 }
@@ -755,6 +760,7 @@ fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
                 worker: network.permissions.worker,
                 ..network.worker_permissions.clone()
             },
+            code_cache_protection: state.code_cache_protection.borrow().clone(),
             trusted: network.trusted.clone(),
             proxy: network.proxy.as_ref().map(|(env, _)| env.clone()),
         }

@@ -95,6 +95,13 @@ ureq = { version = "3.4", default-features = false, features = ["rustls-no-provi
 tar = { version = "0.4.44", default-features = false, optional = true }
 base64 = { version = "0.23", optional = true }
 
+# The code cache's folder: private to its owner.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
+
 [features]
 default = ["npm"]
 # The npm installer: an embedder that installs no packages leaves out its HTTP client.
@@ -102,6 +109,9 @@ npm = ["dep:ureq", "dep:tar", "dep:base64"]
 # Boa's baseline JIT: hot functions run as native code (see `docs/jit.md`). Switched off at
 # runtime with `VERVE_JIT=0` or `Runtime::set_jit_enabled(false)`.
 jit = ["boa_engine/jit"]
+# Every runtime made with `Runtime::new` keeps a code cache in `VERVE_CODE_CACHE`, as `verve run`
+# does: for running whole test suites with one. An embedder sets its directory itself.
+code-cache-env = []
 
 [[example]]
 name = "jit_probe"

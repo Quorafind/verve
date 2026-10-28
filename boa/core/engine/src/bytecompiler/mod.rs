@@ -86,7 +86,7 @@ use thin_vec::ThinVec;
 pub(crate) use declarations::{
     global_declaration_instantiation_context, prepare_eval_declaration_instantiation,
 };
-pub(crate) use function::FunctionCompiler;
+pub(crate) use function::{FunctionCompiler, PendingFunction};
 pub(crate) use jump_control::JumpControlInfo;
 pub(crate) use register::*;
 
@@ -564,6 +564,15 @@ pub struct ByteCompiler<'ctx> {
 
     #[cfg(feature = "annex-b")]
     pub(crate) annex_b_function_names: Vec<Sym>,
+
+    /// Whether the functions this compiles are compiled when they are first called (see
+    /// `FunctionCompiler::lazy`) rather than now.
+    pub(crate) lazy_functions: bool,
+
+    /// Whether this code calls `eval` directly. Such an `eval` may declare bindings in the
+    /// scopes the functions nested here were declared in, so [`ByteCompiler::finish`] compiles
+    /// them all before the code can run.
+    emitted_direct_eval: bool,
 }
 
 pub(crate) enum BindingKind {
@@ -685,6 +694,9 @@ impl<'ctx> ByteCompiler<'ctx> {
             global_lexs: Vec::new(),
             global_fns: Vec::new(),
             global_vars: Vec::new(),
+
+            lazy_functions: false,
+            emitted_direct_eval: false,
         }
     }
 
@@ -2492,6 +2504,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             .in_with(self.in_with)
             .name_scope(name_scope.cloned())
             .source_path(self.source_path.clone())
+            .lazy(self.lazy_functions)
             .compile(
                 parameters,
                 body,
@@ -2573,6 +2586,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             .in_with(self.in_with)
             .name_scope(name_scope.cloned())
             .source_path(self.source_path.clone())
+            .lazy(self.lazy_functions)
             .compile(
                 parameters,
                 body,
@@ -2623,6 +2637,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             .in_with(self.in_with)
             .name_scope(function.name_scope.cloned())
             .source_path(self.source_path.clone())
+            .lazy(self.lazy_functions)
             .compile(
                 parameters,
                 body,
@@ -2747,6 +2762,7 @@ impl<'ctx> ByteCompiler<'ctx> {
 
         match kind {
             CallKind::CallEval => {
+                compiler.emitted_direct_eval = true;
                 let scope_index = compiler.constants.len() as u32;
                 let lexical_scope = compiler.lexical_scope.clone();
                 compiler.constants.push(Constant::Scope(lexical_scope));
@@ -2797,6 +2813,17 @@ impl<'ctx> ByteCompiler<'ctx> {
 
         let register_count = self.register_allocator.finish();
 
+        if self.emitted_direct_eval {
+            // The functions nested here are compiled before the `eval` can declare anything.
+            for constant in &mut self.constants {
+                if let Constant::Function(code) = constant
+                    && code.is_lazy()
+                {
+                    *code = CodeBlock::compiled_eagerly(code, self.interner);
+                }
+            }
+        }
+
         let source_map_entries = self.source_map_builder.build(final_bytecode_len.as_u32());
 
         CodeBlock {
@@ -2824,6 +2851,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             traced: Cell::new(false),
             #[cfg(feature = "jit")]
             jit: crate::vm::jit::JitSlot::default(),
+            lazy: None,
         }
     }
 

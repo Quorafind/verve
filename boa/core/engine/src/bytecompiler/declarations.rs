@@ -532,6 +532,7 @@ impl ByteCompiler<'_> {
                 .strict(self.strict())
                 .in_with(self.in_with)
                 .source_path(self.source_path.clone())
+                .lazy(self.lazy_functions)
                 .compile(
                     parameters,
                     body,

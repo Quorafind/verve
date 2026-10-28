@@ -299,26 +299,50 @@ fn grants(context: &Context) -> Rc<Grants> {
 
 /// Throws unless the realm may read `path` (following a link at its end).
 pub(crate) fn read(context: &mut Context, path: impl AsRef<Path>) -> JsResult<()> {
-    check(context, path.as_ref(), false, true)
+    check(context, path.as_ref(), false, true, false)
 }
 
 /// Throws unless the realm may read `path` itself, a link at its end not followed: `lstat`,
 /// `readlink`.
 pub(crate) fn read_here(context: &mut Context, path: impl AsRef<Path>) -> JsResult<()> {
-    check(context, path.as_ref(), false, false)
+    check(context, path.as_ref(), false, false, false)
 }
 
 /// Throws unless the realm may write `path` (following a link at its end).
 pub(crate) fn write(context: &mut Context, path: impl AsRef<Path>) -> JsResult<()> {
-    check(context, path.as_ref(), true, true)
+    check(context, path.as_ref(), true, true, false)
 }
 
 /// Throws unless the realm may write `path` itself: removing or renaming a link, or making one.
 pub(crate) fn write_here(context: &mut Context, path: impl AsRef<Path>) -> JsResult<()> {
-    check(context, path.as_ref(), true, false)
+    check(context, path.as_ref(), true, false, false)
 }
 
-fn check(context: &mut Context, path: &Path, writing: bool, follow: bool) -> JsResult<()> {
+/// 重命名或递归删除目录树时，不得移动或删除受保护的后代路径。
+/// 不跟随末端符号链接：移动或删除链接本身不会移动或删除其目标。
+pub(crate) fn write_tree(context: &mut Context, path: impl AsRef<Path>) -> JsResult<()> {
+    check(context, path.as_ref(), true, false, true)
+}
+
+fn check(
+    context: &mut Context,
+    path: &Path,
+    writing: bool,
+    follow: bool,
+    subtree: bool,
+) -> JsResult<()> {
+    // The code cache's directory and secret are the runtime's: what JavaScript could write there
+    // would run as the code of the modules it loads, whatever else it is granted.
+    // 访问拒绝规则独立于普通授权，也不取决于当前执行环境是否启用缓存。
+    if crate::code_cache::protects(context, path, follow, subtree) {
+        let permission = if writing {
+            "FileSystemWrite"
+        } else {
+            "FileSystemRead"
+        };
+        let shown = unverbatim(lexical(&absolute(path)));
+        return Err(denied(context, permission, &shown.to_string_lossy()));
+    }
     let grants = grants(context);
     if (writing && grants.writes_all()) || (!writing && grants.reads_all()) {
         return Ok(());
@@ -348,7 +372,13 @@ fn check(context: &mut Context, path: &Path, writing: bool, follow: bool) -> JsR
 pub(crate) fn child_process(context: &mut Context) -> JsResult<()> {
     let grants = grants(context);
     let confined = !grants.reads_all() || !grants.writes_all();
-    if confined && !crate::shared(context).network.borrow().permissions.child_process {
+    if confined
+        && !crate::shared(context)
+            .network
+            .borrow()
+            .permissions
+            .child_process
+    {
         return Err(denied(context, "ChildProcess", ""));
     }
     Ok(())

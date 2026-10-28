@@ -127,6 +127,10 @@ pub struct Context {
     optimizer_options: OptimizerOptions,
     root_shape: RootShape,
 
+    /// Whether a function's body is compiled when it is first called, not with the code that
+    /// declares it (see [`Context::set_lazy_compile`]).
+    lazy_compile: bool,
+
     /// Unique identifier for each parser instance used during the context lifetime.
     parser_identifier: u32,
 
@@ -480,6 +484,27 @@ impl Context {
     #[inline]
     pub fn set_optimizer_options(&mut self, optimizer_options: OptimizerOptions) {
         self.optimizer_options = optimizer_options;
+    }
+
+    /// Whether functions are compiled when they are first called, rather than with the script,
+    /// module or function that declares them (the default).
+    #[inline]
+    #[must_use]
+    pub const fn lazy_compile(&self) -> bool {
+        self.lazy_compile
+    }
+
+    /// Compile each function's body when the function is first called (`true`), or with the
+    /// code that declares it (`false`, the default). The code that runs is the same either
+    /// way; lazily, code that is loaded but never called is never compiled, and a function's
+    /// syntax tree is kept until it is. It applies to code compiled after the change. The
+    /// default can be set with the environment variable `BOA_LAZY_COMPILE` (`1` for lazily).
+    ///
+    /// A function compiled lazily must first be called from this context: its syntax tree is
+    /// this context's, and a first call from another context throws a `TypeError`.
+    #[inline]
+    pub fn set_lazy_compile(&mut self, lazy: bool) {
+        self.lazy_compile = lazy;
     }
 
     /// Changes the strictness mode of the context.
@@ -1269,6 +1294,7 @@ impl ContextBuilder {
             module_loader,
             optimizer_options: OptimizerOptions::OPTIMIZE_ALL,
             root_shape,
+            lazy_compile: lazy_compile_default(),
             parser_identifier: 0,
             can_block: self.can_block,
             data: HostDefined::default(),
@@ -1278,6 +1304,17 @@ impl ContextBuilder {
 
         Ok(context)
     }
+}
+
+/// The default of [`Context::lazy_compile`]: off, unless `BOA_LAZY_COMPILE` is `1`, `true`,
+/// `on` or `yes`.
+fn lazy_compile_default() -> bool {
+    std::env::var("BOA_LAZY_COMPILE").is_ok_and(|value| {
+        matches!(
+            cow_utils::CowUtils::cow_to_ascii_lowercase(value.trim()).as_ref(),
+            "1" | "true" | "on" | "yes"
+        )
+    })
 }
 
 /// A cleanup guard for a [`Context`] that is executed when dropped.

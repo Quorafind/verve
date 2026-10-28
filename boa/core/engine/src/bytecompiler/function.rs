@@ -3,7 +3,10 @@ use crate::{
     builtins::function::ThisMode,
     bytecompiler::ByteCompiler,
     js_string,
-    vm::{CodeBlock, CodeBlockFlags, source_info::SourcePath},
+    vm::{
+        CodeBlock, CodeBlockFlags, LazyCode,
+        source_info::{SourceInfo, SourceMap, SourcePath},
+    },
 };
 use boa_ast::{
     function::{FormalParameterList, FunctionBody},
@@ -27,6 +30,57 @@ pub(crate) struct FunctionCompiler {
     name_scope: Option<Scope>,
     spanned_source_text: SpannedSourceText,
     source_path: SourcePath,
+    lazy: bool,
+}
+
+/// What compiling a function's body needs once it is first called: the function as the
+/// [`FunctionCompiler`] had it, its parameters and body, and the scopes it was declared in.
+///
+/// The body is shared with the tree it was parsed into ([`FunctionBody`] holds it behind an
+/// `Rc`), so keeping it costs nothing until the rest of that tree is dropped.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingFunction {
+    compiler: FunctionCompiler,
+    parameters: FormalParameterList,
+    body: FunctionBody,
+    variable_environment: Scope,
+    lexical_environment: Scope,
+    scopes: FunctionScopes,
+    contains_direct_eval: bool,
+    /// The interner the function was parsed with: its symbols mean something only there.
+    interner: usize,
+}
+
+impl PendingFunction {
+    /// Whether this function's symbols are `interner`'s, so it can compile with it.
+    pub(crate) const fn parsed_with(&self, interner: &Interner) -> bool {
+        self.interner == interner.id()
+    }
+
+    /// Compiles the body, as [`FunctionCompiler::compile`] does for a function it compiles at
+    /// once. The functions nested in it are compiled lazily too, unless `eager`.
+    pub(crate) fn compile(self, eager: bool, interner: &mut Interner) -> Gc<CodeBlock> {
+        let Self {
+            compiler,
+            parameters,
+            body,
+            variable_environment,
+            lexical_environment,
+            scopes,
+            contains_direct_eval,
+            interner: _,
+        } = self;
+        compiler.compile_now(
+            &parameters,
+            &body,
+            variable_environment,
+            lexical_environment,
+            &scopes,
+            contains_direct_eval,
+            !eager,
+            interner,
+        )
+    }
 }
 
 impl FunctionCompiler {
@@ -44,7 +98,15 @@ impl FunctionCompiler {
             name_scope: None,
             spanned_source_text,
             source_path: SourcePath::None,
+            lazy: false,
         }
+    }
+
+    /// Compile the function's body only when it is first called (see [`LazyCode`]), and the
+    /// functions nested in it the same way.
+    pub(crate) const fn lazy(mut self, lazy: bool) -> Self {
+        self.lazy = lazy;
+        self
     }
 
     /// Set the name of the function.
@@ -112,8 +174,94 @@ impl FunctionCompiler {
     }
 
     /// Compile a function statement list and it's parameters into bytecode.
+    ///
+    /// A lazy function gets a code block with no bytecode yet, but everything that is read of
+    /// it before it runs (its name, `length`, flags and source text); its body is compiled when
+    /// it is first called, by [`CodeBlock::compiled`].
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn compile(
+        self,
+        parameters: &FormalParameterList,
+        body: &FunctionBody,
+        variable_environment: Scope,
+        lexical_environment: Scope,
+        scopes: &FunctionScopes,
+        contains_direct_eval: bool,
+        interner: &mut Interner,
+    ) -> Gc<CodeBlock> {
+        if self.lazy {
+            return Gc::new(self.stub(
+                parameters,
+                body,
+                variable_environment,
+                lexical_environment,
+                scopes,
+                contains_direct_eval,
+                interner,
+            ));
+        }
+        self.compile_now(
+            parameters,
+            body,
+            variable_environment,
+            lexical_environment,
+            scopes,
+            contains_direct_eval,
+            false,
+            interner,
+        )
+    }
+
+    /// The code block of a function whose body is compiled when it is first called.
+    #[allow(clippy::too_many_arguments)]
+    fn stub(
+        self,
+        parameters: &FormalParameterList,
+        body: &FunctionBody,
+        variable_environment: Scope,
+        lexical_environment: Scope,
+        scopes: &FunctionScopes,
+        contains_direct_eval: bool,
+        interner: &Interner,
+    ) -> CodeBlock {
+        let strict = self.strict || body.strict();
+        let mut code = CodeBlock::new(self.name.clone(), parameters.length(), strict);
+        let mut flags = code.flags.get();
+        flags.set(CodeBlockFlags::IS_ASYNC, self.r#async);
+        flags.set(CodeBlockFlags::IS_GENERATOR, self.generator);
+        flags.set(
+            CodeBlockFlags::HAS_PROTOTYPE_PROPERTY,
+            !self.arrow && !self.method && !self.r#async && !self.generator,
+        );
+        code.flags.set(flags);
+        if self.arrow {
+            code.this_mode = ThisMode::Lexical;
+        }
+        code.parameter_length = parameters.as_ref().len() as u32;
+        code.source_info = SourceInfo::new(
+            SourceMap::new(Box::default(), self.source_path.clone()),
+            self.name.clone(),
+            self.spanned_source_text.clone(),
+        );
+        code.lazy = Some(Box::new(LazyCode::new(PendingFunction {
+            compiler: self,
+            parameters: parameters.clone(),
+            body: body.clone(),
+            variable_environment,
+            lexical_environment,
+            scopes: scopes.clone(),
+            contains_direct_eval,
+            interner: interner.id(),
+        })));
+        code
+    }
+
+    /// Compiles the function now. Functions nested in it are compiled lazily if `lazy_nested`,
+    /// unless it contains a direct `eval`: that may declare `var`s in this function's scope
+    /// when it runs, and a nested function compiled after that would see them as bindings of
+    /// every call of it, not only the one that ran the `eval`.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_now(
         mut self,
         parameters: &FormalParameterList,
         body: &FunctionBody,
@@ -121,6 +269,7 @@ impl FunctionCompiler {
         lexical_environment: Scope,
         scopes: &FunctionScopes,
         contains_direct_eval: bool,
+        lazy_nested: bool,
         interner: &mut Interner,
     ) -> Gc<CodeBlock> {
         self.strict = self.strict || body.strict();
@@ -142,6 +291,7 @@ impl FunctionCompiler {
         );
 
         compiler.length = length;
+        compiler.lazy_functions = lazy_nested && !contains_direct_eval;
         compiler.code_block_flags.set(
             CodeBlockFlags::HAS_PROTOTYPE_PROPERTY,
             !self.arrow && !self.method && !self.r#async && !self.generator,

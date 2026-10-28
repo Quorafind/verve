@@ -5,6 +5,7 @@ use indoc::indoc;
 
 mod async_generator;
 mod class;
+mod code_cache;
 mod control_flow;
 mod env;
 mod function;
@@ -12,6 +13,7 @@ mod generators;
 mod interrupt;
 mod iterators;
 mod job;
+mod lazy;
 mod operators;
 mod promise;
 mod spread;

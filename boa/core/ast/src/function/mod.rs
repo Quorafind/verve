@@ -32,7 +32,7 @@ mod generator;
 mod ordinary_function;
 mod parameters;
 
-use std::ops::ControlFlow;
+use std::{ops::ControlFlow, rc::Rc};
 
 pub use arrow_function::ArrowFunction;
 pub use async_arrow_function::AsyncArrowFunction;
@@ -65,7 +65,9 @@ use crate::{
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct FunctionBody {
-    pub(crate) statements: StatementList,
+    // Shared, so a function whose body is compiled when it is first called can keep its body
+    // without copying it out of the tree.
+    pub(crate) statements: Rc<StatementList>,
     span: Span,
 }
 
@@ -74,34 +76,37 @@ impl FunctionBody {
     #[inline]
     #[must_use]
     pub fn new(statements: StatementList, span: Span) -> Self {
-        Self { statements, span }
+        Self {
+            statements: Rc::new(statements),
+            span,
+        }
     }
 
     /// Gets the list of statements.
     #[inline]
     #[must_use]
-    pub const fn statements(&self) -> &[StatementListItem] {
+    pub fn statements(&self) -> &[StatementListItem] {
         self.statements.statements()
     }
 
     /// Gets the statement list.
     #[inline]
     #[must_use]
-    pub const fn statement_list(&self) -> &StatementList {
+    pub fn statement_list(&self) -> &StatementList {
         &self.statements
     }
 
     /// Get the strict mode.
     #[inline]
     #[must_use]
-    pub const fn strict(&self) -> bool {
+    pub fn strict(&self) -> bool {
         self.statements.strict()
     }
 
     /// Get end of linear position in source code.
     #[inline]
     #[must_use]
-    pub const fn linear_pos_end(&self) -> LinearPosition {
+    pub fn linear_pos_end(&self) -> LinearPosition {
         self.statements.linear_pos_end()
     }
 }
@@ -124,7 +129,7 @@ impl VisitWith for FunctionBody {
     where
         V: Visitor<'a>,
     {
-        for statement in &*self.statements {
+        for statement in self.statements.statements() {
             visitor.visit_statement_list_item(statement)?;
         }
         ControlFlow::Continue(())
@@ -134,7 +139,7 @@ impl VisitWith for FunctionBody {
     where
         V: VisitorMut<'a>,
     {
-        for statement in &mut *self.statements.statements {
+        for statement in &mut *Rc::make_mut(&mut self.statements).statements {
             visitor.visit_statement_list_item_mut(statement)?;
         }
         ControlFlow::Continue(())

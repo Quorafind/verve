@@ -27,6 +27,19 @@ jobs:
       - name: DOM, React and security regressions
         run: cargo test --locked -p verve-dom --no-fail-fast
 
+  cache:
+    name: Cache security (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache permissions and worker inheritance
+        run: cargo test --locked --lib code_cache::tests -- --test-threads=1
+
   probe:
     name: Probe (${{ matrix.target }})
     runs-on: macos-14

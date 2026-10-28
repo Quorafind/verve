@@ -249,13 +249,29 @@ impl core::fmt::Display for JSInternedStrRef<'_, '_> {
 }
 
 /// The string interner for Boa.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Interner {
     utf8_interner: RawInterner<u8>,
     utf16_interner: RawInterner<u16>,
     /// Latin1-encodability cache for dynamically-interned strings (all code units ≤ 0xFF).
     latin1_flags: Vec<bool>,
+    /// Which interner this is: a symbol means something only to the interner that made it.
+    id: usize,
 }
+
+impl Default for Interner {
+    fn default() -> Self {
+        Self {
+            utf8_interner: RawInterner::default(),
+            utf16_interner: RawInterner::default(),
+            latin1_flags: Vec::new(),
+            id: NEXT_INTERNER_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+/// The identities of interners, so no two share one.
+static NEXT_INTERNER_ID: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);
 
 impl Interner {
     /// Creates a new [`Interner`].
@@ -293,7 +309,16 @@ impl Interner {
             utf8_interner: RawInterner::with_capacity(capacity),
             utf16_interner: RawInterner::with_capacity(capacity),
             latin1_flags: Vec::with_capacity(capacity),
+            id: NEXT_INTERNER_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
         }
+    }
+
+    /// This interner's identity: no other interner of the process has it. A [`Sym`] can only
+    /// be resolved by the interner that made it.
+    #[inline]
+    #[must_use]
+    pub const fn id(&self) -> usize {
+        self.id
     }
 
     /// Returns the number of strings interned by the interner.

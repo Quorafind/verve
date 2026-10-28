@@ -1006,6 +1006,29 @@ pub(crate) fn set_function_name(
     Ok(())
 }
 
+/// Compiles the body of a function whose code is compiled when it is first called, and gives
+/// the function object the compiled code, so its later calls go straight to it.
+#[cold]
+fn compile_lazy_function(
+    function_object: &JsObject,
+    code: &Gc<CodeBlock>,
+    realm: &Realm,
+    context: &mut Context,
+) -> JsResult<Gc<CodeBlock>> {
+    let compiled = CodeBlock::compiled(code, context.interner_mut()).map_err(|reason| {
+        JsNativeError::typ()
+            .with_message(reason)
+            .with_realm(realm.clone())
+    })?;
+    // The body may have been compiled to find a binding in the global scope that a script
+    // parsed since declared, before that script has run and made room for it: make room.
+    realm.resize_global_env();
+    if let Some(mut function) = function_object.downcast_mut::<OrdinaryFunction>() {
+        function.code = compiled.clone();
+    }
+    Ok(compiled)
+}
+
 /// Call this object.
 ///
 /// # Panics
@@ -1045,6 +1068,12 @@ pub(crate) fn function_call(
     let script_or_module = function.script_or_module.clone();
 
     drop(function);
+
+    let code = if code.is_lazy() {
+        compile_lazy_function(function_object, &code, &realm, context)?
+    } else {
+        code
+    };
 
     let env_fp = environments.len() as u32;
 
@@ -1155,6 +1184,12 @@ fn function_construct(
     let environments = function.environments.clone();
     let script_or_module = function.script_or_module.clone();
     drop(function);
+
+    let code = if code.is_lazy() {
+        compile_lazy_function(this_function_object, &code, &realm, context)?
+    } else {
+        code
+    };
 
     let env_fp = environments.len() as u32;
 

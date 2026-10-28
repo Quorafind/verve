@@ -871,6 +871,8 @@ pub(crate) fn exit_code(context: &mut Context) -> i32 {
 /// The end, as Node ends: `exitCode` set, `exit` listeners told — once — and whatever they
 /// left as `exitCode` is the code. Answers that code; the caller ends the process with it.
 pub(crate) fn exiting(context: &mut Context, code: Option<i32>) -> i32 {
+    // What the code cache compiled is written before the process can end.
+    crate::code_cache::flush(context, true);
     let Some(profile) = profile(context) else {
         return code.unwrap_or(0);
     };

@@ -41,6 +41,7 @@ use boa_parser::{Parser, Source};
 pub use loader::*;
 pub use namespace::ModuleNamespace;
 use source::SourceTextModule;
+pub(crate) use source::{CompiledModule, ModuleCode};
 pub use synthetic::{SyntheticModule, SyntheticModuleInitializer};
 
 use crate::bytecompiler::ToJsString;
@@ -285,13 +286,117 @@ impl Module {
         let source_text = SourceText::new(source);
         let src = SourceTextModule::new(module, context.interner(), source_text, path.clone());
 
-        Ok(Self {
+        let module = Self {
             inner: Gc::new(ModuleRepr {
                 realm,
                 namespace: GcRefCell::default(),
                 kind: ModuleKind::SourceText(Box::new(src)),
                 host_defined: HostDefined::default(),
                 path,
+            }),
+        };
+        if crate::code_cache::round_trip() {
+            return module.through_code_cache(context);
+        }
+        Ok(module)
+    }
+
+    /// The module written down and read back, as [`Module::code_cache`] and
+    /// [`Module::from_code_cache`] would across runs: `BOA_CODE_CACHE_ROUNDTRIP=1` makes every
+    /// parse do it, so a whole suite runs code read back from a cache.
+    fn through_code_cache(self, context: &mut Context) -> JsResult<Self> {
+        // What cannot be written down, or fails to compile, is left to fail when linked.
+        let Ok(Some(bytes)) = self.code_cache(context) else {
+            return Ok(self);
+        };
+        let ModuleKind::SourceText(module) = self.kind() else {
+            return Ok(self);
+        };
+        let Some((_, source_text)) = module.cacheable() else {
+            return Ok(self);
+        };
+        let path = self.inner.path.clone();
+        let realm = self.realm().clone();
+        Self::read_code_cache(&bytes, source_text, path.as_deref(), realm, context)
+    }
+
+    /// Compiles this module now, with every function it declares, and answers its code written
+    /// down, for [`Module::from_code_cache`] to read back in a later run instead of parsing and
+    /// compiling the same source text again. `None` for a module that cannot be written down:
+    /// a synthetic one, or one that is linked already.
+    ///
+    /// The bytes say what the module's code does, so they must be kept where nothing that
+    /// should not run code can change them; see [`code_cache`](crate::code_cache).
+    ///
+    /// # Errors
+    ///
+    /// If compiling the module throws.
+    pub fn code_cache(&self, context: &mut Context) -> JsResult<Option<Vec<u8>>> {
+        let ModuleKind::SourceText(module) = self.kind() else {
+            return Ok(None);
+        };
+        if !module.compile_for_cache(context)? {
+            return Ok(None);
+        }
+        let Some((compiled, source_text)) = module.cacheable() else {
+            return Ok(None);
+        };
+        let units = source_text.code_points().unwrap_or(&[]);
+        Ok(crate::code_cache::write_module(
+            module.code(),
+            &compiled,
+            units,
+            self.realm(),
+            context.interner(),
+        ))
+    }
+
+    /// The module whose code [`Module::code_cache`] wrote down, compiled from `source` (the
+    /// same text, as given to [`Module::parse`]), read back without parsing or compiling it.
+    /// It links and runs as the module parsed from `source` at `path` would.
+    ///
+    /// # Errors
+    ///
+    /// If the bytes are refused: not written down from this source text, by this build, against
+    /// this realm's global scope, or not well formed (see [`code_cache`](crate::code_cache)). The
+    /// message says why; parse the source instead.
+    pub fn from_code_cache(
+        bytes: &[u8],
+        source: &str,
+        path: Option<&Path>,
+        realm: Option<Realm>,
+        context: &mut Context,
+    ) -> JsResult<Self> {
+        let realm = realm.unwrap_or_else(|| context.realm().clone());
+        let text = boa_ast::SourceText::from_code_units(source.encode_utf16().collect());
+        Self::read_code_cache(bytes, SourceText::new(text), path, realm, context)
+    }
+
+    fn read_code_cache(
+        bytes: &[u8],
+        source_text: SourceText,
+        path: Option<&Path>,
+        realm: Realm,
+        context: &mut Context,
+    ) -> JsResult<Self> {
+        let (code, compiled) = crate::code_cache::read_module(
+            bytes,
+            &source_text,
+            path,
+            &realm,
+            context.interner_mut(),
+        )
+        .map_err(|reason| {
+            JsNativeError::error().with_message(format!("code cache refused: {reason}"))
+        })?;
+        let module = SourceTextModule::from_compiled(code, compiled, source_text);
+        Ok(Self {
+            inner: Gc::new(ModuleRepr {
+                realm,
+                namespace: GcRefCell::default(),
+                kind: ModuleKind::SourceText(Box::new(module)),
+                host_defined: HostDefined::default(),
+                path: path.map(Path::to_path_buf),
             }),
         })
     }

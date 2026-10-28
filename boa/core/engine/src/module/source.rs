@@ -57,13 +57,11 @@ use super::{
 #[boa_gc(unsafe_no_drop)]
 enum ModuleStatus {
     Unlinked {
-        #[unsafe_ignore_trace]
-        source: boa_ast::Module,
+        source: ModuleSource,
         source_text: SourceText,
     },
     Linking {
-        #[unsafe_ignore_trace]
-        source: boa_ast::Module,
+        source: ModuleSource,
         source_text: SourceText,
         ancestor_index: usize,
     },
@@ -111,7 +109,7 @@ impl ModuleStatus {
         *self = f(std::mem::replace(
             self,
             ModuleStatus::Unlinked {
-                source: boa_ast::Module::default(),
+                source: ModuleSource::Ast(Box::default()),
                 source_text: SourceText::default(),
             },
         ));
@@ -208,7 +206,7 @@ impl ModuleStatus {
     }
 
     /// If this module is in the unlinked or linking states, gets its source.
-    fn source(&self) -> Option<(&boa_ast::Module, &SourceText)> {
+    fn source(&self) -> Option<(&ModuleSource, &SourceText)> {
         match self {
             ModuleStatus::Unlinked {
                 source,
@@ -222,6 +220,30 @@ impl ModuleStatus {
             _ => None,
         }
     }
+}
+
+/// The code of a [`SourceTextModule`] before it is linked: its syntax tree, or its code compiled
+/// already.
+#[derive(Debug, Trace, Finalize)]
+#[boa_gc(unsafe_no_drop)]
+enum ModuleSource {
+    Ast(#[unsafe_ignore_trace] Box<boa_ast::Module>),
+    Compiled(Box<CompiledModule>),
+}
+
+/// A module's compiled code: its scope, its body and the functions it declares, which linking
+/// puts in its environment.
+#[derive(Debug, Clone, Trace, Finalize)]
+#[boa_gc(unsafe_no_drop)]
+pub(crate) struct CompiledModule {
+    #[unsafe_ignore_trace]
+    pub(crate) scope: boa_ast::scope::Scope,
+    pub(crate) codeblock: Gc<CodeBlock>,
+    /// Each function declaration: its index in the body's constants, and its binding.
+    #[unsafe_ignore_trace]
+    pub(crate) functions: Vec<(u32, BindingLocator)>,
+    /// Whether every function in it is compiled, as a code cache needs.
+    pub(crate) eager: bool,
 }
 
 /// The execution context of a [`SourceTextModule`].
@@ -271,14 +293,14 @@ impl std::fmt::Debug for SourceTextModule {
 }
 
 #[derive(Debug)]
-struct ModuleCode {
-    has_tla: bool,
-    requested_modules: IndexSet<super::ModuleRequest, BuildHasherDefault<FxHasher>>,
-    path: Option<PathBuf>,
-    import_entries: Vec<ImportEntry>,
-    local_export_entries: Vec<LocalExportEntry>,
-    indirect_export_entries: Vec<IndirectExportEntry>,
-    star_export_entries: Vec<super::ModuleRequest>,
+pub(crate) struct ModuleCode {
+    pub(crate) has_tla: bool,
+    pub(crate) requested_modules: IndexSet<super::ModuleRequest, BuildHasherDefault<FxHasher>>,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) import_entries: Vec<ImportEntry>,
+    pub(crate) local_export_entries: Vec<LocalExportEntry>,
+    pub(crate) indirect_export_entries: Vec<IndirectExportEntry>,
+    pub(crate) star_export_entries: Vec<super::ModuleRequest>,
 }
 
 struct ModuleRequestsVisitor<'a> {
@@ -469,7 +491,7 @@ impl SourceTextModule {
         // Most of this can be ignored, since `Status` takes care of the remaining state.
         Self {
             status: GcRefCell::new(ModuleStatus::Unlinked {
-                source,
+                source: ModuleSource::Ast(Box::new(source)),
                 source_text,
             }),
             loaded_modules: GcRefCell::default(),
@@ -1645,6 +1667,194 @@ impl SourceTextModule {
         // 2. Return unused.
     }
 
+    /// Compiles the module's code: steps 18 to 24 of [`InitializeEnvironment ( )`][spec], which
+    /// only need its syntax tree, and the body. The functions it declares are compiled when
+    /// first called if `lazy`.
+    ///
+    /// [spec]: https://tc39.es/ecma262/#sec-source-text-module-record-initialize-environment
+    fn compile(
+        &self,
+        source: &boa_ast::Module,
+        source_text: &SourceText,
+        lazy: bool,
+        context: &mut Context,
+    ) -> JsResult<CompiledModule> {
+        let env = source.scope().clone();
+        let spanned_source_text = SpannedSourceText::new_source_only(source_text.clone());
+        let mut compiler = ByteCompiler::new(
+            js_string!("<main>"),
+            true,
+            false,
+            env.clone(),
+            env.clone(),
+            self.code.has_tla,
+            false,
+            context.interner_mut(),
+            false,
+            spanned_source_text,
+            self.code.path.clone().into(),
+        );
+        compiler.lazy_functions = lazy;
+        compiler.async_handler = self.code.has_tla.then(|| compiler.push_handler());
+
+        // 18. Let code be module.[[ECMAScriptCode]].
+        // 19. Let varDeclarations be the VarScopedDeclarations of code.
+        let var_declarations = var_scoped_declarations(source);
+        // 20. Let declaredVarNames be a new empty List.
+        let mut declared_var_names = Vec::new();
+        // 21. For each element d of varDeclarations, do
+        for var in var_declarations {
+            // a. For each element dn of the BoundNames of d, do
+            for name in var.bound_names() {
+                let name = name.to_js_string(compiler.interner());
+
+                // i. If declaredVarNames does not contain dn, then
+                if !declared_var_names.contains(&name) {
+                    // 1. Perform ! env.CreateMutableBinding(dn, false).
+                    // 2. Perform ! env.InitializeBinding(dn, undefined).
+                    let binding = env
+                        .get_binding_reference(&name)
+                        .js_expect("binding must exist")?;
+                    let index = compiler.insert_binding(binding);
+                    compiler.emit_binding_access(
+                        BindingAccessOpcode::DefInitVar,
+                        &index,
+                        &CallFrame::undefined_register(),
+                    );
+
+                    // 3. Append dn to declaredVarNames.
+                    declared_var_names.push(name);
+                }
+            }
+        }
+
+        // 22. Let lexDeclarations be the LexicallyScopedDeclarations of code.
+        // 23. Let privateEnv be null.
+        let lex_declarations = lexically_scoped_declarations(source);
+        let mut functions = Vec::new();
+        // 24. For each element d of lexDeclarations, do
+        for declaration in lex_declarations {
+            // ii. Else,
+            // a. For each element dn of the BoundNames of d, do
+            // 1. Perform ! env.CreateMutableBinding(dn, false).
+            //
+            // iii. If d is either a FunctionDeclaration, a GeneratorDeclaration, an
+            //      AsyncFunctionDeclaration, or an AsyncGeneratorDeclaration, then
+            // 1. Let fo be InstantiateFunctionObject of d with arguments env and privateEnv.
+            // 2. Perform ! env.InitializeBinding(dn, fo).
+            //
+            // deferred to below.
+            let (spec, locator): (FunctionSpec<'_>, _) = match declaration {
+                LexicallyScopedDeclaration::FunctionDeclaration(f) => {
+                    let name = bound_names(f)[0].to_js_string(compiler.interner());
+                    let locator = env.get_binding(&name).js_expect("binding must exist")?;
+
+                    (f.into(), locator)
+                }
+                LexicallyScopedDeclaration::GeneratorDeclaration(g) => {
+                    let name = bound_names(g)[0].to_js_string(compiler.interner());
+                    let locator = env.get_binding(&name).js_expect("binding must exist")?;
+
+                    (g.into(), locator)
+                }
+                LexicallyScopedDeclaration::AsyncFunctionDeclaration(af) => {
+                    let name = bound_names(af)[0].to_js_string(compiler.interner());
+                    let locator = env.get_binding(&name).js_expect("binding must exist")?;
+
+                    (af.into(), locator)
+                }
+                LexicallyScopedDeclaration::AsyncGeneratorDeclaration(ag) => {
+                    let name = bound_names(ag)[0].to_js_string(compiler.interner());
+                    let locator = env.get_binding(&name).js_expect("binding must exist")?;
+
+                    (ag.into(), locator)
+                }
+                LexicallyScopedDeclaration::ClassDeclaration(_)
+                | LexicallyScopedDeclaration::LexicalDeclaration(_)
+                | LexicallyScopedDeclaration::AssignmentExpression(_) => {
+                    continue;
+                }
+            };
+
+            functions.push((spec, locator));
+        }
+
+        // Should compile after initializing bindings first to ensure inner calls
+        // are correctly resolved to the outer functions instead of as global bindings.
+        let functions = functions
+            .into_iter()
+            .map(|(spec, locator)| (compiler.function(spec), locator))
+            .collect::<Vec<_>>();
+
+        compiler.compile_module_item_list(source.items());
+
+        let codeblock = Gc::new(compiler.finish());
+        Ok(CompiledModule {
+            scope: env,
+            codeblock,
+            functions,
+            eager: !lazy,
+        })
+    }
+
+    /// Compiles the module now, with every function it declares, if it has not been compiled
+    /// or linked yet: the code a code cache writes down. Answers whether it is compiled so.
+    pub(crate) fn compile_for_cache(&self, context: &mut Context) -> JsResult<bool> {
+        let compiled = {
+            let status = self.status.borrow();
+            match &*status {
+                ModuleStatus::Unlinked {
+                    source: ModuleSource::Ast(source),
+                    source_text,
+                } => self.compile(source, source_text, false, context)?,
+                ModuleStatus::Unlinked {
+                    source: ModuleSource::Compiled(compiled),
+                    ..
+                } => return Ok(compiled.eager),
+                _ => return Ok(false),
+            }
+        };
+        if let ModuleStatus::Unlinked { source, .. } = &mut *self.status.borrow_mut() {
+            *source = ModuleSource::Compiled(Box::new(compiled));
+        }
+        Ok(true)
+    }
+
+    /// The module's compiled code and what a code cache writes down with it, once
+    /// [`SourceTextModule::compile_for_cache`] has compiled it.
+    pub(crate) fn cacheable(&self) -> Option<(CompiledModule, SourceText)> {
+        match &*self.status.borrow() {
+            ModuleStatus::Unlinked {
+                source: ModuleSource::Compiled(compiled),
+                source_text,
+            } if compiled.eager => Some(((**compiled).clone(), source_text.clone())),
+            _ => None,
+        }
+    }
+
+    /// What the module's import and export entries are: the part of it read from its syntax.
+    pub(crate) const fn code(&self) -> &ModuleCode {
+        &self.code
+    }
+
+    /// A module made of code read from a code cache: compiled, not linked yet.
+    pub(crate) fn from_compiled(
+        code: ModuleCode,
+        compiled: CompiledModule,
+        source_text: SourceText,
+    ) -> Self {
+        Self {
+            status: GcRefCell::new(ModuleStatus::Unlinked {
+                source: ModuleSource::Compiled(Box::new(compiled)),
+                source_text,
+            }),
+            loaded_modules: GcRefCell::default(),
+            async_parent_modules: GcRefCell::default(),
+            import_meta: GcRefCell::default(),
+            code,
+        }
+    }
+
     /// Abstract operation [`InitializeEnvironment ( )`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-source-text-module-record-initialize-environment
@@ -1695,201 +1905,103 @@ impl SourceTextModule {
         // 4. Assert: realm is not undefined.
         let realm = module_self.realm().clone();
 
-        let status = self.status.borrow();
-        let (source, source_text) = status
-            .source()
-            .js_expect("module can only initialize its environment in the linking phase")?;
-
         // 5. Let env be NewModuleEnvironment(realm.[[GlobalEnv]]).
         // 6. Set module.[[Environment]] to env.
-        let env = source.scope().clone();
-
-        let spanned_source_text = SpannedSourceText::new_source_only(source_text.clone());
-        let mut compiler = ByteCompiler::new(
-            js_string!("<main>"),
-            true,
-            false,
-            source.scope().clone(),
-            source.scope().clone(),
-            self.code.has_tla,
-            false,
-            context.interner_mut(),
-            false,
-            spanned_source_text,
-            self.code.path.clone().into(),
-        );
-
-        compiler.async_handler = self.code.has_tla.then(|| compiler.push_handler());
+        //
+        // The module's code, compiled now from its syntax tree, or already (for a code cache, or
+        // read from one).
+        let CompiledModule {
+            scope: env,
+            codeblock,
+            functions,
+            ..
+        } = {
+            let status = self.status.borrow();
+            let (source, source_text) = status
+                .source()
+                .js_expect("module can only initialize its environment in the linking phase")?;
+            match source {
+                ModuleSource::Compiled(compiled) => (**compiled).clone(),
+                ModuleSource::Ast(source) => {
+                    let lazy = context.lazy_compile();
+                    self.compile(source, source_text, lazy, context)?
+                }
+            }
+        };
 
         let mut imports = Vec::new();
 
-        let (codeblock, functions) = {
-            // 7. For each ImportEntry Record in of module.[[ImportEntries]], do
-            for entry in &self.code.import_entries {
-                // a. Let importedModule be GetImportedModule(module, in.[[ModuleRequest]]).
-                let module_request = super::ModuleRequest::from_ast(
-                    entry.module_request().to_js_string(compiler.interner()),
-                    entry.attributes(),
-                    compiler.interner(),
-                );
-                let imported_module = self.loaded_modules.borrow()[&module_request].clone();
+        // 7. For each ImportEntry Record in of module.[[ImportEntries]], do
+        for entry in &self.code.import_entries {
+            // a. Let importedModule be GetImportedModule(module, in.[[ModuleRequest]]).
+            let module_request = super::ModuleRequest::from_ast(
+                entry.module_request().to_js_string(context.interner()),
+                entry.attributes(),
+                context.interner(),
+            );
+            let imported_module = self.loaded_modules.borrow()[&module_request].clone();
 
-                if let ImportName::Name(name) = entry.import_name() {
-                    let name = name.to_js_string(compiler.interner());
-                    // c. Else,
-                    //    i. Let resolution be importedModule.ResolveExport(in.[[ImportName]]).
-                    let resolution = imported_module
-                        .resolve_export(&name, &mut HashSet::default(), compiler.interner())
-                        // ii. If resolution is either null or ambiguous, throw a SyntaxError exception.
-                        .map_err(|err| match err {
-                            ResolveExportError::NotFound => JsNativeError::syntax().with_message(
-                                format!("could not find export `{}`", name.to_std_string_escaped()),
-                            ),
-                            ResolveExportError::Ambiguous => {
-                                JsNativeError::syntax().with_message(format!(
-                                    "could not resolve ambiguous export `{}`",
-                                    name.to_std_string_escaped()
-                                ))
-                            }
-                        })?;
+            if let ImportName::Name(name) = entry.import_name() {
+                let name = name.to_js_string(context.interner());
+                // c. Else,
+                //    i. Let resolution be importedModule.ResolveExport(in.[[ImportName]]).
+                let resolution = imported_module
+                    .resolve_export(&name, &mut HashSet::default(), context.interner())
+                    // ii. If resolution is either null or ambiguous, throw a SyntaxError exception.
+                    .map_err(|err| match err {
+                        ResolveExportError::NotFound => JsNativeError::syntax().with_message(
+                            format!("could not find export `{}`", name.to_std_string_escaped()),
+                        ),
+                        ResolveExportError::Ambiguous => {
+                            JsNativeError::syntax().with_message(format!(
+                                "could not resolve ambiguous export `{}`",
+                                name.to_std_string_escaped()
+                            ))
+                        }
+                    })?;
 
-                    // 2. Perform ! env.CreateImmutableBinding(in.[[LocalName]], true).
-                    // 3. Perform ! env.InitializeBinding(in.[[LocalName]], namespace).
-                    let local_name = entry.local_name().to_js_string(compiler.interner());
-                    let locator = env
-                        .get_binding(&local_name)
-                        .js_expect("binding must exist")?;
+                // 2. Perform ! env.CreateImmutableBinding(in.[[LocalName]], true).
+                // 3. Perform ! env.InitializeBinding(in.[[LocalName]], namespace).
+                let local_name = entry.local_name().to_js_string(context.interner());
+                let locator = env
+                    .get_binding(&local_name)
+                    .js_expect("binding must exist")?;
 
-                    if let BindingName::Name(_) = resolution.binding_name() {
-                        // 1. Perform env.CreateImportBinding(in.[[LocalName]], resolution.[[Module]],
-                        //    resolution.[[BindingName]]).
-                        //    deferred to initialization below
-                        imports.push(ImportBinding::Single {
-                            locator,
-                            export_locator: resolution,
-                        });
-                    } else {
-                        // 1. Let namespace be GetModuleNamespace(resolution.[[Module]]).
-                        // deferred to initialization below
-                        imports.push(ImportBinding::Namespace {
-                            locator,
-                            module: resolution.into_module(),
-                        });
-                    }
+                if let BindingName::Name(_) = resolution.binding_name() {
+                    // 1. Perform env.CreateImportBinding(in.[[LocalName]], resolution.[[Module]],
+                    //    resolution.[[BindingName]]).
+                    //    deferred to initialization below
+                    imports.push(ImportBinding::Single {
+                        locator,
+                        export_locator: resolution,
+                    });
                 } else {
-                    // b. If in.[[ImportName]] is namespace-object, then
-                    //    ii. Perform ! env.CreateImmutableBinding(in.[[LocalName]], true).
-                    //    iii. Perform ! env.InitializeBinding(in.[[LocalName]], namespace).
-                    let name = entry.local_name().to_js_string(compiler.interner());
-                    let locator = env.get_binding(&name).js_expect("binding must exist")?;
-
-                    //    i. Let namespace be GetModuleNamespace(importedModule).
-                    //       deferred to initialization below
+                    // 1. Let namespace be GetModuleNamespace(resolution.[[Module]]).
+                    // deferred to initialization below
                     imports.push(ImportBinding::Namespace {
                         locator,
-                        module: imported_module.clone(),
+                        module: resolution.into_module(),
                     });
                 }
+            } else {
+                // b. If in.[[ImportName]] is namespace-object, then
+                //    ii. Perform ! env.CreateImmutableBinding(in.[[LocalName]], true).
+                //    iii. Perform ! env.InitializeBinding(in.[[LocalName]], namespace).
+                let name = entry.local_name().to_js_string(context.interner());
+                let locator = env.get_binding(&name).js_expect("binding must exist")?;
+
+                //    i. Let namespace be GetModuleNamespace(importedModule).
+                //       deferred to initialization below
+                imports.push(ImportBinding::Namespace {
+                    locator,
+                    module: imported_module.clone(),
+                });
             }
-
-            // 18. Let code be module.[[ECMAScriptCode]].
-            // 19. Let varDeclarations be the VarScopedDeclarations of code.
-            let var_declarations = var_scoped_declarations(source);
-            // 20. Let declaredVarNames be a new empty List.
-            let mut declared_var_names = Vec::new();
-            // 21. For each element d of varDeclarations, do
-            for var in var_declarations {
-                // a. For each element dn of the BoundNames of d, do
-                for name in var.bound_names() {
-                    let name = name.to_js_string(compiler.interner());
-
-                    // i. If declaredVarNames does not contain dn, then
-                    if !declared_var_names.contains(&name) {
-                        // 1. Perform ! env.CreateMutableBinding(dn, false).
-                        // 2. Perform ! env.InitializeBinding(dn, undefined).
-                        let binding = env
-                            .get_binding_reference(&name)
-                            .js_expect("binding must exist")?;
-                        let index = compiler.insert_binding(binding);
-                        compiler.emit_binding_access(
-                            BindingAccessOpcode::DefInitVar,
-                            &index,
-                            &CallFrame::undefined_register(),
-                        );
-
-                        // 3. Append dn to declaredVarNames.
-                        declared_var_names.push(name);
-                    }
-                }
-            }
-
-            // 22. Let lexDeclarations be the LexicallyScopedDeclarations of code.
-            // 23. Let privateEnv be null.
-            let lex_declarations = lexically_scoped_declarations(source);
-            let mut functions = Vec::new();
-            // 24. For each element d of lexDeclarations, do
-            for declaration in lex_declarations {
-                // ii. Else,
-                // a. For each element dn of the BoundNames of d, do
-                // 1. Perform ! env.CreateMutableBinding(dn, false).
-                //
-                // iii. If d is either a FunctionDeclaration, a GeneratorDeclaration, an
-                //      AsyncFunctionDeclaration, or an AsyncGeneratorDeclaration, then
-                // 1. Let fo be InstantiateFunctionObject of d with arguments env and privateEnv.
-                // 2. Perform ! env.InitializeBinding(dn, fo).
-                //
-                // deferred to below.
-                let (spec, locator): (FunctionSpec<'_>, _) = match declaration {
-                    LexicallyScopedDeclaration::FunctionDeclaration(f) => {
-                        let name = bound_names(f)[0].to_js_string(compiler.interner());
-                        let locator = env.get_binding(&name).js_expect("binding must exist")?;
-
-                        (f.into(), locator)
-                    }
-                    LexicallyScopedDeclaration::GeneratorDeclaration(g) => {
-                        let name = bound_names(g)[0].to_js_string(compiler.interner());
-                        let locator = env.get_binding(&name).js_expect("binding must exist")?;
-
-                        (g.into(), locator)
-                    }
-                    LexicallyScopedDeclaration::AsyncFunctionDeclaration(af) => {
-                        let name = bound_names(af)[0].to_js_string(compiler.interner());
-                        let locator = env.get_binding(&name).js_expect("binding must exist")?;
-
-                        (af.into(), locator)
-                    }
-                    LexicallyScopedDeclaration::AsyncGeneratorDeclaration(ag) => {
-                        let name = bound_names(ag)[0].to_js_string(compiler.interner());
-                        let locator = env.get_binding(&name).js_expect("binding must exist")?;
-
-                        (ag.into(), locator)
-                    }
-                    LexicallyScopedDeclaration::ClassDeclaration(_)
-                    | LexicallyScopedDeclaration::LexicalDeclaration(_)
-                    | LexicallyScopedDeclaration::AssignmentExpression(_) => {
-                        continue;
-                    }
-                };
-
-                functions.push((spec, locator));
-            }
-
-            // Should compile after initializing bindings first to ensure inner calls
-            // are correctly resolved to the outer functions instead of as global bindings.
-            let functions = functions
-                .into_iter()
-                .map(|(spec, locator)| (compiler.function(spec), locator))
-                .collect::<Vec<_>>();
-
-            compiler.compile_module_item_list(source.items());
-
-            (Gc::new(compiler.finish()), functions)
-        };
+        }
 
         // 8. Let moduleContext be a new ECMAScript code execution context.
         let mut envs = EnvironmentStack::new();
-        envs.push_module(source.scope().clone());
-        drop(status);
+        envs.push_module(env);
 
         // 9. Set the Function of moduleContext to null.
         // 10. Assert: module.[[Realm]] is not undefined.

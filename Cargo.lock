@@ -3163,6 +3163,7 @@ dependencies = [
  "hmac",
  "httparse",
  "iana-time-zone",
+ "libc",
  "md-5",
  "mio",
  "oxc_allocator",
@@ -3193,6 +3194,7 @@ dependencies = [
  "wasmi",
  "wat",
  "web-time",
+ "windows-sys 0.61.2",
  "x509-parser",
 ]
 

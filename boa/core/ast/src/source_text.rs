@@ -16,6 +16,13 @@ impl SourceText {
         }
     }
 
+    /// The source text whose code units are `units`, as the lexer would collect them from the
+    /// same text.
+    #[must_use]
+    pub fn from_code_units(units: Vec<u16>) -> Self {
+        Self { source_text: units }
+    }
+
     /// Get current `LinearPosition`.
     #[must_use]
     pub fn cur_linear_position(&self) -> LinearPosition {

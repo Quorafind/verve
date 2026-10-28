@@ -43,6 +43,7 @@
 //! | `--stack-size=<KiB>`, `--stack_size=<KiB>` | the script thread's stack, in KiB as V8's |
 //! | `--no-warnings` | `process.emitWarning` writes nothing |
 //! | `--jitless` | hot functions stay interpreted, whatever `VERVE_JIT` says (Node's flag) |
+//! | `--code-cache=<dir>` | keep the compiled code of ES modules in `dir` between runs (also `VERVE_CODE_CACHE=<dir>`); signed with the user's own secret, see `Runtime::set_code_cache_dir_with_user_secret` |
 //! | `--experimental-vm-modules`, `--no-addons` | accepted; nothing to change here |
 //! | `--max-old-space-size=<MiB>` | accepted and ignored: Boa has no heap cap; bound memory with the OS (a Job Object, `RLIMIT_AS`) |
 //!
@@ -85,6 +86,7 @@ flags: -A/--allow-all, --allow-read[=paths], --allow-fs-read=<path>, --allow-wri
        --allow-fs-write=<path>, --allow-net[=hosts], --allow-worker, --permission,
        --use-env-proxy,
        --disable-proto=throw|delete, --stack-size=<KiB>, --no-warnings, --jitless,
+       --code-cache=<dir>,
        --experimental-vm-modules, --no-addons, --max-old-space-size=<MiB>";
 
 /// What the command line asked for.
@@ -100,6 +102,7 @@ struct Options {
     disable_proto: Option<Proto>,
     no_warnings: bool,
     jitless: bool,
+    code_cache: Option<PathBuf>,
     eval: Option<String>,
     entry: Option<PathBuf>,
     args: Vec<String>,
@@ -114,7 +117,7 @@ enum Proto {
 
 /// What the command line comes to.
 enum Command {
-    Run(Options),
+    Run(Box<Options>),
     Print(String),
 }
 
@@ -144,7 +147,7 @@ pub fn main_with(args: impl IntoIterator<Item = OsString>, setup: Setup) -> Exit
             ExitCode::SUCCESS
         }
         Ok(Command::Run(options)) => {
-            let code = run(options, argv0, setup);
+            let code = run(*options, argv0, setup);
             ExitCode::from((code & 0xff) as u8)
         }
         Err(message) => {
@@ -235,6 +238,9 @@ fn parse(args: Vec<String>) -> Result<Command, String> {
             "--permission" | "--experimental-permission" => {}
             "--no-warnings" => options.no_warnings = true,
             "--jitless" => options.jitless = true,
+            "--code-cache" => {
+                options.code_cache = Some(PathBuf::from(needs_value("--code-cache")?))
+            }
             "--experimental-vm-modules" | "--no-addons" => {}
             "--max-old-space-size" => {
                 let size = needs_value("--max-old-space-size")?;
@@ -275,7 +281,7 @@ fn parse(args: Vec<String>) -> Result<Command, String> {
     if options.eval.is_none() && options.entry.is_none() {
         return Err("no script given".into());
     }
-    Ok(Command::Run(options))
+    Ok(Command::Run(Box::new(options)))
 }
 
 /// A path grant: `*` (or a bare `--allow-read`) for everything, else the paths, relative to
@@ -428,6 +434,16 @@ fn script(options: Options, argv0: String, embedder: Setup) -> i32 {
     let mut runtime = Runtime::new();
     if options.jitless {
         runtime.set_jit_enabled(false);
+    }
+    let code_cache = options.code_cache.clone().or_else(|| {
+        std::env::var_os("VERVE_CODE_CACHE")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+    });
+    if let Some(dir) = code_cache
+        && let Err(error) = runtime.set_code_cache_dir_with_user_secret(&dir)
+    {
+        eprintln!("verve: code cache {} not used: {error}", dir.display());
     }
     runtime.set_permissions(permissions.clone());
     runtime.set_worker_permissions(permissions);
@@ -649,7 +665,7 @@ mod tests {
 
     fn options(args: &[&str]) -> Options {
         match parse(args.iter().map(|a| a.to_string()).collect()) {
-            Ok(Command::Run(options)) => options,
+            Ok(Command::Run(options)) => *options,
             Ok(Command::Print(text)) => panic!("printed {text}"),
             Err(error) => panic!("{error}"),
         }

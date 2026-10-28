@@ -72,6 +72,36 @@ pub(crate) trait Argument: Sized + std::fmt::Debug {
     /// Decode the argument from a byte slice
     /// Returns the decoded argument and the new position after reading
     fn decode(bytes: &[u8], pos: usize) -> (Self, usize);
+
+    /// Reads past the argument in bytecode that may be malformed, as a verifier does: the new
+    /// position, or `None` if the bytes end first. Each register and address it holds is
+    /// handed to `operand`.
+    fn check(bytes: &[u8], pos: usize, operand: &mut dyn FnMut(Operand)) -> Option<usize>;
+}
+
+/// An operand a verifier checks: a register must be within the frame, an address the start of
+/// an instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(variant_size_differences)]
+pub(crate) enum Operand {
+    Register(u32),
+    Address(u32),
+    /// An index operand, or a plain `u32`: what it indexes depends on the instruction and the
+    /// field (`field`, filled in by `check_instruction_in`).
+    Index {
+        field: &'static str,
+        value: u32,
+    },
+}
+
+/// Reads a `T` at `offset`, or `None` if the bytes end first.
+fn read_checked<T: Readable>(bytes: &[u8], offset: usize) -> Option<(T, usize)> {
+    let end = offset.checked_add(size_of::<T>())?;
+    if bytes.len() < end {
+        return None;
+    }
+    // Safety: the bytes are long enough to hold a `T` at `offset`.
+    Some((unsafe { read_unchecked(bytes, offset) }, end))
 }
 
 #[inline(always)]
@@ -136,6 +166,14 @@ impl<T: Argument> Argument for ThinVec<T> {
         }
         (result, pos)
     }
+
+    fn check(bytes: &[u8], pos: usize, operand: &mut dyn FnMut(Operand)) -> Option<usize> {
+        let (len, mut pos) = read_checked::<u32>(bytes, pos)?;
+        for _ in 0..len {
+            pos = T::check(bytes, pos, operand)?;
+        }
+        Some(pos)
+    }
 }
 
 impl Argument for () {
@@ -143,6 +181,10 @@ impl Argument for () {
 
     fn decode(_: &[u8], pos: usize) -> (Self, usize) {
         ((), pos)
+    }
+
+    fn check(_: &[u8], pos: usize, _: &mut dyn FnMut(Operand)) -> Option<usize> {
+        Some(pos)
     }
 }
 
@@ -155,6 +197,30 @@ impl Argument for IndexOperand {
         let (arg1, pos) = read::<u32>(bytes, pos);
         (arg1.into(), pos)
     }
+
+    fn check(bytes: &[u8], pos: usize, operand: &mut dyn FnMut(Operand)) -> Option<usize> {
+        let (value, pos) = read_checked::<u32>(bytes, pos)?;
+        operand(Operand::Index { field: "", value });
+        Some(pos)
+    }
+}
+
+impl Argument for u32 {
+    #[inline(always)]
+    fn encode(self, bytes: &mut Vec<u8>) {
+        write_u32(bytes, self);
+    }
+
+    #[inline(always)]
+    fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
+        read::<u32>(bytes, pos)
+    }
+
+    fn check(bytes: &[u8], pos: usize, operand: &mut dyn FnMut(Operand)) -> Option<usize> {
+        let (value, pos) = read_checked::<u32>(bytes, pos)?;
+        operand(Operand::Index { field: "", value });
+        Some(pos)
+    }
 }
 
 impl Argument for RegisterOperand {
@@ -165,6 +231,12 @@ impl Argument for RegisterOperand {
     fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
         let (arg1, pos) = read::<u32>(bytes, pos);
         (Self::new(arg1), pos)
+    }
+
+    fn check(bytes: &[u8], pos: usize, operand: &mut dyn FnMut(Operand)) -> Option<usize> {
+        let (register, pos) = read_checked::<u32>(bytes, pos)?;
+        operand(Operand::Register(register));
+        Some(pos)
     }
 }
 
@@ -178,6 +250,12 @@ impl Argument for Address {
     fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
         let (value, pos) = read::<u32>(bytes, pos);
         (Self::new(value), pos)
+    }
+
+    fn check(bytes: &[u8], pos: usize, operand: &mut dyn FnMut(Operand)) -> Option<usize> {
+        let (address, pos) = read_checked::<u32>(bytes, pos)?;
+        operand(Operand::Address(address));
+        Some(pos)
     }
 }
 
@@ -194,6 +272,11 @@ macro_rules! impl_argument_for_tuple {
             fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
                 $( let ($i, pos) = $t::decode(bytes, pos); )*
                 (($($i,)*), pos)
+            }
+
+            fn check(bytes: &[u8], pos: usize, operand: &mut dyn FnMut(Operand)) -> Option<usize> {
+                $( let pos = $t::check(bytes, pos, operand)?; )*
+                Some(pos)
             }
         }
     };
@@ -220,12 +303,16 @@ macro_rules! impl_argument_for_int {
             fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
                 read::<$t>(bytes, pos)
             }
+
+            fn check(bytes: &[u8], pos: usize, _: &mut dyn FnMut(Operand)) -> Option<usize> {
+                read_checked::<$t>(bytes, pos).map(|(_, pos)| pos)
+            }
         }
         )*
     };
 }
 
-impl_argument_for_int!(u8 u16 u32 u64 i8 i16 i32 f32 f64);
+impl_argument_for_int!(u8 u16 u64 i8 i16 i32 f32 f64);
 
 #[cfg(test)]
 mod tests {

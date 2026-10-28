@@ -530,6 +530,156 @@ impl Scope {
     pub fn unique_id(&self) -> u32 {
         self.inner.unique_id
     }
+
+    /// Whether `self` and `other` are the same scope, not two alike.
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// An address standing for this scope while it lives, to tell scopes apart by.
+    #[must_use]
+    pub fn addr(&self) -> usize {
+        Rc::as_ptr(&self.inner) as usize
+    }
+
+    /// Hides the bindings at positions `range` (as [`Scope::num_bindings`] counts them) from
+    /// every lookup, keeping their indices: a script's global lexical declarations, from when
+    /// it is parsed until its declarations are instantiated (see [`Scope::declare_withdrawn`]).
+    #[doc(hidden)]
+    pub fn withdraw_bindings(&self, range: std::ops::Range<u32>) {
+        let bindings = self.inner.bindings.borrow();
+        let mut positions = self.inner.positions.borrow_mut();
+        for position in range {
+            if let Some(binding) = bindings.get(position as usize)
+                && positions.get(&binding.name) == Some(&position)
+            {
+                positions.remove(&binding.name);
+            }
+        }
+    }
+
+    /// Makes the bindings at positions `range`, hidden by [`Scope::withdraw_bindings`], found
+    /// again. Nothing changes if another binding of one of their names is found already: that
+    /// name is the error.
+    ///
+    /// # Errors
+    ///
+    /// The name of a binding another binding of the scope already declares.
+    #[doc(hidden)]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn declare_withdrawn(&self, range: std::ops::Range<u32>) -> Result<(), JsString> {
+        let bindings = self.inner.bindings.borrow();
+        let mut positions = self.inner.positions.borrow_mut();
+        let range = range.start as usize..(range.end as usize).min(bindings.len());
+        for (position, binding) in bindings[range.clone()].iter().enumerate() {
+            let position = (range.start + position) as u32;
+            if positions
+                .get(&binding.name)
+                .is_some_and(|found| *found != position)
+            {
+                return Err(binding.name.clone());
+            }
+        }
+        for (position, binding) in bindings[range.clone()].iter().enumerate() {
+            positions.insert(binding.name.clone(), (range.start + position) as u32);
+        }
+        Ok(())
+    }
+
+    /// What this scope is made of besides its outer scope, to write it down; see
+    /// [`Scope::from_parts`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn parts(&self) -> ScopeParts {
+        ScopeParts {
+            index: self.inner.index.get(),
+            function: self.inner.function,
+            arrow: self.inner.arrow.get(),
+            this_escaped: self.inner.this_escaped.get(),
+            bindings: self
+                .inner
+                .bindings
+                .borrow()
+                .iter()
+                .map(|binding| BindingParts {
+                    name: binding.name.clone(),
+                    index: binding.index,
+                    flags: binding.flags.bits(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The scope inside `outer` that [`Scope::parts`] wrote down, with an identity of its own.
+    ///
+    /// # Errors
+    ///
+    /// If the parts are not those of a scope: unknown binding flags, a name bound twice, or an
+    /// escaping binding at an index its scope has no room for.
+    #[doc(hidden)]
+    pub fn from_parts(outer: Self, parts: ScopeParts) -> Result<Self, &'static str> {
+        let escaping = parts
+            .bindings
+            .iter()
+            .filter(|b| b.flags & BindingFlags::ESCAPES.bits() != 0)
+            .count();
+        let mut positions = FxHashMap::default();
+        let mut bindings = Vec::with_capacity(parts.bindings.len());
+        for binding in parts.bindings {
+            let flags = BindingFlags::from_bits(binding.flags).ok_or("unknown binding flags")?;
+            if flags.escapes() && binding.index as usize >= escaping {
+                return Err("binding index out of its scope");
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            if positions
+                .insert(binding.name.clone(), bindings.len() as u32)
+                .is_some()
+            {
+                return Err("a name bound twice in one scope");
+            }
+            bindings.push(Binding {
+                name: binding.name,
+                index: binding.index,
+                flags,
+            });
+        }
+        Ok(Self {
+            inner: Rc::new(Inner {
+                unique_id: outer.inner.context.next_unique_id(),
+                index: Cell::new(parts.index),
+                bindings: RefCell::new(bindings),
+                positions: RefCell::new(positions),
+                function: parts.function,
+                arrow: Cell::new(parts.arrow),
+                this_escaped: Cell::new(parts.this_escaped),
+                context: outer.inner.context.clone(),
+                outer: Some(outer),
+            }),
+        })
+    }
+}
+
+/// A scope written down without its outer scope: see [`Scope::parts`].
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs, clippy::struct_excessive_bools)]
+pub struct ScopeParts {
+    pub index: u32,
+    pub function: bool,
+    pub arrow: bool,
+    pub this_escaped: bool,
+    pub bindings: Vec<BindingParts>,
+}
+
+/// A binding of [`ScopeParts`].
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub struct BindingParts {
+    pub name: JsString,
+    pub index: u32,
+    pub flags: u8,
 }
 
 /// Additional state that all Scopes of a single AST share for bookkeeping.
@@ -686,6 +836,37 @@ impl BindingLocator {
     #[must_use]
     pub fn unique_scope_id(&self) -> u32 {
         self.unique_scope_id
+    }
+
+    /// The locator's fields as they are stored: name, scope (0 the global object, 1 the
+    /// global declarative scope, `n` the environment at `n - 2`), binding index and the
+    /// unique id of its scope; see [`BindingLocator::from_parts`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn parts(&self) -> (JsString, u32, u32, u32) {
+        (
+            self.name.clone(),
+            self.scope,
+            self.binding_index,
+            self.unique_scope_id,
+        )
+    }
+
+    /// The locator [`BindingLocator::parts`] wrote down.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_parts(
+        name: JsString,
+        scope: u32,
+        binding_index: u32,
+        unique_scope_id: u32,
+    ) -> Self {
+        Self {
+            name,
+            scope,
+            binding_index,
+            unique_scope_id,
+        }
     }
 }
 
