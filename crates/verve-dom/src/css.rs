@@ -1922,6 +1922,8 @@ fn own_style(
         style.insert("display".into(), "none".into());
     }
     // 先记下本节点 font 后出现的长属性；变量替换后展开 font 时不能覆盖它们。
+    // The `font` shorthand is opened up once its `var()`s are resolved (below): the longhands
+    // this node declares after its own `font` win over it, as later declarations do.
     let mut own_font = false;
     let mut font_overridden: Vec<&str> = Vec::new();
     for (_, declaration) in matched {
@@ -1985,6 +1987,7 @@ fn own_style(
 }
 
 /// font 简写展开后的属性，未给出的项重置为 normal。
+/// What the `font` shorthand sets.
 const FONT_LONGHANDS: &[&str] = &[
     "font-style",
     "font-variant",
@@ -1995,6 +1998,10 @@ const FONT_LONGHANDS: &[&str] = &[
     "font-family",
 ];
 
+/// The `font` shorthand opened into its longhands: `[style] [variant] [weight] [stretch]
+/// size[/line-height] family`, every longhand it leaves out reset to `normal`. A system font
+/// (`caption`, `menu`…) or a value with no size answers `None`, and the shorthand is left as
+/// written.
 fn font_longhands(value: &str) -> Option<Vec<(&'static str, String)>> {
     let mut style = "normal".to_owned();
     let mut variant = "normal".to_owned();
