@@ -193,6 +193,12 @@ always agree with one another.
   value `repr(transparent)` on 64-bit). `Context::jit_options_mut`, `Context::jit_stats`,
   `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>`. Design and results: Verve's `docs/jit.md`.
 
+- `boa_engine`, `object/jsobject.rs`: `JsObject::downgrade` and `WeakJsObject`, a reference to
+  an object that does not keep it alive and is read without a call into JavaScript (unlike a
+  `WeakRef`, it keeps nothing until the end of the job). A host that hands out one object per
+  native thing — `verve-dom`'s one object per DOM node — keeps its objects this way, so a node a
+  script let go of is collected and then freed.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

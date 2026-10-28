@@ -1053,6 +1053,17 @@ impl<T: NativeObject> JsObject<T> {
         Self { inner }
     }
 
+    /// A reference to this object that does not keep it alive: what a host keeps beside an
+    /// object it hands out again while JavaScript still holds it — one wrapper per native
+    /// thing — without being the reason it lives. Unlike a `WeakRef`, it neither keeps its
+    /// target until the end of the job nor needs a call into JavaScript to read.
+    #[must_use]
+    pub fn downgrade(&self) -> WeakJsObject<T> {
+        WeakJsObject {
+            inner: boa_gc::WeakGc::new(&self.inner),
+        }
+    }
+
     /// Create a new private name with this object as the unique identifier.
     pub(crate) fn private_name(&self, description: JsString) -> PrivateName {
         let ptr: *const _ = self.as_ref();
@@ -1162,6 +1173,40 @@ impl<T: NativeObject> AsRef<GcRefCell<Object<T>>> for JsObject<T> {
     #[inline]
     fn as_ref(&self) -> &GcRefCell<Object<T>> {
         &self.inner.object
+    }
+}
+
+/// A [`JsObject`] held without keeping it alive; see [`JsObject::downgrade`].
+#[derive(Trace, Finalize)]
+pub struct WeakJsObject<T: NativeObject = ErasedObjectData> {
+    inner: boa_gc::WeakGc<VTableObject<T>>,
+}
+
+impl<T: NativeObject> WeakJsObject<T> {
+    /// The object, while it is alive.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<JsObject<T>> {
+        self.inner.upgrade().map(|inner| JsObject { inner })
+    }
+
+    /// Whether the object is still alive, without taking a reference to it.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        self.inner.is_upgradable()
+    }
+}
+
+impl<T: NativeObject> Clone for WeakJsObject<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T: NativeObject> Debug for WeakJsObject<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("WeakJsObject")
     }
 }
 

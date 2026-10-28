@@ -30,6 +30,11 @@ Node's and the web's APIs and no Node underneath.
   waits: a script busy for seconds holds only its own thread. A panic ends only its own isolate,
   and a script that will not return is stopped from outside (`Isolate::interrupt`), uncatchably.
   What runs in one is the embedder's: implement `isolate::Guest`.
+- **A document**, for an embedder that asks for one: [`crates/verve-dom`](crates/verve-dom/README.md)
+  gives a runtime a `window` and a `document` — the DOM, CSS's cascade and the window's platform
+  pieces in Rust, so React and DOM-using libraries run unchanged — and whoever draws it
+  snapshots of the document, an input interface that dispatches the DOM's events, and a way to
+  report back where it painted each node. Without it there is no `document`, as in Node.
 
 ## What a plugin finds
 
@@ -49,7 +54,9 @@ Node's and the web's APIs and no Node underneath.
 **The web's globals**
 - `EventTarget`, `Event`, `CustomEvent`, `MessageEvent`, `ErrorEvent`, `CloseEvent`,
   `ProgressEvent`; `DOMException`; `AbortController`/`AbortSignal` (an `EventTarget`, with
-  `timeout` and `any`); `reportError`.
+  `timeout` and `any`); `reportError`. A host with a document builds its nodes on these
+  (`verve::dom_events`): its own targets, the tree an event is captured down and bubbles up,
+  and the global object as the window at the top of it.
 - `ReadableStream` (default and byte streams, BYOB reader, `tee`, `pipeTo`/`pipeThrough` with
   abort signals, `for await`, `ReadableStream.from`), `WritableStream`, `TransformStream`,
   `CountQueuingStrategy`/`ByteLengthQueuingStrategy`, `TextEncoderStream`/`TextDecoderStream`,
