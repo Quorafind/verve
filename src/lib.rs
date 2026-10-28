@@ -641,6 +641,7 @@ impl Runtime {
     }
 
     /// 复制当前 realm 的 `URL.createObjectURL` 已有存储中的字节。
+    /// Copies bytes from this realm's existing `URL.createObjectURL` storage.
     ///
     /// 撤销后不再提供新副本；已交给解码器的副本由宿主管理。本接口不获取远程地址，
     /// 也不授予网络权限，非 blob URL 或不存在的 URL 返回 `None`。

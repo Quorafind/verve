@@ -130,6 +130,7 @@ pub struct MediaState {
     pub seeking: bool,
     pub seekable: bool,
     /// 请求的输出策略；不支持的命令必须收到 CommandFailed。
+    /// Requested output policy; unsupported commands must receive CommandFailed.
     /// 暂停和时间以宿主回执为准，settings 保留脚本请求的策略值。
     pub settings: MediaSettings,
     pub error: Option<MediaError>,
