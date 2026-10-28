@@ -1021,6 +1021,24 @@ impl Document {
         runtime.run_microtasks();
     }
 
+    /// The pointer moved over `node` (or over nothing): that node hears `pointermove` and
+    /// `mousemove`, without hit testing — for a drawer that knows which box the pointer is
+    /// over itself, and for a press whose moves stay with the box it went down on.
+    pub fn pointer_move_on(
+        &self,
+        runtime: &mut verve::Runtime,
+        node: Option<NodeId>,
+        pointer: &Pointer,
+    ) {
+        let Some(node) = node else {
+            return;
+        };
+        let init = Self::pointer_init(pointer, 0);
+        self.fire(runtime, node, "PointerEvent", "pointermove", &init);
+        self.fire(runtime, node, "MouseEvent", "mousemove", &init);
+        runtime.run_microtasks();
+    }
+
     /// The pointer left the document.
     pub fn pointer_leave(&self, runtime: &mut verve::Runtime) {
         self.hover_node(runtime, None, &Pointer::default());

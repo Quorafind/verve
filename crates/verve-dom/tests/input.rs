@@ -125,6 +125,35 @@ fn the_pointer_comes_goes_and_presses() {
 }
 
 #[test]
+fn a_drawer_sends_a_move_to_the_box_it_names() {
+    on_page(|| {
+        let mut page = page();
+        let go = page.find("#go");
+        page.eval(
+            "for (const kind of ['pointermove', 'mousemove']) document.getElementById('go').addEventListener(kind, (e) => log.push(kind + ' ' + e.clientX + ',' + e.clientY))",
+        );
+        // The box hears the move though the pointer is nowhere near it, and `:hover` is the
+        // drawer's to move: a press whose moves stay with the box it went down on.
+        let at = Pointer {
+            x: 300.,
+            y: 250.,
+            ..Pointer::default()
+        };
+        page.document
+            .pointer_move_on(&mut page.runtime, Some(go), &at);
+        assert_eq!(log(&mut page), "pointermove 300,250 mousemove 300,250");
+        assert_ne!(
+            page.document.computed().get(go, "color"),
+            Some("rgb(255, 0, 0)")
+        );
+        // Nothing named, nothing told.
+        page.document.pointer_move_on(&mut page.runtime, None, &at);
+        assert_eq!(log(&mut page), "");
+        assert_eq!(page.console(), "");
+    });
+}
+
+#[test]
 fn painted_boxes_are_what_geometry_answers() {
     on_page(|| {
         let mut page = page();
