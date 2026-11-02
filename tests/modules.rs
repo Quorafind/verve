@@ -40,7 +40,11 @@ fn built_ins_answer_to_both_names_and_to_a_trailing_slash() {
             require('node:process') === process,
             require('process') === globalThis.process,
             require('node:events') === require('events'),
-            require('original-fs') === require('fs'),
+            // Electron's `original-fs`: the same `fs` implementation, never reading through an
+            // overlay — so an object of its own, not another name for `fs`'s.
+            require('original-fs') !== require('fs'),
+            typeof require('original-fs').readFileSync,
+            require('node:original-fs') === require('original-fs'),
             require('module').isBuiltin('node:fs'),
             require('module').isBuiltin('left-pad'),
             require.resolve('node:fs'),
@@ -56,6 +60,8 @@ fn built_ins_answer_to_both_names_and_to_a_trailing_slash() {
             "true",
             "true",
             "true",
+            "true",
+            "function",
             "true",
             "true",
             "false",
@@ -359,9 +365,9 @@ fn the_host_requires_natively_and_gives_scripts_a_window_require() {
     let mut rt = Runtime::new();
     let electron = rt.eval("({ remote: 'stub' })").unwrap();
     rt.define_builtin("electron", electron);
-    let fs = rt.require("node:original-fs").unwrap();
-    let again = rt.require("fs").unwrap();
-    assert!(fs == again);
+    let original = rt.require("node:original-fs").unwrap();
+    assert!(rt.require("node:original-fs").unwrap() == original);
+    assert!(rt.require("fs").unwrap() != original);
     assert!(
         rt.require("nope")
             .unwrap_err()

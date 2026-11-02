@@ -1,17 +1,52 @@
 //! The kernel's hooks for an embedder building Electron on it, a section for each: the structured
-//! clone that crosses threads and the process a realm says it is.
+//! clone that crosses threads, the process a realm says it is and the virtual filesystem
+//! `app.asar` is read through.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use boa_engine::JsValue;
 use verve::clone::{CloneBytesError, Cloned};
+use verve::vfs::{DirEntry, Kind, Metadata, Overlay};
 use verve::{ExitBehavior, ProcessInfo, Runtime, UncaughtBehavior};
 
 mod common;
 
 use common::Dir;
 
-// ─── A value between realms ───────────────────────────────────────────────────────────────
+// ─── A realm to run things in ───────────────────────────────────────────────────────────────
+
+/// A realm with `require` on its global object, as Electron's renderer has `window.require`.
+fn realm() -> Runtime {
+    let mut rt = Runtime::new();
+    let require = rt.global_require();
+    rt.context()
+        .register_global_property(
+            boa_engine::js_string!("require"),
+            require,
+            boa_engine::property::Attribute::all(),
+        )
+        .unwrap();
+    rt
+}
+
+/// Runs `body` as `main.js` in `dir` (whose path it has as `__dirname`), lets what it started
+/// settle, then reads `exports.result`.
+fn run_in(rt: &mut Runtime, dir: &Path, body: &str) -> Vec<String> {
+    let exports = rt
+        .load_module(&dir.join("main.js"), body)
+        .unwrap_or_else(|e| panic!("{e}"));
+    // Streams and promises settle over several turns: microtasks, then timers, again.
+    for _ in 0..10 {
+        rt.run_microtasks();
+        rt.run_due();
+    }
+    common::result_of(rt, exports)
+}
 
 /// What a value made of `script` looks like when written out again in `other`, and again after
 /// the trip through bytes.
@@ -329,6 +364,393 @@ fn verve_run_still_ends_the_process_itself() {
         .unwrap();
     assert_eq!(ran.status.code(), Some(3));
     assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "bye");
+}
+
+// ─── The virtual filesystem ─────────────────────────────────────────────────────────────────
+
+/// An overlay of bytes in memory, as a packed `app.asar` is: the paths under `root` are its own
+/// and nothing else is. Keys are the paths themselves, so this holds on every platform the tests
+/// run on.
+struct Memory {
+    /// How many times `read` was asked for `data.txt`.
+    reads: Arc<AtomicUsize>,
+    root: PathBuf,
+    files: HashMap<PathBuf, Vec<u8>>,
+    dirs: Vec<PathBuf>,
+}
+
+impl Memory {
+    fn new(root: &Path) -> Self {
+        Self {
+            reads: Arc::new(AtomicUsize::new(0)),
+            root: root.to_path_buf(),
+            files: HashMap::new(),
+            dirs: Vec::new(),
+        }
+    }
+
+    fn file(mut self, path: &str, bytes: &[u8]) -> Self {
+        let path = self.root.join(path);
+        let mut at = path.parent();
+        while let Some(dir) = at.filter(|dir| dir.starts_with(&self.root)) {
+            self.dirs.push(dir.to_path_buf());
+            at = dir.parent();
+        }
+        self.files.insert(path, bytes.to_vec());
+        self
+    }
+
+    /// The path as this overlay names it, when it is under its root at all.
+    fn under(&self, path: &Path) -> Option<PathBuf> {
+        path.starts_with(&self.root).then(|| path.to_path_buf())
+    }
+
+    fn answer<T>(&self, path: &Path, found: impl FnOnce(&Path) -> Option<T>) -> Option<T> {
+        found(&self.under(path)?)
+    }
+
+    fn known(&self, path: &Path) -> bool {
+        self.files.contains_key(path) || self.dirs.iter().any(|d| d == path)
+    }
+}
+
+fn missing(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("{} is not in the archive", path.display()),
+    )
+}
+
+impl Overlay for Memory {
+    fn stat(&self, path: &Path) -> Option<io::Result<Metadata>> {
+        self.answer(path, |name| {
+            Some(
+                match (self.files.get(name), self.dirs.iter().any(|d| d == name)) {
+                    (Some(bytes), _) => {
+                        Ok(Metadata::new(Kind::File, bytes.len() as u64, 0., 0o100644))
+                    }
+                    (None, true) => Ok(Metadata::new(Kind::Dir, 0, 0., 0o040755)),
+                    (None, false) => Err(missing(name)),
+                },
+            )
+        })
+    }
+
+    fn read(&self, path: &Path) -> Option<io::Result<Cow<'static, [u8]>>> {
+        self.answer(path, |name| {
+            if name.ends_with("data.txt") {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+            }
+            Some(match self.files.get(name) {
+                Some(bytes) => Ok(Cow::Owned(bytes.clone())),
+                None if self.dirs.iter().any(|d| d == name) => {
+                    Err(io::Error::from(io::ErrorKind::IsADirectory))
+                }
+                None => Err(missing(name)),
+            })
+        })
+    }
+
+    fn read_dir(&self, path: &Path) -> Option<io::Result<Vec<DirEntry>>> {
+        self.answer(path, |name| {
+            if !self.dirs.iter().any(|d| d == name) {
+                return Some(Err(missing(name)));
+            }
+            let mut entries = Vec::new();
+            for file in self.files.keys() {
+                if let (Some(dir), Some(rest)) = (file.parent(), file.file_name())
+                    && dir == name
+                {
+                    entries.push(DirEntry::new(
+                        rest.to_string_lossy().into_owned(),
+                        Kind::File,
+                    ));
+                }
+            }
+            for dir in &self.dirs {
+                if let (Some(parent), Some(rest)) = (dir.parent(), dir.file_name())
+                    && parent == name
+                    && !rest.is_empty()
+                {
+                    entries.push(DirEntry::new(
+                        rest.to_string_lossy().into_owned(),
+                        Kind::Dir,
+                    ));
+                }
+            }
+            Some(Ok(entries))
+        })
+    }
+
+    fn realpath(&self, path: &Path) -> Option<io::Result<PathBuf>> {
+        self.answer(path, |name| {
+            Some(if self.known(name) {
+                Ok(name.to_path_buf())
+            } else {
+                Err(missing(name))
+            })
+        })
+    }
+
+    fn write_denied(&self, path: &Path) -> Option<io::Error> {
+        self.under(path)
+            .map(|_| io::Error::new(io::ErrorKind::Unsupported, "EROFS: read-only file system"))
+    }
+
+    fn error_message(&self, err: &io::Error, path: &Path) -> Option<String> {
+        let name = self.under(path)?;
+        (err.kind() == io::ErrorKind::NotFound).then(|| {
+            format!(
+                "ENOENT: no such file or directory, open '{}' not found in {}",
+                name.display(),
+                self.root.display()
+            )
+        })
+    }
+}
+
+/// A tree as `app.asar` has it, with `require` of its files, its packages and its `fs`.
+fn packed(root: &Path) -> Memory {
+    Memory::new(root)
+        .file("app.asar/data.txt", b"packed bytes")
+        .file(
+            "app.asar/package.json",
+            br#"{"name":"app","main":"./main.js"}"#,
+        )
+        .file(
+            "app.asar/main.js",
+            b"module.exports = 'main of the archive';",
+        )
+        .file("x.js", b"module.exports = 'x of the archive';")
+        .file("x.mjs", b"export default 'esm of the archive';")
+        .file(
+            "node_modules/pkg/package.json",
+            br#"{"name":"pkg","exports":{"./thing":"./thing.js"}}"#,
+        )
+        .file(
+            "node_modules/pkg/thing.js",
+            b"module.exports = 'thing of pkg';",
+        )
+}
+
+#[test]
+fn the_overlay_answers_for_what_it_holds() {
+    let dir = Dir::new("overlay");
+    let mut rt = realm();
+    let root = dir.0.clone();
+    rt.set_vfs(Some(Arc::new(packed(&root))));
+    let result = run_in(
+        &mut rt,
+        &root,
+        r#"
+        const fs = require('fs');
+        const path = require('path');
+        const data = path.join(__dirname, 'app.asar', 'data.txt');
+        const result = [];
+        result.push(fs.readFileSync(data, 'utf8'));
+        result.push(fs.readdirSync(path.join(__dirname, 'app.asar')).sort().join(','));
+        result.push(fs.statSync(data).isFile() + ':' + fs.statSync(data).size);
+        result.push(String(fs.existsSync(data)) + String(fs.existsSync(path.join(__dirname, 'nope'))));
+        const fd = fs.openSync(data, 'r');
+        result.push('fd:' + fs.fstatSync(fd).size);
+        fs.closeSync(fd);
+        fs.promises.readFile(data, 'utf8').then((text) => result.push('promise:' + text));
+        result.push(require('./x'));
+        result.push(require('./app.asar'));
+        result.push(require('pkg/thing'));
+        try { fs.readFileSync(path.join(__dirname, 'app.asar', 'missing.txt'), 'utf8'); }
+        catch (e) { result.push(e.code + '|' + e.message.includes('not found in')); }
+        try { fs.writeFileSync(data, 'x'); } catch (e) { result.push('write:' + e.code); }
+        const stream = fs.createReadStream(data, { encoding: 'utf8' });
+        let streamed = '';
+        stream.on('data', (chunk) => { streamed += chunk; });
+        stream.on('end', () => {
+            result.push('stream:' + streamed);
+            exports.result = result;
+        });
+        "#,
+    );
+    assert_eq!(
+        result,
+        [
+            "packed bytes",
+            "data.txt,main.js,package.json",
+            "true:12",
+            "truefalse",
+            "fd:12",
+            "x of the archive",
+            "main of the archive",
+            "thing of pkg",
+            "ENOENT|true",
+            "write:ENOTSUP",
+            "promise:packed bytes",
+            "stream:packed bytes",
+        ]
+    );
+}
+
+/// `import()` of a file the disk does not hold: the loader asks the overlay too.
+#[test]
+fn an_import_reads_the_overlay() {
+    let dir = Dir::new("import");
+    let mut rt = realm();
+    let root = dir.0.clone();
+    rt.set_vfs(Some(Arc::new(packed(&root))));
+    let result = run_in(
+        &mut rt,
+        &root,
+        r#"
+        const result = [];
+        import('./x.mjs').then(
+            (module) => { result.push('esm:' + module.default); exports.result = result; },
+            (error) => { result.push('rejected:' + (error.code || error.message)); exports.result = result; },
+        );
+        "#,
+    );
+    assert_eq!(result, ["esm:esm of the archive"]);
+}
+
+#[test]
+fn original_fs_and_no_asar_read_the_disk_alone() {
+    let dir = Dir::new("original");
+    let mut rt = realm();
+    let root = dir.0.clone();
+    rt.set_vfs(Some(Arc::new(packed(&root))));
+    let data = root.join("app.asar").join("data.txt");
+    let answer = rt
+        .eval(&format!(
+            r#"(() => {{
+                const fs = require('fs');
+                const original = require('original-fs');
+                let code;
+                try {{ original.readFileSync({path:?}, 'utf8'); }} catch (e) {{ code = e.code; }}
+                return [fs !== original, code].join('|');
+            }})()"#,
+            path = data.to_string_lossy()
+        ))
+        .unwrap();
+    assert_eq!(verve::print(&answer), "true|ENOENT");
+    // `process.noAsar`: the same realm reads the disk alone from now on.
+    rt.set_no_asar(true);
+    let denied = rt.eval(&format!(
+        "require('fs').readFileSync({:?}, 'utf8')",
+        data.to_string_lossy()
+    ));
+    assert!(denied.is_err());
+}
+
+/// What `original-fs` reads, a stream it makes keeps reading, however late it does.
+#[test]
+fn an_original_fs_stream_never_reads_the_overlay() {
+    let dir = Dir::new("original-stream");
+    let mut rt = realm();
+    let root = dir.0.clone();
+    rt.set_vfs(Some(Arc::new(packed(&root))));
+    let result = run_in(
+        &mut rt,
+        &root,
+        r#"
+        const original = require('original-fs');
+        const fs = require('fs');
+        const path = require('path');
+        const data = path.join(__dirname, 'app.asar', 'data.txt');
+        const result = [];
+        const through = fs.createReadStream(data, { encoding: 'utf8' });
+        through.on('data', (chunk) => result.push('fs:' + chunk));
+        const bare = original.createReadStream(data, { encoding: 'utf8' });
+        bare.on('data', (chunk) => result.push('original:' + chunk));
+        bare.on('error', (error) => result.push('original:' + error.code));
+        bare.on('close', () => { exports.result = result.sort(); });
+        "#,
+    );
+    assert_eq!(result, ["fs:packed bytes", "original:ENOENT"]);
+}
+
+/// An overlay is asked about the path made absolute against the realm's folder and clean, not
+/// as the caller wrote it.
+#[test]
+fn the_overlay_is_asked_about_absolute_clean_paths() {
+    let dir = Dir::new("relative");
+    let mut rt = realm();
+    let root = dir.0.clone();
+    rt.set_vfs(Some(Arc::new(packed(&root))));
+    let result = run_in(
+        &mut rt,
+        &root,
+        r#"
+        process.chdir(__dirname);
+        const fs = require('fs');
+        exports.result = [
+            fs.readFileSync('app.asar/data.txt', 'utf8'),
+            fs.readFileSync('./app.asar/../app.asar/./data.txt', 'utf8'),
+            String(fs.existsSync('app.asar/missing.txt')),
+        ];
+        "#,
+    );
+    assert_eq!(result, ["packed bytes", "packed bytes", "false"]);
+}
+
+#[test]
+fn process_no_asar_puts_the_overlay_aside_from_javascript() {
+    let dir = Dir::new("no-asar");
+    let mut rt = realm();
+    let root = dir.0.clone();
+    rt.set_vfs(Some(Arc::new(packed(&root))));
+    let result = run_in(
+        &mut rt,
+        &root,
+        r#"
+        const fs = require('fs');
+        const data = require('path').join(__dirname, 'app.asar', 'data.txt');
+        const result = [String(process.noAsar), fs.readFileSync(data, 'utf8')];
+        process.noAsar = true;
+        try { fs.readFileSync(data, 'utf8'); } catch (e) { result.push(e.code); }
+        process.noAsar = false;
+        result.push(fs.readFileSync(data, 'utf8'));
+        exports.result = result;
+        "#,
+    );
+    assert_eq!(result, ["false", "packed bytes", "ENOENT", "packed bytes"]);
+    // With the overlay taken away there is nothing to put aside: the accessor goes too.
+    rt.set_vfs(None);
+    let answer = rt.eval("'noAsar' in process").unwrap();
+    assert_eq!(verve::print(&answer), "false");
+}
+
+/// A file stream asks an overlay for its file once, not once for each chunk.
+#[test]
+fn an_overlay_file_is_read_once_for_all_the_chunks_of_a_stream() {
+    let dir = Dir::new("chunks");
+    let mut rt = realm();
+    let root = dir.0.clone();
+    let memory = packed(&root);
+    let reads = memory.reads.clone();
+    rt.set_vfs(Some(Arc::new(memory)));
+    let result = run_in(
+        &mut rt,
+        &root,
+        r#"
+        const fs = require('fs');
+        const data = require('path').join(__dirname, 'app.asar', 'data.txt');
+        const chunks = [];
+        fs.createReadStream(data, { highWaterMark: 4, encoding: 'utf8' })
+            .on('data', (chunk) => chunks.push(chunk))
+            .on('end', () => { exports.result = [chunks.length, chunks.join('')]; });
+        "#,
+    );
+    assert_eq!(result, ["3", "packed bytes"]);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn original_fs_shares_fs_classes() {
+    let mut rt = realm();
+    let answer = rt
+        .eval(
+            "(() => { const fs = require('fs'); const original = require('original-fs');              return [original.Stats === fs.Stats, original.statSync('.') instanceof fs.Stats,              fs.statSync('.') instanceof original.Stats, original.Dirent === fs.Dirent].join('|'); })()",
+        )
+        .unwrap();
+    assert_eq!(verve::print(&answer), "true|true|true|true");
 }
 
 // ─── The rest of the hooks ─────────────────────────────────────────────────────────────────

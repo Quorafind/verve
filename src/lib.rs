@@ -73,6 +73,7 @@ mod typescript;
 mod url;
 mod url_pattern;
 mod util;
+pub mod vfs;
 mod vm;
 #[cfg(feature = "wasm")]
 mod wasm;
@@ -227,6 +228,8 @@ struct Shared {
     profile: RefCell<Option<Rc<process::Profile>>>,
     /// What this realm's `process` is, as its embedder described it: see [`ProcessInfo`].
     process: RefCell<ProcessInfo>,
+    /// The virtual filesystem this realm reads through: see [`vfs`].
+    vfs: RefCell<vfs::Layers>,
     /// Where compiled modules are kept between runs, if anywhere: see `code_cache`.
     code_cache: RefCell<code_cache::Shared>,
     /// 即使 Worker 自身不启用缓存，也会继承这些访问拒绝规则。
@@ -513,6 +516,7 @@ impl Runtime {
             wake: std::sync::Arc::default(),
             profile: RefCell::new(None),
             process: RefCell::new(ProcessInfo::default()),
+            vfs: RefCell::new(vfs::Layers::default()),
             code_cache: RefCell::new(code_cache),
             code_cache_protection: RefCell::new(code_cache_protection),
         }));

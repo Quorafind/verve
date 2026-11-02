@@ -448,7 +448,7 @@ fn script_of(url: &str, context: &Context) -> Option<String> {
         && url.scheme() == "file"
         && let Ok(path) = crate::esm_resolve::file_path(&url)
     {
-        return std::fs::read_to_string(path).ok();
+        return crate::fs::sys::read_to_string(&crate::vfs::View::of(context), &path).ok();
     }
     let rest = url.strip_prefix("data:")?;
     let (header, body) = rest.split_once(',')?;

@@ -24,9 +24,11 @@ use boa_engine::{
     object::builtins::JsArray,
 };
 
+use crate::fs::sys;
 use crate::native::{
     ClassSpec, arg, array, class, closure, function, get, hidden, js_text, object, text_of,
 };
+use crate::vfs::View;
 
 /// What a name names: a built-in module, or a file.
 enum Resolved {
@@ -35,14 +37,10 @@ enum Resolved {
 }
 
 /// The name Node's built-in module answers to, as `require` was given it: `node:` and a
-/// trailing `/` taken off, and Electron's `original-fs` read as `fs`.
+/// trailing `/` taken off.
 pub(crate) fn bare_name(name: &str) -> &str {
     let bare = name.strip_prefix("node:").unwrap_or(name);
-    let bare = bare.strip_suffix('/').unwrap_or(bare);
-    match bare {
-        "original-fs" => "fs",
-        other => other,
-    }
+    bare.strip_suffix('/').unwrap_or(bare)
 }
 
 /// Whether Node's table answers `name`: every module of it does to its bare name, but those
@@ -156,34 +154,34 @@ fn path_text(path: &Path) -> JsValue {
 }
 
 /// The file `base` names: itself, with an extension added, or as a folder.
-fn as_file_or_folder(base: &Path) -> Option<PathBuf> {
-    if base.is_file() {
+fn as_file_or_folder(view: &View, base: &Path) -> Option<PathBuf> {
+    if sys::is_file(view, base) {
         return Some(base.to_path_buf());
     }
     for ext in ["js", "json", "cjs"] {
         let path = PathBuf::from(format!("{}.{ext}", base.display()));
-        if path.is_file() {
+        if sys::is_file(view, &path) {
             return Some(path);
         }
     }
-    if base.is_dir() {
+    if sys::is_dir(view, base) {
         let manifest = base.join("package.json");
         if crate::permission::resolution_may_read(&manifest)
-            && let Ok(text) = std::fs::read_to_string(&manifest)
+            && let Ok(text) = sys::read_to_string(view, &manifest)
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
         {
             let main = json.get("main").and_then(|m| m.as_str());
             if let Some(main) = main {
                 // `main` is written as the package's author wrote it: `./main.js`, `lib/x.js`.
                 let target = clean(&base.join(main));
-                if let Some(found) = as_file_or_folder_plain(&target) {
+                if let Some(found) = as_file_or_folder_plain(view, &target) {
                     return Some(found);
                 }
             }
         }
         for index in ["index.js", "index.json", "index.cjs"] {
             let path = base.join(index);
-            if path.is_file() {
+            if sys::is_file(view, &path) {
                 return Some(path);
             }
         }
@@ -193,18 +191,18 @@ fn as_file_or_folder(base: &Path) -> Option<PathBuf> {
 
 /// A `main` named in a `package.json`: the file, with an extension added, or its folder's
 /// `index.js` — but not that folder's own `package.json` again.
-fn as_file_or_folder_plain(base: &Path) -> Option<PathBuf> {
-    if base.is_file() {
+fn as_file_or_folder_plain(view: &View, base: &Path) -> Option<PathBuf> {
+    if sys::is_file(view, base) {
         return Some(base.to_path_buf());
     }
     for ext in ["js", "json", "cjs"] {
         let path = PathBuf::from(format!("{}.{ext}", base.display()));
-        if path.is_file() {
+        if sys::is_file(view, &path) {
             return Some(path);
         }
     }
     let index = base.join("index.js");
-    index.is_file().then_some(index)
+    sys::is_file(view, &index).then_some(index)
 }
 
 fn is_path(name: &str) -> bool {
@@ -225,7 +223,7 @@ fn resolve(context: &mut Context, folder: &Path, name: &str) -> JsResult<Resolve
         return Ok(Resolved::Builtin(name.to_owned()));
     }
     if is_path(name) {
-        return as_file_or_folder(&clean(&folder.join(name)))
+        return as_file_or_folder(&View::of(context), &clean(&folder.join(name)))
             .map(Resolved::File)
             .ok_or_else(|| not_found(context, name));
     }
@@ -319,7 +317,8 @@ pub(crate) fn load_file(
         ));
     }
     crate::permission::read(context, path)?;
-    let text = std::fs::read_to_string(path).map_err(|error| {
+    let view = View::of(context);
+    let text = sys::read_to_string(&view, path).map_err(|error| {
         JsNativeError::error().with_message(format!("{}: {error}", path.display()))
     })?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);

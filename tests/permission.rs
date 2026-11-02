@@ -562,3 +562,30 @@ fn an_embedder_that_grants_nothing_keeps_the_disk_and_workers_it_had() {
     ));
     assert!(denied.is_err_and(|e| e.contains("restricted")));
 }
+
+/// `fs.promises.watch` checks its path as `fs.watch` does: a name that is not a path is
+/// `ERR_INVALID_ARG_TYPE`, and one the realm may not read is refused.
+#[test]
+fn promises_watch_validates_and_checks_its_path() {
+    let tree = Tree::new("watch");
+    let mut rt = tree.runtime();
+    let result = run(
+        &mut rt,
+        &tree,
+        r#"
+        globalThis.result = [
+            code(() => fs.promises.watch()),
+            code(() => fs.promises.watch(at('secret'))),
+            code(() => fs.promises.watch(at('open'))),
+        ];
+        "#,
+    );
+    assert_eq!(
+        result,
+        [
+            "ERR_INVALID_ARG_TYPE:",
+            "ERR_ACCESS_DENIED:FileSystemRead",
+            "ok"
+        ]
+    );
+}

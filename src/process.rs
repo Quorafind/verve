@@ -684,6 +684,37 @@ fn apply_versions(context: &mut Context, process: &JsObject, info: &ProcessInfo)
     Ok(())
 }
 
+/// Takes `process.noAsar` off again, for a realm whose overlay was removed: there is nothing
+/// left for it to put aside.
+pub(crate) fn hide_no_asar(context: &mut Context) -> JsResult<()> {
+    let Some(process) = crate::native::global(context, "process")?.as_object() else {
+        return Ok(());
+    };
+    process.delete_property_or_throw(js_string!("noAsar"), context)?;
+    Ok(())
+}
+
+/// `process.noAsar`, as Electron has it: reading it says whether the overlay is put aside, and
+/// setting it puts the overlay aside or back. An accessor over the realm's own layers, not a
+/// flag of its own, so [`crate::Runtime::set_no_asar`] and JavaScript always agree.
+pub(crate) fn expose_no_asar(context: &mut Context) -> JsResult<()> {
+    let Some(process) = crate::native::global(context, "process")?.as_object() else {
+        return Ok(());
+    };
+    crate::native::accessors(
+        context,
+        &process,
+        &[(
+            "noAsar",
+            |_, _, cx| Ok(crate::shared(cx).vfs.borrow().no_asar.into()),
+            Some(|_, args, cx| {
+                crate::shared(cx).vfs.borrow_mut().no_asar = arg(args, 0).to_boolean();
+                Ok(JsValue::undefined())
+            }),
+        )],
+    )
+}
+
 /// `require('process')`: the global `process`, whatever it is now.
 pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     crate::native::global(context, "process")
