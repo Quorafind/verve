@@ -703,12 +703,12 @@ fn access(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsVa
     let mode = arg(args, 1).as_number().unwrap_or(0.) as i64;
     crate::permission::read(context, &path)?;
     if mode & 2 != 0 {
-        may_write(view, context, &path, "access", Scope::Path)?;
+        crate::permission::write(context, &path)?;
     }
     let meta = sys::stat(view, Path::new(&path), true)
         .map_err(|e| io_error(view, context, e, "access", &path, None))?;
-    if mode & 2 != 0 && meta.is_readonly() {
-        return Err(fs_error(context, "EACCES", "access", Some(&path), None));
+    if let Some(error) = sys::write_refusal(view, &meta, Path::new(&path), mode & 2 != 0) {
+        return Err(io_error(view, context, error, "access", &path, None));
     }
     Ok(JsValue::undefined())
 }

@@ -112,9 +112,16 @@ pub trait Overlay: Send + Sync {
     fn realpath(&self, path: &Path) -> Option<io::Result<PathBuf>>;
 
     /// The error a write to `path` fails with, when the overlay holds it and keeps it as it is
-    /// — `app.asar` is read-only, and Electron says so with `ENOTSUP`.
+    /// — a path inside `app.asar` fails as a path through a file does, with `ENOTDIR`.
     fn write_denied(&self, _path: &Path) -> Option<io::Error> {
         None
+    }
+
+    /// The error `access(path, W_OK)` fails with, when the overlay holds the path and it is not
+    /// writable. Apart from [`Overlay::write_denied`] because the two differ: Electron asks the
+    /// real file about an unpacked one, and words the refusal for a packed one its own way.
+    fn access_denied(&self, path: &Path) -> Option<io::Error> {
+        self.write_denied(path)
     }
 
     /// Where a file only the overlay holds can be read by a program that is not this runtime —
@@ -235,6 +242,12 @@ impl View {
         let overlay = self.overlay.as_ref()?;
         let path = self.absolute(path)?;
         overlay.write_denied(&path)
+    }
+
+    pub(crate) fn access_denied(&self, path: &Path) -> Option<io::Error> {
+        let overlay = self.overlay.as_ref()?;
+        let path = self.absolute(path)?;
+        overlay.access_denied(&path)
     }
 
     pub(crate) fn materialize(&self, path: &Path) -> Option<io::Result<PathBuf>> {
