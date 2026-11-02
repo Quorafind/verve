@@ -3,8 +3,8 @@ crates/verve-dom/src/bind/platform.rs 2259
 crates/verve-dom/src/dom.rs 1769
 crates/verve-dom/src/lib.rs 1790
 src/buffer.rs 1742
-src/code_cache.rs 1668
-src/crypto.rs 2533
+src/code_cache.rs 1666
+src/crypto.rs 2529
 src/dom_events.rs 1901
 src/fetch.rs 1719
 src/fs.rs 1884
