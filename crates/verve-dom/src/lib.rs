@@ -31,6 +31,7 @@ pub mod field;
 pub mod html;
 mod inner_text;
 mod media;
+mod rect;
 mod state;
 mod window_state;
 
@@ -50,60 +51,10 @@ pub use field::Draft;
 pub use media::{
     MediaCommand, MediaCommandKind, MediaError, MediaSettings, MediaState, MediaUpdate,
 };
+pub use rect::Rect;
 pub use state::FrameClock;
 
 use state::{Shared, SheetOwner, SheetRecord, State, shared};
-
-/// A box, in CSS pixels from the viewport's top left.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.width && y < self.y + self.height
-    }
-
-    pub fn union(&self, other: &Rect) -> Rect {
-        let x = self.x.min(other.x);
-        let y = self.y.min(other.y);
-        Rect {
-            x,
-            y,
-            width: (self.x + self.width).max(other.x + other.width) - x,
-            height: (self.y + self.height).max(other.y + other.height) - y,
-        }
-    }
-
-    pub fn intersection(&self, other: &Rect) -> Option<Rect> {
-        let x = self.x.max(other.x);
-        let y = self.y.max(other.y);
-        let right = (self.x + self.width).min(other.x + other.width);
-        let bottom = (self.y + self.height).min(other.y + other.height);
-        (right >= x
-            && bottom >= y
-            && (right > x || bottom > y || self.width == 0. || self.height == 0.))
-            .then_some(Rect {
-                x,
-                y,
-                width: right - x,
-                height: bottom - y,
-            })
-    }
-}
 
 /// What a script asked of the window that only the embedder can do.
 ///
