@@ -2,7 +2,9 @@
 //! could apply to it.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use super::animate::Keyframes;
 use super::cascade::{Origin, says_revert_layer};
 use super::layer::LayerOrder;
 use super::media::Environment;
@@ -51,6 +53,10 @@ pub struct Styler {
     /// which are worked out beside each element. A page that says nothing about them pays
     /// nothing for them.
     pub(super) parts: Vec<PseudoElement>,
+    /// Whether any rule sets a `transition…` or an `animation…`, or any sheet has `@keyframes`.
+    animates: bool,
+    /// Every `@keyframes` the sheets declare, by name; a later one of the same name wins.
+    keyframes: HashMap<String, Arc<Keyframes>>,
 }
 
 impl Styler {
@@ -68,6 +74,11 @@ impl Styler {
                 .collect::<Vec<_>>(),
         );
         out.layers = order.count();
+        for (_, sheet, _) in sheets {
+            out.animates |= !sheet.keyframes.is_empty();
+            out.keyframes
+                .extend(sheet.keyframes.iter().map(|(n, k)| (n.clone(), k.clone())));
+        }
         for (ordinal, (origin, sheet, tree)) in sheets.iter().enumerate() {
             for rule in sheet
                 .rules
@@ -75,6 +86,10 @@ impl Styler {
                 .filter(|r| r.media.iter().all(|m| m.matches(env)))
             {
                 out.revert_layer |= rule.declarations.iter().any(says_revert_layer);
+                out.animates |= rule
+                    .declarations
+                    .iter()
+                    .any(|d| d.name.starts_with("transition") || d.name.starts_with("animation"));
                 out.add_rule(*origin, *tree, rule, order.place(ordinal, rule.layer));
             }
         }
@@ -107,6 +122,16 @@ impl Styler {
             own,
             rule: rule.clone(),
         });
+    }
+
+    /// Whether the sheets ask for transitions or animations at all.
+    pub(crate) fn animates(&self) -> bool {
+        self.animates
+    }
+
+    /// The `@keyframes` a name stands for.
+    pub(super) fn keyframes(&self, name: &str) -> Option<Arc<Keyframes>> {
+        self.keyframes.get(name).cloned()
     }
 
     pub fn environment(&self) -> &Environment {

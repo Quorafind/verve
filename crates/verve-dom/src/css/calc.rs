@@ -478,3 +478,15 @@ pub(super) fn degrees(token: &str) -> Option<f32> {
         _ => None,
     }
 }
+
+/// A time in milliseconds: `150ms`, `0.15s`. A bare number is no time, nor is a word that
+/// happens to end in `s` (`spin-forms`).
+pub(super) fn milliseconds(token: &str) -> Option<f64> {
+    let token = token.trim();
+    let split = token.find(|c: char| c.is_ascii_alphabetic())?;
+    let number: f64 = token[..split].parse().ok()?;
+    match unit(&token[split..])? {
+        Unit::Time(seconds) => Some((number * f64::from(seconds) * 1e6).round() / 1e3),
+        _ => None,
+    }
+}

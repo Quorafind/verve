@@ -1,5 +1,9 @@
 //! Stylesheets: a `<style>`'s text read into rules, at-rules and their nesting.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use super::animate::Keyframes;
 use super::media::MediaQuery;
 use super::selector::{Pseudo, SelectorList};
 use super::syntax::{matching_brace, split_outside, strip_comments};
@@ -68,6 +72,8 @@ pub struct Sheet {
     /// Every layer it declares, by its full name (`a`, then `a.b`), in the order it declares
     /// them. A layer written without a name is `<n>`, `n` being its number in the sheet.
     pub(super) layers: Vec<String>,
+    /// Every `@keyframes` it declares, by name.
+    pub(super) keyframes: HashMap<String, Arc<Keyframes>>,
     /// The text it was read from, comments and all: what the CSSOM shows.
     source: String,
 }
@@ -80,6 +86,7 @@ impl Sheet {
         Self {
             rules: parser.rules,
             layers: parser.layers,
+            keyframes: parser.keyframes,
             source,
         }
     }
@@ -132,6 +139,7 @@ pub fn split_rules(css: &str) -> Vec<String> {
 struct SheetParser {
     rules: Vec<Rule>,
     layers: Vec<String>,
+    keyframes: HashMap<String, Arc<Keyframes>>,
     anonymous: usize,
 }
 
@@ -203,6 +211,13 @@ impl SheetParser {
                 let inside = format!("{path}{name}");
                 self.declare(&inside);
                 self.block(body, media, &format!("{inside}."));
+            }
+            "keyframes" | "-webkit-keyframes" => {
+                let name = condition.trim().trim_matches(['"', '\'']);
+                if !name.is_empty() {
+                    self.keyframes
+                        .insert(name.to_owned(), Arc::new(Keyframes::parse(body)));
+                }
             }
             // What it supports is what it was given; a document block is all documents.
             "supports" | "document" | "-moz-document" | "scope" | "starting-style" => {

@@ -370,6 +370,17 @@ fn cascading_five_thousand_nodes_under_a_tailwind_sheet() {
         let markup = serde_json::to_string(&tailwind_markup(5000, groups)).expect("a string");
         page.eval(&format!("document.body.innerHTML = {markup}"));
         let css = tailwind_sheet(groups);
+        // What a drawer waits for: the first update of the page, and one after 500 elements
+        // changed class.
+        page.document.set_stylesheet("tailwind", &css);
+        let started = Instant::now();
+        page.document.update();
+        let first = started.elapsed().as_secs_f64() * 1000.;
+        page.eval("document.querySelectorAll('span').forEach((n, i) => { if (i < 500) n.classList.add('p-1'); })");
+        let started = Instant::now();
+        page.document.update();
+        let restyle = started.elapsed().as_secs_f64() * 1000.;
+        eprintln!("update: first {first:.0} ms, 500 elements restyled {restyle:.0} ms");
         let dom = page.document.dom();
         let nodes = dom.len();
         // The best of `runs`, in milliseconds.

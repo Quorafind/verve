@@ -1942,38 +1942,6 @@ pub fn empty_ranges(context: &mut Context) -> JsResult<JsValue> {
     Ok(ranges.into())
 }
 
-/// `element.animate(…)`: an animation already finished, as a page with animations off has.
-pub fn finished_animation(context: &mut Context) -> JsResult<JsValue> {
-    let target = shared(context)
-        .borrow()
-        .class("EventTarget")
-        .expect("made")
-        .0;
-    let animation = target.construct(&[], None, context)?;
-    let done = super::resolved(animation.clone().into(), context)?;
-    set(&animation, "finished", done.clone(), context)?;
-    set(&animation, "ready", done, context)?;
-    set(&animation, "playState", text("finished"), context)?;
-    set(&animation, "currentTime", 0, context)?;
-    set(&animation, "playbackRate", 1, context)?;
-    set(&animation, "onfinish", JsValue::null(), context)?;
-    set(&animation, "oncancel", JsValue::null(), context)?;
-    for name in [
-        "play",
-        "pause",
-        "cancel",
-        "finish",
-        "reverse",
-        "persist",
-        "commitStyles",
-        "updatePlaybackRate",
-    ] {
-        let f = function(context, name, 0, |_, _, _| Ok(JsValue::undefined()));
-        set(&animation, name, f, context)?;
-    }
-    Ok(animation.into())
-}
-
 fn construct_data_transfer(
     new_target: &JsValue,
     _: &[JsValue],

@@ -55,7 +55,7 @@ pub(super) fn color_text(text: &str) -> Option<String> {
 }
 
 /// `rgb(r, g, b)`, or `rgba(r, g, b, a)` when it is not opaque.
-fn srgb_text(r: f32, g: f32, b: f32, a: f32) -> String {
+pub(super) fn srgb_text(r: f32, g: f32, b: f32, a: f32) -> String {
     let channel = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
     let (r, g, b) = (channel(r), channel(g), channel(b));
     if a >= 1. {

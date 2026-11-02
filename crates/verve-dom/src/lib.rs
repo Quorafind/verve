@@ -24,6 +24,7 @@
 //! (`createEl`, `setText`, its user agent and `app://obsidian.md`) is left to the embedder,
 //! which can add methods to any class with [`host::extend`].
 
+mod animation;
 mod bind;
 pub mod canvas;
 pub mod css;
@@ -31,6 +32,7 @@ pub mod dom;
 pub mod field;
 pub mod html;
 mod inner_text;
+mod input;
 mod media;
 mod rect;
 mod snapshot;
@@ -40,7 +42,7 @@ mod window_state;
 pub use window_state::{Align, FontFaceId, FontOutcome, ScrollRequest};
 
 use std::cell::{Ref, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -50,6 +52,7 @@ use boa_engine::{Context, JsResult, JsValue, js_string};
 pub use css::{Computed, Environment, Style};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
 pub use field::Draft;
+pub use input::{Key, Modifiers, Pointer};
 pub use media::{
     MediaCommand, MediaCommandKind, MediaError, MediaSettings, MediaState, MediaUpdate,
 };
@@ -233,6 +236,7 @@ fn install_classes(context: &mut Context, options: &Options) -> JsResult<()> {
     bind::platform::install(context)?;
     bind::observers::install(context)?;
     bind::xhr::install(context)?;
+    bind::animation::install(context)?;
     bind::traversal::install(context)?;
     bind::events::install_handlers(context)?;
     let document_id = shared(context).borrow().dom.document;
@@ -314,70 +318,6 @@ pub struct Update {
     pub changes: Changes,
 }
 
-/// The modifier keys held.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Modifiers {
-    pub ctrl: bool,
-    pub shift: bool,
-    pub alt: bool,
-    pub meta: bool,
-}
-
-/// The pointer, where it is and what it pressed.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Pointer {
-    pub x: f32,
-    pub y: f32,
-    /// The button pressed or let go: 0 primary, 1 middle (auxiliary), 2 secondary.
-    pub button: i16,
-    /// How many presses in a row this is: 2 for the second of a double click.
-    pub count: u32,
-    pub modifiers: Modifiers,
-}
-
-/// A key, as `KeyboardEvent` has it: `key` (`"a"`, `"Enter"`, `"ArrowLeft"`) and `code`
-/// (`"KeyA"`, `"Enter"`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Key {
-    pub key: String,
-    pub code: String,
-    pub modifiers: Modifiers,
-    pub repeat: bool,
-}
-
-impl Key {
-    /// The key that types `c`, with its `code`.
-    pub fn char(c: char) -> Self {
-        let code = if c.is_ascii_alphabetic() {
-            format!("Key{}", c.to_ascii_uppercase())
-        } else if c.is_ascii_digit() {
-            format!("Digit{c}")
-        } else if c == ' ' {
-            "Space".to_owned()
-        } else {
-            String::new()
-        };
-        Key {
-            key: c.to_string(),
-            code,
-            modifiers: Modifiers {
-                shift: c.is_ascii_uppercase(),
-                ..Modifiers::default()
-            },
-            repeat: false,
-        }
-    }
-
-    /// A named key: `Key::named("Enter")`, `Key::named("Backspace")`.
-    pub fn named(name: &str) -> Self {
-        Key {
-            key: name.to_owned(),
-            code: name.to_owned(),
-            ..Key::default()
-        }
-    }
-}
-
 /// The handle whoever draws the document keeps. Every method that dispatches events takes the
 /// runtime, runs the microtasks the listeners queued, and leaves the document settled.
 #[derive(Clone)]
@@ -388,7 +328,7 @@ pub struct Document {
 
 /// What the drawer has been told so far.
 #[derive(Default)]
-struct View {
+pub(crate) struct View {
     computed: Computed,
     changed: HashSet<NodeId>,
     restyled: HashSet<NodeId>,
@@ -422,6 +362,13 @@ impl Document {
             }
         };
         Some(document)
+    }
+
+    /// The document installed in the realm of `context`, once its embedder has asked for it.
+    pub(crate) fn at(context: &Context) -> Option<Document> {
+        let state = state::try_shared(context)?;
+        let view = context.get_data::<Rc<RefCell<View>>>().cloned()?;
+        Some(Document { state, view })
     }
 
     /// The arena itself, as it is now.
@@ -488,8 +435,9 @@ impl Document {
     }
 
     /// Styles and partitions brought up to date with what the document says changed.
-    fn absorb(&self) {
+    pub(crate) fn absorb(&self) {
         let mut state = self.state.borrow_mut();
+        let state = &mut *state;
         let styler = state.styler();
         let key = state.sheets_key;
         let changes = state.dom.take_changes();
@@ -506,7 +454,7 @@ impl Document {
         if full {
             view.restyled_all = true;
             for id in dom.subtree(dom.document) {
-                if before.shared(id) != view.computed.shared(id) {
+                if before.cascaded(id) != view.computed.cascaded(id) {
                     restyled.push(id);
                 }
             }
@@ -514,8 +462,8 @@ impl Document {
             for root in &changes.nodes {
                 let root = dom.parent(*root).unwrap_or(*root);
                 for id in dom.subtree(root) {
-                    let old = before.shared(id);
-                    let new = view.computed.shared(id);
+                    let old = before.cascaded(id);
+                    let new = view.computed.cascaded(id);
                     let same = match (&old, &new) {
                         (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
                         (None, None) => true,
@@ -540,6 +488,9 @@ impl Document {
         }
         // A box that is not what it was looks different, though its element may not.
         restyled.extend(view.computed.take_pseudo_changes());
+        let began = animation::restyle(state, &mut view.computed, &styler, &before, &restyled);
+        restyled.extend(began);
+        let dom = &state.dom;
         for id in restyled {
             if dom.exists(id) {
                 view.restyled.insert(id);
@@ -760,15 +711,21 @@ impl Document {
     pub fn frame(&self, runtime: &mut verve::Runtime, now: f64) -> usize {
         let context = runtime.context();
         canvas::flush_events(context);
-        let ran = bind::window::run_frame(context, now);
+        // Animations are brought to the frame, and tell what happened, before the callbacks of
+        // the frame run: a callback reads the values it will be drawn with.
+        animation::advance(context, now);
+        runtime.run_microtasks();
+        let ran = bind::window::run_frame(runtime.context(), now);
         runtime.run_microtasks();
         self.deliver_layout(runtime);
         ran
     }
 
-    /// Whether `requestAnimationFrame` callbacks are waiting.
+    /// Whether `requestAnimationFrame` callbacks are waiting, or something is still moving in
+    /// the document, or an animation has something to tell.
     pub fn wants_frame(&self) -> bool {
-        !self.state.borrow().frames.is_empty()
+        let state = self.state.borrow();
+        !state.frames.is_empty() || animation::wants(&state, &self.view.borrow().computed)
     }
 
     /// Reclaims every detached tree nothing can reach any more: no object of a node in it is
@@ -777,38 +734,7 @@ impl Document {
         runtime.run_microtasks();
         runtime.collect_garbage();
         let roots = self.state.borrow().dom.detached_roots();
-        let alive = {
-            let state = self.state.borrow();
-            let mut alive = HashSet::from([state.dom.document]);
-            let in_use = |id: &NodeId| {
-                state.dom.is_pinned(*id) || state.wrappers.get(id).is_some_and(|w| w.is_alive())
-            };
-            for root in &roots {
-                if state.dom.shadow_including_tree(*root).iter().any(in_use) {
-                    alive.insert(*root);
-                }
-            }
-            // A template keeps its content alive, and the other way round only through the
-            // objects of the nodes. Only real ownership edges keep a tree.
-            let mut edges = HashMap::<NodeId, Vec<NodeId>>::new();
-            for (template, content) in &state.template_contents {
-                edges
-                    .entry(state.dom.root_of(*template))
-                    .or_default()
-                    .push(*content);
-            }
-            let mut pending: Vec<NodeId> = alive.iter().copied().collect();
-            while let Some(root) = pending.pop() {
-                if let Some(next) = edges.get(&root) {
-                    for root in next {
-                        if alive.insert(*root) {
-                            pending.push(*root);
-                        }
-                    }
-                }
-            }
-            alive
-        };
+        let alive = self.state.borrow().reachable(&roots);
         let mut freed_all = Vec::new();
         for root in roots {
             if alive.contains(&root) {
@@ -817,6 +743,7 @@ impl Document {
             let freed = self.state.borrow_mut().dom.free(root);
             freed_all.extend(freed);
         }
+        animation::swept(runtime.context(), &freed_all);
         if freed_all.is_empty() {
             return 0;
         }
@@ -827,35 +754,7 @@ impl Document {
             }
         }
         runtime.run_microtasks();
-        {
-            let mut state = self.state.borrow_mut();
-            for id in &freed_all {
-                state.wrappers.remove(id);
-                state.links.remove(id);
-                state.rects.remove(id);
-                state.fragments.remove(id);
-                state.scroll_offsets.remove(id);
-                state.custom.forget(*id);
-            }
-            canvas::forget(&mut state, &gone);
-            state
-                .template_contents
-                .retain(|t, f| !gone.contains(t) && !gone.contains(f));
-            if state.fullscreen.is_some_and(|id| gone.contains(&id)) {
-                state.fullscreen = None;
-            }
-            for observer in &mut state.observers {
-                observer.targets.retain(|t| !gone.contains(&t.node));
-                observer.transient.retain(|(node, _)| !gone.contains(node));
-            }
-            state.observers.retain(|o| {
-                o.object.is_alive() && (!o.targets.is_empty() || !o.records.is_empty())
-            });
-            state.dom.record_mutations = state
-                .observers
-                .iter()
-                .any(|o| o.watch == state::Watch::Mutation && !o.targets.is_empty());
-        }
+        self.state.borrow_mut().forget_nodes(&freed_all, &gone);
         let mut view = self.view.borrow_mut();
         view.computed.forget(&freed_all);
         view.changed.retain(|id| !gone.contains(id));

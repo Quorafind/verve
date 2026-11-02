@@ -64,6 +64,7 @@ pub fn create_element(context: &mut Context, tag: &str, namespace: Namespace) ->
 }
 
 const DOCUMENT_METHODS: &[Method] = &[
+    ("getAnimations", 0, super::animation::document_animations),
     ("createElement", 2, |_, args, cx| {
         let tag = arg_string(args, 0, cx)?;
         create_element(cx, &tag, Namespace::Html)

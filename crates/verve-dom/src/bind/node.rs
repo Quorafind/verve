@@ -19,7 +19,8 @@ use super::{
 use crate::dom::{Dom, Namespace, Node, NodeId, NodeKind};
 use crate::state::shared;
 
-/// What distinguishes a node's number among host targets.
+/// What distinguishes a node's number among host targets: bit 40. An animation's is bit 41, in
+/// `bind/animation.rs`.
 const NODE_TAG: u64 = 1 << 40;
 
 /// The host id a node's object carries.
@@ -52,6 +53,7 @@ pub fn with_dom<R>(context: &mut Context, f: impl FnOnce(&mut Dom) -> R) -> R {
         relink(context);
     }
     super::slot::slots_changed(context);
+    crate::animation::wake(context);
     if mutated {
         super::observers::queue_delivery(context);
     }

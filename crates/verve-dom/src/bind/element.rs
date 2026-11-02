@@ -1184,11 +1184,8 @@ const ELEMENT_METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     ("hasPointerCapture", 1, |_, _, _| Ok(false.into())),
-    ("getAnimations", 0, |_, _, cx| Ok(array(Vec::new(), cx))),
-    // An animation that has already finished: what a page with animations off sees.
-    ("animate", 2, |_, _, cx| {
-        super::platform::finished_animation(cx)
-    }),
+    ("getAnimations", 0, super::animation::element_animations),
+    ("animate", 2, super::animation::animate_element),
     ("checkVisibility", 0, |this, _, cx| {
         let id = node_of(this)?;
         Ok(read_dom(cx, |dom| dom.is_shown(id)).into())
