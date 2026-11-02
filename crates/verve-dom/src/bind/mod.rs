@@ -9,13 +9,18 @@
 //! An object that stands for something else the document keeps — a node's `classList`, its
 //! `style`, a `<style>`'s sheet — carries a [`Handle`]: what kind of thing, and its number.
 
+pub mod custom;
 pub mod document;
 pub mod element;
 pub mod events;
 pub mod fetch;
+pub mod fonts;
+pub mod live;
 pub mod node;
 pub mod observers;
 pub mod platform;
+pub mod reveal;
+pub mod slot;
 pub mod traversal;
 pub mod window;
 pub mod xhr;
@@ -33,6 +38,20 @@ use crate::state::shared;
 
 /// A method: its name, how many arguments it declares, and the native.
 pub type Method = (&'static str, usize, NativeFunctionPointer);
+/// Runs the native `f` in a microtask, through the global `queueMicrotask`. If a script has
+/// broken that there is no one to tell, and nothing else to do: the work is dropped.
+/// R1: once `verve::native` is public (P03) this goes through the runtime's own microtask queue,
+/// which a script cannot replace.
+pub fn queue_microtask(context: &mut Context, name: &str, f: NativeFunctionPointer) {
+    let task = function(context, name, 0, f);
+    let queue = context
+        .global_object()
+        .get(js_string!("queueMicrotask"), context);
+    if let Ok(queue) = queue {
+        let _ = verve::call(context, &queue, &JsValue::undefined(), &[task.into()]);
+    }
+}
+
 /// An accessor: its name, its getter and its setter.
 pub type Accessor = (
     &'static str,

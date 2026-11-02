@@ -12,31 +12,57 @@ use verve::dom_events::FieldDefault as F;
 
 use super::node::{read_dom, with_dom, wrap};
 use super::{Method, arg, node_id, plain_object, text};
-use crate::dom::{NodeId, NodeKind};
+use crate::dom::{Dom, NodeId, NodeKind};
 use crate::state::shared;
 
 /// The next target on an event's path from `target`: a node's parent, the window from its
-/// document, a shadow root's host.
+/// document, a shadow root's host — for an event that crosses shadow boundaries (`composed`).
 pub fn parent(
     target: &JsValue,
-    _event: &JsObject,
+    event: &JsObject,
     context: &mut Context,
 ) -> JsResult<Option<JsValue>> {
     let Some(id) = node_id(target) else {
         return Ok(None);
     };
+    let composed = verve::dom_events::is_composed(event);
     let next = {
         let state = shared(context);
         let state = state.borrow();
         if id == state.dom.document {
             return Ok(Some(context.global_object().into()));
         }
-        state
-            .dom
-            .parent(id)
-            .or_else(|| state.shadow_hosts.get(&id).copied())
+        // A slotted node is heard by its slot before the host it is drawn in.
+        match state.dom.assigned_slot(id).or_else(|| state.dom.parent(id)) {
+            Some(parent) => Some(parent),
+            None if composed => state.dom.shadow_host(id),
+            None => None,
+        }
     };
     Ok(next.map(|n| wrap(context, n)))
+}
+
+/// What a listener on `node` sees an event's `target` (or `relatedTarget`) as: the host, for
+/// one inside a shadow tree `node` is outside of.
+fn retarget(node: &JsValue, target: &JsValue, context: &mut Context) -> JsValue {
+    let Some(id) = node_id(target) else {
+        return target.clone();
+    };
+    let seen = read_dom(context, |dom| dom.retarget(id, node_id(node)));
+    if seen == id {
+        target.clone()
+    } else {
+        wrap(context, seen)
+    }
+}
+
+/// Whether `composedPath()` called from a listener on `node` lists `item`: not what is inside
+/// a closed shadow tree `node` is outside of.
+fn visible(node: &JsValue, item: &JsValue, context: &mut Context) -> bool {
+    let Some(item) = node_id(item) else {
+        return true;
+    };
+    read_dom(context, |dom| dom.is_visible_from(item, node_id(node)))
 }
 
 const UI: &[(&str, F)] = &[
@@ -426,8 +452,15 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         })],
         &[],
     )?;
-    verve::dom_events::set_event_parent(context, parent);
+    install_hooks(context);
     Ok(())
+}
+
+/// Tells a dispatch what a node's parent is and what a shadow tree hides.
+fn install_hooks(context: &mut Context) {
+    verve::dom_events::set_event_parent(context, parent);
+    let scope = verve::dom_events::EventScope { retarget, visible };
+    verve::dom_events::set_event_scope(context, scope);
 }
 
 /// Whether `kind` bubbles and can be cancelled when the host dispatches it.
@@ -470,7 +503,13 @@ pub fn fire_event(
     let dict = plain_object(context);
     dict.set(js_string!("bubbles"), bubbles, false, context)?;
     dict.set(js_string!("cancelable"), cancelable, false, context)?;
-    dict.set(js_string!("composed"), true, false, context)?;
+    // What the page itself does (a load, a change) stays where it happened; what a person did
+    // crosses shadow boundaries.
+    let composed = !matches!(
+        kind,
+        "load" | "change" | "scroll" | "scrollend" | "select" | "toggle" | "invalid"
+    );
+    dict.set(js_string!("composed"), composed, false, context)?;
     if class != "Event" && class != "CustomEvent" {
         let view = context.global_object();
         dict.set(js_string!("view"), view, false, context)?;
@@ -508,32 +547,29 @@ pub fn fire_at(
 
 /// Whether `id` can take the focus: a field, a link, something with a `tabindex`, an editable
 /// region — enabled, and in the document.
-pub fn focusable(context: &Context, id: NodeId) -> bool {
-    read_dom(context, |dom| {
-        let Some(node) = dom.get(id) else {
-            return false;
-        };
-        if !dom.is_connected(id) || !node.is_element() {
-            return false;
+pub fn is_focusable(dom: &Dom, id: NodeId) -> bool {
+    let Some(node) = dom.get(id) else {
+        return false;
+    };
+    if !dom.is_connected(id) || !node.is_element() {
+        return false;
+    }
+    if node.attr("tabindex").is_some() || node.attr("contenteditable").is_some_and(|v| v != "false")
+    {
+        return true;
+    }
+    match node.tag() {
+        Some("input") => {
+            node.attr("type")
+                .is_none_or(|t| !t.eq_ignore_ascii_case("hidden"))
+                && node.attr("disabled").is_none()
         }
-        if node.attr("tabindex").is_some()
-            || node.attr("contenteditable").is_some_and(|v| v != "false")
-        {
-            return true;
-        }
-        match node.tag() {
-            Some("input") => {
-                node.attr("type")
-                    .is_none_or(|t| !t.eq_ignore_ascii_case("hidden"))
-                    && node.attr("disabled").is_none()
-            }
-            Some("select" | "textarea" | "button") => node.attr("disabled").is_none(),
-            Some("a" | "area") => node.attr("href").is_some(),
-            Some("iframe" | "summary") => true,
-            Some("audio" | "video") => node.attr("controls").is_some(),
-            _ => false,
-        }
-    })
+        Some("select" | "textarea" | "button") => node.attr("disabled").is_none(),
+        Some("a" | "area") => node.attr("href").is_some(),
+        Some("iframe" | "summary") => true,
+        Some("audio" | "video") => node.attr("controls").is_some(),
+        _ => false,
+    }
 }
 
 /// Focus moves to `id` (or away, with `None`), with the events that says.
@@ -784,7 +820,7 @@ pub fn click(
             if let Some(control) =
                 control.filter(|c| !read_dom(context, |dom| dom.contains(*c, id)))
             {
-                if focusable(context, control) {
+                if read_dom(context, |dom| is_focusable(dom, control)) {
                     set_focus_from(context, Some(control), trusted)?;
                 }
                 click(context, control, props, trusted)?;

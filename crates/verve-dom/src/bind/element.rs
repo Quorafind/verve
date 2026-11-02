@@ -12,17 +12,17 @@ use boa_engine::{
 };
 
 use super::node::{
-    CHILD_NODE_ACCESSORS, CHILD_NODE_METHODS, PARENT_NODE_ACCESSORS, PARENT_NODE_METHODS,
-    collection, read_dom, with_dom, wrap, wrap_opt,
+    CHILD_NODE_ACCESSORS, CHILD_NODE_METHODS, PARENT_NODE_ACCESSORS, PARENT_NODE_METHODS, read_dom,
+    with_dom, wrap, wrap_opt,
 };
 use super::{
     Accessor, ClassSpec, Kind, Method, arg, arg_string, array, call_method, class, closure,
     dom_error, extend_prototype, get, handle_of, illegal_constructor, native_instance, node_id,
     node_of, opt_string, plain_object, set, string, text, type_error,
 };
-use crate::Rect;
-use crate::dom::{Dom, Namespace, NodeId, NodeKind, camel_name, css_name};
+use crate::dom::{Dom, Namespace, NodeId, ShadowMode, camel_name, css_name};
 use crate::state::shared;
+use crate::{Align, Rect};
 
 /// The class of an HTML element, by its tag.
 pub fn html_class(tag: &str) -> &'static str {
@@ -288,7 +288,7 @@ pub fn request_scroll(context: &mut Context, request: crate::ScrollRequest) {
                     .insert(*node, [(at[0] + left).max(0.), (at[1] + top).max(0.)]);
                 Some(*node)
             }
-            crate::ScrollRequest::Reveal(_) => None,
+            crate::ScrollRequest::Reveal { .. } => None,
         };
         state.requests.push(crate::Request::Scroll(request));
         state.touch();
@@ -873,15 +873,25 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "shadowRoot",
         Some(|this, _, cx| {
             let host = node_of(this)?;
-            let root = shared(cx).borrow().shadow_roots.get(&host).copied();
-            Ok(match root {
-                Some((root, true)) => wrap(cx, root),
-                _ => JsValue::null(),
-            })
+            let root = read_dom(cx, |dom| {
+                dom.shadow_root(host).filter(|root| {
+                    dom.shadow(*root)
+                        .is_some_and(|s| s.mode == ShadowMode::Open)
+                })
+            });
+            Ok(wrap_opt(cx, root))
         }),
         None,
     ),
-    ("assignedSlot", Some(|_, _, _| Ok(JsValue::null())), None),
+    (
+        "assignedSlot",
+        Some(|this, _, cx| {
+            let id = node_of(this)?;
+            let slot = read_dom(cx, |dom| dom.assigned_slot(id));
+            Ok(wrap_opt(cx, slot))
+        }),
+        None,
+    ),
 ];
 
 /// How big what is inside `this` is on `axis`: what the drawer painted of its content, at least
@@ -1099,17 +1109,43 @@ const ELEMENT_METHODS: &[Method] = &[
     }),
     ("getClientRects", 0, |this, _, cx| {
         let id = node_of(this)?;
-        let rect = painted(cx, id);
-        let items = if rect == Rect::default() {
-            Vec::new()
-        } else {
-            vec![rect_object(cx, rect)?]
-        };
+        let lines = shared(cx).borrow().fragments.get(&id).cloned();
+        let rects = lines.unwrap_or_else(|| vec![painted(cx, id)]);
+        let items = rects
+            .into_iter()
+            .filter(|rect| *rect != Rect::default())
+            .map(|rect| rect_object(cx, rect))
+            .collect::<JsResult<_>>()?;
         Ok(array(items, cx))
     }),
-    ("scrollIntoView", 1, |this, _, cx| {
+    ("scrollIntoView", 1, |this, args, cx| {
         let node = node_of(this)?;
-        request_scroll(cx, crate::ScrollRequest::Reveal(node));
+        let (block, inline, smooth) = super::reveal::reveal_options(&arg(args, 0), cx)?;
+        let request = crate::ScrollRequest::Reveal {
+            node,
+            block,
+            inline,
+            smooth,
+        };
+        request_scroll(cx, request);
+        Ok(JsValue::undefined())
+    }),
+    // Chromium's: centered unless `false` says to scroll only as far as needed.
+    ("scrollIntoViewIfNeeded", 0, |this, args, cx| {
+        let node = node_of(this)?;
+        let centered = arg(args, 0).is_undefined() || arg(args, 0).to_boolean();
+        let block = if centered {
+            Align::Center
+        } else {
+            Align::Nearest
+        };
+        let request = crate::ScrollRequest::Reveal {
+            node,
+            block,
+            inline: Align::Nearest,
+            smooth: false,
+        };
+        request_scroll(cx, request);
         Ok(JsValue::undefined())
     }),
     ("scrollTo", 2, |this, args, cx| {
@@ -1436,8 +1472,12 @@ const STYLED_ACCESSORS: &[Accessor] = &[
 const FOCUS_METHODS: &[Method] = &[
     ("focus", 1, |this, _, cx| {
         let id = node_of(this)?;
-        if super::events::focusable(cx, id) {
-            super::events::set_focus(cx, Some(id))?;
+        let target = read_dom(cx, |dom| {
+            let target = dom.focus_target(id, super::events::is_focusable);
+            super::events::is_focusable(dom, target).then_some(target)
+        });
+        if target.is_some() {
+            super::events::set_focus(cx, target)?;
         }
         Ok(JsValue::undefined())
     }),
@@ -1455,7 +1495,7 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
         "innerText",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| inner_text(dom, id))))
+            Ok(text(&super::platform::rendered_text(cx, id)))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -1468,7 +1508,7 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
         "outerText",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| inner_text(dom, id))))
+            Ok(text(&super::platform::rendered_text(cx, id)))
         }),
         None,
     ),
@@ -1608,69 +1648,6 @@ const HTML_ELEMENT_METHODS: &[Method] = &[
     ("hidePopover", 0, |_, _, _| Ok(JsValue::undefined())),
     ("togglePopover", 0, |_, _, _| Ok(false.into())),
 ];
-
-/// `innerText`: the text, with what is not drawn left out.
-fn inner_text(dom: &Dom, id: NodeId) -> String {
-    let mut out = String::new();
-    collect_inner_text(dom, id, &mut out);
-    out
-}
-
-fn collect_inner_text(dom: &Dom, id: NodeId, out: &mut String) {
-    let Some(node) = dom.get(id) else { return };
-    match &node.kind {
-        NodeKind::Text(text) => out.push_str(text),
-        NodeKind::Element(tag) => {
-            if matches!(
-                tag.as_str(),
-                "script" | "style" | "template" | "head" | "title"
-            ) || node.attr("hidden").is_some()
-                || node.style_value("display") == Some("none")
-            {
-                return;
-            }
-            if tag == "br" {
-                out.push('\n');
-                return;
-            }
-            let block = matches!(
-                tag.as_str(),
-                "p" | "div"
-                    | "li"
-                    | "tr"
-                    | "h1"
-                    | "h2"
-                    | "h3"
-                    | "h4"
-                    | "h5"
-                    | "h6"
-                    | "section"
-                    | "article"
-                    | "header"
-                    | "footer"
-                    | "ul"
-                    | "ol"
-                    | "pre"
-                    | "blockquote"
-                    | "table"
-            );
-            if block && !out.is_empty() && !out.ends_with('\n') {
-                out.push('\n');
-            }
-            for child in &node.children {
-                collect_inner_text(dom, *child, out);
-            }
-            if block && !out.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-        _ => {
-            for child in &node.children {
-                collect_inner_text(dom, *child, out);
-            }
-        }
-    }
-}
 
 fn set_inner_text(context: &mut Context, id: NodeId, value: &str) {
     with_dom(context, |dom| {
@@ -2192,8 +2169,7 @@ const SELECT_ACCESSORS: &[Accessor] = &[
         "options",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let options = read_dom(cx, |dom| dom.options(id));
-            Ok(collection(options, cx))
+            super::live::same_collection(this, "options", cx, move |dom| dom.options(id))
         }),
         None,
     ),
@@ -2201,13 +2177,12 @@ const SELECT_ACCESSORS: &[Accessor] = &[
         "selectedOptions",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let options = read_dom(cx, |dom| {
+            super::live::same_collection(this, "selectedOptions", cx, move |dom| {
                 dom.options(id)
                     .into_iter()
                     .filter(|o| option_selected(dom, *o))
                     .collect()
-            });
-            Ok(collection(options, cx))
+            })
         }),
         None,
     ),
@@ -2459,8 +2434,7 @@ const FORM_ACCESSORS: &[Accessor] = &[
         "elements",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let controls = read_dom(cx, |dom| form_controls(dom, id));
-            Ok(collection(controls, cx))
+            super::live::same_collection(this, "elements", cx, move |dom| form_controls(dom, id))
         }),
         None,
     ),
@@ -2948,8 +2922,7 @@ const TABLE_ACCESSORS: &[Accessor] = &[
         "rows",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let rows = read_dom(cx, |dom| table_rows(dom, id));
-            Ok(collection(rows, cx))
+            super::live::same_collection(this, "rows", cx, move |dom| table_rows(dom, id))
         }),
         None,
     ),
@@ -2957,8 +2930,9 @@ const TABLE_ACCESSORS: &[Accessor] = &[
         "tBodies",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let bodies = read_dom(cx, |dom| children_tagged(dom, id, &["tbody"]));
-            Ok(collection(bodies, cx))
+            super::live::same_collection(this, "tBodies", cx, move |dom| {
+                children_tagged(dom, id, &["tbody"])
+            })
         }),
         None,
     ),
@@ -3092,8 +3066,9 @@ const SECTION_ACCESSORS: &[Accessor] = &[(
     "rows",
     Some(|this, _, cx| {
         let id = node_of(this)?;
-        let rows = read_dom(cx, |dom| children_tagged(dom, id, &["tr"]));
-        Ok(collection(rows, cx))
+        super::live::same_collection(this, "rows", cx, move |dom| {
+            children_tagged(dom, id, &["tr"])
+        })
     }),
     None,
 )];
@@ -3127,8 +3102,9 @@ const ROW_ACCESSORS: &[Accessor] = &[
         "cells",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let cells = read_dom(cx, |dom| children_tagged(dom, id, &["td", "th"]));
-            Ok(collection(cells, cx))
+            super::live::same_collection(this, "cells", cx, move |dom| {
+                children_tagged(dom, id, &["td", "th"])
+            })
         }),
         None,
     ),
@@ -3346,7 +3322,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ClassSpec {
             name: "HTMLElement",
             length: 0,
-            construct: super::platform::construct_html_element,
+            construct: super::custom::construct_html_element,
             parent: Some("Element"),
             methods: HTML_ELEMENT_METHODS,
             accessors: HTML_ELEMENT_ACCESSORS,
@@ -3789,19 +3765,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         let prototype = shared(context).borrow().prototype(name);
         extend_prototype(context, &prototype, &[], accessors)?;
     }
-    {
-        let slot = shared(context).borrow().prototype("HTMLSlotElement");
-        extend_prototype(
-            context,
-            &slot,
-            &[
-                ("assignedNodes", 1, |_, _, cx| Ok(array(Vec::new(), cx))),
-                ("assignedElements", 1, |_, _, cx| Ok(array(Vec::new(), cx))),
-                ("assign", 0, |_, _, _| Ok(JsValue::undefined())),
-            ],
-            &[],
-        )?;
-    }
+    super::slot::install(context)?;
     // SVG's classes, under one that shapes share.
     let svg = full_class(context, "SVGElement", "Element", &[], SVG_ACCESSORS, &[])?;
     extend_prototype(context, &svg, FOCUS_METHODS, STYLED_ACCESSORS)?;

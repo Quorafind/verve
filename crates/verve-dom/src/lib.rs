@@ -29,8 +29,12 @@ pub mod css;
 pub mod dom;
 pub mod field;
 pub mod html;
+mod inner_text;
 mod media;
 mod state;
+mod window_state;
+
+pub use window_state::{Align, FontFaceId, FontOutcome, ScrollRequest};
 
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -101,23 +105,6 @@ impl Rect {
     }
 }
 
-/// A scroll a script asked for, for the drawer to do (and then report with
-/// [`Document::set_scroll_offsets`]).
-#[derive(Clone, Debug, PartialEq)]
-pub enum ScrollRequest {
-    /// `scrollTo`, or `scrollTop`/`scrollLeft` set: to this offset, on the axes given. The
-    /// document's root element stands for the window.
-    To {
-        node: NodeId,
-        left: Option<f32>,
-        top: Option<f32>,
-    },
-    /// `scrollBy`: this much further.
-    By { node: NodeId, left: f32, top: f32 },
-    /// `scrollIntoView`: whatever scrolls `node`'s box, until `node` is in sight.
-    Reveal(NodeId),
-}
-
 /// What a script asked of the window that only the embedder can do.
 ///
 /// 地址和剪贴板内容来自不可信脚本；即使地址限于 HTTP(S)，宿主仍须检查网络权限和用户授权。
@@ -147,6 +134,12 @@ pub enum Request {
     Submit(NodeId),
     /// An animation frame is wanted, on [`FrameClock::Host`]: call [`Document::frame`].
     Frame,
+    /// A `FontFace` was asked to load (`face.load()`, `document.fonts.load`): fetch `url`, then
+    /// call [`Document::settle_font`].
+    LoadFont {
+        face: FontFaceId,
+        url: String,
+    },
 }
 
 /// Where `localStorage` lives between runs.
@@ -245,16 +238,19 @@ pub fn install(runtime: &mut verve::Runtime, options: Options) -> Result<Documen
         };
         s.frame_clock = options.frames;
         s.title_fallback = options.title.clone();
+        let document = s.dom.document;
         if options.user_agent_sheet {
             s.sheets.push(SheetRecord {
                 owner: SheetOwner::UserAgent,
                 sheet: css::Sheet::parse(css::USER_AGENT_SHEET),
+                tree: document,
             });
         }
         for (name, text) in &options.stylesheets {
             s.sheets.push(SheetRecord {
                 owner: SheetOwner::Embedder(name.clone()),
                 sheet: css::Sheet::parse(text),
+                tree: document,
             });
         }
     }
@@ -693,7 +689,8 @@ impl Document {
                         matches!(r.owner, SheetOwner::Element(_) | SheetOwner::Adopted(_))
                     })
                     .unwrap_or(state.sheets.len());
-                state.sheets.insert(at, SheetRecord { owner, sheet });
+                let tree = state.dom.document;
+                state.sheets.insert(at, SheetRecord { owner, sheet, tree });
             }
         }
         state.sheets_changed();
@@ -864,20 +861,17 @@ impl Document {
         let alive = {
             let state = self.state.borrow();
             let mut alive = HashSet::from([state.dom.document]);
+            let in_use = |id: &NodeId| {
+                state.dom.is_pinned(*id) || state.wrappers.get(id).is_some_and(|w| w.is_alive())
+            };
             for root in &roots {
-                if state.dom.subtree(*root).iter().any(|id| {
-                    state.dom.is_pinned(*id) || state.wrappers.get(id).is_some_and(|w| w.is_alive())
-                }) {
+                if state.dom.shadow_including_tree(*root).iter().any(in_use) {
                     alive.insert(*root);
                 }
             }
-            // 只沿真实所有权边保活附属树；影子根不是永久根，闭合影子树同样可回收。
+            // A template keeps its content alive, and the other way round only through the
+            // objects of the nodes. Only real ownership edges keep a tree.
             let mut edges = HashMap::<NodeId, Vec<NodeId>>::new();
-            for (host, (root, _)) in &state.shadow_roots {
-                let host = state.dom.root_of(*host);
-                edges.entry(host).or_default().push(*root);
-                edges.entry(*root).or_default().push(host);
-            }
             for (template, content) in &state.template_contents {
                 edges
                     .entry(state.dom.root_of(*template))
@@ -920,18 +914,13 @@ impl Document {
                 state.wrappers.remove(id);
                 state.links.remove(id);
                 state.rects.remove(id);
+                state.fragments.remove(id);
                 state.scroll_offsets.remove(id);
-                state.custom_nodes.remove(id);
+                state.custom.forget(*id);
             }
             state
                 .template_contents
                 .retain(|t, f| !gone.contains(t) && !gone.contains(f));
-            state
-                .shadow_roots
-                .retain(|host, (root, _)| !gone.contains(host) && !gone.contains(root));
-            state
-                .shadow_hosts
-                .retain(|root, host| !gone.contains(root) && !gone.contains(host));
             if state.fullscreen.is_some_and(|id| gone.contains(&id)) {
                 state.fullscreen = None;
             }
@@ -1134,7 +1123,7 @@ impl Document {
                 let mut at = Some(target);
                 let mut found = None;
                 while let Some(node) = at {
-                    if bind::events::focusable(context, node) {
+                    if bind::node::read_dom(context, |dom| bind::events::is_focusable(dom, node)) {
                         found = Some(node);
                         break;
                     }
@@ -1543,7 +1532,7 @@ impl Document {
         };
         let candidates: Vec<NodeId> = candidates
             .into_iter()
-            .filter(|n| bind::events::focusable(context, *n))
+            .filter(|n| bind::node::read_dom(context, |dom| bind::events::is_focusable(dom, *n)))
             .collect();
         if candidates.is_empty() {
             return;

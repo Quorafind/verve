@@ -3,9 +3,7 @@
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
 
-use super::node::{
-    PARENT_NODE_ACCESSORS, PARENT_NODE_METHODS, collection, read_dom, with_dom, wrap, wrap_opt,
-};
+use super::node::{PARENT_NODE_ACCESSORS, PARENT_NODE_METHODS, read_dom, with_dom, wrap, wrap_opt};
 use super::{
     Accessor, ClassSpec, Kind, Method, arg, arg_string, class, constructor_of, dom_error,
     extend_prototype, illegal_constructor, instance, native_instance, node_id, node_of, opt_string,
@@ -57,9 +55,9 @@ pub fn create_element(context: &mut Context, tag: &str, namespace: Namespace) ->
         ));
     }
     if namespace == Namespace::Html
-        && let Some(class) = super::platform::custom_class(context, &tag.to_ascii_lowercase())
+        && let Some(class) = super::custom::class_of(context, &tag.to_ascii_lowercase())
     {
-        return Ok(class.construct(&[], None, context)?.into());
+        return super::custom::create(context, &class);
     }
     let id = with_dom(context, |dom| dom.create_element_ns(tag, namespace));
     Ok(wrap(context, id))
@@ -166,7 +164,9 @@ const DOCUMENT_METHODS: &[Method] = &[
         });
         Ok(super::node::node_list(found, cx))
     }),
-    ("hasFocus", 0, |_, _, _| Ok(true.into())),
+    ("hasFocus", 0, |_, _, cx| {
+        Ok(shared(cx).borrow().window_focused.into())
+    }),
     ("importNode", 2, |_, args, cx| {
         let id = super::node_arg(args, 0, "importNode", "Document")?;
         if read_dom(cx, |dom| {
@@ -356,6 +356,7 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
                 }
                 dom.focused
                     .filter(|f| dom.is_connected(*f))
+                    .map(|f| dom.retarget(f, Some(doc)))
                     .or(Some(dom.body))
             });
             Ok(wrap_opt(cx, id))
@@ -493,8 +494,19 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
         }),
     ),
     ("readyState", Some(|_, _, _| Ok(text("complete"))), None),
-    ("visibilityState", Some(|_, _, _| Ok(text("visible"))), None),
-    ("hidden", Some(|_, _, _| Ok(false.into())), None),
+    (
+        "visibilityState",
+        Some(|_, _, cx| {
+            let hidden = shared(cx).borrow().hidden;
+            Ok(text(if hidden { "hidden" } else { "visible" }))
+        }),
+        None,
+    ),
+    (
+        "hidden",
+        Some(|_, _, cx| Ok(shared(cx).borrow().hidden.into())),
+        None,
+    ),
     ("compatMode", Some(|_, _, _| Ok(text("CSS1Compat"))), None),
     ("characterSet", Some(|_, _, _| Ok(text("UTF-8"))), None),
     ("charset", Some(|_, _, _| Ok(text("UTF-8"))), None),
@@ -560,33 +572,30 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
     ),
     (
         "forms",
-        Some(|this, _, cx| tagged_collection(this, cx, &["form"])),
+        Some(|this, _, cx| tagged_collection(this, cx, "forms", &["form"])),
         None,
     ),
     (
         "images",
-        Some(|this, _, cx| tagged_collection(this, cx, &["img"])),
+        Some(|this, _, cx| tagged_collection(this, cx, "images", &["img"])),
         None,
     ),
     (
         "scripts",
-        Some(|this, _, cx| tagged_collection(this, cx, &["script"])),
+        Some(|this, _, cx| tagged_collection(this, cx, "scripts", &["script"])),
         None,
     ),
     (
         "links",
         Some(|this, _, cx| {
             let doc = document_of(this, cx);
-            let found = read_dom(cx, |dom| {
-                dom.descendants(doc)
-                    .into_iter()
-                    .filter(|n| {
-                        matches!(dom.get(*n).and_then(|x| x.tag()), Some("a" | "area"))
-                            && dom.get_attr(*n, "href").is_some()
-                    })
-                    .collect()
-            });
-            Ok(collection(found, cx))
+            super::live::same_collection(this, "links", cx, move |dom| {
+                let is_link = |n: &NodeId| {
+                    matches!(dom.get(*n).and_then(|x| x.tag()), Some("a" | "area"))
+                        && dom.get_attr(*n, "href").is_some()
+                };
+                dom.descendants(doc).into_iter().filter(is_link).collect()
+            })
         }),
         None,
     ),
@@ -597,14 +606,12 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
     ),
     (
         "adoptedStyleSheets",
-        Some(|_, _, cx| super::platform::adopted_sheets(cx)),
-        Some(|_, args, cx| super::platform::set_adopted_sheets(&arg(args, 0), cx)),
+        Some(|this, _, cx| super::platform::adopted_sheets(node_of(this)?, cx)),
+        Some(|this, args, cx| {
+            super::platform::set_adopted_sheets(node_of(this)?, "Document", &arg(args, 0), cx)
+        }),
     ),
-    (
-        "fonts",
-        Some(|_, _, cx| super::platform::font_faces(cx)),
-        None,
-    ),
+    ("fonts", Some(|_, _, cx| super::fonts::font_set(cx)), None),
     (
         "timeline",
         Some(|_, _, cx| {
@@ -617,9 +624,14 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
     ),
 ];
 
-fn tagged_collection(this: &JsValue, context: &mut Context, tags: &[&str]) -> JsResult<JsValue> {
+fn tagged_collection(
+    this: &JsValue,
+    context: &mut Context,
+    key: &str,
+    tags: &'static [&'static str],
+) -> JsResult<JsValue> {
     let doc = document_of(this, context);
-    let found = read_dom(context, |dom| {
+    super::live::same_collection(this, key, context, move |dom| {
         dom.descendants(doc)
             .into_iter()
             .filter(|n| {
@@ -628,8 +640,7 @@ fn tagged_collection(this: &JsValue, context: &mut Context, tags: &[&str]) -> Js
                     .is_some_and(|t| tags.contains(&t))
             })
             .collect()
-    });
-    Ok(collection(found, context))
+    })
 }
 
 // ─── DOMParser ──────────────────────────────────────────────────────────────────────────────
