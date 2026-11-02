@@ -1,0 +1,578 @@
+//! What the threads of one Electron app say to each other, and nothing else: the main process's
+//! isolate, the isolate of each rendered page, and the shell — the OS thread — that draws their
+//! windows.
+//!
+//! These types are the contract every other package compiles against, so they live here, in one
+//! module. A package that needs a variant adds it at the end of a message and records it in
+//! `docs/electron/packages/P02-skeleton-and-contracts.md`.
+
+use std::path::PathBuf;
+use std::sync::mpsc::{SyncSender, TrySendError};
+
+pub use crate::ids::{ContentsId, WindowId};
+
+/// A JavaScript value copied out of its realm, to cross to another thread: the kernel's
+/// structured clone. `Clone`, because [`ToShell`] and the pages' replies are copied by whoever
+/// observes them.
+pub use verve::clone::Cloned;
+
+// ---------- Main process to shell ----------
+
+/// What the main process asks of the OS thread.
+#[derive(Clone, Debug)]
+pub enum ToShell {
+    CreateWindow {
+        window: WindowId,
+        contents: ContentsId,
+        options: WindowOptions,
+    },
+    Window {
+        window: WindowId,
+        op: WindowOp,
+    },
+    /// The application menu, context menus, the tray and global shortcuts: P15 defines them.
+    Menu(MenuOp),
+    /// The app is ending: the shell closes what it has and leaves with this code.
+    Quit {
+        exit_code: i32,
+    },
+}
+
+/// `new BrowserWindow(options)`, as the shell needs it. The defaults are Electron's.
+#[derive(Clone, Debug)]
+pub struct WindowOptions {
+    /// 800 × 600, in CSS pixels.
+    pub width: f32,
+    /// Its height, in CSS pixels.
+    pub height: f32,
+    /// Its left edge in screen coordinates; `None` centres it.
+    pub x: Option<f32>,
+    /// Its top edge in screen coordinates; `None` centres it.
+    pub y: Option<f32>,
+    /// `minWidth` and `minHeight`.
+    pub min_size: Option<(f32, f32)>,
+    /// `maxWidth` and `maxHeight`.
+    pub max_size: Option<(f32, f32)>,
+    /// Whether the user may resize it.
+    pub resizable: bool,
+    /// Whether the user may move it.
+    pub movable: bool,
+    /// Whether it has a minimize button.
+    pub minimizable: bool,
+    /// Whether it has a maximize button.
+    pub maximizable: bool,
+    /// Whether the user may close it.
+    pub closable: bool,
+    /// Whether it may take focus.
+    pub focusable: bool,
+    /// Whether it stays above other windows.
+    pub always_on_top: bool,
+    /// Whether it starts full screen.
+    pub fullscreen: bool,
+    /// `false` creates the window hidden; `show()` or P13's `ready-to-show` shows it.
+    pub show: bool,
+    /// `false` is a window without system decoration, dragged by `-webkit-app-region` (P34).
+    pub frame: bool,
+    /// How the title bar is drawn.
+    pub title_bar_style: TitleBarStyle,
+    /// Whether the window itself is transparent.
+    pub transparent: bool,
+    /// The colour the window is cleared to before the page's first frame; `None` is white, as
+    /// Electron's windows are.
+    pub background_color: Option<[u8; 4]>,
+    /// `"Electron"` unless given: Electron's default, ignored once the page has a `<title>`.
+    pub title: String,
+    /// The window icon, a file.
+    pub icon: Option<PathBuf>,
+    /// The window this one is a child of.
+    pub parent: Option<WindowId>,
+    /// Whether it blocks its parent while it is open.
+    pub modal: bool,
+    /// Whether the taskbar leaves it out.
+    pub skip_taskbar: bool,
+    /// Whether it starts in kiosk mode.
+    pub kiosk: bool,
+}
+
+impl Default for WindowOptions {
+    fn default() -> Self {
+        Self {
+            width: 800.0,
+            height: 600.0,
+            x: None,
+            y: None,
+            min_size: None,
+            max_size: None,
+            resizable: true,
+            movable: true,
+            minimizable: true,
+            maximizable: true,
+            closable: true,
+            focusable: true,
+            always_on_top: false,
+            fullscreen: false,
+            show: true,
+            frame: true,
+            title_bar_style: TitleBarStyle::Default,
+            transparent: false,
+            background_color: None,
+            title: "Electron".into(),
+            icon: None,
+            parent: None,
+            modal: false,
+            skip_taskbar: false,
+            kiosk: false,
+        }
+    }
+}
+
+/// `titleBarStyle`, minus the overlay P34 does not do yet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TitleBarStyle {
+    #[default]
+    Default,
+    Hidden,
+    HiddenInset,
+}
+
+/// What the main process does to a window.
+#[derive(Clone, Debug)]
+pub enum WindowOp {
+    Show,
+    ShowInactive,
+    Hide,
+    /// As a user clicking the close button: the page may cancel it, so this asks first.
+    Close,
+    Destroy,
+    Focus,
+    Blur,
+    Minimize,
+    Maximize,
+    Unmaximize,
+    Restore,
+    SetFullScreen(bool),
+    SetBounds {
+        x: Option<f32>,
+        y: Option<f32>,
+        width: Option<f32>,
+        height: Option<f32>,
+        animate: bool,
+    },
+    SetMinSize(f32, f32),
+    SetMaxSize(f32, f32),
+    Center,
+    SetTitle(String),
+    SetResizable(bool),
+    SetAlwaysOnTop(bool),
+    SetBackgroundColor([u8; 4]),
+    /// `-1` removes the bar; `2` is indeterminate.
+    SetProgressBar(f64),
+    SetIcon(PathBuf),
+    FlashFrame(bool),
+    SetOpacity(f64),
+    SetSkipTaskbar(bool),
+    SetIgnoreMouseEvents(bool),
+    /// The page's answer to `'close'`: `true` when a listener kept the window open.
+    CloseAnswer {
+        prevented: bool,
+    },
+}
+
+/// Menus, trays and global shortcuts. Empty until P15 gives them their first variant.
+#[derive(Clone, Debug)]
+pub enum MenuOp {}
+
+// ---------- Shell to main process ----------
+
+/// What the shell tells the main process.
+#[derive(Clone, Debug)]
+pub enum FromShell {
+    Window {
+        window: WindowId,
+        event: WindowEvent,
+    },
+    App(AppEvent),
+    MenuClicked {
+        menu_item: u32,
+        window: Option<WindowId>,
+    },
+    /// The displays as they are now, for `screen` (P14).
+    Displays(Vec<Display>),
+}
+
+/// What happened to a window.
+#[derive(Clone, Debug)]
+pub enum WindowEvent {
+    Shown,
+    Hidden,
+    Focus,
+    Blur,
+    /// A person asked to close the window: the main process emits `'close'`, then answers with
+    /// [`WindowOp::CloseAnswer`].
+    CloseRequested,
+    Closed,
+    Resized {
+        width: f32,
+        height: f32,
+    },
+    Moved {
+        x: f32,
+        y: f32,
+    },
+    Maximized,
+    Unmaximized,
+    Minimized,
+    Restored,
+    EnterFullScreen,
+    LeaveFullScreen,
+    ScaleFactor(f32),
+}
+
+/// What happened to the app as a whole.
+#[derive(Clone, Debug)]
+pub enum AppEvent {
+    /// macOS clicking the Dock icon; Windows has none.
+    Activate {
+        has_visible_windows: bool,
+    },
+    OpenFile(PathBuf),
+    OpenUrl(String),
+    ThemeChanged {
+        dark: bool,
+    },
+    /// A second launch of the app (P10's single-instance lock).
+    SecondInstance {
+        argv: Vec<String>,
+        cwd: PathBuf,
+    },
+}
+
+/// A display, as `screen` reports it.
+#[derive(Clone, Debug)]
+pub struct Display {
+    /// `Display.id`.
+    pub id: u32,
+    /// The display's whole area.
+    pub bounds: Rect,
+    /// The area the system leaves to windows.
+    pub work_area: Rect,
+    /// Device pixels per CSS pixel.
+    pub scale_factor: f32,
+    /// Whether it is the primary display.
+    pub primary: bool,
+}
+
+/// A box in screen coordinates, as `screen` and `getBounds` read it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rect {
+    /// The left edge.
+    pub x: f32,
+    /// The top edge.
+    pub y: f32,
+    /// The width.
+    pub width: f32,
+    /// The height.
+    pub height: f32,
+}
+
+// ---------- Main process to page ----------
+
+/// What the main process asks of a page.
+#[derive(Debug)]
+pub enum ToRenderer {
+    /// `loadURL` / `loadFile` / `reload`.
+    Load {
+        url: String,
+        options: LoadOptions,
+    },
+    Ipc {
+        channel: String,
+        args: Vec<Cloned>,
+        /// `0` for the main process.
+        sender_id: ContentsId,
+    },
+    InvokeReply {
+        call: u64,
+        /// `Err` is the error the handler threw, cloned.
+        result: Result<Cloned, Cloned>,
+    },
+    SendSyncReply {
+        call: u64,
+        value: Cloned,
+    },
+    ExecuteJavaScript {
+        call: u64,
+        code: String,
+        user_gesture: bool,
+    },
+    SetZoomFactor(f64),
+}
+
+/// The answer to a `sendSync`, sent once.
+///
+/// The page that asked waits on the other end, so this is one-shot and non-blocking by type:
+/// [`SyncReply::send`] consumes it and never waits, and dropping it unanswered wakes the page
+/// with an error, which is what a main process that ended or ignored the message owes it.
+#[derive(Debug)]
+pub struct SyncReply(SyncSender<Cloned>);
+
+impl SyncReply {
+    /// A reply, and the end the page waits on.
+    pub fn channel() -> (Self, std::sync::mpsc::Receiver<Cloned>) {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        (Self(sender), receiver)
+    }
+
+    /// Answers the page. `false` when it is no longer waiting.
+    pub fn send(self, value: Cloned) -> bool {
+        !matches!(
+            self.0.try_send(value),
+            Err(TrySendError::Disconnected(_) | TrySendError::Full(_))
+        )
+    }
+}
+
+/// What a page's `loadURL` carries besides its address. P20 sends them with the request.
+#[derive(Clone, Debug, Default)]
+pub struct LoadOptions {
+    /// `httpReferrer`.
+    pub http_referrer: Option<String>,
+    /// `userAgent`.
+    pub user_agent: Option<String>,
+    /// `extraHeaders`, as given: lines of `Name: value`.
+    pub extra_headers: Option<String>,
+}
+
+// ---------- Page to main process ----------
+
+/// What a page tells the main process.
+#[derive(Debug)]
+pub enum FromRenderer {
+    Ipc {
+        channel: String,
+        args: Vec<Cloned>,
+    },
+    Invoke {
+        call: u64,
+        channel: String,
+        args: Vec<Cloned>,
+    },
+    SendSync {
+        channel: String,
+        args: Vec<Cloned>,
+        /// The answer, sent back once by the main process: one slot, no waiting on this side.
+        reply: SyncReply,
+    },
+    /// `webContents.sendTo` / `sendToHost`.
+    SendTo {
+        target: ContentsId,
+        channel: String,
+        args: Vec<Cloned>,
+    },
+    ExecuteJavaScriptReply {
+        call: u64,
+        result: Result<Cloned, Cloned>,
+    },
+    Lifecycle(PageEvent),
+    /// What the page asked of the window that only the embedder can do — `verve-dom`'s requests.
+    Dom(verve_dom::Request),
+    Console {
+        level: verve::Level,
+        message: String,
+        line: u32,
+        source: String,
+    },
+    /// The page's thread is gone: `'render-process-gone'`.
+    Gone {
+        reason: GoneReason,
+    },
+}
+
+/// What `webPreferences` says of a page, the part P02 reads; P13 adds the rest. A page is made
+/// with these and, when P20 makes its isolate anew on a navigation, made with the same ones.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WebPreferences {
+    /// `devTools`.
+    pub dev_tools: bool,
+    /// `nodeIntegration`: whether the page's scripts see Node's modules.
+    pub node_integration: bool,
+    /// `nodeIntegrationInWorker`.
+    pub node_integration_in_worker: bool,
+    /// `nodeIntegrationInSubFrames`.
+    pub node_integration_in_sub_frames: bool,
+    /// `preload`: the script run before the page's own, an absolute path.
+    pub preload: Option<PathBuf>,
+    /// `sandbox`: on unless `nodeIntegration` is, or the app said otherwise.
+    pub sandbox: bool,
+    /// `partition`: the session's name; `None` is the default session.
+    pub partition: Option<String>,
+    /// `zoomFactor`.
+    pub zoom_factor: f64,
+    /// `javascript`: whether the page's scripts run at all.
+    pub javascript: bool,
+    /// `webSecurity`.
+    pub web_security: bool,
+    /// `allowRunningInsecureContent`.
+    pub allow_running_insecure_content: bool,
+    /// `images`: whether the page loads images.
+    pub images: bool,
+}
+
+impl Default for WebPreferences {
+    fn default() -> Self {
+        Self {
+            dev_tools: true,
+            node_integration: false,
+            node_integration_in_worker: false,
+            node_integration_in_sub_frames: false,
+            preload: None,
+            sandbox: true,
+            partition: None,
+            zoom_factor: 1.0,
+            javascript: true,
+            web_security: true,
+            allow_running_insecure_content: false,
+            images: true,
+        }
+    }
+}
+
+/// The page's life, in the order `webContents` reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageEvent {
+    DidStartLoading,
+    DomReady,
+    DidFinishLoad,
+    DidFailLoad {
+        code: i32,
+        description: String,
+        url: String,
+    },
+    DidNavigate {
+        url: String,
+    },
+    DidNavigateInPage {
+        url: String,
+    },
+    TitleUpdated(String),
+    FaviconUpdated(Vec<String>),
+    /// There is something to paint for the first time — one of `ready-to-show`'s conditions, which
+    /// P13 settles.
+    FirstPaintable,
+}
+
+/// Electron's `render-process-gone` reasons.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GoneReason {
+    CleanExit,
+    AbnormalExit,
+    Killed,
+    Crashed,
+    OutOfMemory,
+    LaunchFailed,
+    IntegrityFailure,
+}
+
+// ---------- Shell to page, past the main process (the hot path) ----------
+
+/// What a person did to the window, as the page under it is told.
+#[derive(Clone, Debug)]
+pub enum ToRendererInput {
+    /// The page's viewport, in CSS pixels, and the window's scale factor.
+    Viewport {
+        width: f32,
+        height: f32,
+        scale: f32,
+    },
+    ColorScheme {
+        dark: bool,
+    },
+    /// Deprecated: layout runs on the page's own thread in `verve-layout` (P30) and the shell no
+    /// longer reports it. The variant stays so the others keep their numbers.
+    Layout(Vec<(verve_dom::NodeId, verve_dom::Rect)>),
+    ScrollOffsets(Vec<(verve_dom::NodeId, [f32; 2])>),
+    Frame {
+        now: f64,
+    },
+    Pointer {
+        kind: PointerKind,
+        pointer: verve_dom::Pointer,
+        target: Option<verve_dom::NodeId>,
+    },
+    Wheel {
+        pointer: verve_dom::Pointer,
+        dx: f32,
+        dy: f32,
+        target: Option<verve_dom::NodeId>,
+    },
+    Key {
+        down: bool,
+        key: verve_dom::Key,
+    },
+    /// An input method's commit, or a paste.
+    Text(String),
+    /// P24 makes it `Update { text, selection } | Commit | Cancel`.
+    Composition(CompositionEvent),
+    /// The window gained (`true`) or lost focus.
+    Focus(bool),
+}
+
+/// What an input method is doing with a field. Empty until P24 gives it its variants.
+#[derive(Clone, Debug)]
+pub enum CompositionEvent {}
+
+/// What a pointer did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerKind {
+    Down,
+    Up,
+    Move,
+}
+
+/// What the shell reads of a page to draw it: `Guest::View` of [`crate::RendererGuest`].
+pub struct RendererView {
+    /// The number of the last job the page ran, for whoever waits on one.
+    pub applied: u64,
+    /// The document as it is now, with what changed since the last view; `None` when nothing did.
+    pub update: Option<verve_dom::Update>,
+    /// Whether the page asked for an animation frame: send [`ToRendererInput::Frame`].
+    pub wants_frame: bool,
+    /// The CSS `cursor` of the element under the pointer.
+    pub cursor: Option<String>,
+    /// Where a candidate window goes: the caret's box (P24/P32).
+    pub ime_rect: Option<verve_dom::Rect>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sync_reply_answers_once_and_never_waits() {
+        let (reply, page) = SyncReply::channel();
+        assert!(reply.send(Cloned::undefined()));
+        assert!(page.try_recv().is_ok());
+    }
+
+    #[test]
+    fn a_sync_reply_to_a_page_that_left_is_not_an_error() {
+        let (reply, page) = SyncReply::channel();
+        drop(page);
+        assert!(!reply.send(Cloned::undefined()));
+    }
+
+    #[test]
+    fn a_sync_reply_dropped_unanswered_wakes_the_page() {
+        let (reply, page) = SyncReply::channel();
+        drop(reply);
+        assert!(page.recv().is_err());
+    }
+
+    #[test]
+    fn a_pages_preferences_default_as_electrons_do() {
+        let prefs = WebPreferences::default();
+        assert!(prefs.sandbox && prefs.web_security && prefs.javascript && prefs.dev_tools);
+        assert!(!prefs.node_integration && !prefs.allow_running_insecure_content);
+        assert_eq!(prefs.zoom_factor, 1.0);
+    }
+}

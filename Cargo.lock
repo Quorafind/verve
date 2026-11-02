@@ -3489,6 +3489,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "verve-electron"
+version = "0.1.0"
+dependencies = [
+ "boa_engine",
+ "url",
+ "verve",
+ "verve-dom",
+]
+
+[[package]]
 name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
