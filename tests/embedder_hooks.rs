@@ -1,6 +1,6 @@
 //! The kernel's hooks for an embedder building Electron on it, a section for each: the structured
-//! clone that crosses threads, the process a realm says it is and the virtual filesystem
-//! `app.asar` is read through.
+//! clone that crosses threads, the process a realm says it is, the virtual filesystem `app.asar`
+//! is read through and the permission bit a child process needs.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use boa_engine::JsValue;
 use verve::clone::{CloneBytesError, Cloned};
 use verve::vfs::{DirEntry, Kind, Metadata, Overlay};
-use verve::{ExitBehavior, ProcessInfo, Runtime, UncaughtBehavior};
+use verve::{ExitBehavior, Permissions, ProcessInfo, Runtime, UncaughtBehavior};
 
 mod common;
 
@@ -754,3 +754,22 @@ fn original_fs_shares_fs_classes() {
 }
 
 // ─── The rest of the hooks ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn the_child_permission_bit_is_reported() {
+    let mut rt = Runtime::new();
+    assert_eq!(
+        verve::print(&rt.eval("process.permission.has('child')").unwrap()),
+        "false"
+    );
+    rt.set_permissions(Permissions {
+        child_process: true,
+        ..Permissions::none()
+    });
+    assert_eq!(
+        verve::print(&rt.eval("process.permission.has('child')").unwrap()),
+        "true"
+    );
+    // `-A` grants no child processes: running a program is not one of the grants.
+    assert!(!Permissions::all().child_process);
+}
