@@ -25,6 +25,7 @@
 //! which can add methods to any class with [`host::extend`].
 
 mod bind;
+pub mod canvas;
 pub mod css;
 pub mod dom;
 pub mod field;
@@ -91,6 +92,9 @@ pub enum Request {
         face: FontFaceId,
         url: String,
     },
+    /// An `<img src>` needs its bytes: the embedder fetches them and calls
+    /// [`Document::set_image_bytes`] — or [`Document::fail_image`] when there are none.
+    Image(String),
 }
 
 /// Where `localStorage` lives between runs.
@@ -293,6 +297,10 @@ pub struct SnapshotData {
     pub scroll_offsets: std::collections::HashMap<NodeId, [f32; 2]>,
     /// 活跃媒体代的元数据；移除、空源和回收的节点不在这里，不保存像素。
     pub media: HashMap<NodeId, MediaState>,
+    /// Each canvas's last committed frame: premultiplied RGBA8, row-major, `width * 4` stride.
+    pub canvases: HashMap<NodeId, canvas::CanvasFrame>,
+    /// Each image the page has bytes for, by resolved address, for the drawer to decode.
+    pub images: HashMap<String, canvas::ImageBytes>,
 }
 
 impl std::ops::Deref for Snapshot {
@@ -482,6 +490,8 @@ impl Document {
     /// update.
     pub fn update(&self) -> Update {
         self.absorb();
+        self.sync_images();
+        self.commit_canvases();
         let snapshot = self.snapshot();
         let mut view = self.view.borrow_mut();
         let mut nodes: Vec<NodeId> = view.changed.drain().collect();
@@ -513,6 +523,8 @@ impl Document {
             url: state.url.to_string(),
             scroll_offsets: state.scroll_offsets.clone(),
             media: state.media.snapshot(),
+            canvases: canvas::snapshot_canvases(&state),
+            images: state.images.snapshot(),
         }))
     }
 
@@ -792,6 +804,7 @@ impl Document {
     /// callbacks ran.
     pub fn frame(&self, runtime: &mut verve::Runtime, now: f64) -> usize {
         let context = runtime.context();
+        canvas::flush_events(context);
         let ran = bind::window::run_frame(context, now);
         runtime.run_microtasks();
         self.deliver_layout(runtime);
@@ -869,6 +882,7 @@ impl Document {
                 state.scroll_offsets.remove(id);
                 state.custom.forget(*id);
             }
+            canvas::forget(&mut state, &gone);
             state
                 .template_contents
                 .retain(|t, f| !gone.contains(t) && !gone.contains(f));

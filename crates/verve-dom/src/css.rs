@@ -1994,7 +1994,7 @@ pub(crate) fn font_longhands(value: &str) -> Option<Vec<(&'static str, String)>>
 
 /// A font size in pixels, against the parent's: lengths, percentages, `em`, `rem`, and the
 /// keywords.
-fn font_size_px(value: &str, parent: f32) -> Option<f32> {
+pub(crate) fn font_size_px(value: &str, parent: f32) -> Option<f32> {
     let value = value.trim();
     let keyword = match value {
         "xx-small" => Some(9.),

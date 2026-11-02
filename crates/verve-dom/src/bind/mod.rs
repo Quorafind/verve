@@ -70,6 +70,27 @@ pub enum Kind {
     Sheet,
     /// A `new CSSStyleSheet()`, by its number.
     Constructed,
+    /// A `CanvasRenderingContext2D`, by the canvas it draws into.
+    #[cfg(feature = "canvas")]
+    Context2d,
+    /// A `CanvasGradient`, by its number.
+    #[cfg(feature = "canvas")]
+    Gradient,
+    /// A `CanvasPattern`, by its number.
+    #[cfg(feature = "canvas")]
+    Pattern,
+    /// A `Path2D`, by its number.
+    #[cfg(feature = "canvas")]
+    Path,
+    /// An `ImageBitmap`, by its number.
+    #[cfg(feature = "canvas")]
+    Bitmap,
+    /// An `OffscreenCanvas`, by its canvas's number.
+    #[cfg(feature = "canvas")]
+    Offscreen,
+    /// An `ImageBitmapRenderingContext`, by the canvas it shows.
+    #[cfg(feature = "canvas")]
+    BitmapRenderer,
     /// An instance whose state is all in its own properties.
     Plain,
 }
