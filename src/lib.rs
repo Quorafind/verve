@@ -32,7 +32,9 @@ pub mod cli;
 mod code_cache;
 mod crypto;
 pub mod dom_events;
-mod encoding;
+/// Base64, percent-decoding and `data:` URLs as the runtime reads them, for embedders: no crate
+/// writes its own (docs/electron/style.md §1).
+pub mod encoding;
 mod esm;
 mod esm_resolve;
 mod events;

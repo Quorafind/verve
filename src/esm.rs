@@ -837,7 +837,7 @@ fn data_source(url: &Url, context: &mut Context) -> JsResult<(String, bool)> {
     }
     let decoded = resolve::percent_decode(body).map_err(|e| resolve_error(context, e))?;
     let source = if header.split(';').any(|s| s.eq_ignore_ascii_case("base64")) {
-        let bytes = decode_base64(&decoded)
+        let bytes = crate::encoding::unbase64(&decoded)
             .ok_or_else(|| coded_error(context, "Invalid base64 data URL", "ERR_INVALID_URL"))?;
         String::from_utf8(bytes)
             .map_err(|_| coded_error(context, "Module source is not UTF-8", "ERR_INVALID_URL"))?
@@ -845,29 +845,4 @@ fn data_source(url: &Url, context: &mut Context) -> JsResult<(String, bool)> {
         decoded
     };
     Ok((source, json))
-}
-
-fn decode_base64(text: &str) -> Option<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut bits = 0u32;
-    let mut count = 0u32;
-    for byte in text.bytes().filter(|b| !b.is_ascii_whitespace()) {
-        let digit = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' => break,
-            _ => return None,
-        };
-        bits = (bits << 6) | u32::from(digit);
-        count += 6;
-        if count >= 8 {
-            count -= 8;
-            output.push((bits >> count) as u8);
-            bits &= (1 << count) - 1;
-        }
-    }
-    Some(output)
 }

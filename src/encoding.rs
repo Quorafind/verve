@@ -31,6 +31,7 @@ fn type_error(message: impl Into<String>) -> boa_engine::JsError {
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// Base64 as `btoa` and Node write it; `url` for the URL-safe alphabet without padding.
 pub fn base64(data: &[u8], url: bool) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
@@ -82,7 +83,7 @@ pub fn unbase64(text: &str) -> Option<Vec<u8>> {
 }
 
 /// The bytes of an `ArrayBuffer`, a typed array or a `DataView`.
-pub fn bytes_of(value: &JsValue, context: &mut Context) -> JsResult<Option<Vec<u8>>> {
+pub(crate) fn bytes_of(value: &JsValue, context: &mut Context) -> JsResult<Option<Vec<u8>>> {
     let Some(object) = value.as_object() else {
         return Ok(None);
     };
@@ -107,6 +108,61 @@ pub fn bytes_of(value: &JsValue, context: &mut Context) -> JsResult<Option<Vec<u
     };
     let end = (offset + length).min(all.len());
     Ok(Some(all[offset.min(end)..end].to_vec()))
+}
+
+// ─── data: and percent-encoding ──────────────────────────────────────────────────────────────────────────────────
+
+/// A `data:` address's type and bytes, by the standard's data: URL processor.
+pub fn data_url(url: &url::Url) -> Result<(String, Vec<u8>), String> {
+    let mut url = url.clone();
+    url.set_fragment(None);
+    let rest = &url.as_str()["data:".len()..];
+    let (kind, body) = rest
+        .split_once(',')
+        .ok_or_else(|| "invalid data: URL".to_owned())?;
+    let mut kind = kind
+        .trim_matches([' ', '\t', '\n', '\r', '\x0c'])
+        .to_owned();
+    let mut bytes = percent_decode(body);
+    let lower = kind.to_ascii_lowercase();
+    if let Some(head) = lower.strip_suffix("base64")
+        && head.trim_end_matches(' ').ends_with(';')
+    {
+        let text: String = String::from_utf8_lossy(&bytes)
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        bytes = unbase64(&text).ok_or_else(|| "invalid base64 in data: URL".to_owned())?;
+        let cut = head.trim_end_matches(' ').len() - 1;
+        kind.truncate(cut);
+    }
+    if kind.starts_with(';') {
+        kind.insert_str(0, "text/plain");
+    }
+    if kind.is_empty() || !kind.contains('/') {
+        kind = "text/plain;charset=US-ASCII".into();
+    }
+    Ok((kind, bytes))
+}
+
+/// `%XX` escapes undone, byte for byte; a `%` that does not start one is kept as it is.
+pub fn percent_decode(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let hex = |b: Option<&u8>| b.and_then(|b| (*b as char).to_digit(16));
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let (Some(high), Some(low)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2)))
+        {
+            out.push((high * 16 + low) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 // ─── atob and btoa ──────────────────────────────────────────────────────────────────────────
@@ -335,7 +391,7 @@ fn with_prototype(
 // ─── Buffer ─────────────────────────────────────────────────────────────────────────────────
 
 /// A `Uint8Array` of `bytes`, made a `Buffer` (see `crate::buffer`).
-pub fn make_buffer(context: &mut Context, bytes: Vec<u8>) -> JsResult<JsValue> {
+pub(crate) fn make_buffer(context: &mut Context, bytes: Vec<u8>) -> JsResult<JsValue> {
     crate::buffer::make(context, bytes)
 }
 
@@ -361,7 +417,7 @@ fn constructor(
         .into()
 }
 
-pub fn install(context: &mut Context) -> JsResult<()> {
+pub(crate) fn install(context: &mut Context) -> JsResult<()> {
     for (name, f) in [("atob", atob as NativeFunctionPointer), ("btoa", btoa)] {
         context.register_global_callable(
             JsString::from(name),
@@ -390,6 +446,27 @@ pub fn install(context: &mut Context) -> JsResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn data_urls_decode_as_the_standard_says() {
+        let parse = |s: &str| data_url(&url::Url::parse(s).unwrap()).unwrap();
+        assert_eq!(
+            parse("data:,Hello%2C%20World"),
+            (
+                "text/plain;charset=US-ASCII".into(),
+                b"Hello, World".to_vec()
+            )
+        );
+        assert_eq!(
+            parse("data:text/plain;base64,SGVsbG8=#frag"),
+            ("text/plain".into(), b"Hello".to_vec())
+        );
+        assert_eq!(
+            parse("data:;charset=utf-8,x"),
+            ("text/plain;charset=utf-8".into(), b"x".to_vec())
+        );
+        assert!(data_url(&url::Url::parse("data:;base64,%%%").unwrap()).is_err());
+    }
+
     use super::*;
 
     #[test]

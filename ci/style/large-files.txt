@@ -11,7 +11,7 @@ src/fetch.rs 1719
 src/fs.rs 2175
 src/indexeddb.rs 2612
 src/intl.rs 1997
-src/lib.rs 1535
+src/lib.rs 1537
 src/network/http.rs 1766
 src/path.rs 1507
 src/sockets.rs 1598

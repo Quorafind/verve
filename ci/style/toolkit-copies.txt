@@ -9,8 +9,11 @@ crates/verve-dom/src/bind/mod.rs instance
 crates/verve-dom/src/bind/mod.rs type_error
 crates/verve-dom/src/bind/node.rs list_of
 src/dom_events.rs invoke
+src/encoding.rs arg
+src/encoding.rs function
+src/encoding.rs text_of
+src/encoding.rs type_error
 src/esm.rs coded_error
-src/esm.rs decode_base64
 src/esm_resolve.rs percent_decode
 src/indexeddb.rs arg
 src/indexeddb.rs class
@@ -21,7 +24,6 @@ src/indexeddb.rs list_of
 src/indexeddb.rs object
 src/indexeddb.rs text_of
 src/network/fetch.rs function
-src/network/fetch.rs percent_decode
 src/typescript.rs base64
 src/typescript.rs function
 src/typescript.rs type_error

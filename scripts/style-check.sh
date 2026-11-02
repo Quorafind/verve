@@ -18,7 +18,10 @@ cd "$(dirname "$0")/.."
 MAX_LINES=1500
 LARGE=ci/style/large-files.txt
 COPIES=ci/style/toolkit-copies.txt
-TOOLKIT='arg|js_text|text_of|type_error|range_error|coded_error|coded_error_value|object|function|closure|hidden|methods|exports|accessors|get|invoke|list_of|array|global|class|instance|base64|unbase64|percent_decode|decode_base64'
+# Each helper has one home: the native-function toolkit in src/native.rs, the encoders in
+# src/encoding.rs. A definition of one of these names anywhere else is a copy.
+NATIVE='arg|js_text|text_of|type_error|range_error|coded_error|coded_error_value|object|function|closure|hidden|methods|exports|accessors|get|invoke|list_of|array|global|class|instance'
+ENCODING='base64|unbase64|percent_decode|decode_base64|data_url'
 
 # Only the folders that exist: a crate without tests/ is not an error.
 existing() { for d in "$@"; do [ -d "$d" ] && echo "$d"; done; return 0; }
@@ -34,9 +37,14 @@ large_files() {
 }
 
 toolkit_copies() {
-    library_sources | grep -v -e '^src/native.rs$' -e '^src/encoding.rs$' | while read -r f; do
-        { grep -oE "^(pub(\([a-z]+\))? )?fn ($TOOLKIT)\b *[<(]" "$f" || true; } |
-            sed -E "s/^.*fn ([a-z_0-9]+).*/\1/" | sort -u | sed "s|^|$f |"
+    library_sources | while read -r f; do
+        case "$f" in
+            src/native.rs) names=$ENCODING ;;
+            src/encoding.rs) names=$NATIVE ;;
+            *) names="$NATIVE|$ENCODING" ;;
+        esac
+        { grep -oE "^(pub(\([a-z]+\))? )?fn ($names)\b *[<(]" "$f" || true; } |
+            sed -E 's/^.*fn ([a-z_0-9]+).*/\1/' | sort -u | sed "s|^|$f |"
     done
     return 0
 }
