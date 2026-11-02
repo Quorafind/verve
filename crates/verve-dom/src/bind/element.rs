@@ -1495,7 +1495,7 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
         "innerText",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&super::platform::rendered_text(cx, id)))
+            Ok(text(&super::computed::rendered_text(cx, id)))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -1508,7 +1508,7 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
         "outerText",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&super::platform::rendered_text(cx, id)))
+            Ok(text(&super::computed::rendered_text(cx, id)))
         }),
         None,
     ),

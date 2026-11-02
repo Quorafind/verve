@@ -9,9 +9,9 @@ use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, MetadataProvider};
 use tiny_skia::PathBuilder;
 
-use crate::canvas::ROOT_FONT_SIZE;
 use crate::canvas::fonts::FontStack;
 use crate::css;
+use crate::css::ROOT_FONT_SIZE;
 
 /// Where the hanging baseline sits, as a fraction of the ascent.
 pub const HANGING_BASELINE: f32 = 0.8;

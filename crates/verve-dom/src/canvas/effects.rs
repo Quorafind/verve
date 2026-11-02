@@ -67,7 +67,7 @@ pub fn draw_blurred(
 /// The blur radius of the `filter` property, when it is one the canvas supports.
 pub fn blur_of(filter: &str) -> Option<f32> {
     let rest = filter.trim().strip_prefix("blur(")?.strip_suffix(')')?;
-    let length = crate::css::length(rest, crate::canvas::ROOT_FONT_SIZE)?;
+    let length = crate::css::length(rest, crate::css::ROOT_FONT_SIZE)?;
     (length > 0.).then_some(length)
 }
 

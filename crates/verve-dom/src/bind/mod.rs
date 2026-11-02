@@ -9,6 +9,7 @@
 //! An object that stands for something else the document keeps — a node's `classList`, its
 //! `style`, a `<style>`'s sheet — carries a [`Handle`]: what kind of thing, and its number.
 
+pub mod computed;
 pub mod custom;
 pub mod document;
 pub mod element;
@@ -101,6 +102,9 @@ pub struct Handle {
     pub kind: Kind,
     #[unsafe_ignore_trace]
     pub id: u32,
+    /// For a computed style: the part of the element, if any, that it is about.
+    #[unsafe_ignore_trace]
+    pub target: computed::Target,
 }
 
 pub fn handle(value: &JsValue) -> Option<(Kind, u32)> {
@@ -397,7 +401,11 @@ pub fn instance(
     let prototype = prototype_of_target(new_target, context)?;
     Ok(JsObject::from_proto_and_data(
         prototype,
-        Handle { kind, id },
+        Handle {
+            kind,
+            id,
+            target: computed::Target::default(),
+        },
     ))
 }
 
@@ -417,7 +425,14 @@ pub fn prototype_of_target(new_target: &JsValue, context: &mut Context) -> JsRes
 /// An instance of one of the classes made here, made by the host itself.
 pub fn native_instance(context: &Context, class: &str, kind: Kind, id: u32) -> JsObject {
     let prototype = shared(context).borrow().prototype(class);
-    JsObject::from_proto_and_data(prototype, Handle { kind, id })
+    JsObject::from_proto_and_data(
+        prototype,
+        Handle {
+            kind,
+            id,
+            target: computed::Target::default(),
+        },
+    )
 }
 
 /// The constructor of a class made here, by name.

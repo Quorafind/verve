@@ -2,14 +2,19 @@
 //! boundary — `:host` and `:host-context()` out to the element hosting the tree, `::slotted()`
 //! out to what a slot shows, `::part()` in from the outside to an element a `part` attribute
 //! names (CSS Scoping Module Level 1). Which tree a declaration comes from also decides the
-//! cascade between it and one from another tree: [`Layer`].
+//! cascade between it and one from another tree: [`Precedence`].
 
 use std::collections::HashMap;
 
-use super::{
-    Compound, Declaration, Dom, MatchCache, MatchContext, NodeId, Origin, Parser, Pseudo, Rank,
-    Selector, SelectorError, SelectorList, Styler,
+use super::cascade::{Precedence, Rank};
+use super::layer;
+use super::pseudo::PseudoElement;
+use super::selector::{
+    Compound, MatchCache, MatchContext, Parser, Pseudo, Selector, SelectorError, SelectorList,
 };
+use super::sheet::Declaration;
+use super::styler::Styler;
+use crate::dom::{Dom, NodeId};
 
 /// How far a compound's subject reaches beyond the tree its sheet is in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -61,11 +66,12 @@ fn host_context_matches(
     dom: &Dom,
     host: NodeId,
     list: &SelectorList,
-    cx: &MatchContext,
+    matching: &MatchContext,
     cache: &mut MatchCache,
 ) -> bool {
     std::iter::successors(Some(host), |node| dom.parent(*node)).any(|node| {
-        dom.get(node).is_some_and(|n| n.is_element()) && list.matches_cached(dom, node, cx, cache)
+        dom.get(node).is_some_and(|n| n.is_element())
+            && list.matches_cached(dom, node, matching, cache)
     })
 }
 
@@ -78,7 +84,7 @@ impl Pseudo {
         dom: &Dom,
         id: NodeId,
         aside: Aside,
-        cx: &MatchContext,
+        matching: &MatchContext,
         cache: &mut MatchCache,
     ) -> bool {
         match self {
@@ -86,8 +92,8 @@ impl Pseudo {
             Self::Part(_) => aside == Aside::Part,
             Self::Host(arg) => arg
                 .as_ref()
-                .is_none_or(|arg| arg.matches_cached(dom, id, cx, cache)),
-            Self::HostContext(list) => host_context_matches(dom, id, list, cx, cache),
+                .is_none_or(|arg| arg.matches_cached(dom, id, matching, cache)),
+            Self::HostContext(list) => host_context_matches(dom, id, list, matching, cache),
             _ => false,
         }
     }
@@ -114,7 +120,7 @@ impl Compound {
         &self,
         dom: &Dom,
         id: NodeId,
-        cx: &MatchContext,
+        matching: &MatchContext,
         cache: &mut MatchCache,
     ) -> Option<bool> {
         let pseudo = |wanted: fn(&Pseudo) -> bool| self.pseudo.iter().find(|p| wanted(p));
@@ -128,8 +134,8 @@ impl Compound {
                     return Some(false);
                 };
                 Some(
-                    list.matches_cached(dom, id, cx, cache)
-                        && self.matches_own(dom, slot, cx, cache, Aside::Slotted),
+                    list.matches_cached(dom, id, matching, cache)
+                        && self.matches_own(dom, slot, matching, cache, Aside::Slotted),
                 )
             }
             Reach::Part => {
@@ -139,7 +145,10 @@ impl Compound {
                 let Some(host) = dom.shadow_host(dom.root_of(id)) else {
                     return Some(false);
                 };
-                Some(is_part(dom, id, name) && self.matches_own(dom, host, cx, cache, Aside::Part))
+                Some(
+                    is_part(dom, id, name)
+                        && self.matches_own(dom, host, matching, cache, Aside::Part),
+                )
             }
             Reach::Own | Reach::Host => None,
         }
@@ -199,15 +208,19 @@ impl Parser<'_> {
         })
     }
 
-    /// What follows `::` in a compound: `::part(name)` and `::slotted(selectors)` are kept, any
-    /// other pseudo-element makes a compound that matches no element.
+    /// What follows `::` in a compound: `::part(name)` and `::slotted(selectors)` are kept, a
+    /// pseudo-element with a part of its own (`::before`) is the part the compound is about,
+    /// and any other makes a compound that matches no element.
     pub(super) fn pseudo_element(&mut self, out: &mut Compound) -> Result<(), SelectorError> {
         let name = self
             .ident()
             .ok_or_else(|| self.error())?
             .to_ascii_lowercase();
         if self.peek() != Some('(') {
-            out.element = true;
+            match PseudoElement::from_name(&name) {
+                Some(part) => out.element = Some(part),
+                None => out.foreign = true,
+            }
             return Ok(());
         }
         match name.as_str() {
@@ -228,83 +241,79 @@ impl Parser<'_> {
             }
             _ => {
                 self.skip_arguments()?;
-                out.element = true;
+                out.foreign = true;
             }
         }
         Ok(())
     }
 }
 
-/// Where a declaration ranks in the cascade, lowest first: normal declarations from the user
-/// agent up to the inline style, then the `!important` ones the other way round. Between
-/// trees, the outer one wins a normal declaration and the inner one an important one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum Layer {
-    /// The user agent's normal declarations.
-    UserAgent,
-    /// Normal author declarations of an inner tree reaching out (`:host`, `::slotted`).
-    InnerAuthor,
-    /// Normal author declarations.
-    Author,
-    /// The `style` attribute.
-    Inline,
-    /// `!important` author declarations.
-    ImportantAuthor,
-    /// `!important` in the `style` attribute.
-    ImportantInline,
-    /// `!important` declarations of an inner tree reaching out.
-    ImportantInnerAuthor,
-    /// The user agent's `!important` declarations.
-    ImportantUserAgent,
+/// What the rules say about an element and the parts of it that are pseudo-elements, and
+/// whether the pointer being on it would make another rule match.
+#[derive(Default)]
+pub(super) struct Matched<'a> {
+    /// The declarations that apply to the element itself, each with its rank.
+    pub(super) element: Vec<(Rank, &'a Declaration)>,
+    /// The declarations of the rules written for a part of it, by part.
+    pub(super) parts: Vec<(PseudoElement, Vec<(Rank, &'a Declaration)>)>,
+    pub(super) pointer: bool,
 }
 
-impl Layer {
-    /// The layer of a rule's declaration; `inner` when it comes from a shadow tree and reaches
-    /// out of it.
-    pub(super) fn of(important: bool, origin: Origin, inner: bool) -> Self {
-        match (important, origin, inner) {
-            (false, Origin::UserAgent, _) => Self::UserAgent,
-            (false, Origin::Author, true) => Self::InnerAuthor,
-            (false, Origin::Author, false) => Self::Author,
-            (true, Origin::Author, true) => Self::ImportantInnerAuthor,
-            (true, Origin::Author, false) => Self::ImportantAuthor,
-            (true, Origin::UserAgent, _) => Self::ImportantUserAgent,
-        }
+impl<'a> Matched<'a> {
+    /// The declarations for `part`, in the order they are met.
+    fn part(&mut self, part: PseudoElement) -> &mut Vec<(Rank, &'a Declaration)> {
+        let at = self
+            .parts
+            .iter()
+            .position(|(found, _)| *found == part)
+            .unwrap_or_else(|| {
+                self.parts.push((part, Vec::new()));
+                self.parts.len() - 1
+            });
+        &mut self.parts[at].1
     }
 }
 
-/// The declarations of the rules that match `id`, each with its rank, and whether the pointer
-/// being on it would make another rule match.
+/// The declarations of the rules that match `id`, with those written for a part of it kept
+/// apart.
 pub(super) fn matched_rules<'a>(
     dom: &Dom,
     styler: &'a Styler,
     id: NodeId,
     cache: &mut MatchCache,
-) -> (Vec<(Rank, &'a Declaration)>, bool) {
-    let mut matched = Vec::new();
-    let mut pointer = false;
-    let cx = MatchContext::default();
+) -> Matched<'a> {
+    let mut matched = Matched::default();
+    let matching = MatchContext::default();
     let tree = dom.root_of(id);
     for (index, k) in styler.candidates(dom, id, tree) {
         let entry = &styler.rules[index];
         let selector = &entry.rule.selectors.0[k];
-        if selector.matches_cached(dom, id, &cx, cache) {
+        if selector.matches_cached(dom, id, &matching, cache) {
             let specificity = selector.specificity();
             // The tree a declaration comes from decides between it and one from another tree.
             let inner = matches!(selector.subject().reach, Reach::Host | Reach::Slotted)
                 && entry.tree != tree;
+            let declarations = match selector.pseudo_element() {
+                Some(part) => matched.part(part),
+                None => &mut matched.element,
+            };
             for declaration in &entry.rule.declarations {
-                let layer = Layer::of(declaration.important, entry.origin, inner);
-                matched.push(((layer, specificity, entry.order), declaration));
+                let rank = Rank {
+                    precedence: Precedence::of(declaration.important, entry.origin, inner),
+                    layer: layer::key(entry.layer, declaration.important, styler.layers),
+                    specificity,
+                    order: entry.order,
+                };
+                declarations.push((rank, declaration));
             }
-        } else if entry.rule.pointer && !pointer {
+        } else if entry.rule.pointer && !matched.pointer {
             // Would the pointer on it make this rule apply?
             let probe = MatchContext {
                 scope: None,
                 hover_probe: Some(id),
             };
-            pointer = selector.matches_with(dom, id, &probe);
+            matched.pointer = selector.matches_with(dom, id, &probe);
         }
     }
-    (matched, pointer)
+    matched
 }

@@ -7,11 +7,11 @@ use boa_engine::{Context, JsObject, JsResult, JsString, JsValue};
 use tiny_skia::{BlendMode, Color, FilterQuality, LineCap, LineJoin};
 
 use crate::bind::{Kind, arg, closure, handle_of, string, text};
-use crate::canvas::ROOT_FONT_SIZE;
 use crate::canvas::context2d::DrawState;
 use crate::canvas::paint::{PaintSource, css_of, parse_color};
 use crate::canvas::store::{canvas_object, read_canvas, this_handle};
 use crate::canvas::text::{Align, Baseline, TextStyle};
+use crate::css::ROOT_FONT_SIZE;
 use crate::state::shared;
 
 /// What a property reads back.
