@@ -42,6 +42,8 @@ use boa_engine::{Context, JsResult, Module, Source};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
+use crate::encoding::hex;
+
 const MAGIC: &[u8; 8] = b"VERVEPK\x02";
 const TAG_DOMAIN: &[u8] = b"verve code cache entry v1";
 const KEY_LEN: usize = 32;
@@ -475,10 +477,6 @@ impl Drop for CodeCache {
     fn drop(&mut self) {
         self.write(true);
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Writes `bytes` to a file of its own beside `path`, then renames it to `path`, so a reader

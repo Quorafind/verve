@@ -34,6 +34,11 @@ fn type_error(message: impl Into<String>) -> boa_engine::JsError {
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// `bytes` as lowercase hexadecimal: the digests and names that are written in hex.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Base64 as `btoa` and Node write it; `url` for the URL-safe alphabet without padding.
 pub fn base64(data: &[u8], url: bool) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);

@@ -5,6 +5,8 @@ use base64::engine::general_purpose::STANDARD;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
+use crate::encoding::hex;
+
 /// The digest algorithms npm writes, weakest first: the strongest one present is checked.
 const ALGORITHMS: [&str; 4] = ["sha1", "sha256", "sha384", "sha512"];
 
@@ -25,10 +27,6 @@ pub fn sha512(bytes: &[u8]) -> String {
 /// The hex SHA-512 of `bytes`: the name a tarball has in the content-addressed cache.
 pub fn sha512_hex(bytes: &[u8]) -> String {
     hex(&Sha512::digest(bytes))
-}
-
-pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The strongest hash of an SRI string, as `(algorithm, digest)`.
