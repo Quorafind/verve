@@ -572,7 +572,7 @@ pub fn initial_value(property: &str, tag: Option<&str>) -> Option<&'static str> 
         "font-style" => "normal",
         "line-height" => "normal",
         "overflow" | "overflow-x" | "overflow-y" => "visible",
-        "float" => "none",
+        "float" | "-webkit-app-region" | "app-region" => "none",
         "z-index" | "width" | "height" | "top" | "left" | "right" | "bottom" => "auto",
         "box-sizing" => "content-box",
         "pointer-events" | "cursor" => "auto",
