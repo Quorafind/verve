@@ -174,7 +174,8 @@ fn as_file_or_folder(base: &Path) -> Option<PathBuf> {
         {
             let main = json.get("main").and_then(|m| m.as_str());
             if let Some(main) = main {
-                let target = base.join(main);
+                // `main` is written as the package's author wrote it: `./main.js`, `lib/x.js`.
+                let target = clean(&base.join(main));
                 if let Some(found) = as_file_or_folder_plain(&target) {
                     return Some(found);
                 }

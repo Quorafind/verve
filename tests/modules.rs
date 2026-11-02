@@ -152,6 +152,41 @@ fn a_plugins_own_files_folders_packages_and_json() {
     );
 }
 
+/// A package whose `main` is written `./x.js` is the file `pkg/x.js`, as in Node: the path a
+/// `main` names is made absolute and cleaned, so `require.resolve`, `module.id`, `__filename`
+/// and the `require.cache` key all name the same string, with no `./` in it. Before this,
+/// `require.resolve` answered `pkg/./x.js`, which the cache had no entry for.
+#[test]
+fn a_package_main_is_cleaned_the_way_node_cleans_it() {
+    let dir = folder(
+        "main",
+        &[
+            ("lib/dotted/package.json", "{ \"main\": \"./x.js\" }"),
+            (
+                "lib/dotted/x.js",
+                "exports.id = module.id; exports.file = __filename;",
+            ),
+        ],
+    );
+    let mut rt = Runtime::new();
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        const path = require('path');
+        const x = require('./lib/dotted');
+        const key = require.resolve('./lib/dotted');
+        exports.result = [
+            path.basename(x.id),
+            path.basename(x.file),
+            String(require.cache[key] !== undefined),
+            /(^|[\/])\.([\/]|$)/.test(x.file) ? 'dot segment' : 'clean',
+        ];
+    "#,
+    );
+    assert_eq!(result, ["x.js", "x.js", "true", "clean"]);
+}
+
 /// A native addon is refused the way Node refuses one under `--no-addons`, by
 /// name and code, so a package that falls back from its addon (or reports it)
 /// can tell this from a broken file.
