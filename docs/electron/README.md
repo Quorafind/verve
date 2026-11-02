@@ -12,7 +12,7 @@ electron-builder / electron-forge 打包出来的应用照常运行。
 
 | 指标 | 目标（Windows x64 release，strip 后） | 说明 |
 |---|---|---|
-| 运行时二进制 `electron.exe` | **≈ 20 MB**（硬上限 24 MB，**待 GPUI 实测后复核**，见下注） | Electron 本身约 180 MB |
+| 运行时二进制 `electron.exe` | **≈ 32 MB，含 JIT**（硬上限 **34 MB**，2026-11-02 定，见下注） | Electron 本身约 180 MB |
 | JavaScript 层 | **≈ 10 MB** | 应用自己的 `app.asar` + 代码缓存；**Verve 不内置任何 JS 垫片** |
 | 冷启动到首帧（electron-quick-start，热代码缓存） | ≤ 250 ms | |
 | 单窗口空闲内存 | ≤ 60 MB | Electron 约 150 MB |
@@ -29,7 +29,8 @@ electron-builder / electron-forge 打包出来的应用照常运行。
 | **合计（不含 JIT）** | **≈ 26 MB** | |
 | JIT（可选） | +5.9 MB | P01；数值热循环快约 8 倍 |
 
-超出原定 24 MB 硬上限。**上限待定**（用户决定：GPUI 实测后再定——数据已齐，待拍板）。可继续压缩的方向：`wasm` 关闭（−0.7 MB）、
+**决定（2026-11-02，用户）：硬上限 34 MB，JIT 默认开启**——性能优先，约 32 MB，仍约为 Electron 的 1/5。原 20/24 MB 目标作废。
+继续压缩仍然是 P42 的工作（腾出余量）：`wasm` 关闭（−0.7 MB）、
 依赖试 `opt-level = "z"`、归属 4.4 MiB 未归属的 `.rdata`。详见 [`size.md`](size.md)（P01 合并后可见）。
 
 ## 2. 原则（不可违反）

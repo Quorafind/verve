@@ -4,7 +4,7 @@
 
 ## 目标
 
-让 `electron.exe` 能落在 **≈ 20 MB（硬上限 24 MB）**。先量出现状、找出大头，再用 release 配置和
+让 `electron.exe` 能落在 **≈ 20 MB（硬上限 24 MB）**（**已修订**：2026-11-02 定为硬上限 34 MB、JIT 默认开启，见 README「目标」）。先量出现状、找出大头，再用 release 配置和
 feature 开关把不需要的东西拿掉，并给之后每个包提供一个"体积增量"脚本。
 
 现状：`E:\cargo-target\verve\release\verve.exe` = **35.8 MB**（2026-10-25 构建，未开 LTO、未 strip，不含 GPUI）。
@@ -60,7 +60,7 @@ feature 开关把不需要的东西拿掉，并给之后每个包提供一个"�
    | **合计** | **≈ 20 MB** |
 
    初始预算是估计值；实测后在 `size.md` 修订，并标出超支项的处理方案（换更小的 crate、按需加载、feature 关闭）。
-6. CI：加一个检查，`electron` release 体积超过 24 MB 就失败（先只在 Windows x64）。
+6. CI：加一个检查，`electron` release 体积超过 **34 MB**（`--max-bytes 35651584`）就失败（先只在 Windows x64）。
 
 ## 验收
 
