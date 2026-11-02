@@ -221,7 +221,8 @@ uncaught exception or an unhandled rejection. The loop sleeps until the next tim
 from the input, the network or a worker; nothing polls.
 
 Permissions are on unless `-A`: nothing may be read, written, connected to or started without a
-flag. The entry file itself may be read (not its folder); a `-e` script needs no grant. Flags
+flag; `-A` grants everything, programs included (as Deno's does), which `Permissions::all()` leaves
+to the embedder. The entry file itself may be read (not its folder); a `-e` script needs no grant. Flags
 are Deno's with Node's spellings beside them: `--allow-read[=a,b]` / `--allow-fs-read=<path>`,
 `--allow-write[=a,b]` / `--allow-fs-write=<path>`, `--allow-net[=host[:port],…]`,
 `--allow-worker`, `--allow-child-process` (or `--allow-run`), `-A`; `--permission` is accepted and changes nothing. `--use-env-proxy` or

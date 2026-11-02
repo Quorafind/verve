@@ -197,7 +197,9 @@ pub fn fetch_internal(context: &mut Context, head: RequestHead, body: Option<Bod
 
 ### 4d. `Permissions::all()` 与子进程
 
-`Permissions::all()` **不包含** `child_process`（保持 `verve run -A` 现有语义不变）；Electron 主进程显式设置 `child_process: true`。
+`Permissions::all()` **不包含** `child_process`；Electron 主进程显式设置 `child_process: true`。
+
+> **P17 修订**：`verve run -A` 现在**授予** `child_process`（与 Deno 的 `-A` 一致，`-A` 本就授予不受限的文件写）。这一步在 `cli.rs` 的 `permissions()` 里做，`Permissions::all()` 本身不变，嵌入方 API 的语义不变；改变的只是 `verve run -A` 的行为（此前子进程不存在，所以没有人依赖「`-A` 不能启动程序」）。另有 `--allow-child-process`/`--allow-run`。
 
 ### 5. 杂项
 
