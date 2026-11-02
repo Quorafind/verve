@@ -138,9 +138,10 @@ Node's and the web's APIs and no Node underneath.
   escapes a grant (Node checks the path as written). A worker shares its page's filesystem and
   worker grants; without `worker`, `Worker` and `worker_threads.Worker` throw `ERR_ACCESS_DENIED`
   (`WorkerThreads`). `process.permission.has(scope, reference)` answers as Node's (`fs`,
-  `fs.read`, `fs.write`, `worker`, and Verve's `net`; `child`, `addon` and `wasi` are always
+  `fs.read`, `fs.write`, `worker`, `child` and Verve's `net`; `addon` and `wasi` are always
   false). `Runtime::add_trusted_certificates` trusts PEM certificates besides the system's, as
-  Node's `NODE_EXTRA_CA_CERTS` does. The reserved `child_process` bit does not enable execution.
+  Node's `NODE_EXTRA_CA_CERTS` does. The `child_process` bit lets a realm start programs (below); `Permissions::all()` leaves it
+  to the embedder, `verve run -A` grants it.
 - `Runtime::set_proxy_env(Some(ProxyEnv))` is Node 24's `NODE_USE_ENV_PROXY`: `fetch`,
   `WebSocket` and the `http`/`https` global agents (and an `Agent` with `proxyEnv`) go through
   `HTTP_PROXY`/`HTTPS_PROXY` — absolute-URI requests for `http:`, a `CONNECT` tunnel with TLS to
@@ -169,9 +170,16 @@ Node's and the web's APIs and no Node underneath.
   needs its own capability; an outbound-only binding accepts replies only from contacted peers.
   Buffer-size getters expose kernel snapshots delivered on host beats; option setters are
   applied by the reactor, not synchronously by the realm.
-- `http2`, `cluster`, `child_process` and `node:sqlite` load
-  with their classes and constants. Process execution, cluster and IPC sockets remain denied.
-  Without network capabilities, the original network refusal errors are preserved.
+- `http2`, `cluster` and `node:sqlite` load with their classes and constants; cluster and IPC
+  sockets remain denied. Without network capabilities, the original network refusal errors are
+  preserved.
+- `child_process` starts programs in a realm granted the `child` bit (`Permissions::child_process`,
+  `verve run --allow-child-process` or `--allow-run`, or `-A`): `spawn`, `exec`, `execFile`,
+  `fork` and the `*Sync` forms, with `child.stdout instanceof net.Socket`, kill signals, `timeout`,
+  `signal`, `maxBuffer`, and for `fork` an IPC channel (`serialization: 'json'` is Node's wire
+  format; `'advanced'` works between Verve processes only). `process.kill` signals any pid.
+  A realm without the bit sees the module as before: `ERR_ACCESS_DENIED` under the permission
+  model, `ENOSYS` otherwise. `cli::main_node` runs an executable as `ELECTRON_RUN_AS_NODE=1` does.
 
 ## Using it
 
@@ -216,7 +224,7 @@ Permissions are on unless `-A`: nothing may be read, written, connected to or st
 flag. The entry file itself may be read (not its folder); a `-e` script needs no grant. Flags
 are Deno's with Node's spellings beside them: `--allow-read[=a,b]` / `--allow-fs-read=<path>`,
 `--allow-write[=a,b]` / `--allow-fs-write=<path>`, `--allow-net[=host[:port],…]`,
-`--allow-worker`, `-A`; `--permission` is accepted and changes nothing. `--use-env-proxy` or
+`--allow-worker`, `--allow-child-process` (or `--allow-run`), `-A`; `--permission` is accepted and changes nothing. `--use-env-proxy` or
 `NODE_USE_ENV_PROXY=1` routes requests through the environment's proxy, as Node 24's do. Node's
 `--disable-proto=throw|delete`, `--stack-size=<KiB>` (the script thread's stack, at least
 4 MiB), `--no-warnings`, `--experimental-vm-modules`, `--no-addons` and

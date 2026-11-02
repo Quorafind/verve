@@ -64,7 +64,7 @@ pub(crate) enum StdioSpec {
 ### 2. JS 层行为（逐条对照 Node 22 文档与源码 `lib/internal/child_process.js`、`lib/child_process.js`）
 
 - `spawn(file, args?, options?)`：参数校验错误同 Node（`ERR_INVALID_ARG_TYPE`、`ERR_INVALID_ARG_VALUE`、参数含 `\0` 时 `ERR_INVALID_ARG_VALUE`）。
-  启动失败（`ENOENT`、`EACCES`、`EINVAL`）**异步**：返回的 `ChildProcess` 在下一轮发 `'error'`，`pid === undefined`，
+  启动失败里只有 `ENOENT`、`EACCES`、`EAGAIN`、`EMFILE`、`ENFILE` 是**异步**的；其余（如 `.bat` 的 `EINVAL`、Windows 上传 `uid` 的 `ENOTSUP`）同步抛 `spawn <file> <CODE>`：返回的 `ChildProcess` 在下一轮发 `'error'`，`pid === undefined`，
   `spawnfile`/`spawnargs` 已设置；成功则下一轮发 `'spawn'`。
 - 选项：`cwd`（字符串或 `URL`）、`env`、`argv0`、`stdio`（`'pipe'`/`'overlapped'`/`'ignore'`/`'inherit'`/数组；数组元素还可为 `'ipc'`、
   `null`/`undefined`、`Stream`、非负整数、`process.stdin` 等）、`detached`、`uid`/`gid`、`serialization`（`'json'` | `'advanced'`）、
@@ -134,8 +134,8 @@ Event::Exited(Option<i32> /* code */, Option<i32> /* signal */),
 - 不经 shell 直接 spawn `.bat`/`.cmd` 文件：抛 `EINVAL`（Node 18.20.2/20.12.2 起的 CVE-2024-27980 修复行为）。
 - 环境块：`UTF-16`，按 `RtlCompareUnicodeString` 不区分大小写排序；确保 `SYSTEMROOT` 等 libuv 要求的变量存在（`required_vars`）。
 - 标志：`CREATE_UNICODE_ENVIRONMENT`；`windowsHide` → `STARTF_USESHOWWINDOW` + `SW_HIDE`，且对控制台程序加 `CREATE_NO_WINDOW`；
-  `detached` → `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`。非 detached 的子进程**不**放进 job object（libuv 不放），
-  所以父进程退出后子进程继续运行，与 Node 一致。
+  `detached` → `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`。非 detached 的子进程放进一个全局 job object（`KILL_ON_JOB_CLOSE | SILENT_BREAKAWAY_OK`，同 libuv `uv__init_global_job_handle`），
+  所以父进程退出时子进程随之结束，与 Node 一致。
 - `kill`：信号 `0` → 探测（`GetExitCodeProcess == STILL_ACTIVE`）；`SIGTERM`/`SIGKILL`/`SIGINT`/`SIGQUIT`/其他 → `TerminateProcess(handle, 1)`，
   之后 `'exit'` 的 `signal` 参数报告所发的信号名、`code` 为 `null`（libuv 行为）。
 - 依赖：仓库已有 `windows-sys`，追加 features `Win32_System_Pipes`、`Win32_System_Console`、`Win32_System_Environment`、`Win32_System_IO`。
@@ -236,4 +236,70 @@ Event::Exited(Option<i32> /* code */, Option<i32> /* signal */),
 
 ## 状态
 
-（实现者完成后填写）
+### 完成了什么
+
+- **权限**：`Permissions::child_process` 为真才启动程序；为假时行为与原来逐字相同（受限 realm 抛 `ERR_ACCESS_DENIED`/`ChildProcess`，其余为 `ENOSYS` 存根，
+  存根搬到 `src/child_process/denied.rs`，`sockets.rs` 降到 1458 行、退出 `large-files.txt`）。每个入口在调用时再查一次位，不只在建模块时。
+  `verve run` 新增 `--allow-child-process`（Node 拼写）、`--allow-run`（Deno 拼写）；`-A` 在 `cli.rs` 里加上该位（`Permissions::all()` 仍不含）。
+  `process.permission.has('child')` 跟随该位（P03 已做）。
+- **`spawn`/`exec`/`execFile`/`fork` 与 `spawnSync`/`execSync`/`execFileSync`**，事件顺序 `spawn` → 数据 → `exit` → `close`；`child.stdout instanceof net.Socket`；
+  `kill`（名字/数字、`ERR_UNKNOWN_SIGNAL`）、`killed`/`signalCode`、`ref`/`unref`（接入 `network::keeps_alive`）、`timeout`、`killSignal`、`signal`（`AbortError`）、
+  `maxBuffer`（`ERR_CHILD_PROCESS_STDIO_MAXBUFFER`/`ENOBUFS`）、`encoding`、`cwd`（字符串或 URL，默认 realm 的 cwd 而非进程 cwd）、`env`、`argv0`、`detached`、
+  `windowsHide`、`windowsVerbatimArguments`、`shell`（Node 的 `normalizeSpawnArguments` 规则）、`stdio`（`pipe`/`overlapped`/`ignore`/`inherit`/`ipc`/0–2 号 fd/带 `fd` 的流）、
+  `promisify(exec|execFile)`（`{stdout, stderr}`，失败的 error 带二者）、`execSync` 的 stderr 同步写到父进程 stderr。启动失败异步：`'error'` 然后 `'close'`（负 errno），`pid === undefined`，
+  `spawnfile`/`spawnargs` 已设。进程退出时销毁 `stdin`、冲刷没人读的输出流（Node 的 `onexit`/`flushStdio`）。
+- **`process.kill(pid, signal)`** 对有授权的 realm 真实发送（Windows：`TerminateProcess`，信号 0 探测）；`ESRCH`/`EPERM` 同 Node。
+- **Windows 后端**（`windows.rs`）：手写 `CreateProcessW`，照 libuv——`search_path`（先 cwd 再 `PATH`，`.com`/`.exe`，不用 `PATHEXT`）、`quote_cmd_arg`、环境块（大小写不敏感排序 + `required_vars`）、
+  `lpReserved2` 的 CRT fd 表、`.bat`/`.cmd` 无 shell 时 `EINVAL`、`windowsHide`/`detached` 标志、命名管道（父端 overlapped、子端普通句柄；IPC 与 fd≥3 的子端也 overlapped 以便子进程自己轮询）、
+  `RegisterWaitForSingleObject` 退出通知（无线程）。**与 libuv 的差别**：用 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 把可继承句柄限定为子进程自己的几个——libuv 不限，
+  结果是孙进程会攥着父进程的 stdout 管道不放（测试里它让整个 harness 挂住）。
+- **Unix 后端**（`unix.rs`）：`std::process::Command`，所有管道都是 `UnixStream::pair`（同 libuv），fd≥3 在 `pre_exec` 里先挪开再 `dup2`，`detached` → `setsid`，`uid`/`gid`。
+- **reactor 接入**（`child_process/pipes.rs`）：`Command::{Pipe,Track,Kill,Reap}`、`Event::Exited`；管道复用 `Read`/`Write`/`End`/`Close` 与 `Data`/`Written`/`Finished`/`End`/`Closed`，
+  读额度一次一块（64 KiB），写一次一块在途。`reactor.rs` 只加了几行钩子，管道逻辑全在新模块里。
+- **IPC**（`ipc.rs`、`fork.rs`）：`fork` 的 `execPath`/`execArgv`/`silent`/`stdio`/`serialization`、`NODE_CHANNEL_FD`、`NODE_CHANNEL_SERIALIZATION_MODE`、Electron 里自动 `ELECTRON_RUN_AS_NODE=1`；
+  `send`（回调、背压返回值、`ERR_IPC_CHANNEL_CLOSED`）、`'message'`、`NODE_` 内部消息分流、`disconnect`（两侧事件）、`channel.ref/unref`。
+  `serialization: 'json'` 是 Node 的线格式（换行分隔），`'advanced'` 是结构化克隆字节 + 4 字节长度（仅 Verve↔Verve）。
+  **子进程侧**：`verve run` 起来时若有 `NODE_CHANNEL_FD` 就接上（`process.send`/`connected`/`disconnect`/`channel`/`'message'`），读完后从 `process.env` 删掉；
+  只有存在 `message`/`disconnect` 监听者时通道才阻止退出。
+- **`cli::main_node`**（`ELECTRON_RUN_AS_NODE` 的入口）：`--version`（`v22.20.0`）、`--help`、`-e`、`-p/--print`、脚本；Node 模式等同 `-A`（含 child），`process.versions.electron` 保留，`process.type` 无。
+  新增 `-p/--print`（`verve run` 也能用）。`process::Setup` 多了 `electron` 字段。
+- **工具箱**：`native::invalid_arg_type`/`invalid_arg_value`（Node 的 `ERR_INVALID_ARG_TYPE/VALUE` 措辞）。测试辅助（`Ran`/`verve`/`wait`）从 `tests/cli.rs` 挪到 `tests/common`。
+
+### 没完成
+
+- **`utilityProcess` 与 `process.parentPort`**：推迟。仓库里没有 `crates/verve-electron`、P02 的 Hub、P12 的 `MessagePortMain`（`transfer_port`/`adopt_port`），
+  `transfer` 非空的行为也无从依赖。要等 P02（isolate 与消息枢纽）和 P12 合并。`--test utility_process`、`cargo test -p verve-electron --test run_as_node` 因此未做；
+  `main_node` 的行为由根 crate 的 `tests/run_as_node.rs`（`harness = false`，自己充当 electron 二进制）覆盖。
+- **`electron` 二进制入口的 `ELECTRON_RUN_AS_NODE` 分支**：入口属于 P02，本包只提供 `verve::cli::main_node`。**fuse `runAsNode`** 未接（P40 未合并，也没有预留函数——没有调用者就不留）。
+- **与真 Node 的 IPC 互通**：Windows 的 `lpReserved2` 表按 libuv 格式写，json 线格式是 Node 的，理论上两个方向都通；但没有真 Node 可测，`--test child_process_node` 没写。
+  真 Node 当子进程时，IPC 子端我们建的是 overlapped 句柄，libuv 的 `uv_pipe_open` 会识别并走 IOCP——未验证。
+- **`sendHandle`**（按任务书不做）：抛 `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`。
+- **`stdio` 里的 `Stream`**：只支持 0–2 号 fd 与带 `fd` 属性的流；`fs.openSync` 得到的 fd 与已打开的 `net.Socket` 传给子进程未做（Verve 的 fd 表不是 OS fd）。
+  `spawnSync` 里 fd≥3 的 `pipe` 被当作 `ignore`。
+- **Review 修复**：`.bat`/`.cmd` 按请求的文件名与找到的路径双检（尾随点/空格，CVE-2024-36138）；env/args/argv0/shell/file 里的 NUL 拒绝；`disconnect` 先 `end()` 排空再关；等待句柄先注销再关进程句柄；Windows 信号只认 0/2/3/9/15（其余 `ENOSYS`）；全局 job object；`windowsHide` 仅在没有 inherit 时加 `CREATE_NO_WINDOW`；同步版本不再轮询；`spawn` 带 `'ipc'` 即设置 `NODE_CHANNEL_FD`；`main_node` 认 `--permission`、忽略未知 Node 选项、不解析 Verve 子命令。
+- **仍未做（review 的次要项）**：`child.kill()` 对已退出进程的 ESRCH/EPERM 不能同步得知（命令走 reactor，返回的是「进程还没报告退出」）；退出时不移除 `AbortSignal` 的监听；`pipes.rs` 的多个 bool 未改成枚举；`cli::parse`/`script` 未拆；Unix 子进程在 realm 被丢弃而未回收时会成为僵尸（长寿命多 realm 宿主需要进程级回收器，`pidfd_open` 为后续）；Windows 上 IPC 子端的 overlapped 假设（真 Node 父进程）未用 `FileModeInformation` 校验；`stdio:'inherit'` 在 index≥3 未支持。
+- **Unix 的退出检测**用 reactor 每圈（≤20 ms）`try_wait`，不是 `SIGCHLD` 自管道：全局信号处理函数与多 realm 分发在没有 Unix 机器可测的情况下风险大于收益，延迟 ≤20 ms。
+  Windows 是事件驱动的。
+- **`[Symbol.dispose]`**、`child.stdio` 里的 `overlapped` 区分、`process.on('SIGINT')`（任务书不做）。
+- 没做 release 体积测量（`scripts/size-report` 未跑）；新依赖为 0，只是 mio 开了 `os-ext`、windows-sys 加了 `Win32_System_Console`/`Win32_System_Pipes`。
+
+### 已知问题 / 发现
+
+- **Unix 代码没在真机跑过**：本机是 Windows。`unix.rs`/`launch.rs` 单独抽出来用 `--target x86_64-unknown-linux-gnu` 做过类型检查（整个 crate 在该 target 上因 `ring` 需要 C 工具链而无法检查），测试里的 unix 分支（`sh -c` 回显）没有运行。
+- 一个预先存在的流问题：`readable.once('data', fn)` 不会让 Verve 的流开始流动（`on('data')` 才会），所以子进程 `stdout.once('data')` 永远等不到。我没有改 `stream.rs`（超出本包）；测试里改用 `on`。
+- `fork()` 默认的 `execArgv` 是 `process.execArgv`；对 `verve run -e <source>` 它含 `-e <source>`，原样传下去子进程会重跑同一段脚本。Node 为此把 `-e`/`-p` 及其源码从继承的 `execArgv` 里去掉（靠 `process._eval`），我们照做（`cli::eval` 设置 `process._eval`），有不传 `execArgv` 的测试。第一版没做，测试时 fork 炸了一百多个进程。
+- Windows 上 `process.kill(pid)` 杀掉的子进程 `exit` 事件是 `(1, null)`（libuv 同），只有 `child.kill()` 会报信号名。
+
+### 给其他包的备注
+
+- **P02**：`electron` 入口读 `ELECTRON_RUN_AS_NODE` 后调 `verve::cli::main_node(std::env::args_os(), setup)`；`Permissions { child_process: true, .. }` 由 P10/P21 设置。
+  `utilityProcess` 需要 Hub 与端口转移，见上。
+- **P11（asar）**：`child_process` 要跑 asar 里的文件时需 `Runtime::materialize`；本包的 `spawn` 未接，`spec.file` 和 `cwd` 目前按原样交给系统。
+- **P40**：`runAsNode` fuse 在 `main_node` 的调用方判断即可。
+
+### 验收情况
+
+- 新增 `tests/child_process.rs`（18 个通过，1 个 `#[ignore]` 的 100 并发）、`tests/run_as_node.rs`（`harness = false`）、`src/child_process/{spec,ipc,windows}.rs` 的单元测试。
+- 覆盖：事件顺序、`ENOENT`、退出码与 `SIGKILL`、参数引号（空格/引号/反斜杠/`^&|`/`%`/`*`）、env/cwd/argv0、`shell: true`（Windows 的 `cmd`、Unix 的 `sh`）、`where`、`.bat` 的 `EINVAL` 与 shell 运行、
+  10 MiB 管道不丢字节、慢读者背压、`exec`/`promisify`/`maxBuffer`/`timeout`/`AbortSignal`、`spawnSync` 的 `input`/`ENOBUFS`/`ETIMEDOUT`、`execSync` 的 stderr、`fork` 的 json 与 advanced、`disconnect` 两侧、`process.kill`、未授权。
+- 既有的 `cli`、`permission`、`node`、`node_misc`、`embedder_hooks`、`network` 测试全过（`cli.rs` 里两处断言随语义改：`--allow-child-process` 不再是 9，受限进程的 `-A` 对照项删去）。
