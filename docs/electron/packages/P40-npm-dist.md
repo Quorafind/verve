@@ -102,7 +102,7 @@ version, LICENSE
 | builder/packager `electronLanguages` / `--prune` 语言 | 遍历 `locales/` 删除不需要的 `.pak` | 提供 `locales/en-US.pak` 占位；验证目录缺失时是否报错 |
 | builder `electronFuses` / forge `FusesPlugin`（`@electron/fuses`） | 在二进制中搜索 fuse 哨兵字符串 `dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX`，后跟版本字节和 fuse 线格式，原地翻转；找不到即报错 | 7：在二进制里放同格式的 fuse 段，并让启动器**读取并遵守**这些 fuse |
 | builder macOS：改 `Info.plist`、重命名 `Electron.app`、`MacOS/Electron`，处理 `Frameworks/Electron Helper*.app` 与 `Electron Framework.framework` | 若缺少 Helper 应用/Framework，重命名步骤可能报错 | 实测；若报错，提供**最小占位 Helper 应用**（只含 Info.plist 与一个退出码 0 的极小可执行文件），并在本文记录体积成本 |
-| builder/forge ASAR 完整性（`ElectronAsarIntegrity`：macOS 写 Info.plist，Windows 写 `INTEGRITY/ELECTRONASAR` 资源） | 启用 `EnableEmbeddedAsarIntegrityValidation` fuse 时运行时应校验 | 与 P11 协作：P11 读取并校验；本包保证资源段可写入 |
+| builder/forge ASAR 完整性（`ElectronAsarIntegrity`：macOS 写 Info.plist，Windows 写 `INTEGRITY/ELECTRONASAR` 资源） | 启用 `EnableEmbeddedAsarIntegrityValidation` fuse 时运行时应校验 | P10 读取资源并与 `Archive::header_hash()` 比对，文件摘要由 `verve-asar` 校验；本包保证资源段可写入 |
 | packager/forge 通过 `@electron/get` 下载 `electron-v{version}-{platform}-{arch}.zip` 并校验 `SHASUMS256.txt` | 文件名与校验文件格式必须与官方一致 | 8：Release 资产按官方命名，附 `SHASUMS256.txt` |
 | forge `packagerConfig.electronZipDir` | 目录内放上述命名的 zip，跳过下载 | 文档给出示例 |
 | `@electron/rebuild` 读取 Electron 版本下载 headers | 用 `39.2.0` 下载官方 headers | 无影响（v1 不支持原生模块，见 P50）；文档说明 |
@@ -127,7 +127,7 @@ version, LICENSE
 | `EnableCookieEncryption` | P16 的 cookie 落盘时用 safeStorage 加密 |
 | `EnableNodeOptionsEnvironmentVariable` | 关时忽略 `NODE_OPTIONS` |
 | `EnableNodeCliInspectArguments` | 关时 `--inspect*` 直接报错退出；开时按 P43 接受并警告 |
-| `EnableEmbeddedAsarIntegrityValidation` | 交给 P11 校验 |
+| `EnableEmbeddedAsarIntegrityValidation` | P10 比对头哈希，`verve-asar` 校验文件摘要 |
 | `OnlyLoadAppFromAsar` | 开时只从 `app.asar` 加载应用，不看 `resources/app/` |
 | `LoadBrowserProcessSpecificV8Snapshot`、`GrantFileProtocolExtraPrivileges` | 前者无意义，读取后忽略；后者交给 P16 的 `file://` 权限 |
 
@@ -152,7 +152,7 @@ ELECTRON_CUSTOM_DIR=electron-v{{ version }}
 2. 用 Verve 的 `electron.exe` 覆盖 `<App>.exe`（保留原名）；可选用 `rcedit` 把原 exe 的图标/版本信息拷过来。
 3. 保留 `resources/app.asar` 和 `resources/app.asar.unpacked/`；Chromium 的 dll/pak 可以留着（Verve 不读），也可删。
 4. 已知限制：`app.asar.unpacked` 里的 `.node` 原生模块在 v1 不可用（P50）；启用了 ASAR 完整性 fuse 的应用需要
-   Verve 读取原 exe 的完整性资源（P11），否则用 `--verve-skip-asar-integrity` 调试开关（P10 加，打印警告）。
+   Verve 读取原 exe 的完整性资源（P10），否则用 `--verve-skip-asar-integrity` 调试开关（P10 加，打印警告）。
 5. 回滚：恢复备份。
 
 ### 10. macOS 签名

@@ -19,7 +19,9 @@
   常量 `ELECTRON_VERSION = "39.2.0"`、`CHROME_VERSION`、`NODE_VERSION`。
 - `src/isolate.rs`：主进程跑在 `Isolate<MainGuest>` 里（P02）。
 - P02 的 `msg.rs`：`AppEvent`、`FromShell`、`ToShell::Quit`。
-- P11：打包形态的 `app.asar` 由 P11 的 overlay 提供；本包只负责**找到**应用目录/归档并把路径交给它。
+- P11：打包形态的 `app.asar` 由 `verve-asar` 的 `AsarOverlay` 提供；本包负责**找到**应用目录/归档，在主进程与每个渲染器的 runtime 上安装同一个 `Arc<AsarOverlay>`，
+  并决定 `AsarOptions`：`--verve-skip-asar-integrity` → `validate_integrity: false`；`on_integrity_failure` 里打印并终止进程（Electron 的 `LOG(FATAL)`）；
+  `ELECTRON_NO_ASAR` 非空且 `process.type` 既非 `browser` 也非 `renderer` 时 `disabled: true`。
 
 ## 接口契约
 
@@ -239,7 +241,7 @@ Verve 发行目录自己的 `resources`，P40 保证它存在，里面可以没�
 - **Electron Fuses**（P40）：二进制里必须带官方 fuse 哨兵串与线格式（`dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX` + 版本 + 各 fuse 字节），
   否则 electron-builder/forge 配了 `electronFuses` 会打包失败。`main` 一开始读取 fuse 字节并遵守：`RunAsNode`
   （关则忽略 `ELECTRON_RUN_AS_NODE`）、`EnableNodeCliInspectArguments`、`OnlyLoadAppFromAsar`、`EnableEmbeddedAsarIntegrityValidation`
-  （P11 实现校验）、`EnableNodeOptionsEnvironmentVariable`、`GrantFileProtocolExtraPrivileges`。哨兵串与字节布局以 `@electron/fuses` 源码为准。
+  （文件摘要由 `verve-asar` 校验；`ElectronAsarIntegrity` 与 `Archive::header_hash()` 的比对由本包做）、`EnableNodeOptionsEnvironmentVariable`、`GrantFileProtocolExtraPrivileges`。哨兵串与字节布局以 `@electron/fuses` 源码为准。
 - **保留的隐藏开关**：`--verve-dump-api`（P41：打印所有已注册的 Electron API 名后退出）、`--verve-skip-asar-integrity`（P40）、
   `--headless`（P00）；`--inspect`、`--inspect-brk`、`--remote-debugging-port` 等接受并打印一次警告（P43）。
 - **ABI 号**：`process.versions.modules` / `--abi` 现为 `136`，须对照 Electron 39 的 `NODE_MODULE_VERSION` 核实后修正（P50 依赖它）。

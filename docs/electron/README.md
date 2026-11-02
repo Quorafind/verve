@@ -84,7 +84,8 @@ electron.exe（crates/verve-electron 的 bin）
 ```
 crates/
   verve-dom/          已有：无头 DOM + CSS 层叠（P22–P25 补齐）
-  verve-electron/     新：Electron API、Hub、主进程/渲染器 Guest、启动器、asar
+  verve-asar/         新：app.asar 读取器与 `verve::vfs::Overlay` 实现（P11），只依赖 verve
+  verve-electron/     新：Electron API、Hub、主进程/渲染器 Guest、启动器（依赖 verve-asar）
     src/bin/electron.rs
   verve-layout/       新：布局引擎（taffy + 行内排版 + 层叠上下文 → DisplayList），不依赖 GPUI（P30/P31）
   verve-gpui/         新：GPUI Shell、DomView（回放 DisplayList）、TextMeasurer 的 GPUI 实现、输入桥接、菜单托盘
