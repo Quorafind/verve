@@ -129,7 +129,12 @@ impl Meta {
 
 /// What `path` is, following a link at its end when `follow` says so.
 pub(crate) fn stat(view: &View, path: &Path, follow: bool) -> io::Result<Meta> {
-    if let Some(found) = view.stat(path) {
+    let held = if follow {
+        view.stat(path)
+    } else {
+        view.lstat(path)
+    };
+    if let Some(found) = held {
         return found.map(Meta::Overlay);
     }
     let meta = if follow {

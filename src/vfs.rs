@@ -96,6 +96,12 @@ pub trait Overlay: Send + Sync {
     /// What `path` is, when it is this overlay's.
     fn stat(&self, path: &Path) -> Option<io::Result<Metadata>>;
 
+    /// What `path` is itself, a link at its end not followed — what `lstat` asks. An overlay
+    /// without links answers as [`Overlay::stat`] does.
+    fn lstat(&self, path: &Path) -> Option<io::Result<Metadata>> {
+        self.stat(path)
+    }
+
     /// The bytes of `path`, when it is this overlay's file.
     fn read(&self, path: &Path) -> Option<io::Result<Cow<'static, [u8]>>>;
 
@@ -199,6 +205,12 @@ impl View {
         let overlay = self.overlay.as_ref()?;
         let path = self.absolute(path)?;
         overlay.stat(&path)
+    }
+
+    pub(crate) fn lstat(&self, path: &Path) -> Option<io::Result<Metadata>> {
+        let overlay = self.overlay.as_ref()?;
+        let path = self.absolute(path)?;
+        overlay.lstat(&path)
     }
 
     pub(crate) fn read(&self, path: &Path) -> Option<io::Result<Cow<'static, [u8]>>> {
