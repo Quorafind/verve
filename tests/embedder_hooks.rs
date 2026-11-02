@@ -1,6 +1,7 @@
 //! The kernel's hooks for an embedder building Electron on it, a section for each: the structured
 //! clone that crosses threads, the process a realm says it is, the virtual filesystem `app.asar`
-//! is read through and the permission bit a child process needs.
+//! is read through, the permission bit a child process needs and the natives a host defines its
+//! own modules with.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -772,4 +773,45 @@ fn the_child_permission_bit_is_reported() {
     );
     // `-A` grants no child processes: running a program is not one of the grants.
     assert!(!Permissions::all().child_process);
+}
+
+#[test]
+fn an_embedder_can_build_an_event_emitter_class() {
+    let mut rt = realm();
+    let context = rt.context();
+    let events = verve::require(context, "events").unwrap();
+    let emitter = verve::native::get(&events, "EventEmitter", context).unwrap();
+    let emitter = emitter.as_object().expect("a class");
+    let (class, _prototype) = verve::native::class(
+        context,
+        verve::native::ClassSpec {
+            name: "Window",
+            parent: Some(&emitter),
+            init: |this, _, context| {
+                let events = verve::require(context, "events")?;
+                let emitter = verve::native::get(&events, "EventEmitter", context)?;
+                verve::call(context, &emitter, &this.clone().into(), &[])?;
+                verve::native::hidden(this, boa_engine::js_string!("id"), 1, context)
+            },
+            ..verve::native::ClassSpec::default()
+        },
+    )
+    .unwrap();
+    context
+        .register_global_property(boa_engine::js_string!("Window"), class, Default::default())
+        .unwrap();
+    rt.eval("var w = new Window(); var heard = []; w.on('ping', (a, b) => heard.push(a + b));")
+        .unwrap();
+    let window = rt.eval("w").unwrap();
+    verve::events::emit_event(
+        rt.context(),
+        &window,
+        "ping",
+        &[JsValue::from(1), JsValue::from(2)],
+    )
+    .unwrap();
+    let answer = rt
+        .eval("[w instanceof require('events').EventEmitter, heard.join(','), w.id].join('|')")
+        .unwrap();
+    assert_eq!(verve::print(&answer), "true|3|1");
 }
