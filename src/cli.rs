@@ -24,7 +24,7 @@
 //! file may be read or written, no worker started and no host reached unless a flag says so.
 //! The entry file itself may always be read — the one path a script needs to start — but not
 //! the folder it is in, so what it imports must be granted too. A `-e` script needs no grant.
-//! Child processes, native addons and WASI do not exist here, granted or not.
+//! Native addons and WASI do not exist here, granted or not.
 //!
 //! Flags come Deno's way with Node's spellings beside them, so a command line built for
 //! `node --permission` maps one to one:
@@ -36,6 +36,7 @@
 //! | `--allow-write[=a,b]`, `--allow-fs-write=<path>` (repeatable, `*` for all) | write |
 //! | `--allow-net[=host[:port],…]` | connect to those (alone: anything; and listen, and DNS) |
 //! | `--allow-worker` | start workers |
+//! | `--allow-child-process`, `--allow-run` | start programs with `child_process` (Node's and Deno's spellings) |
 //! | `--use-env-proxy` | `fetch`, `WebSocket` and the `http`/`https` global agents go through `HTTP_PROXY`/`HTTPS_PROXY`, minus `NO_PROXY` — also when `NODE_USE_ENV_PROXY=1` |
 //! | `--permission`, `--experimental-permission` | accepted: permissions are always on |
 //! | `-e`, `--eval <source>` | run `source` as `node -e` does (also `verve eval <source>`) |
@@ -83,7 +84,7 @@ const USAGE: &str = "usage: verve run [flags] <entry.js|.mjs|.cjs> [args...]
        verve --version
 
 flags: -A/--allow-all, --allow-read[=paths], --allow-fs-read=<path>, --allow-write[=paths],
-       --allow-fs-write=<path>, --allow-net[=hosts], --allow-worker, --permission,
+       --allow-fs-write=<path>, --allow-net[=hosts], --allow-worker, --allow-child-process, --permission,
        --use-env-proxy,
        --disable-proto=throw|delete, --stack-size=<KiB>, --no-warnings, --jitless,
        --code-cache=<dir>,
@@ -97,6 +98,7 @@ struct Options {
     write: Option<Vec<PathBuf>>,
     net: Option<Vec<NetworkRule>>,
     worker: bool,
+    child_process: bool,
     use_env_proxy: bool,
     stack_kib: Option<usize>,
     disable_proto: Option<Proto>,
@@ -234,6 +236,7 @@ fn parse(args: Vec<String>) -> Result<Command, String> {
                 }
             }
             "--allow-worker" => options.worker = true,
+            "--allow-child-process" | "--allow-run" => options.child_process = true,
             "--use-env-proxy" => options.use_env_proxy = true,
             "--permission" | "--experimental-permission" => {}
             "--no-warnings" => options.no_warnings = true,
@@ -266,9 +269,9 @@ fn parse(args: Vec<String>) -> Result<Command, String> {
                 });
             }
             "-e" | "--eval" => options.eval = Some(needs_value("--eval")?),
-            "--allow-child-process" | "--allow-addons" | "--allow-wasi" => {
+            "--allow-addons" | "--allow-wasi" => {
                 return Err(format!(
-                    "{flag}: Verve has no child processes, native addons or WASI to allow"
+                    "{flag}: Verve has no native addons or WASI to allow"
                 ));
             }
             _ => return Err(format!("unknown flag {arg}")),
@@ -333,7 +336,11 @@ fn net_rule(entry: &str) -> Result<NetworkRule, String> {
 /// The grants the options come to; `entry` may always be read.
 fn permissions(options: &Options, entry: Option<&Path>) -> Permissions {
     if options.all {
-        return Permissions::all();
+        // `-A` grants programs too, which `Permissions::all()` leaves to the embedder.
+        return Permissions {
+            child_process: true,
+            ..Permissions::all()
+        };
     }
     let mut permissions = Permissions::none();
     let fs = |grant: &Option<Vec<PathBuf>>, extra: Option<&Path>| match grant {
@@ -347,6 +354,7 @@ fn permissions(options: &Options, entry: Option<&Path>) -> Permissions {
     permissions.fs_read = fs(&options.read, entry);
     permissions.fs_write = fs(&options.write, None);
     permissions.worker = options.worker;
+    permissions.child_process = options.child_process;
     if let Some(rules) = &options.net {
         let any = rules.iter().any(|r| r.host.is_none() && r.port.is_none());
         permissions.outbound = rules.clone();
@@ -774,6 +782,7 @@ mod tests {
     fn unknown_flags_and_missing_scripts_are_errors() {
         assert!(parse(vec!["--frobnicate".into(), "x.js".into()]).is_err());
         assert!(parse(vec!["run".into()]).is_err());
-        assert!(parse(vec!["--allow-child-process".into(), "x.js".into()]).is_err());
+        assert!(parse(vec!["--allow-addons".into(), "x.js".into()]).is_err());
+        assert!(parse(vec!["--allow-child-process".into(), "x.js".into()]).is_ok());
     }
 }

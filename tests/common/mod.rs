@@ -2,8 +2,11 @@
 //! test's own, and reading the `result` a script left on its exports.
 
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use boa_engine::JsValue;
 use verve::Runtime;
@@ -104,4 +107,80 @@ pub fn result_of(rt: &mut Runtime, exports: JsValue) -> Vec<String> {
                 .unwrap_or_else(|| v.to_string())
         })
         .collect()
+}
+
+// ─── The binary, run as a process ───────────────────────────────────────────────────────────
+
+#[allow(dead_code)] // Not every test file uses every helper.
+pub const VERVE: &str = env!("CARGO_BIN_EXE_verve");
+
+#[allow(dead_code)] // Not every test file uses every helper.
+pub struct Ran {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    #[allow(dead_code)]
+    pub took: Duration,
+}
+
+#[allow(dead_code)] // Not every test file uses every helper.
+pub fn command(args: &[&str], cwd: &Path) -> Command {
+    let mut command = Command::new(VERVE);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+/// Runs `verve` with `args` in `cwd`, `input` on its standard input (closed after it), and
+/// waits for it — at most 60 seconds, after which it is killed and the test fails.
+#[allow(dead_code)] // Not every test file uses every helper.
+pub fn verve(args: &[&str], cwd: &Path, input: &[u8]) -> Ran {
+    let started = Instant::now();
+    let mut child = command(args, cwd).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    let ran = wait(child, started);
+    let _ = writer.join();
+    ran
+}
+
+#[allow(dead_code)] // Not every test file uses every helper.
+pub fn wait(mut child: Child, started: Instant) -> Ran {
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let out = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+    let err = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    let deadline = started + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("verve did not exit within 60 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let took = started.elapsed();
+    Ran {
+        code: status.code().unwrap_or(-1),
+        stdout: out.join().unwrap(),
+        stderr: err.join().unwrap(),
+        took,
+    }
 }

@@ -3,81 +3,11 @@
 //! flags, Node's spellings beside Deno's.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 mod common;
 
-use common::Dir;
-
-const VERVE: &str = env!("CARGO_BIN_EXE_verve");
-
-struct Ran {
-    code: i32,
-    stdout: String,
-    stderr: String,
-    took: Duration,
-}
-
-fn command(args: &[&str], cwd: &Path) -> Command {
-    let mut command = Command::new(VERVE);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command
-}
-
-/// Runs `verve` with `args` in `cwd`, `input` on its standard input (closed after it), and
-/// waits for it — at most 60 seconds, after which it is killed and the test fails.
-fn verve(args: &[&str], cwd: &Path, input: &[u8]) -> Ran {
-    let started = Instant::now();
-    let mut child = command(args, cwd).spawn().unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let input = input.to_vec();
-    let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(&input);
-    });
-    let ran = wait(child, started);
-    let _ = writer.join();
-    ran
-}
-
-fn wait(mut child: Child, started: Instant) -> Ran {
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    let out = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
-        text
-    });
-    let err = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        text
-    });
-    let deadline = started + Duration::from_secs(60);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            panic!("verve did not exit within 60 seconds");
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    let took = started.elapsed();
-    Ran {
-        code: status.code().unwrap_or(-1),
-        stdout: out.join().unwrap(),
-        stderr: err.join().unwrap(),
-        took,
-    }
-}
+use common::{Dir, Ran, VERVE, command, verve, wait};
 
 fn script(dir: &Dir, name: &str, source: &str, flags: &[&str], args: &[&str]) -> Ran {
     let path = dir.file(name, source);
@@ -650,7 +580,11 @@ fn no_warnings_and_the_flags_with_nothing_to_change() {
         ],
     );
     assert_eq!((accepted.code, accepted.stdout.as_str()), (0, "fine\n"));
-    assert_eq!(eval("0", &["--allow-child-process"]).code, 9);
+    // Programs are a grant of their own, in Node's spelling and Deno's; addons and WASI are not.
+    for flag in ["--allow-child-process", "--allow-run"] {
+        assert_eq!(eval("0", &[flag]).code, 0, "{flag}");
+    }
+    assert_eq!(eval("0", &["--allow-addons"]).code, 9);
 }
 
 #[test]
@@ -670,12 +604,6 @@ fn a_confined_process_is_refused_programs_as_node_refuses_them() {
         "{}",
         confined.stderr
     );
-    // Unconfined, there are still no programs to start: Verve has none.
-    let open = eval(
-        "try { require('child_process').execSync('x'); } catch (e) { console.log(e.code); }",
-        &["-A"],
-    );
-    assert_eq!(open.stdout, "ENOSYS\n", "{}", open.stderr);
 }
 
 #[cfg(windows)]

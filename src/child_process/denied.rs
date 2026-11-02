@@ -93,6 +93,34 @@ pub(super) fn refused(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     Ok(child.into())
 }
 
+/// `execSync` and `execFileSync`: an error thrown, as a program that could not start throws.
+pub(super) fn run_sync(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    crate::permission::child_process(context)?;
+    Err(boa_engine::JsError::from_opaque(spawn_error(
+        context,
+        "spawnSync",
+        &arg(args, 0),
+    )))
+}
+
+/// `spawnSync`: as Node answers a program that could not start — no output, no status, the error.
+pub(super) fn spawn_sync(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    crate::permission::child_process(context)?;
+    let result = object(context);
+    let error = spawn_error(context, "spawnSync", &arg(args, 0));
+    for key in ["output", "stdout", "stderr", "status", "signal"] {
+        result.set(JsString::from(key), JsValue::null(), false, context)?;
+    }
+    result.set(js_string!("pid"), 0, false, context)?;
+    result.set(js_string!("error"), error, false, context)?;
+    Ok(result.into())
+}
+
+/// The `ChildProcess` class of a realm that may start nothing.
 pub(super) fn module(context: &mut Context) -> JsResult<JsValue> {
     let module = object(context);
     let emitter = emitter_class(context)?;
@@ -122,34 +150,9 @@ pub(super) fn module(context: &mut Context) -> JsResult<JsValue> {
         context,
         &module,
         &[
-            ("execSync", 2, |_, args, cx| {
-                crate::permission::child_process(cx)?;
-                Err(boa_engine::JsError::from_opaque(spawn_error(
-                    cx,
-                    "spawnSync",
-                    &arg(args, 0),
-                )))
-            }),
-            ("execFileSync", 3, |_, args, cx| {
-                crate::permission::child_process(cx)?;
-                Err(boa_engine::JsError::from_opaque(spawn_error(
-                    cx,
-                    "spawnSync",
-                    &arg(args, 0),
-                )))
-            }),
-            ("spawnSync", 3, |_, args, cx| {
-                crate::permission::child_process(cx)?;
-                // As Node answers a program that could not start: no output, no status, the error.
-                let result = object(cx);
-                let error = spawn_error(cx, "spawnSync", &arg(args, 0));
-                for key in ["output", "stdout", "stderr", "status", "signal"] {
-                    result.set(JsString::from(key), JsValue::null(), false, cx)?;
-                }
-                result.set(js_string!("pid"), 0, false, cx)?;
-                result.set(js_string!("error"), error, false, cx)?;
-                Ok(result.into())
-            }),
+            ("execSync", 2, run_sync),
+            ("execFileSync", 3, run_sync),
+            ("spawnSync", 3, spawn_sync),
         ],
     )?;
     Ok(module.into())
