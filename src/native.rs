@@ -69,6 +69,71 @@ pub fn coded_error_value(context: &mut Context, message: &str, code: &str) -> Js
         .unwrap_or_default()
 }
 
+/// Node's `ERR_INVALID_ARG_TYPE`: a `TypeError` saying `name` must be `expected` and what it
+/// was instead, as `The "file" argument must be of type string. Received undefined`.
+pub fn invalid_arg_type(
+    context: &mut Context,
+    name: &str,
+    expected: &str,
+    value: &JsValue,
+) -> JsError {
+    let kind = if name.contains('.') {
+        "property"
+    } else {
+        "argument"
+    };
+    let message = format!(
+        "The \"{name}\" {kind} must be {expected}. Received {}",
+        received(value, context)
+    );
+    crate::events::coded_type_error(context, &message, "ERR_INVALID_ARG_TYPE")
+}
+
+/// Node's `ERR_INVALID_ARG_VALUE`: a `TypeError` for a `name` of the right type but a value
+/// that will not do, `reason` saying why: `The argument 'file' cannot be empty. Received ''`.
+pub fn invalid_arg_value(
+    context: &mut Context,
+    name: &str,
+    value: &JsValue,
+    reason: &str,
+) -> JsError {
+    let shown = match value.to_string(context) {
+        Ok(text) if !value.is_object() => format!("'{}'", text.to_std_string_escaped()),
+        _ => received(value, context),
+    };
+    let message = format!("The argument '{name}' {reason}. Received {shown}");
+    crate::events::coded_type_error(context, &message, "ERR_INVALID_ARG_VALUE")
+}
+
+/// How Node's argument errors name what they were given.
+pub(crate) fn received(value: &JsValue, context: &mut Context) -> String {
+    if value.is_null_or_undefined() {
+        return crate::print(value);
+    }
+    if value.is_callable() {
+        return "function".into();
+    }
+    if let Some(object) = value.as_object() {
+        let constructor = object.get(js_string!("constructor"), context).ok();
+        let name = get(
+            constructor.as_ref().unwrap_or(&JsValue::undefined()),
+            "name",
+            context,
+        )
+        .map(|n| crate::print(&n))
+        .unwrap_or_default();
+        return if name.is_empty() {
+            "an instance of Object".into()
+        } else {
+            format!("an instance of {name}")
+        };
+    }
+    if value.is_string() {
+        return format!("type string ('{}')", crate::print(value));
+    }
+    format!("type {} ({})", value.type_of(), crate::print(value))
+}
+
 /// A new empty object on `Object.prototype`.
 pub fn object(context: &mut Context) -> JsObject {
     JsObject::with_object_proto(context.intrinsics())
