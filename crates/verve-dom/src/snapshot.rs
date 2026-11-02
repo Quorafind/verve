@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::canvas;
-use crate::css::Computed;
+use crate::css::{Computed, PseudoBox, PseudoElement};
 use crate::dom::{Dom, NodeId};
 use crate::media::MediaState;
 
@@ -29,6 +29,10 @@ pub struct SnapshotData {
     pub canvases: HashMap<NodeId, canvas::CanvasFrame>,
     /// Each image the page has bytes for, by resolved address, for the drawer to decode.
     pub images: HashMap<String, canvas::ImageBytes>,
+    /// The generated boxes — an element's `::before`, `::after` — and the styles of the parts
+    /// that are no boxes of their own: `::placeholder`, `::selection`, a scrollbar's thumb.
+    /// They are not in the DOM, as in a browser.
+    pub pseudo: Arc<HashMap<(NodeId, PseudoElement), PseudoBox>>,
 }
 
 impl std::ops::Deref for Snapshot {

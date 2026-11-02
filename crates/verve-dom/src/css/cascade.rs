@@ -3,10 +3,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::boxes::Boxes;
 use super::calc::{length, length_calc, math_text};
 use super::color::color_text;
 use super::layer::{History, Place};
 use super::media::Environment;
+use super::pseudo::{PseudoBox, PseudoElement};
 use super::scope::matched_rules;
 use super::selector::MatchCache;
 use super::sheet::Declaration;
@@ -83,6 +85,8 @@ pub struct Computed {
     /// The nodes a `:hover` or `:active` rule would change: the ones a drawer follows the
     /// pointer on.
     pointer: HashSet<NodeId>,
+    /// The boxes of the pseudo-elements.
+    boxes: Boxes,
 }
 
 impl Computed {
@@ -94,6 +98,7 @@ impl Computed {
             .map(String::as_str)
     }
 
+    /// The node's style, if it has been worked out.
     pub fn style(&self, node: NodeId) -> Option<&Style> {
         self.styles.get(&node).map(|style| &**style)
     }
@@ -108,10 +113,23 @@ impl Computed {
         self.pointer.contains(&node)
     }
 
+    /// The generated boxes (an element's `::before`, `::after`) and the styles of the parts
+    /// that are no boxes of their own, by the element and the part. They are not nodes.
+    pub(crate) fn pseudo(&self) -> &Arc<HashMap<(NodeId, PseudoElement), PseudoBox>> {
+        self.boxes.all()
+    }
+
+    /// The nodes whose pseudo-element boxes changed since this was last asked, which look
+    /// different though their own style may not.
+    pub(crate) fn take_pseudo_changes(&mut self) -> Vec<NodeId> {
+        self.boxes.take_changed()
+    }
+
     /// Cascades `styler` onto every node in the document.
     pub fn cascade(dom: &Dom, styler: &Styler) -> Self {
         let mut out = Computed::default();
         out.subtree(dom, styler, dom.document, &Style::new());
+        out.boxes.count(dom, &out.styles);
         out
     }
 
@@ -123,8 +141,11 @@ impl Computed {
         if self.key != Some(key) {
             self.styles.clear();
             self.pointer.clear();
+            self.boxes.clear();
             self.key = Some(key);
-            return self.subtree(dom, styler, dom.document, &Style::new());
+            let count = self.subtree(dom, styler, dom.document, &Style::new());
+            self.boxes.count(dom, &self.styles);
+            return count;
         }
         let mut roots: Vec<NodeId> = Vec::new();
         for id in changed {
@@ -154,6 +175,7 @@ impl Computed {
                 .unwrap_or_default();
             count += self.subtree(dom, styler, root, &inherited);
         }
+        self.boxes.count(dom, &self.styles);
         count
     }
 
@@ -168,6 +190,7 @@ impl Computed {
             self.styles.remove(id);
             self.pointer.remove(id);
         }
+        self.boxes.forget(ids);
     }
 
     fn subtree(&mut self, dom: &Dom, styler: &Styler, root: NodeId, inherited: &Style) -> usize {
@@ -180,9 +203,20 @@ impl Computed {
             .unwrap_or(ROOT_FONT_SIZE);
         let mut walk = Walk::new(dom, styler, root_font_size);
         while let Some((id, inherited)) = stack.pop() {
-            let (style, pointer) = walk.style(id, &inherited);
+            let Styled {
+                style,
+                pointer,
+                mut parts,
+            } = walk.styled(id, &inherited, Parts::Matching);
             for child in dom.flat_children(id) {
                 stack.push((child, style.clone()));
+            }
+            // What is not rendered has no boxes.
+            let rendered = style.get("display").is_none_or(|display| display != "none");
+            for part in &styler.parts {
+                let found = parts.iter().position(|(found, _)| found == part);
+                let made = found.filter(|_| rendered).map(|at| parts.swap_remove(at).1);
+                self.boxes.set(dom, id, *part, made);
             }
             self.styles.insert(id, Arc::new(style));
             if pointer {
@@ -199,18 +233,40 @@ impl Computed {
 /// The style of one node, worked out along its ancestors from the root: what
 /// `getComputedStyle` answers in the middle of a turn, before the document is cascaded again.
 pub fn style_of(dom: &Dom, styler: &Styler, id: NodeId) -> Style {
+    style_along(dom, styler, id, Parts::No).0
+}
+
+/// [`style_of`] for one of the element's parts: `::before`'s style, which inherits from the
+/// element and is set by the rules written `::before` — what `getComputedStyle(el, '::before')`
+/// answers, whether or not the part has a box.
+pub(crate) fn style_of_part(dom: &Dom, styler: &Styler, id: NodeId, part: PseudoElement) -> Style {
+    style_along(dom, styler, id, Parts::Only(part)).1
+}
+
+/// The style of `id` and of the `wanted` part of it, worked out down from the root.
+fn style_along(dom: &Dom, styler: &Styler, id: NodeId, wanted: Parts) -> (Style, Style) {
     let mut chain = vec![id];
     let mut at = dom.flat_parent(id);
     while let Some(node) = at {
         chain.push(node);
         at = dom.flat_parent(node);
     }
-    let mut style = Style::new();
     let mut walk = Walk::new(dom, styler, ROOT_FONT_SIZE);
+    let mut style = Style::new();
+    let mut part = Style::new();
     for node in chain.into_iter().rev() {
-        style = walk.style(node, &style).0;
+        // Only the element itself has a part the caller asked about.
+        let wanted = if node == id { wanted } else { Parts::No };
+        let styled = walk.styled(node, &style, wanted);
+        style = styled.style;
+        part = styled
+            .parts
+            .into_iter()
+            .next()
+            .map(|(_, part)| part)
+            .unwrap_or_default();
     }
-    style
+    (style, part)
 }
 
 /// Where a declaration ranks in the cascade, lowest first: its precedence, then the layer it
@@ -254,6 +310,47 @@ struct Walk<'a> {
     /// The root element's font size, which `rem` is measured against; sixteen until the root
     /// is styled.
     root_font_size: f32,
+    /// What values came to, kept for the pass: a page says the same few hundred values over and
+    /// over, and working one out is a parse.
+    memo: Memo,
+}
+
+/// The computed text of colors and math functions already worked out in a pass.
+#[derive(Default)]
+struct Memo {
+    colors: HashMap<String, Option<String>>,
+    /// By value, font size and root font size (their bits, as `f32` is no key).
+    math: HashMap<(String, u32, u32), Option<String>>,
+}
+
+/// What the cascade makes of a node: its style, whether the pointer being on it would make
+/// another rule apply, and the styles of those of its parts that are pseudo-elements.
+struct Styled {
+    style: Style,
+    pointer: bool,
+    parts: Vec<(PseudoElement, Style)>,
+}
+
+/// Which parts of an element are worked out beside it.
+#[derive(Clone, Copy)]
+enum Parts {
+    /// None: the style of an ancestor, or of a text node.
+    No,
+    /// Those that rules are written for and the element can have: what a drawer is given.
+    Matching,
+    /// This one, whatever the rules say: what `getComputedStyle(element, '::before')` answers.
+    Only(PseudoElement),
+}
+
+/// What differs between the styles of the things a walk works out.
+#[derive(Clone, Copy, Default)]
+struct Cascading {
+    /// It is the root element, whose `rem` is the initial font size.
+    root: bool,
+    /// It has the `hidden` attribute, which is the user agent's `display: none`.
+    hidden: bool,
+    /// Some declaration of it says `revert-layer`.
+    revert: bool,
 }
 
 impl<'a> Walk<'a> {
@@ -263,20 +360,18 @@ impl<'a> Walk<'a> {
             styler,
             cache: MatchCache::default(),
             root_font_size,
+            memo: Memo::default(),
         }
     }
 
-    /// The style of one node from what it `inherited`, and whether the pointer being on it
-    /// would make another rule apply.
-    fn style(&mut self, id: NodeId, inherited: &Style) -> (Style, bool) {
-        let mut style = Style::new();
-        for (key, value) in inherited {
-            if is_inherited(key) {
-                style.insert(key.clone(), value.clone());
-            }
-        }
+    /// The style of one node from what it `inherited`, with those of its `wanted` parts.
+    fn styled(&mut self, id: NodeId, inherited: &Style, wanted: Parts) -> Styled {
         let Some(node) = self.dom.get(id).filter(|node| node.is_element()) else {
-            return (style, false);
+            return Styled {
+                style: inheritable(inherited),
+                pointer: false,
+                parts: Vec::new(),
+            };
         };
         let inline: Vec<Declaration> = node
             .style
@@ -287,48 +382,100 @@ impl<'a> Walk<'a> {
                 important: node.important.contains(name),
             })
             .collect();
-        let (matched, pointer) =
-            matched_declarations(self.dom, self.styler, id, &inline, &mut self.cache);
+        let styler = self.styler;
+        let mut matched = matched_rules(self.dom, styler, id, &mut self.cache);
+        matched.element.extend(
+            inline
+                .iter()
+                .map(|declaration| (Rank::inline(declaration.important), declaration)),
+        );
+        matched.element.sort_by_key(|a| a.0);
+        let root = id == self.dom.html;
+        let cascading = Cascading {
+            root,
+            hidden: node.attr("hidden").is_some() && node.namespace == Namespace::Html,
+            revert: styler.revert_layer || inline.iter().any(says_revert_layer),
+        };
+        let (style, font_size) = self.compute(matched.element, inherited, cascading);
+        if root {
+            self.root_font_size = font_size;
+        }
+        let mut parts = Vec::new();
+        for (part, mut declarations) in matched.parts {
+            let wanted = match wanted {
+                Parts::No => false,
+                // A reset like `*, ::before, ::after { box-sizing: border-box }` is about every
+                // element, but a generated box with no `content` is no box.
+                Parts::Matching => {
+                    let generated = matches!(part, PseudoElement::Before | PseudoElement::After);
+                    part.is_part_of(node, &style)
+                        && (!generated || declarations.iter().any(|(_, d)| d.name == "content"))
+                }
+                Parts::Only(only) => part == only,
+            };
+            if wanted {
+                declarations.sort_by_key(|a| a.0);
+                parts.push((part, self.part_style(declarations, &style)));
+            }
+        }
+        if let Parts::Only(only) = wanted
+            && parts.is_empty()
+        {
+            parts.push((only, self.part_style(Vec::new(), &style)));
+        }
+        Styled {
+            style,
+            pointer: matched.pointer,
+            parts,
+        }
+    }
+
+    /// The style of a part of an element, which inherits from the element and is set by the
+    /// rules written for the part.
+    fn part_style(&mut self, declarations: Vec<(Rank, &Declaration)>, element: &Style) -> Style {
+        let cascading = Cascading {
+            revert: self.styler.revert_layer,
+            ..Cascading::default()
+        };
+        self.compute(declarations, element, cascading).0
+    }
+
+    /// The style `matched`, lowest rank first, makes over what is `inherited`, with the size of
+    /// its font in pixels.
+    fn compute(
+        &mut self,
+        matched: Vec<(Rank, &Declaration)>,
+        inherited: &Style,
+        cascading: Cascading,
+    ) -> (Style, f32) {
+        let mut style = inheritable(inherited);
         // `hidden` is the user agent's `display: none`, under any author rule.
-        if node.attr("hidden").is_some() && node.namespace == Namespace::Html {
+        if cascading.hidden {
             style.insert("display".into(), "none".into());
         }
-        let revert = self.styler.revert_layer || inline.iter().any(says_revert_layer);
-        let font = apply(&mut style, matched, inherited, revert);
+        let font = apply(&mut style, matched, inherited, cascading.revert);
         resolve_variables(&mut style, inherited);
-        normalize_colors(&mut style);
+        normalize_colors(&mut style, &mut self.memo.colors);
         font.open(&mut style);
-        // `rem` on the root element is the initial font size, not its own.
-        let root = if id == self.dom.html {
+        let root = if cascading.root {
             ROOT_FONT_SIZE
         } else {
             self.root_font_size
         };
-        let font_size = compute_font_size(&mut style, inherited, root, self.styler.environment());
-        compute_math(&mut style, font_size, root, self.styler.environment());
-        if id == self.dom.html {
-            self.root_font_size = font_size;
-        }
-        (style, pointer)
+        let env = self.styler.environment();
+        let font_size = compute_font_size(&mut style, inherited, root, env);
+        compute_math(&mut style, (font_size, root), env, &mut self.memo.math);
+        (style, font_size)
     }
 }
 
-/// The declarations that apply to `id`, the rules' and its `inline` style's, lowest rank first.
-fn matched_declarations<'a>(
-    dom: &Dom,
-    styler: &'a Styler,
-    id: NodeId,
-    inline: &'a [Declaration],
-    cache: &mut MatchCache,
-) -> (Vec<(Rank, &'a Declaration)>, bool) {
-    let (mut matched, pointer) = matched_rules(dom, styler, id, cache);
-    matched.extend(
-        inline
-            .iter()
-            .map(|declaration| (Rank::inline(declaration.important), declaration)),
-    );
-    matched.sort_by_key(|a| a.0);
-    (matched, pointer)
+/// The properties of a parent a child takes unless something says otherwise.
+fn inheritable(parent: &Style) -> Style {
+    parent
+        .iter()
+        .filter(|(key, _)| is_inherited(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 /// Whether a declaration's value is the keyword `revert-layer`.
@@ -466,12 +613,25 @@ fn is_color_property(property: &str) -> bool {
 
 /// A color is computed to the sRGB it comes to, as `getComputedStyle` answers it, except for
 /// those of the newer spaces, which keep the text and the space they were written in.
-fn normalize_colors(style: &mut Style) {
+fn normalize_colors(style: &mut Style, memo: &mut HashMap<String, Option<String>>) {
     for (property, value) in style.iter_mut() {
         if is_color_property(property)
-            && let Some(text) = color_text(value)
+            && let Some(text) = memo
+                .entry(value.clone())
+                .or_insert_with_key(|value| color_text(value))
         {
-            *value = text;
+            value.clone_from(text);
+        }
+    }
+    // `currentcolor` in any other color property computes to the element's own color, as
+    // Chrome answers it.
+    let current = style
+        .get("color")
+        .cloned()
+        .unwrap_or_else(|| "rgb(0, 0, 0)".to_owned());
+    for (property, value) in style.iter_mut() {
+        if property.ends_with("-color") && value.eq_ignore_ascii_case("currentcolor") {
+            value.clone_from(&current);
         }
     }
 }
@@ -511,12 +671,22 @@ fn compute_font_size(style: &mut Style, inherited: &Style, root: f32, env: &Envi
 /// A value that is a mathematical function is computed: what is all absolute folds into
 /// pixels, what has a percentage in it keeps a `calc()` for the drawer to resolve against its
 /// basis.
-fn compute_math(style: &mut Style, font_size: f32, root: f32, env: &Environment) {
+fn compute_math(
+    style: &mut Style,
+    (font_size, root): (f32, f32),
+    env: &Environment,
+    memo: &mut HashMap<(String, u32, u32), Option<String>>,
+) {
     for (property, value) in style.iter_mut() {
-        if !property.starts_with("--")
-            && let Some(text) = math_text(value, font_size, root, env)
+        if property.starts_with("--") || !value.contains('(') {
+            continue;
+        }
+        let key = (value.clone(), font_size.to_bits(), root.to_bits());
+        if let Some(text) = memo
+            .entry(key)
+            .or_insert_with_key(|(value, ..)| math_text(value, font_size, root, env))
         {
-            *value = text;
+            value.clone_from(text);
         }
     }
 }

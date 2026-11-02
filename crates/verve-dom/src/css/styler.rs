@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use super::cascade::{Origin, says_revert_layer};
 use super::layer::LayerOrder;
 use super::media::Environment;
+use super::pseudo::PseudoElement;
 use super::scope::{Reach, ScopeIndex};
 use super::sheet::{Rule, Sheet};
 use crate::dom::{Dom, NodeId};
@@ -46,6 +47,10 @@ pub struct Styler {
     pub(super) layers: u32,
     /// Whether any declaration says `revert-layer`: the history it needs is kept only then.
     pub(super) revert_layer: bool,
+    /// The parts of elements the rules are about — `::before`, `::-webkit-scrollbar-thumb` —
+    /// which are worked out beside each element. A page that says nothing about them pays
+    /// nothing for them.
+    pub(super) parts: Vec<PseudoElement>,
 }
 
 impl Styler {
@@ -84,6 +89,11 @@ impl Styler {
                 .entry(selector.key())
                 .or_default()
                 .push((index, k));
+            if let Some(part) = selector.pseudo_element()
+                && !self.parts.contains(&part)
+            {
+                self.parts.push(part);
+            }
             let reach = selector.subject().reach;
             own |= reach == Reach::Own;
             self.scope.add(tree, (index, k), reach);

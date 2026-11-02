@@ -93,6 +93,7 @@ pub(super) fn decimal(value: f32) -> String {
         format!("{rounded}")
     }
 }
+
 /// Where the `)` closing the `(` at `open` is.
 pub(super) fn matching_parenthesis(text: &str, open: usize) -> Option<usize> {
     let mut depth = 0;
@@ -109,4 +110,40 @@ pub(super) fn matching_parenthesis(text: &str, open: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// A quoted string with its escapes read: `"\f101"` is the character of that code point, and
+/// `"\n"` is an `n`. `None` for text that is not quoted.
+pub(super) fn unquote(text: &str) -> Option<String> {
+    let text = text.trim();
+    let quote = text.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    let inner = text.strip_prefix(quote)?.strip_suffix(quote)?;
+    let mut out = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let mut hex = String::new();
+        while hex.len() < 6 {
+            match chars.next_if(char::is_ascii_hexdigit) {
+                Some(digit) => hex.push(digit),
+                None => break,
+            }
+        }
+        if hex.is_empty() {
+            out.extend(chars.next());
+            continue;
+        }
+        // One white space ends a hex escape.
+        chars.next_if(|c| c.is_whitespace());
+        out.push(
+            u32::from_str_radix(&hex, 16)
+                .ok()
+                .and_then(char::from_u32)
+                .unwrap_or('\u{fffd}'),
+        );
+    }
+    Some(out)
 }

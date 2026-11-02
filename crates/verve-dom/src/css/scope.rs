@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use super::cascade::{Precedence, Rank};
 use super::layer;
+use super::pseudo::PseudoElement;
 use super::selector::{
     Compound, MatchCache, MatchContext, Parser, Pseudo, Selector, SelectorError, SelectorList,
 };
@@ -207,15 +208,19 @@ impl Parser<'_> {
         })
     }
 
-    /// What follows `::` in a compound: `::part(name)` and `::slotted(selectors)` are kept, any
-    /// other pseudo-element makes a compound that matches no element.
+    /// What follows `::` in a compound: `::part(name)` and `::slotted(selectors)` are kept, a
+    /// pseudo-element with a part of its own (`::before`) is the part the compound is about,
+    /// and any other makes a compound that matches no element.
     pub(super) fn pseudo_element(&mut self, out: &mut Compound) -> Result<(), SelectorError> {
         let name = self
             .ident()
             .ok_or_else(|| self.error())?
             .to_ascii_lowercase();
         if self.peek() != Some('(') {
-            out.element = true;
+            match PseudoElement::from_name(&name) {
+                Some(part) => out.element = Some(part),
+                None => out.foreign = true,
+            }
             return Ok(());
         }
         match name.as_str() {
@@ -236,23 +241,48 @@ impl Parser<'_> {
             }
             _ => {
                 self.skip_arguments()?;
-                out.element = true;
+                out.foreign = true;
             }
         }
         Ok(())
     }
 }
 
-/// The declarations of the rules that match `id`, each with its rank, and whether the pointer
-/// being on it would make another rule match.
+/// What the rules say about an element and the parts of it that are pseudo-elements, and
+/// whether the pointer being on it would make another rule match.
+#[derive(Default)]
+pub(super) struct Matched<'a> {
+    /// The declarations that apply to the element itself, each with its rank.
+    pub(super) element: Vec<(Rank, &'a Declaration)>,
+    /// The declarations of the rules written for a part of it, by part.
+    pub(super) parts: Vec<(PseudoElement, Vec<(Rank, &'a Declaration)>)>,
+    pub(super) pointer: bool,
+}
+
+impl<'a> Matched<'a> {
+    /// The declarations for `part`, in the order they are met.
+    fn part(&mut self, part: PseudoElement) -> &mut Vec<(Rank, &'a Declaration)> {
+        let at = self
+            .parts
+            .iter()
+            .position(|(found, _)| *found == part)
+            .unwrap_or_else(|| {
+                self.parts.push((part, Vec::new()));
+                self.parts.len() - 1
+            });
+        &mut self.parts[at].1
+    }
+}
+
+/// The declarations of the rules that match `id`, with those written for a part of it kept
+/// apart.
 pub(super) fn matched_rules<'a>(
     dom: &Dom,
     styler: &'a Styler,
     id: NodeId,
     cache: &mut MatchCache,
-) -> (Vec<(Rank, &'a Declaration)>, bool) {
-    let mut matched = Vec::new();
-    let mut pointer = false;
+) -> Matched<'a> {
+    let mut matched = Matched::default();
     let matching = MatchContext::default();
     let tree = dom.root_of(id);
     for (index, k) in styler.candidates(dom, id, tree) {
@@ -263,6 +293,10 @@ pub(super) fn matched_rules<'a>(
             // The tree a declaration comes from decides between it and one from another tree.
             let inner = matches!(selector.subject().reach, Reach::Host | Reach::Slotted)
                 && entry.tree != tree;
+            let declarations = match selector.pseudo_element() {
+                Some(part) => matched.part(part),
+                None => &mut matched.element,
+            };
             for declaration in &entry.rule.declarations {
                 let rank = Rank {
                     precedence: Precedence::of(declaration.important, entry.origin, inner),
@@ -270,16 +304,16 @@ pub(super) fn matched_rules<'a>(
                     specificity,
                     order: entry.order,
                 };
-                matched.push((rank, declaration));
+                declarations.push((rank, declaration));
             }
-        } else if entry.rule.pointer && !pointer {
+        } else if entry.rule.pointer && !matched.pointer {
             // Would the pointer on it make this rule apply?
             let probe = MatchContext {
                 scope: None,
                 hover_probe: Some(id),
             };
-            pointer = selector.matches_with(dom, id, &probe);
+            matched.pointer = selector.matches_with(dom, id, &probe);
         }
     }
-    (matched, pointer)
+    matched
 }

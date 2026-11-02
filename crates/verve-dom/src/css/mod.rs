@@ -7,9 +7,10 @@
 //! subsequent-sibling combinators, `:not()`, `:is()`, `:where()`, `:has()`, the structural
 //! pseudo-classes (`:nth-child(2n+1 of S)` and its family), and the state ones — `:hover` and
 //! `:active` from the pointer, `:focus`, `:focus-within`, `:checked`, `:disabled`… A
-//! pseudo-element (`::before`) parses and matches no element. One that does not parse is
-//! `querySelector`'s `SyntaxError`, and a stylesheet's rule that has one is dropped, as a
-//! browser drops it.
+//! pseudo-element (`::before`) is the part of an element a rule is about, styled beside the
+//! element and given to the drawer as a [`PseudoBox`]; it matches no element to a query. One
+//! that does not parse is `querySelector`'s `SyntaxError`, and a stylesheet's rule that has one
+//! is dropped, as a browser drops it.
 //!
 //! The cascade is origin, importance, `@layer`, specificity and order; the inline style wins
 //! over every rule of its importance; the inherited properties come down from the parent;
@@ -25,11 +26,14 @@
 //! Lifted from su-editor's Obsidian host (its cascade, `var()` and incremental restyle) with a
 //! selector engine of its own.
 
+mod boxes;
 mod calc;
 mod cascade;
 mod color;
+mod counters;
 mod layer;
 mod media;
+mod pseudo;
 mod scope;
 mod selector;
 mod sheet;
@@ -38,9 +42,11 @@ mod syntax;
 mod values;
 
 pub use calc::{LengthCalc, length, length_calc};
+pub(crate) use cascade::style_of_part;
 pub use cascade::{Computed, Origin, Style, style_of};
 pub use color::{color, color_with};
 pub use media::{Environment, MediaQuery};
+pub use pseudo::{ContentItem, PseudoBox, PseudoElement, ScrollbarPart};
 pub use selector::{MatchContext, Selector, SelectorError, SelectorList};
 pub use sheet::{Declaration, Sheet, declarations, split_rules};
 pub use styler::Styler;

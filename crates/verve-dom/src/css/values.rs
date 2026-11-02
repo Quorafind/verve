@@ -1,4 +1,4 @@
-//! Property values: shorthands opened up, `var()`, the initial values, lengths and colours.
+//! Property values: shorthands opened up, `var()`, the initial values, the user agent's sheet.
 
 use std::collections::{HashMap, HashSet};
 

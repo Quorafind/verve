@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::pseudo::PseudoElement;
 use super::scope::{Aside, Reach};
 use super::styler::RuleKey;
 use crate::dom::{Dom, Namespace, NodeId, NodeKind};
@@ -38,8 +39,12 @@ pub(super) struct Compound {
     classes: Vec<String>,
     attrs: Vec<AttrSelector>,
     pub(super) pseudo: Vec<Pseudo>,
-    /// `::before` and the rest: matches no element.
-    pub(super) element: bool,
+    /// `::before` and the rest: the part of the element the compound is about, which it
+    /// otherwise matches as it would the element.
+    pub(super) element: Option<PseudoElement>,
+    /// A pseudo-element this engine has no part for (`::file-selector-button`): matches no
+    /// element.
+    pub(super) foreign: bool,
     /// How far the subject reaches beyond its own tree, worked out once when it is parsed.
     pub(super) reach: Reach,
 }
@@ -164,9 +169,11 @@ impl SelectorList {
         matching: &MatchContext,
         cache: &mut MatchCache,
     ) -> bool {
+        // A query asks about elements: `querySelector('p::before')` finds nothing, as in a
+        // browser, even though the selector is one to write in a stylesheet.
         self.0
             .iter()
-            .any(|s| s.matches_cached(dom, id, matching, cache))
+            .any(|s| s.pseudo_element().is_none() && s.matches_cached(dom, id, matching, cache))
     }
 
     pub(crate) fn select(
@@ -324,6 +331,11 @@ impl Selector {
         &self.parts[0].0
     }
 
+    /// The part of the element it is about: `None` for the element itself.
+    pub(super) fn pseudo_element(&self) -> Option<PseudoElement> {
+        self.subject().element
+    }
+
     pub(super) fn specificity(&self) -> (u32, u32, u32) {
         self.parts.iter().fold((0, 0, 0), |sum, (compound, _)| {
             let s = compound.specificity();
@@ -394,7 +406,7 @@ impl Compound {
         cache: &mut MatchCache,
         aside: Aside,
     ) -> bool {
-        if self.element {
+        if self.foreign {
             return false;
         }
         let Some(node) = dom.get(id) else {
@@ -583,7 +595,7 @@ impl Compound {
         let mut out = (
             self.id.is_some() as u32,
             (self.classes.len() + self.attrs.len()) as u32,
-            (self.tag.is_some() || self.element) as u32,
+            (self.tag.is_some() || self.element.is_some() || self.foreign) as u32,
         );
         for pseudo in &self.pseudo {
             // What the pseudo adds itself, and the selector list it takes, if it counts.
@@ -769,6 +781,13 @@ impl<'a> Parser<'a> {
                 None => return Err(self.error()),
             };
         }
+        // A pseudo-element ends a selector: `p::before span` is no selector.
+        if left_to_right[..left_to_right.len() - 1]
+            .iter()
+            .any(|(compound, _)| compound.element.is_some() || compound.foreign)
+        {
+            return Err(self.error());
+        }
         // Right to left: each part carries how the part to its left is reached from it.
         let len = left_to_right.len();
         let parts = (0..len)
@@ -786,6 +805,29 @@ impl<'a> Parser<'a> {
             parts,
             relative: leading.or(relative.then_some(Combinator::Descendant)),
         })
+    }
+
+    /// The pseudo-element of CSS 2 that follows a single colon — `:before`, `:after`,
+    /// `:first-line`, `:first-letter` — and is read as the two-colon one.
+    fn legacy_pseudo_element(&mut self) -> Option<PseudoElement> {
+        let start = self.at;
+        let name = self.ident()?.to_ascii_lowercase();
+        let part = match name.as_str() {
+            "before" | "after" | "first-line" | "first-letter" => PseudoElement::from_name(&name),
+            _ => None,
+        };
+        if part.is_none() {
+            self.at = start;
+        }
+        part
+    }
+
+    /// Whether what is left of the text starts with `prefix`.
+    fn rest_starts(&self, prefix: &str) -> bool {
+        prefix
+            .chars()
+            .enumerate()
+            .all(|(k, c)| self.chars.get(self.at + k) == Some(&c))
     }
 
     pub(super) fn ident(&mut self) -> Option<String> {
@@ -878,6 +920,12 @@ impl<'a> Parser<'a> {
             );
         }
         loop {
+            // Nothing but pseudo-classes may follow a pseudo-element: `p::before.foo` and
+            // `p::before::after` are no selectors.
+            let ended = out.element.is_some() || out.foreign;
+            if ended && (matches!(self.peek(), Some('#' | '.' | '[')) || self.rest_starts("::")) {
+                return Err(self.error());
+            }
             match self.peek() {
                 Some('#') => {
                     self.at += 1;
@@ -896,6 +944,8 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(':') {
                         self.at += 1;
                         self.pseudo_element(&mut out)?;
+                    } else if let Some(part) = self.legacy_pseudo_element() {
+                        out.element = Some(part);
                     } else {
                         let pseudo = self.pseudo()?;
                         out.pseudo.push(pseudo);
@@ -1107,10 +1157,6 @@ impl<'a> Parser<'a> {
             | "autofill" | "-webkit-autofill" | "indeterminate" | "invalid" | "user-invalid"
             | "playing" | "paused" | "picture-in-picture" | "open" => Pseudo::Never,
             "valid" | "user-valid" | "default" | "in-range" | "local-link" => Pseudo::Defined,
-            // The pseudo-elements of CSS 2, written with one colon.
-            "before" | "after" | "first-line" | "first-letter" => {
-                return Ok(Pseudo::Never);
-            }
             other
                 if other.starts_with("-webkit-")
                     || other.starts_with("-moz-")

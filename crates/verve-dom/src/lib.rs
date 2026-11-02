@@ -477,6 +477,7 @@ impl Document {
             media: state.media.snapshot(),
             canvases: canvas::snapshot_canvases(&state),
             images: state.images.snapshot(),
+            pseudo: view.computed.pseudo().clone(),
         }))
     }
 
@@ -537,6 +538,8 @@ impl Document {
                 }
             }
         }
+        // A box that is not what it was looks different, though its element may not.
+        restyled.extend(view.computed.take_pseudo_changes());
         for id in restyled {
             if dom.exists(id) {
                 view.restyled.insert(id);

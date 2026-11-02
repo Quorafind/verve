@@ -243,10 +243,10 @@ fn a_computed_color_is_rgb_unless_it_keeps_its_space() {
             "rgba(0, 0, 0, 0.5)"
         );
         assert_eq!(style(&mut page, "target", "fill"), "rgba(0, 0, 0, 0)");
-        // `currentcolor` is a keyword in a computed value, not a color yet.
+        // `currentcolor` in another color property is the element's own color.
         assert_eq!(
             style(&mut page, "target", "text-decoration-color"),
-            "currentcolor"
+            "rgb(17, 34, 51)"
         );
         assert_eq!(page.console(), "");
     });
