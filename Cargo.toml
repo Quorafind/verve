@@ -203,18 +203,17 @@ opt-level = 3
 opt-level = 3
 
 # A shipped binary is one codegen unit with fat LTO: the linker drops everything no native table
-# reaches, which is most of a feature-gated API. `panic` stays `unwind` on purpose — an isolate
+# reaches, which is most of a feature-gated API. `panic` stays `unwind` on purpose: an isolate
 # catches a panic so only it dies (`src/isolate.rs`), which `panic = "abort"` would take away.
+# Verve's own glue and the dependencies are built for size (2.6 MB less than opt-level 3, for
+# 5% on the interpreter benchmark in `docs/electron/size.md`); the interpreter, its parser, the
+# regex engine, wasmi and the JIT's code generator are hot paths and keep opt-level 3.
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
-opt-level = 3
-
-# Everything but the interpreter, its parser and the JIT's code generator is built for size:
-# those are on the hot path of every script, while the rest runs once or never.
-[profile.release.package."*"]
 opt-level = "s"
+
 [profile.release.package.boa_engine]
 opt-level = 3
 [profile.release.package.boa_parser]
