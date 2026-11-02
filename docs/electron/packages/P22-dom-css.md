@@ -229,4 +229,36 @@ impl Document { pub fn font_faces(&self) -> Vec<FontFaceRule>; }   // 需新增�
 
 ## 状态
 
-（实现者完成后填写）
+### P22a（分支 `electron/p22a-css`）
+
+**完成**
+
+- `css.rs` 拆成 `css/{mod,selector,sheet,cascade,values,media,syntax,layer,color,calc,pseudo,boxes,counters}.rs`（加上 P23 的 `scope.rs`、`styler.rs`）；`css.rs` 不再在 `ci/style/large-files.txt` 里。另把 `Snapshot` 移到 `snapshot.rs`、`getComputedStyle` 绑定移到 `bind/computed.rs`，`lib.rs` 1835→1790、`platform.rs` 2355→2259，棘轮已下调（均相对 P25 合并后的值）。
+- `@layer`：声明顺序、嵌套层（一层自己的规则在子层之后）、每张样式表各自的匿名层、按树分别排序（影子树有自己的层序）、`!important` 反转、`revert-layer` 按完整 `(precedence, layer)` 回退（没有更低的层时回到用户代理值）。P23 的 `scope::Layer` 改名 `Precedence`。
+- 颜色：`oklab/oklch/lab/lch/hwb/color(srgb|srgb-linear|display-p3)/color-mix()`、相对颜色（通道名）；`color-mix` 按透明度预乘（oklab/oklch/hsl/srgb）；计算值：旧记法写成 `rgb()/rgba()`，新色彩空间保留原文，`currentcolor` 保留关键字。
+- `calc()/min/max/clamp/round/mod/rem/abs/sign`：全绝对长度折成 `px`，含 `%` 的写成 `calc(50% - 12px)`；`LengthCalc`/`length_calc`/`length` 共用一张单位表；`rem` 取根元素的字体大小；只有"整个值就是一个数学函数"才计算，`grid-column: 1 / -1`、`aspect-ratio: 16 / 9` 原样保留。
+- 伪元素：`::before/::after/::marker/::placeholder/::selection/::first-line/::first-letter/::backdrop/::-webkit-scrollbar*`，也认 CSS 2 的单冒号写法；`SnapshotData::pseudo`（`Arc<HashMap>`）；`content`（字符串及转义、`attr()`、`url()`、引号、`/` 后的替代文本、`counter()/counters()`）；计数器按整个文档顺序重算（兄弟的 `counter-reset` 接管、后代的嵌套、不渲染的不计数）；只为能有该伪元素的元素计算；伪元素的变化把宿主记入 `Changes.restyled`；`getComputedStyle(el, pseudo)` 的目标存在 `Handle` 上，无效伪元素得到没有值的声明。
+- `-webkit-app-region` 的测试（规则、层、`var()`、`!important`、内联；不继承；缺省 `none`）。
+- 测试：`css_layers`(10)、`css_values`(17)、`css_pseudo`(17)、`css_app_region`(2) 及 `css.rs` 里调整的期望；`cargo test -p verve-dom` 全部 163 个通过、4 个 ignored（含新的基准）。`cargo clippy -p verve-dom --all-targets -- -D warnings` 通过。
+
+**性能**（`cargo test -p verve-dom --test css -- --ignored --nocapture`，debug 构建，同一台机器，取 5 次最好）：5000 个元素（含文本共 7505 个节点）、7 个类、4004 条 Tailwind 形状的规则，全量层叠（"之前"的数字是在 `docs/electron-plan` 的临时 worktree 里跑同一个测试量的，两边各取 5 次最好）：P22a 之前 662–694 ms，P22a 725 ms（约 +6%，在 20% 之内）；解析 28 ms、建索引 9 ms。第一版曾是 1320 ms：`*, ::before, ::after { … }` 这类重置让每个元素都算两个没有 `content` 的伪元素，现在没有 `content` 声明的 `::before/::after` 不再计算。数字是 debug 构建的，release 的绝对值会小得多，比值参考；没有测 release（全工作区 fat LTO，太慢）。
+
+**留给 P22b**：`transition*`/`animation*`/`@keyframes`、`Element.animate()`/`getAnimations()`、动画事件、`prefers-reduced-motion` 之外的时间轴（`State.animations`、`FrameClock` 接线、`bind/animation.rs`、`src/animation.rs`）。评审指出的动画问题（`transition-property: all`、移除 `animation-name` 时取消、Timer 时钟下启动帧、只结束自己的动画、`is_time` 把 `spin-forms` 当成时间等）都属于 P22b，P22a 里没有为它留钩子。
+
+**未做（优先级表 6–16）**：`@property`/`CSS.registerProperty`、简写补全与逻辑属性、`@supports` 求值、CSS 嵌套、`@container`、`@font-face` 与 `@import` 解析。其中 `:focus-visible`（需要 `FocusOrigin`）交给 P32（输入），`env(titlebar-area-*)` 与 `Document::set_env` 交给 P34（窗口），测试 `env(titlebar-area-height, 30px)` 随它们走。
+
+**已知差异**
+
+- `calc(infinity * 1px)`（Tailwind v4 的 `rounded-full`）写成 `33554400px`，Chrome 写成 `3.35544e+07px`，值相同；`calc(10px / 2px)` 在 Chrome 里无效，这里原样保留。
+- 影子树里 `::part()` 规则与树内规则按 `@layer` 比较，而不是按层叠上下文（`scope.rs` 的 `Precedence` 只区分 `:host`/`::slotted`）。
+
+- 只在整个值是数学函数时才计算：`margin: 1px calc(…)` 展开后的长属性会算，`box-shadow: 0 0 calc(…) red` 这种函数在值中间的不算；普通的 `1.5em`/`2rem` 保持原文（绘制侧用 `length` 解析）。
+- `ex`/`ch` 按 0.5em 算；`lh`/`rlh`、容器单位不解析；`round()` 不支持取整策略关键字。
+- 相对颜色的通道只认通道名，通道里写 `calc(l * 0.8)` 不算；`lab()/lch()` 不能做相对颜色的起点；`color-mix` 在 `lab/hwb/srgb-linear` 等空间里按 sRGB 混合。
+- 新色彩空间的计算值保留原文，不像 Chrome 那样写成解析后的 `oklch(0.628 0.2577 29.23)`；`color-mix()` 同样保留原文。
+- 内联样式里的 `revert-layer` 回到未分层的作者样式（而不是分层样式）。
+- 写在不匹配的 `@media` 里的 `@layer` 声明仍会参与层序。
+- `ContentItem` 没有 `Counter` 变体（计数器已填成 `Text`）；`::marker` 只为 `li`/`summary`/`display: list-item` 生成，列表项隐含的 `list-item` 计数器未实现；`::-webkit-scrollbar*` 只为 `html`、`body`、`textarea` 和 `overflow: auto|scroll|overlay` 的元素生成；`::backdrop` 只为 `dialog` 和带 `popover` 的元素。
+- `p::before span` 这类伪元素不在末尾的选择器按规范视为无效并整条丢弃。
+- `bind/window.rs` 里新增了一处对遗留 `bind::opt_string` 的调用（R1 迁到 `verve::native` 时一并处理）。
+
