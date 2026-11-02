@@ -12,7 +12,7 @@
 //! The script comes from a `blob:` address — `URL.createObjectURL(new Blob([code]))`, how
 //! bundles ship their workers — or a `data:` one.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -22,13 +22,11 @@ use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
     js_string,
     native_function::NativeFunctionPointer,
-    object::{
-        FunctionObjectBuilder,
-        builtins::{JsArray, JsArrayBuffer, JsDate, JsMap, JsSet, JsUint8Array},
-    },
+    object::{FunctionObjectBuilder, builtins::JsArray},
     property::{Attribute, PropertyDescriptor},
 };
 
+use crate::clone::{Cloned, entries};
 use crate::{Level, Runtime, shared};
 
 /// A worker, as its page holds it: the way to its thread, and what came back from it.
@@ -69,259 +67,6 @@ fn function(
         .length(length)
         .build()
         .into()
-}
-
-// ─── A value between threads ────────────────────────────────────────────────────────────────
-
-/// A value copied out of a realm into memory no realm owns, so it can cross to another thread:
-/// what a page and its worker send each other. Objects are numbered in the order they were
-/// first met, and met again they are [`Cloned::Seen`] — cycles and shared parts come out as
-/// they went in.
-#[derive(Debug)]
-pub(crate) enum Cloned {
-    Undefined,
-    Null,
-    Bool(bool),
-    Number(f64),
-    /// UTF-16, as JavaScript keeps it: a lone surrogate crosses as it is.
-    String(Vec<u16>),
-    BigInt(String),
-    Date(f64),
-    Buffer(Vec<u8>),
-    /// A typed array or a view, made a `Uint8Array` on the other side.
-    Bytes(Vec<u8>),
-    Array(Vec<Cloned>),
-    Object(Vec<(Vec<u16>, Cloned)>),
-    /// An error: its own properties, with its name and message among them.
-    Error(Vec<(Vec<u16>, Cloned)>),
-    Map(Vec<(Cloned, Cloned)>),
-    Set(Vec<Cloned>),
-    Seen(usize),
-}
-
-/// `value`, out of `context`'s realm, as `structuredClone` copies it.
-pub(crate) fn clone_out(value: &JsValue, context: &mut Context) -> JsResult<Cloned> {
-    let mut seen = HashMap::new();
-    clone_value(value, context, &mut seen)
-}
-
-fn clone_value(
-    value: &JsValue,
-    from: &mut Context,
-    seen: &mut HashMap<JsObject, usize>,
-) -> JsResult<Cloned> {
-    if let Some(text) = value.as_string() {
-        return Ok(Cloned::String(text.iter().collect()));
-    }
-    let Some(source) = value.as_object() else {
-        if value.is_symbol() {
-            return Err(type_error("DataCloneError: a Symbol could not be cloned"));
-        }
-        if value.is_bigint() {
-            return Ok(Cloned::BigInt(
-                value.to_string(from)?.to_std_string_escaped(),
-            ));
-        }
-        if let Some(n) = value.as_number() {
-            return Ok(Cloned::Number(n));
-        }
-        if let Some(b) = value.as_boolean() {
-            return Ok(Cloned::Bool(b));
-        }
-        return Ok(if value.is_null() {
-            Cloned::Null
-        } else {
-            Cloned::Undefined
-        });
-    };
-    if let Some(at) = seen.get(&source) {
-        return Ok(Cloned::Seen(*at));
-    }
-    if source.is_callable() {
-        return Err(type_error("DataCloneError: a function could not be cloned"));
-    }
-    // Numbered before what is inside it, so what refers back to it finds it.
-    let number = seen.len();
-    seen.insert(source.clone(), number);
-    if let Ok(date) = JsDate::from_object(source.clone()) {
-        return Ok(Cloned::Date(
-            date.get_time(from)?.as_number().unwrap_or(f64::NAN),
-        ));
-    }
-    if let Ok(buffer) = JsArrayBuffer::from_object(source.clone()) {
-        return Ok(Cloned::Buffer(buffer.to_vec().unwrap_or_default()));
-    }
-    if let Some(bytes) = crate::encoding::bytes_of(value, from)? {
-        return Ok(Cloned::Bytes(bytes));
-    }
-    if let Ok(map) = JsMap::from_object(source.clone()) {
-        let mut pairs = Vec::new();
-        for pair in entries(&map.entries(from)?.into(), from)? {
-            let pair = entries(&pair, from)?;
-            let key = clone_value(pair.first().unwrap_or(&JsValue::undefined()), from, seen)?;
-            let item = clone_value(pair.get(1).unwrap_or(&JsValue::undefined()), from, seen)?;
-            pairs.push((key, item));
-        }
-        return Ok(Cloned::Map(pairs));
-    }
-    if let Ok(set) = JsSet::from_object(source.clone()) {
-        let mut items = Vec::new();
-        for item in entries(&set.values(from)?.into(), from)? {
-            items.push(clone_value(&item, from, seen)?);
-        }
-        return Ok(Cloned::Set(items));
-    }
-    if source.is_array() {
-        let array = JsArray::from_object(source.clone())?;
-        let length = array.length(from)?;
-        let mut items = Vec::with_capacity(length as usize);
-        for at in 0..length {
-            items.push(clone_value(&array.get(at, from)?, from, seen)?);
-        }
-        return Ok(Cloned::Array(items));
-    }
-    let keys_fn = from
-        .intrinsics()
-        .constructors()
-        .object()
-        .constructor()
-        .get(js_string!("keys"), from)?;
-    let keys = crate::call(
-        from,
-        &keys_fn,
-        &JsValue::undefined(),
-        std::slice::from_ref(value),
-    )?;
-    let error = source.is::<boa_engine::builtins::error::Error>();
-    let mut names: Vec<JsString> = Vec::new();
-    if let Some(keys) = keys.as_object() {
-        let keys = JsArray::from_object(keys.clone())?;
-        for at in 0..keys.length(from)? {
-            names.push(keys.get(at, from)?.to_string(from)?);
-        }
-    }
-    // An error keeps its name and message, which are not its own enumerable properties.
-    if error {
-        for key in [js_string!("name"), js_string!("message")] {
-            if !names.contains(&key) {
-                names.push(key);
-            }
-        }
-    }
-    let mut fields = Vec::with_capacity(names.len());
-    for name in names {
-        let item = source.get(name.clone(), from)?;
-        fields.push((name.iter().collect(), clone_value(&item, from, seen)?));
-    }
-    Ok(if error {
-        Cloned::Error(fields)
-    } else {
-        Cloned::Object(fields)
-    })
-}
-
-/// `cloned`, made again in `context`'s realm.
-pub(crate) fn clone_in(cloned: &Cloned, context: &mut Context) -> JsResult<JsValue> {
-    let mut made = Vec::new();
-    make(cloned, context, &mut made)
-}
-
-fn make(cloned: &Cloned, to: &mut Context, made: &mut Vec<JsObject>) -> JsResult<JsValue> {
-    Ok(match cloned {
-        Cloned::Undefined => JsValue::undefined(),
-        Cloned::Null => JsValue::null(),
-        Cloned::Bool(b) => (*b).into(),
-        Cloned::Number(n) => (*n).into(),
-        Cloned::String(units) => JsString::from(units.as_slice()).into(),
-        Cloned::BigInt(text) => {
-            boa_engine::JsBigInt::from_string(text).map_or(JsValue::undefined(), JsValue::from)
-        }
-        Cloned::Seen(at) => made
-            .get(*at)
-            .cloned()
-            .map_or(JsValue::undefined(), JsValue::from),
-        Cloned::Date(time) => {
-            let date = JsDate::new(to);
-            date.set_time(*time, to)?;
-            made.push(date.clone().into());
-            date.into()
-        }
-        Cloned::Buffer(bytes) => {
-            let buffer = JsUint8Array::from_iter(bytes.iter().copied(), to)?.buffer(to)?;
-            if let Some(object) = buffer.as_object() {
-                made.push(object.clone());
-            }
-            buffer
-        }
-        Cloned::Bytes(bytes) => {
-            let array = JsUint8Array::from_iter(bytes.iter().copied(), to)?;
-            made.push(array.clone().into());
-            array.into()
-        }
-        Cloned::Map(pairs) => {
-            let map = JsMap::new(to);
-            made.push(map.clone().into());
-            for (key, item) in pairs {
-                let key = make(key, to, made)?;
-                let item = make(item, to, made)?;
-                map.set(key, item, to)?;
-            }
-            map.into()
-        }
-        Cloned::Set(items) => {
-            let set = JsSet::new(to);
-            made.push(set.clone().into());
-            for item in items {
-                let item = make(item, to, made)?;
-                set.add(item, to)?;
-            }
-            set.into()
-        }
-        Cloned::Array(items) => {
-            let array = JsArray::new(to)?;
-            made.push(array.clone().into());
-            for item in items {
-                let item = make(item, to, made)?;
-                array.push(item, to)?;
-            }
-            array.into()
-        }
-        Cloned::Object(fields) | Cloned::Error(fields) => {
-            let object = match cloned {
-                Cloned::Error(_) => JsNativeError::error().into_opaque(to),
-                _ => JsObject::with_object_proto(to.intrinsics()),
-            };
-            made.push(object.clone());
-            for (name, item) in fields {
-                let item = make(item, to, made)?;
-                object.set(JsString::from(name.as_slice()), item, false, to)?;
-            }
-            object.into()
-        }
-    })
-}
-
-/// The items of an array or an iterator, as a list.
-fn entries(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
-    let from = context
-        .intrinsics()
-        .constructors()
-        .array()
-        .constructor()
-        .get(js_string!("from"), context)?;
-    let list = crate::call(
-        context,
-        &from,
-        &JsValue::undefined(),
-        std::slice::from_ref(value),
-    )?;
-    let Some(list) = list.as_object() else {
-        return Ok(Vec::new());
-    };
-    let list = JsArray::from_object(list)?;
-    (0..list.length(context)?)
-        .map(|at| list.get(at, context))
-        .collect()
 }
 
 // ─── The worker's own realm ─────────────────────────────────────────────────────────────────
@@ -612,7 +357,7 @@ fn worker_thread(
             match message {
                 ToWorker::Terminate => return,
                 ToWorker::Message(cloned) => {
-                    match clone_in(&cloned, runtime.context()) {
+                    match cloned.to_value(runtime.context()) {
                         Ok(data) => {
                             let global = runtime.context().global_object();
                             dispatch_message(&global, data, runtime.context());
@@ -669,7 +414,7 @@ fn flush(runtime: &mut Runtime, out: &Outbox, progress: &Progress) -> bool {
         .map(|p| (std::mem::take(&mut p.outbox), p.closed))
         .unwrap_or_default();
     for message in outbox {
-        match clone_out(&message, runtime.context()) {
+        match Cloned::from_value(&message, runtime.context()) {
             Ok(cloned) => {
                 let _ = out.send(FromWorker::Message(cloned));
             }
@@ -842,7 +587,7 @@ const WORKER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let Some(id) = worker_id(this, cx)? else {
             return Ok(JsValue::undefined());
         };
-        let cloned = clone_out(&arg(args, 0), cx)?;
+        let cloned = Cloned::from_value(&arg(args, 0), cx)?;
         let state = shared(cx);
         let workers = state.workers.borrow();
         if let Some(slot) = workers.iter().find(|w| w.id == id && !w.closed) {
@@ -924,7 +669,7 @@ pub(crate) fn run_workers(page: &mut Context, deadline: Option<std::time::Instan
         busy = true;
         {
             match event {
-                FromWorker::Message(cloned) => match clone_in(&cloned, page) {
+                FromWorker::Message(cloned) => match cloned.to_value(page) {
                     Ok(data) => dispatch_message(&object, data, page),
                     Err(error) => crate::report(page, &error),
                 },

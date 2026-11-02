@@ -30,6 +30,7 @@ pub mod blob;
 mod buffer;
 mod cjs_exports;
 pub mod cli;
+pub mod clone;
 mod code_cache;
 mod crypto;
 pub mod dom_events;
