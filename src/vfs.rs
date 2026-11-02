@@ -36,7 +36,7 @@ pub enum Kind {
 
 impl Kind {
     /// `fs.Stats.mode`'s kind bits for this kind: `S_IFREG`, `S_IFDIR` or `S_IFLNK`.
-    pub(crate) fn mode(self) -> u32 {
+    pub fn mode(self) -> u32 {
         match self {
             Self::File => 0o100000,
             Self::Dir => 0o040000,
