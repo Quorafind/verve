@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::calc::length;
 use super::cascade::Style;
-use super::color::color;
+use super::shorthand::expansion;
 use super::syntax::{decimal, split_outside};
 
 /// The properties a child takes from its parent unless something says otherwise.
@@ -188,175 +188,11 @@ pub(super) fn set_declared(style: &mut Style, key: &str, value: &str, inherited:
         }
         _ => {}
     }
-    let sides = ["top", "right", "bottom", "left"];
-    match key {
-        "padding" | "margin" | "inset" | "scroll-margin" | "scroll-padding" => {
-            for (side, v) in sides.iter().zip(box_sides(value)) {
-                let name = if key == "inset" {
-                    (*side).to_owned()
-                } else {
-                    format!("{key}-{side}")
-                };
-                style.insert(name, v);
-            }
+    match expansion(key) {
+        Some(expand) => expand(style, key, value),
+        None => {
             style.insert(key.to_owned(), value.to_owned());
         }
-        "border-width" | "border-style" | "border-color" => {
-            let part = key.trim_start_matches("border-");
-            for (side, v) in sides.iter().zip(box_sides(value)) {
-                style.insert(format!("border-{side}-{part}"), v);
-            }
-            style.insert(key.to_owned(), value.to_owned());
-        }
-        "border" | "border-top" | "border-right" | "border-bottom" | "border-left" | "outline" => {
-            let (width, line, color) = border_parts(value);
-            let targets: Vec<String> = match key {
-                "border" => sides.iter().map(|s| format!("border-{s}")).collect(),
-                other => vec![other.to_owned()],
-            };
-            for target in &targets {
-                style.insert(format!("{target}-width"), width.clone());
-                style.insert(format!("{target}-style"), line.clone());
-                style.insert(format!("{target}-color"), color.clone());
-                style.insert(target.clone(), value.to_owned());
-            }
-            if key == "border" {
-                style.insert("border-width".into(), width);
-                style.insert("border-style".into(), line);
-                style.insert("border-color".into(), color);
-                style.insert("border".into(), value.to_owned());
-            }
-        }
-        "border-radius" => {
-            let first = value.split('/').next().unwrap_or(value);
-            let corners = ["top-left", "top-right", "bottom-right", "bottom-left"];
-            for (corner, v) in corners.iter().zip(box_sides(first)) {
-                style.insert(format!("border-{corner}-radius"), v);
-            }
-            style.insert(key.to_owned(), value.to_owned());
-        }
-        "background" => {
-            // The color is what a drawer reads; the rest is kept whole.
-            let color = split_outside(value, ' ')
-                .into_iter()
-                .map(|p| p.trim().to_owned())
-                .rfind(|p| color(p).is_some() || p.starts_with("var(") || p == "currentcolor")
-                .unwrap_or_else(|| "transparent".to_owned());
-            style.insert("background-color".into(), color);
-            if value.contains("url(") || value.contains("gradient(") {
-                style.insert("background-image".into(), value.to_owned());
-            }
-            style.insert("background".into(), value.to_owned());
-        }
-        "gap" | "grid-gap" => {
-            let mut parts = value.split_whitespace();
-            let row = parts.next().unwrap_or("0").to_owned();
-            let column = parts.next().map_or_else(|| row.clone(), str::to_owned);
-            style.insert("row-gap".into(), row);
-            style.insert("column-gap".into(), column);
-            style.insert("gap".into(), value.to_owned());
-        }
-        "flex" => {
-            let (grow, shrink, basis) = flex_parts(value);
-            style.insert("flex-grow".into(), grow);
-            style.insert("flex-shrink".into(), shrink);
-            style.insert("flex-basis".into(), basis);
-            style.insert("flex".into(), value.to_owned());
-        }
-        "flex-flow" => {
-            for part in value.split_whitespace() {
-                if part.contains("wrap") {
-                    style.insert("flex-wrap".into(), part.to_owned());
-                } else {
-                    style.insert("flex-direction".into(), part.to_owned());
-                }
-            }
-            style.insert("flex-flow".into(), value.to_owned());
-        }
-        "overflow" => {
-            let mut parts = value.split_whitespace();
-            let x = parts.next().unwrap_or("visible").to_owned();
-            let y = parts.next().map_or_else(|| x.clone(), str::to_owned);
-            style.insert("overflow-x".into(), x);
-            style.insert("overflow-y".into(), y);
-            style.insert("overflow".into(), value.to_owned());
-        }
-        "place-items" | "place-content" | "place-self" => {
-            let part = key.trim_start_matches("place-");
-            let mut parts = value.split_whitespace();
-            let align = parts.next().unwrap_or("normal").to_owned();
-            let justify = parts.next().map_or_else(|| align.clone(), str::to_owned);
-            style.insert(format!("align-{part}"), align);
-            style.insert(format!("justify-{part}"), justify);
-            style.insert(key.to_owned(), value.to_owned());
-        }
-        _ => {
-            style.insert(key.to_owned(), value.to_owned());
-        }
-    }
-}
-
-fn border_parts(value: &str) -> (String, String, String) {
-    let mut width = "medium".to_owned();
-    let mut line = "none".to_owned();
-    let mut color = "currentcolor".to_owned();
-    for part in split_outside(value, ' ') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if length(part, ROOT_FONT_SIZE).is_some() || matches!(part, "thin" | "medium" | "thick") {
-            width = part.to_owned();
-        } else if matches!(
-            part,
-            "none"
-                | "hidden"
-                | "solid"
-                | "dashed"
-                | "dotted"
-                | "double"
-                | "groove"
-                | "ridge"
-                | "inset"
-                | "outset"
-        ) {
-            line = part.to_owned();
-        } else {
-            color = part.to_owned();
-        }
-    }
-    if line == "none" {
-        width = "0".to_owned();
-    }
-    (width, line, color)
-}
-
-fn flex_parts(value: &str) -> (String, String, String) {
-    let parts: Vec<&str> = value.split_whitespace().collect();
-    match parts.as_slice() {
-        ["none"] => ("0".into(), "0".into(), "auto".into()),
-        ["auto"] => ("1".into(), "1".into(), "auto".into()),
-        [one] if one.parse::<f32>().is_ok() => ((*one).into(), "1".into(), "0%".into()),
-        [one] => ("1".into(), "1".into(), (*one).into()),
-        [a, b] if b.parse::<f32>().is_ok() => ((*a).into(), (*b).into(), "0%".into()),
-        [a, b] => ((*a).into(), "1".into(), (*b).into()),
-        [a, b, c, ..] => ((*a).into(), (*b).into(), (*c).into()),
-        [] => ("0".into(), "1".into(), "auto".into()),
-    }
-}
-
-fn box_sides(value: &str) -> [String; 4] {
-    let parts: Vec<String> = split_outside(value, ' ')
-        .into_iter()
-        .map(|p| p.trim().to_owned())
-        .filter(|p| !p.is_empty())
-        .collect();
-    let pick = |i: usize| parts.get(i).cloned().unwrap_or_else(|| "0".to_owned());
-    match parts.len() {
-        1 => [pick(0), pick(0), pick(0), pick(0)],
-        2 => [pick(0), pick(1), pick(0), pick(1)],
-        3 => [pick(0), pick(1), pick(2), pick(1)],
-        _ => [pick(0), pick(1), pick(2), pick(3)],
     }
 }
 

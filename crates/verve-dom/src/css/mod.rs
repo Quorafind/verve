@@ -37,6 +37,7 @@ mod pseudo;
 mod scope;
 mod selector;
 mod sheet;
+mod shorthand;
 mod styler;
 mod syntax;
 mod values;
