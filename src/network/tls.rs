@@ -544,7 +544,8 @@ fn check_identity(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<J
         #[cfg(feature = "x509")]
         {
             use x509_parser::{extensions::GeneralName, prelude::FromDer};
-            if let Ok((_, certificate)) = x509_parser::certificate::X509Certificate::from_der(&raw) {
+            if let Ok((_, certificate)) = x509_parser::certificate::X509Certificate::from_der(&raw)
+            {
                 if let Ok(Some(san)) = certificate.subject_alternative_name() {
                     for name in &san.value.general_names {
                         match name {

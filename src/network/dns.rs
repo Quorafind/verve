@@ -3,9 +3,7 @@
 use super::{Id, reactor::Command};
 #[cfg(feature = "dns-records")]
 use crate::native::invoke;
-use crate::native::{
-    arg, array, closure, coded_error_value, get, js_text, object, text_of,
-};
+use crate::native::{arg, array, closure, coded_error_value, get, js_text, object, text_of};
 use boa_engine::{Context, JsObject, JsResult, JsValue, js_string, object::builtins::JsPromise};
 use std::{
     collections::HashMap,

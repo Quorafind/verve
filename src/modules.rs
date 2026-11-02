@@ -761,18 +761,13 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
     #[cfg(feature = "typescript")]
     let strip = crate::typescript::function(context)?;
     #[cfg(not(feature = "typescript"))]
-    let strip = crate::native::function(
-        context,
-        "stripTypeScriptTypes",
-        1,
-        |_, _, cx| {
-            Err(crate::native::coded_error(
-                cx,
-                "module.stripTypeScriptTypes is not supported by Verve",
-                "ERR_NOT_SUPPORTED",
-            ))
-        },
-    );
+    let strip = crate::native::function(context, "stripTypeScriptTypes", 1, |_, _, cx| {
+        Err(crate::native::coded_error(
+            cx,
+            "module.stripTypeScriptTypes is not supported by Verve",
+            "ERR_NOT_SUPPORTED",
+        ))
+    });
     module.set(js_string!("stripTypeScriptTypes"), strip, false, context)?;
     module.set(js_string!("Module"), module.clone(), false, context)?;
     Ok(module.into())
