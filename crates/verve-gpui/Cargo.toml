@@ -1,0 +1,29 @@
+[package]
+name = "verve-gpui"
+version = "0.1.0"
+edition = "2024"
+description = "The shell of Verve's Electron: GPUI windows that draw what each page's isolate publishes, and nothing else."
+publish = false
+
+# The OS thread, and only it: windows, what they draw, and the wake from the Hub that tells it
+# there is something new. No JavaScript runs here, and nothing here waits on a thread that runs it.
+
+[[bin]]
+name = "electron"
+path = "src/bin/electron.rs"
+
+[dependencies]
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+# A wake from any thread, turned into a task on the OS thread by the shell's pump.
+async-channel = "2"
+verve-electron = { path = "../verve-electron" }
+# The document a window draws.
+verve-dom = { path = "../verve-dom" }
+
+[dev-dependencies]
+# The drawing tests build a document in a realm of their own.
+verve = { path = "../..", default-features = false }
+
+[lints]
+workspace = true
