@@ -1,6 +1,6 @@
 # P22 verve-dom CSS 补齐
 
-**依赖**：无（可与 P02 并行）  **规模**：L  **修改**：`crates/verve-dom/src/{css.rs,lib.rs,state.rs,dom.rs,bind/element.rs,bind/window.rs,bind/platform.rs}`；可拆出 `crates/verve-dom/src/css/` 子模块（`css.rs` 已近 3000 行，建议本包先把它拆成 `css/{selector.rs,sheet.rs,cascade.rs,values.rs,media.rs}`，单独一个纯重构 commit）
+**依赖**：无（可与 P02 并行）  **规模**：L，**分两个 PR 交付**：P22a（拆分、`@layer`、现代颜色、数学函数、伪元素、`-webkit-app-region`）与 P22b（过渡与动画、Web Animations）  **修改**：`crates/verve-dom/src/{css.rs,lib.rs,state.rs,dom.rs,bind/element.rs,bind/window.rs,bind/platform.rs}`；可拆出 `crates/verve-dom/src/css/` 子模块（`css.rs` 已近 3000 行，建议本包先把它拆成 `css/{selector.rs,sheet.rs,cascade.rs,values.rs,media.rs}`，单独一个纯重构 commit）
 
 ## 目标
 
@@ -54,7 +54,8 @@ verve-dom 不做布局：凡是依赖布局的值（`%`、`calc()` 里含 `%`）
 - 实现 CSS Cascade 5：层声明顺序（`@layer a, b;` 和首次出现顺序）、嵌套层名 `a.b`、匿名层、
   `@import … layer(x)`。层叠排序键：`(origin, importance, layer_order, specificity, source_order)`，其中
   正常声明**未分层 > 后声明的层 > 先声明的层**，`!important` 时层顺序反转。
-- `Rule` 增加 `layer: u32`（层的全局顺序号，未分层用 `u32::MAX`）。`revert-layer` 正确回退到上一层。
+- `Rule` 增加 `layer: u32`（所在样式表的 `layers` 里的序号，未分层用 `LAYERLESS = u32::MAX`）；`Styler` 把它排成全局顺序。层按树分别排序（影子树有自己的 `@layer a, b`），一层自己的规则排在它的子层之后；匿名层在每张样式表里各是独立的层。
+  排序键写成 `Rank { precedence, layer, specificity, order }`：`precedence` 是 P23 的来源×重要性×树（原 `scope::Layer`，改名以免和 `@layer` 混淆）。`revert-layer` 按完整的 `(precedence, layer)` 回退，没有更低的层时回到用户代理的值。
 
 ### 2. 颜色（`css::color` 扩展）
 
@@ -93,10 +94,10 @@ pub struct SnapshotData {
     // … 现有字段 …
     /// Generated boxes: an element's ::before/::after/::marker and the styles of its
     /// ::placeholder, ::selection, ::-webkit-scrollbar parts, ::backdrop.
-    pub pseudo: HashMap<(NodeId, PseudoElement), PseudoBox>,
+    pub pseudo: Arc<HashMap<(NodeId, PseudoElement), PseudoBox>>,
 }
 pub struct PseudoBox { pub style: Arc<Style>, pub content: Vec<ContentItem> }
-pub enum ContentItem { Text(String), Image(String /* url */), OpenQuote, CloseQuote, Counter { name: String, style: String } }
+pub enum ContentItem { Text(String), Image(String /* url */), OpenQuote, CloseQuote }  // 计数器在遍历时已填成 Text，不会到绘制侧
 ```
 
 - `content` 支持：字符串（含转义 `"\f101"`）、`attr(x)`、`open-quote/close-quote`、`url()`、`counter()/counters()`
