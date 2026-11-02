@@ -702,7 +702,7 @@ const WINDOW_FUNCTIONS: &[Method] = &[
     ("matchMedia", 1, match_media),
     ("getComputedStyle", 2, |_, args, cx| {
         let id = super::node_arg(args, 0, "getComputedStyle", "Window")?;
-        super::platform::computed_style(cx, id)
+        super::computed::computed_style(cx, id)
     }),
     ("scrollTo", 2, |_, args, cx| {
         let root = read_dom(cx, |dom| dom.html);
