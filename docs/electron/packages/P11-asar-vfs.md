@@ -1,6 +1,6 @@
 # P11 asar 与虚拟文件系统
 
-**依赖**：P03（`verve::vfs::Overlay`、`Runtime::set_vfs`、`original-fs` 绕过 overlay）  **规模**：M  **修改**：新建 `crates/verve-electron/src/asar/`（`mod.rs`、`archive.rs`、`overlay.rs`、`integrity.rs`）；`MainGuest`/`RendererGuest` 安装 overlay
+**依赖**：P03（`verve::vfs::Overlay`、`Runtime::set_vfs`、`original-fs` 绕过 overlay）  **规模**：M  **修改**：新建独立 crate `crates/verve-asar/`（`src/{lib,archive,overlay,integrity,extract}.rs`，依赖 `verve`，不依赖 GUI），加入 workspace members；`MainGuest`/`RendererGuest` 安装 overlay 由 P10 负责（`verve-electron` 依赖 `verve-asar`）；内核仅限 P03 遗留项（`src/vfs.rs`、`src/fs.rs`、`src/fs/sys.rs`、`src/modules.rs`）
 
 ## 目标
 
@@ -180,7 +180,7 @@ asar 内脚本的缓存键 = `归档真实路径 + 条目 offset + 条目 size +
 
 ## 验收
 
-- `cargo test -p verve-electron --test asar`：上表每一行至少一个用例；错误 message/code 与冻结观测一致。
+- `cargo test -p verve-asar`：上表每一行至少一个用例；错误 message/code 与冻结观测一致。
 - 夹具应用 `tests/electron/apps/packaged/`（P00）打成 `app.asar` 放到 `resources/`，`electron.exe` 直接启动：
   主进程 `require('./lib')`、ESM `import`、读取 JSON、`fs.readdirSync(__dirname)` 都正确；渲染器的 preload 从归档加载。
 - 性能：10 000 个文件、50 MB 的归档，`Archive::open` ≤ 20 ms；`require` 500 个归档内模块与解包成目录相比耗时差 ≤ 10%。
