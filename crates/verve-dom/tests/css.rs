@@ -291,3 +291,117 @@ fn a_change_dirties_only_its_partition_and_restyles_only_its_subtree() {
         assert!(!changes.restyled.contains(&main));
     });
 }
+
+/// The shape of what Tailwind v4 compiles to: a theme layer of variables, a base reset, and a
+/// layer of utilities — `groups` of each of ten kinds, with `calc()` spacing, `oklch()`
+/// colors, hover variants and a media query — so a page that uses a few of them in its markup
+/// is cascaded against `10 * groups` rules.
+fn tailwind_sheet(groups: usize) -> String {
+    let mut css = String::from(
+        "@layer theme, base, components, utilities;
+         @layer theme { :root { --spacing: 0.25rem; --font-sans: ui-sans-serif, system-ui;
+           --color-brand: oklch(63.7% 0.237 25.331); } }
+         @layer base { *, ::before, ::after { box-sizing: border-box; border: 0 solid }
+           h1, h2, h3 { font-size: inherit; font-weight: inherit } p, h1 { margin: 0 } }
+         @layer utilities {\n",
+    );
+    for i in 0..groups {
+        css.push_str(&format!(
+            ".p-{i} {{ padding: calc(var(--spacing) * {i}) }}
+             .m-{i} {{ margin: calc(var(--spacing) * {i}) }}
+             .w-{i} {{ width: calc(var(--spacing) * {i}) }}
+             .h-{i} {{ height: calc(var(--spacing) * {i}) }}
+             .gap-{i} {{ gap: calc(var(--spacing) * {i}) }}
+             .text-c{i} {{ color: oklch(63.7% 0.237 {}) }}
+             .bg-c{i} {{ background-color: rgb({} 10 20 / 50%) }}
+             .border-c{i} {{ border-color: var(--color-brand) }}
+             .hover\\:bg-c{i}:hover {{ background-color: color-mix(in oklab, var(--color-brand) 50%, transparent) }}
+             @media (min-width: 768px) {{ .md\\:p-{i} {{ padding: calc(var(--spacing) * {i} + 1px) }} }}\n",
+            i % 360,
+            i % 256,
+        ));
+    }
+    css.push('}');
+    css
+}
+
+/// `count` elements in sections, each with seven of the sheet's classes.
+fn tailwind_markup(count: usize, groups: usize) -> String {
+    let class = |n: usize| {
+        let at = |k: usize| (n * 7 + k * 13) % groups;
+        format!(
+            "p-{} m-{} w-{} text-c{} bg-c{} hover:bg-c{} md:p-{}",
+            at(1),
+            at(2),
+            at(3),
+            at(4),
+            at(5),
+            at(6),
+            at(7)
+        )
+    };
+    let mut html = String::new();
+    let mut made = 0;
+    while made < count {
+        html.push_str(&format!("<section class=\"{}\">", class(made)));
+        made += 1;
+        for _ in 0..33 {
+            html.push_str(&format!(
+                "<div class=\"{}\"><span class=\"{}\">t</span></div>",
+                class(made),
+                class(made + 1)
+            ));
+            made += 2;
+        }
+        html.push_str("</section>");
+    }
+    html
+}
+
+#[test]
+#[ignore = "a benchmark: cargo test -p verve-dom --test css -- --ignored --nocapture"]
+fn cascading_five_thousand_nodes_under_a_tailwind_sheet() {
+    use std::time::Instant;
+    use verve_dom::Environment;
+    use verve_dom::css::{Computed, Origin, Sheet, Styler, USER_AGENT_SHEET};
+    on_page(|| {
+        let groups = 400;
+        let mut page = Page::new(Options::default());
+        let markup = serde_json::to_string(&tailwind_markup(5000, groups)).expect("a string");
+        page.eval(&format!("document.body.innerHTML = {markup}"));
+        let css = tailwind_sheet(groups);
+        let dom = page.document.dom();
+        let nodes = dom.len();
+        // The best of `runs`, in milliseconds.
+        fn best(runs: usize, mut work: impl FnMut()) -> f64 {
+            (0..runs)
+                .map(|_| {
+                    let start = Instant::now();
+                    work();
+                    start.elapsed().as_secs_f64() * 1000.
+                })
+                .fold(f64::INFINITY, f64::min)
+        }
+        let parse = best(3, || {
+            Sheet::parse(&css);
+        });
+        let user_agent = Sheet::parse(USER_AGENT_SHEET);
+        let author = Sheet::parse(&css);
+        let env = Environment::default();
+        let sheets = [
+            (Origin::UserAgent, &user_agent, dom.document),
+            (Origin::Author, &author, dom.document),
+        ];
+        let index = best(3, || {
+            Styler::new(&sheets, &env);
+        });
+        let styler = Styler::new(&sheets, &env);
+        let cascade = best(5, || {
+            Computed::cascade(&dom, &styler);
+        });
+        eprintln!(
+            "{nodes} nodes, {} rules: parse {parse:.0} ms, index {index:.0} ms, cascade {cascade:.0} ms",
+            author.len()
+        );
+    });
+}
