@@ -119,7 +119,6 @@ pub struct Ran {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
-    #[allow(dead_code)]
     pub took: Duration,
 }
 

@@ -13,8 +13,7 @@ use boa_gc::{Finalize, Trace};
 
 use super::spec;
 use crate::native::{
-    arg, closure, coded_error, function, get, global, invalid_arg_type, invoke, js_text, list_of,
-    object, text_of,
+    arg, closure, function, get, invalid_arg_type, invoke, js_text, list_of, object, text_of,
 };
 
 /// What the output of the program has come to so far.
@@ -22,6 +21,7 @@ struct Capture {
     out: Vec<u8>,
     err: Vec<u8>,
     max_buffer: usize,
+    kill_signal: i32,
     /// The stream whose output went past `max_buffer`.
     exceeded: Option<&'static str>,
     done: bool,
@@ -126,14 +126,7 @@ fn with_defaults(
             options,
         ));
     }
-    let copy = object(context);
-    let assign = get(&global(context, "Object")?, "assign", context)?;
-    crate::call(
-        context,
-        &assign,
-        &JsValue::undefined(),
-        &[copy.clone().into(), options.clone()],
-    )?;
+    let copy = spec::options_copy(options, context)?;
     if through_shell && !get(&copy.clone().into(), "shell", context)?.is_string() {
         copy.set(js_string!("shell"), true, false, context)?;
     }
@@ -159,6 +152,12 @@ fn capture_of(
             ));
         }
     };
+    let signal = get(options, "killSignal", context)?;
+    let kill_signal = if signal.is_null_or_undefined() {
+        super::signals::SIGTERM
+    } else {
+        super::signals::from_js(&signal, context)?
+    };
     let encoding = get(options, "encoding", context)?;
     let encoding = if encoding.is_string() {
         text_of(&encoding, context)?
@@ -174,6 +173,7 @@ fn capture_of(
         out: Vec::new(),
         err: Vec::new(),
         max_buffer,
+        kill_signal,
         exceeded: None,
         done: false,
         encoding,
@@ -205,10 +205,17 @@ fn collect(
         if over && capture.exceeded.is_none() {
             capture.exceeded = Some(if *stderr { "stderr" } else { "stdout" });
         }
-        over
+        (over, capture.kill_signal)
     };
-    if exceeded {
-        invoke(&run.child.clone().into(), "kill", &[], context)?;
+    if let (true, signal) = exceeded {
+        let child: JsValue = run.child.clone().into();
+        invoke(&child, "kill", &[signal.into()], context)?;
+        for name in ["stdout", "stderr"] {
+            let stream = get(&child, name, context)?;
+            if stream.is_object() {
+                invoke(&stream, "destroy", &[], context)?;
+            }
+        }
     }
     Ok(JsValue::undefined())
 }
@@ -250,8 +257,12 @@ fn finish(
     let failure = match (exceeded, outcome) {
         (Some(stream), _) => {
             let message = format!("{stream} maxBuffer length exceeded");
-            let error = coded_error(context, &message, "ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
-            Some(error.into_opaque(context).unwrap_or_default())
+            let error = boa_engine::JsNativeError::range()
+                .with_message(message)
+                .into_opaque(context);
+            let code = js_text("ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
+            error.set(js_string!("code"), code, false, context)?;
+            Some(error.into())
         }
         (None, Err(error)) => Some(error),
         (None, Ok((code, signal))) if code.as_number() == Some(0.) && signal.is_null() => None,

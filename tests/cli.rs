@@ -627,3 +627,19 @@ fn process_env_finds_a_name_whatever_its_case_on_windows() {
         ran.stderr
     );
 }
+
+#[test]
+fn dash_a_and_allow_run_both_let_a_script_start_programs() {
+    let all = eval(
+        "console.log(process.permission.has('child'), require('child_process').execFileSync(process.execPath, ['-p', '6*7']).toString().trim())",
+        &["-A"],
+    );
+    assert_eq!(all.stdout, "true 42\n", "{}", all.stderr);
+    let run = eval(
+        "console.log(process.permission.has('child'))",
+        &["--allow-run"],
+    );
+    assert_eq!(run.stdout, "true\n", "{}", run.stderr);
+    let none = eval("console.log(process.permission.has('child'))", &[]);
+    assert_eq!(none.stdout, "false\n", "{}", none.stderr);
+}

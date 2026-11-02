@@ -158,6 +158,11 @@ code-cache-env = []
 name = "jit_probe"
 required-features = ["jit"]
 
+# The test is its own executable: it runs as Node (`ELECTRON_RUN_AS_NODE`) when asked to.
+[[test]]
+name = "run_as_node"
+harness = false
+
 [dev-dependencies]
 serde_json = "1"
 # WebAssembly tests write their modules as text.

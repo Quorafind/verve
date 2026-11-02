@@ -6,7 +6,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use boa_engine::{Context, JsObject, JsResult, JsValue};
+use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
 
 use crate::native::{
     get, global, invalid_arg_type, invalid_arg_value, invoke, js_text, list_of, text_of,
@@ -69,6 +69,19 @@ pub(crate) struct Parsed {
     pub behavior: Behavior,
 }
 
+/// A copy of the options object, to add to without touching the caller's.
+pub(crate) fn options_copy(options: &JsValue, context: &mut Context) -> JsResult<JsObject> {
+    let copy = crate::native::object(context);
+    let assign = get(&global(context, "Object")?, "assign", context)?;
+    crate::call(
+        context,
+        &assign,
+        &JsValue::undefined(),
+        &[copy.clone().into(), options.clone()],
+    )?;
+    Ok(copy)
+}
+
 /// `(file, args?, options?)` as `spawn` takes them.
 pub(crate) fn parse(
     file: &JsValue,
@@ -80,6 +93,7 @@ pub(crate) fn parse(
         return Err(invalid_arg_type(context, "file", "of type string", file));
     }
     let file = text_of(file, context)?;
+    no_nul(context, "file", &file)?;
     if file.is_empty() {
         return Err(invalid_arg_value(
             context,
@@ -90,15 +104,7 @@ pub(crate) fn parse(
     }
     let (mut args, options) = split_args(args, options, context)?;
     for value in &args {
-        if value.contains('\0') {
-            let shown = js_text(value);
-            return Err(invalid_arg_value(
-                context,
-                "args",
-                &shown,
-                "must be a string without null bytes",
-            ));
-        }
+        no_nul(context, "args", value)?;
     }
     let cwd = cwd_of(&options, context)?;
     let mut file = file;
@@ -114,15 +120,19 @@ pub(crate) fn parse(
     args.insert(
         0,
         if argv0.is_string() {
-            text_of(&argv0, context)?
+            let argv0 = text_of(&argv0, context)?;
+            no_nul(context, "options.argv0", &argv0)?;
+            argv0
         } else {
             file.clone()
         },
     );
     // Checked everywhere; only Windows has a window to hide and a command line to quote.
     let windows_hide = flag(&options, "windowsHide", context)?;
-    let env = environment(&options, context)?;
+    let mut env = environment(&options, context)?;
     let stdio = stdio_of(&get(&options, "stdio", context)?, context)?;
+    let behavior = behavior_of(&options, context)?;
+    channel_variables(&mut env, &stdio, behavior.serialization);
     let spec = SpawnSpec {
         file,
         args,
@@ -137,9 +147,44 @@ pub(crate) fn parse(
         #[cfg(windows)]
         windows_verbatim_arguments: verbatim,
     };
-    let behavior = behavior_of(&options, context)?;
     let _ = (windows_hide, verbatim);
     Ok(Parsed { spec, behavior })
+}
+
+/// A string that goes to the system must have no NUL in it, or the system would read it short.
+fn no_nul(context: &mut Context, name: &str, text: &str) -> JsResult<()> {
+    if text.contains('\0') {
+        return Err(invalid_arg_value(
+            context,
+            name,
+            &js_text(text),
+            "must be a string without null bytes",
+        ));
+    }
+    Ok(())
+}
+
+/// What tells a child where its IPC channel is: set whenever `stdio` has one, as Node's
+/// `spawn` does, not only for `fork`.
+fn channel_variables(
+    env: &mut Vec<(OsString, OsString)>,
+    stdio: &[Stdio],
+    serialization: Serialization,
+) {
+    let Some(index) = stdio.iter().position(|s| *s == Stdio::Ipc) else {
+        return;
+    };
+    let mode = match serialization {
+        Serialization::Json => "json",
+        Serialization::Advanced => "advanced",
+    };
+    for (name, value) in [
+        ("NODE_CHANNEL_FD", index.to_string()),
+        ("NODE_CHANNEL_SERIALIZATION_MODE", mode.to_owned()),
+    ] {
+        env.retain(|(known, _)| known != name);
+        env.push((name.into(), value.into()));
+    }
 }
 
 /// The argument list and the options object: `spawn(file, options)` is `spawn(file, [], options)`.
@@ -167,13 +212,7 @@ fn split_args(
     }
     let strings = list
         .iter()
-        .map(|value| {
-            if value.is_string() {
-                text_of(value, context)
-            } else {
-                Err(invalid_arg_type(context, "args", "of type string", value))
-            }
-        })
+        .map(|value| text_of(value, context))
         .collect::<JsResult<_>>()?;
     Ok((strings, options))
 }
@@ -251,7 +290,10 @@ fn cwd_of(options: &JsValue, context: &mut Context) -> JsResult<PathBuf> {
 fn shell_of(options: &JsValue, context: &mut Context) -> JsResult<Option<String>> {
     let value = get(options, "shell", context)?;
     if value.is_string() {
-        return Ok(Some(text_of(&value, context)?));
+        let shell = text_of(&value, context)?;
+        no_nul(context, "options.shell", &shell)?;
+        // Node tests `options.shell` for truth: an empty string is no shell.
+        return Ok((!shell.is_empty()).then_some(shell));
     }
     match value.as_boolean() {
         Some(true) => Ok(Some(default_shell(context)?)),
@@ -339,7 +381,10 @@ fn environment(options: &JsValue, context: &mut Context) -> JsResult<Vec<(OsStri
         let name = text_of(&key, context)?;
         let value = get(&source, &name, context)?;
         if !value.is_undefined() {
-            pairs.push((name, text_of(&value, context)?));
+            let value = text_of(&value, context)?;
+            no_nul(context, &format!("options.env['{name}']"), &name)?;
+            no_nul(context, &format!("options.env['{name}']"), &value)?;
+            pairs.push((name, value));
         }
     }
     if cfg!(windows) {
@@ -426,7 +471,23 @@ fn behavior_of(options: &JsValue, context: &mut Context) -> JsResult<Behavior> {
     let timeout = match timeout.as_number() {
         _ if timeout.is_null_or_undefined() => 0.,
         Some(n) if n.is_finite() && n >= 0. && n.fract() == 0. => n,
-        _ => {
+        Some(_) => {
+            let message = format!(
+                "The value of \"options.timeout\" is out of range. It must be an integer >= 0. Received {}",
+                crate::print(&timeout)
+            );
+            let error = boa_engine::JsNativeError::range()
+                .with_message(message)
+                .into_opaque(context);
+            error.set(
+                js_string!("code"),
+                js_text("ERR_OUT_OF_RANGE"),
+                false,
+                context,
+            )?;
+            return Err(boa_engine::JsError::from_opaque(error.into()));
+        }
+        None => {
             return Err(invalid_arg_type(
                 context,
                 "options.timeout",

@@ -13,6 +13,8 @@
 
 mod denied;
 mod exec;
+mod fork;
+mod ipc;
 mod launch;
 mod pipes;
 mod signals;
@@ -36,8 +38,9 @@ use crate::network::reactor::{Command, Event, Id};
 use crate::network::{self, tcp};
 use crate::sockets::{emitter_class, emitter_init, make};
 use launch::{Mode, Parent};
-use spec::{Behavior, Parsed, SpawnSpec};
+use spec::{Behavior, Parsed, Serialization, SpawnSpec, Stdio};
 
+pub(crate) use ipc::join_parent;
 pub(crate) use launch::{Flow, Io, Process};
 pub(crate) use pipes::Pipes;
 
@@ -63,7 +66,7 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
         ("spawn", spawn as NativeFunctionPointer),
         ("exec", exec::exec),
         ("execFile", exec::exec_file),
-        ("fork", denied::refused),
+        ("fork", fork::fork),
     ] {
         let f = function(context, name, 3, f);
         module.set(JsString::from(name), f, false, context)?;
@@ -113,12 +116,8 @@ const CHILD_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("kill", 1, kill),
     ("ref", 0, |this, _, cx| network::set_ref(this, true, cx)),
     ("unref", 0, |this, _, cx| network::set_ref(this, false, cx)),
-    ("send", 4, |_, args, cx| {
-        let error = coded_error_value(cx, "Channel closed", "ERR_IPC_CHANNEL_CLOSED");
-        crate::sockets::call_later(cx, crate::sockets::last_callback(args), vec![error]);
-        Ok(false.into())
-    }),
-    ("disconnect", 0, |_, _, _| Ok(JsValue::undefined())),
+    ("send", 4, ipc::send),
+    ("disconnect", 0, ipc::disconnect),
 ];
 
 // ─── spawn ───────────────────────────────────────────────────────────────────────────────────
@@ -141,7 +140,7 @@ fn start(parsed: Parsed, context: &mut Context) -> JsResult<JsObject> {
     hidden(&child, js_string!("__child"), true, context)?;
     match launch::spawn(&spec, Mode::Reactor) {
         Ok(started) => {
-            track(&child, id, started, &spec, context)?;
+            track(&child, id, started, &spec, behavior.serialization, context)?;
             watch_limits(&child, &behavior, context)?;
             let spawned = closure(
                 context,
@@ -154,7 +153,18 @@ fn start(parsed: Parsed, context: &mut Context) -> JsResult<JsObject> {
             );
             crate::microtask(context, spawned.into(), Vec::new());
         }
-        Err(error) => fail(&child, id, &error, &spec, context)?,
+        Err(error) => {
+            let (code, errno) = launch::classify(&error);
+            // Only these are reported a turn later; any other failure is thrown, as in Node.
+            if matches!(code, "ENOENT" | "EACCES" | "EAGAIN" | "EMFILE" | "ENFILE") {
+                fail(&child, id, &error, &spec, context)?;
+            } else {
+                network::send(context, Command::Close(id));
+                let syscall = format!("spawn {}", spec.file);
+                let failure = system_error(context, &syscall, code, errno, &spec)?;
+                return Err(boa_engine::JsError::from_opaque(failure));
+            }
+        }
     }
     Ok(child)
 }
@@ -174,13 +184,16 @@ fn track(
     id: Id,
     started: launch::Started,
     spec: &SpawnSpec,
+    serialization: Serialization,
     context: &mut Context,
 ) -> JsResult<()> {
     let launch::Started { mut process, pipes } = started;
-    if let Some(sender) = network::sender(context) {
-        process
-            .watch(sender)
-            .map_err(|error| crate::native::type_error(format!("spawn: {error}")))?;
+    if let Some(sender) = network::sender(context)
+        && let Err(error) = process.watch(sender)
+    {
+        // A program nobody will hear the end of is not left running.
+        let _ = process.kill(signals::SIGKILL);
+        return Err(crate::native::type_error(format!("spawn: {error}")));
     }
     child.set(js_string!("pid"), process.pid(), false, context)?;
     network::send(context, Command::Track(id, process));
@@ -192,6 +205,13 @@ fn track(
         };
         let flow = Flow::of(spec.stdio[index], index);
         streams[index] = pipe_socket(child, io, flow, context)?.into();
+    }
+    // The channel is not a stream the caller reads; it is `child.send` and `'message'`.
+    if let Some(index) = spec.stdio.iter().position(|s| *s == Stdio::Ipc)
+        && let Some(socket) = streams[index].as_object()
+    {
+        ipc::attach(child, &socket, serialization, context)?;
+        streams[index] = JsValue::null();
     }
     for (name, index) in [("stdin", 0), ("stdout", 1), ("stderr", 2)] {
         child.set(JsString::from(name), streams[index].clone(), false, context)?;
@@ -205,7 +225,13 @@ fn track(
 /// waits for before it closes.
 fn pipe_socket(child: &JsObject, io: Io, flow: Flow, context: &mut Context) -> JsResult<JsObject> {
     let options = object(context);
-    options.set(js_string!("allowHalfOpen"), true, false, context)?;
+    // A two-way pipe ends when either side does; the one-way ones finish the idle half themselves.
+    options.set(
+        js_string!("allowHalfOpen"),
+        flow != Flow::Both,
+        false,
+        context,
+    )?;
     let socket = make(context, "net", "Socket", &[options.into()])?;
     let id = tcp::attach(&socket, context)?;
     network::send(context, Command::Pipe(id, io, flow));
@@ -372,11 +398,12 @@ fn kill(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsV
     if !running || !get(this, "pid", context)?.is_number() {
         return Ok(false.into());
     }
+    if let Err(error) = launch::check_signal(signal) {
+        return Err(kill_error(&error, context)?);
+    }
     let id = network::id(this, context)?;
     network::send(context, Command::Kill(id, signal));
-    if signal != 0 {
-        child.set(js_string!("killed"), true, false, context)?;
-    }
+    child.set(js_string!("killed"), true, false, context)?;
     Ok(true.into())
 }
 
@@ -482,4 +509,48 @@ fn system_error(
         e.set(js_string!("spawnargs"), rest, false, context)?;
     }
     Ok(failure)
+}
+
+/// `process.kill(pid, signal = 'SIGTERM')` for a realm that may start programs, which may also
+/// signal them; `None` for one that may not, which keeps its refusal.
+pub(crate) fn process_kill(args: &[JsValue], context: &mut Context) -> JsResult<Option<JsValue>> {
+    if !allowed(context) {
+        return Ok(None);
+    }
+    let pid = arg(args, 0);
+    // Negative: a process group, on systems that have them.
+    let number = match pid.as_number() {
+        Some(n) if n.fract() == 0. && (f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&n) => {
+            n as i64
+        }
+        _ => {
+            return Err(crate::native::invalid_arg_type(
+                context,
+                "pid",
+                "of type number",
+                &pid,
+            ));
+        }
+    };
+    let given = arg(args, 1);
+    let signal = if given.is_undefined() {
+        signals::SIGTERM
+    } else {
+        signals::from_js(&given, context)?
+    };
+    match launch::kill_pid(number, signal) {
+        Ok(()) => Ok(Some(true.into())),
+        Err(error) => Err(kill_error(&error, context)?),
+    }
+}
+
+/// Node's error for a `kill` that failed: `kill ESRCH`, with its `errno` and `syscall`.
+fn kill_error(error: &io::Error, context: &mut Context) -> JsResult<boa_engine::JsError> {
+    let (code, errno) = launch::kill_failure(error);
+    let failure = coded_error_value(context, &format!("kill {code}"), code);
+    if let Some(e) = failure.as_object() {
+        e.set(js_string!("errno"), errno as f64, false, context)?;
+        e.set(js_string!("syscall"), js_text("kill"), false, context)?;
+    }
+    Ok(boa_engine::JsError::from_opaque(failure))
 }
