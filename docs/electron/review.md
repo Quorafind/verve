@@ -14,6 +14,14 @@ cargo test -p <改动的 crate>          # 总控合并前再跑全量
 
 分支先 rebase 到最新的基线（`docs/electron-plan`，合并后是 `main`），再跑。
 
+**每个提交都要单独通过**格式与风格检查（提交钩子本应保证；rebase、`reset --soft` 重组时会绕过它）：
+
+```sh
+git rebase --exec 'cargo fmt --all --check && bash scripts/style-check.sh' <基线>
+```
+
+历史要成组、可读：每个提交一件事、能编译；"修上一个提交"的提交折叠进去；同一主题不拆成两个同名提交。
+
 ## 2. 一个工具箱
 
 - [ ] 没有新的 `arg`/`js_text`/`type_error`/`get`/`array`… 副本（`style-check` 已拦），也没有**换了名字的副本**
