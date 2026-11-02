@@ -2368,30 +2368,46 @@ fn write_or_buffer(
             put(state, "allNoop", false, context)?;
         }
     } else {
-        put(state, "writelen", len, context)?;
-        put(state, "writecb", callback, context)?;
-        put(state, "writing", true, context)?;
-        put(state, "sync", true, context)?;
-        let onwrite = sget(state, "onwrite", context)?;
-        invoke(stream, "_write", &[chunk, encoding, onwrite], context)?;
-        put(state, "sync", false, context)?;
+        do_write(
+            stream,
+            state,
+            WriteRequest {
+                writev: false,
+                len,
+                chunk,
+                encoding,
+                callback,
+            },
+            context,
+        )?;
     }
     Ok(ok
         && sget(state, "errored", context)?.is_null_or_undefined()
         && !flag(state, "destroyed", context)?)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn do_write(
-    stream: &JsValue,
-    state: &JsObject,
+/// One write as `_write` is given it: the chunk, how it is counted, and what to call back.
+struct WriteRequest {
     writev: bool,
     len: f64,
     chunk: JsValue,
     encoding: JsValue,
     callback: JsValue,
+}
+
+fn do_write(
+    stream: &JsValue,
+    state: &JsObject,
+    request: WriteRequest,
     context: &mut Context,
 ) -> JsResult<()> {
+    let WriteRequest {
+        writev,
+        len,
+        chunk,
+        encoding,
+        callback,
+    } = request;
     put(state, "writelen", len, context)?;
     put(state, "writecb", callback, context)?;
     put(state, "writing", true, context)?;
@@ -2650,11 +2666,13 @@ fn clear_buffer(stream: &JsValue, state: &JsObject, context: &mut Context) -> Js
         do_write(
             stream,
             state,
-            true,
-            length,
-            list,
-            js_text(""),
-            all.into(),
+            WriteRequest {
+                writev: true,
+                len: length,
+                chunk: list,
+                encoding: js_text(""),
+                callback: all.into(),
+            },
             context,
         )?;
     } else {
@@ -2667,7 +2685,16 @@ fn clear_buffer(stream: &JsValue, state: &JsObject, context: &mut Context) -> Js
             let callback = get(&entry, "callback", context)?;
             let len = chunk_length(&chunk, object_mode, context)?;
             do_write(
-                stream, state, false, len, chunk, encoding, callback, context,
+                stream,
+                state,
+                WriteRequest {
+                    writev: false,
+                    len,
+                    chunk,
+                    encoding,
+                    callback,
+                },
+                context,
             )?;
             if at >= entries.len() || flag(state, "writing", context)? {
                 break;
