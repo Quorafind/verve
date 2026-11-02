@@ -1,7 +1,7 @@
-crates/verve-dom/src/bind/element.rs 3824
-crates/verve-dom/src/bind/platform.rs 2259
+crates/verve-dom/src/bind/element.rs 3821
+crates/verve-dom/src/bind/platform.rs 2227
 crates/verve-dom/src/dom.rs 1769
-crates/verve-dom/src/lib.rs 1790
+crates/verve-dom/src/lib.rs 1689
 src/buffer.rs 1742
 src/code_cache.rs 1666
 src/crypto.rs 2529
