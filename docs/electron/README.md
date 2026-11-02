@@ -19,11 +19,18 @@ electron-builder / electron-forge 打包出来的应用照常运行。
 | `ipcRenderer.invoke` 往返 p50 | ≤ 0.2 ms | 线程间通信，不跨进程 |
 | 2000 行列表滚动 | 60 fps | GPUI 绘制 + 分区增量 |
 
-**体积实测（P01，2026-11-02，Windows x64，strip + fat LTO）**：Verve 核心（Electron 特性组合，不含 GPUI/verve-dom/JIT）
-从 35.8 MB 降到 **17.8 MB**，比原先 ≤ 10 MB 的核心预算高约 8 MB（Boa ≈ 5 MiB、std ≈ 2.4 MiB、4.4 MiB 未归属的 `.rdata`）。
-JIT 另加 5.9 MB（数值热循环快约 8 倍）。按 GPUI ≈ 6 MB、verve-dom ≈ 2 MB 估算，合计约 26 MB（不含 JIT）。
-后续手段：`wasm` 关闭（−0.7 MB）、依赖试 `opt-level = "z"`、归属 `.rdata`、P42 决定 JIT 默认值。**P02 接入 GPUI 后实测一次，
-再定是否把硬上限调整为 ~28 MB 或继续压缩**——这是需要拍板的取舍，详见 [`size.md`](size.md)（P01 合并后可见）。
+**体积实测（2026-11-02，Windows x64，strip + fat LTO）**：
+
+| 部分 | 实测 | 来源 |
+|---|---:|---|
+| Verve 核心（Electron 特性组合） | 17.8 MB | P01（35.8 MB → 17.8 MB） |
+| GPUI（一个窗口画一行字的增量） | +6.1 MB | P30 spike |
+| verve-dom | ≈ +2 MB | 估计，待 P02 接入后实测 |
+| **合计（不含 JIT）** | **≈ 26 MB** | |
+| JIT（可选） | +5.9 MB | P01；数值热循环快约 8 倍 |
+
+超出原定 24 MB 硬上限。**上限待定**（用户决定：GPUI 实测后再定——数据已齐，待拍板）。可继续压缩的方向：`wasm` 关闭（−0.7 MB）、
+依赖试 `opt-level = "z"`、归属 4.4 MiB 未归属的 `.rdata`。详见 [`size.md`](size.md)（P01 合并后可见）。
 
 ## 2. 原则（不可违反）
 
@@ -95,8 +102,9 @@ tests/electron/       夹具应用与无头验收（P00）
 ```
 
 GPUI 版本：与 Rebon 实际使用的同一个 fork（`Quorafind/zed-c`，P30 调研时为 `e679b51`），在 workspace 里锁 rev，
-由 P02 决定并写入 `Cargo.toml` 注释。需要对 fork 打两个小补丁：公开 `TextSystem::layout_line`（在渲染器线程整形文字）、
-公开 `Window::with_element_opacity`（P30 负责）。**verve 根 crate、verve-electron、verve-layout 都不得依赖 GPUI**；只有 `verve-gpui` 依赖。
+由 P02 决定并写入 `Cargo.toml` 注释。渲染器线程用应用共享的 `Arc<TextSystem>` 与已公开的 `WindowTextSystem::layout_line`
+整形文字，**无需补丁**（P30 spike 已验证，见 [`spikes/p30-text-measurement.md`](spikes/p30-text-measurement.md)）；
+fork 只需两处一个字的可见性补丁：`Window::with_element_opacity`、`WindowTextSystem::finish_frame` 改 `pub`（P30 负责）。**verve 根 crate、verve-electron、verve-layout 都不得依赖 GPUI**；只有 `verve-gpui` 依赖。
 
 ## 5. 里程碑与依赖
 
