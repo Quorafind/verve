@@ -137,26 +137,12 @@ fn check_listener(listener: &JsValue, context: &mut Context) -> JsResult<()> {
     if listener.is_callable() {
         return Ok(());
     }
-    Err(coded_type_error(
+    Err(crate::native::invalid_arg_type(
         context,
-        &format!(
-            "The \"listener\" argument must be of type function. Received {}",
-            describe_received(listener)
-        ),
-        "ERR_INVALID_ARG_TYPE",
+        "listener",
+        "of type function",
+        listener,
     ))
-}
-
-fn describe_received(value: &JsValue) -> String {
-    if value.is_undefined() {
-        "undefined".into()
-    } else if value.is_null() {
-        "null".into()
-    } else if value.is_object() {
-        "an instance of Object".into()
-    } else {
-        format!("type {} ({})", value.type_of(), crate::print(value))
-    }
 }
 
 /// `on` / `prependListener`: `newListener` heard first, then the listener kept — and the

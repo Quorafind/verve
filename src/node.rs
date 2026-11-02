@@ -38,7 +38,7 @@ pub(crate) const MODULES: &[(&str, crate::ModuleMaker)] = &[
     ("fs", crate::fs::module),
     ("fs/promises", crate::fs::promises_module),
     ("original-fs", crate::fs::original_module),
-    ("child_process", crate::sockets::child_process_module),
+    ("child_process", crate::child_process::module),
     ("http", crate::sockets::http_module),
     ("https", crate::sockets::https_module),
     ("http2", crate::sockets::http2_module),

@@ -67,8 +67,9 @@ iana-time-zone = "0.1"
 # WebAssembly, run by an interpreter written in Rust. Only with the `wasm` feature.
 wasmi = { version = "0.35", optional = true }
 
-# Permissioned TCP/UDP: one portable readiness reactor, with kernel socket options.
-mio = { version = "1.2", features = ["net", "os-poll"] }
+# Permissioned TCP/UDP: one portable readiness reactor, with kernel socket options; `os-ext` for
+# the pipes of child processes (`mio::windows::NamedPipe`, `mio::net::UnixStream` pairs).
+mio = { version = "1.2", features = ["net", "os-poll", "os-ext"] }
 # TCP keepalive and datagram options, without a connection-per-thread runtime.
 socket2 = { version = "0.6", features = ["all"] }
 # System-configured DNS record queries, confined to the fixed resolver pool. Only with the
@@ -110,12 +111,12 @@ ureq = { version = "3.4", default-features = false, features = ["rustls-no-provi
 tar = { version = "0.4.44", default-features = false, optional = true }
 base64 = { version = "0.23", optional = true }
 
-# The code cache's folder: private to its owner.
+# The code cache's folder: private to its owner; signals and descriptors for child processes.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [features]
 # Every API Verve carries by default. An Electron build turns off what its compatibility target
@@ -156,6 +157,11 @@ code-cache-env = []
 [[example]]
 name = "jit_probe"
 required-features = ["jit"]
+
+# The test is its own executable: it runs as Node (`ELECTRON_RUN_AS_NODE`) when asked to.
+[[test]]
+name = "run_as_node"
+harness = false
 
 [dev-dependencies]
 serde_json = "1"

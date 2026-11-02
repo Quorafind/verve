@@ -316,6 +316,9 @@ const PROCESS_FUNCTIONS: &[(
         }
     }),
     ("kill", 2, |_, args, cx| {
+        if let Some(sent) = crate::child_process::process_kill(args, cx)? {
+            return Ok(sent);
+        }
         let pid = crate::print(&arg(args, 0));
         Err(coded_error(
             cx,
@@ -759,6 +762,8 @@ pub(crate) struct Setup {
     pub env: Vec<(String, String)>,
     /// Whether `process.emitWarning` stays quiet (`--no-warnings`).
     pub no_warnings: bool,
+    /// Whether Electron's versions stay on `process.versions`: an Electron run as Node.
+    pub electron: bool,
     /// How the process wakes its host.
     pub waker: crate::Waker,
 }
@@ -824,7 +829,7 @@ pub(crate) fn become_process(context: &mut Context, setup: Setup) -> JsResult<()
         exec_argv: setup.exec_argv.clone(),
         resources_path: None,
         default_app: false,
-        electron_fields: false,
+        electron_fields: setup.electron,
         sandboxed: None,
         context_isolated: None,
         exit: ExitBehavior::Process,

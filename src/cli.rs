@@ -24,7 +24,7 @@
 //! file may be read or written, no worker started and no host reached unless a flag says so.
 //! The entry file itself may always be read — the one path a script needs to start — but not
 //! the folder it is in, so what it imports must be granted too. A `-e` script needs no grant.
-//! Child processes, native addons and WASI do not exist here, granted or not.
+//! Native addons and WASI do not exist here, granted or not.
 //!
 //! Flags come Deno's way with Node's spellings beside them, so a command line built for
 //! `node --permission` maps one to one:
@@ -36,9 +36,11 @@
 //! | `--allow-write[=a,b]`, `--allow-fs-write=<path>` (repeatable, `*` for all) | write |
 //! | `--allow-net[=host[:port],…]` | connect to those (alone: anything; and listen, and DNS) |
 //! | `--allow-worker` | start workers |
+//! | `--allow-child-process`, `--allow-run` | start programs with `child_process` (Node's and Deno's spellings) |
 //! | `--use-env-proxy` | `fetch`, `WebSocket` and the `http`/`https` global agents go through `HTTP_PROXY`/`HTTPS_PROXY`, minus `NO_PROXY` — also when `NODE_USE_ENV_PROXY=1` |
 //! | `--permission`, `--experimental-permission` | accepted: permissions are always on |
 //! | `-e`, `--eval <source>` | run `source` as `node -e` does (also `verve eval <source>`) |
+//! | `-p`, `--print <source>` | the same, and write its value |
 //! | `--disable-proto=throw\|delete` | `Object.prototype.__proto__` throws, or is gone |
 //! | `--stack-size=<KiB>`, `--stack_size=<KiB>` | the script thread's stack, in KiB as V8's |
 //! | `--no-warnings` | `process.emitWarning` writes nothing |
@@ -80,10 +82,11 @@ const MIN_STACK: usize = 4 * 1024 * 1024;
 
 const USAGE: &str = "usage: verve run [flags] <entry.js|.mjs|.cjs> [args...]
        verve run [flags] -e <source> [args...]
+       verve run [flags] -p <source> [args...]
        verve --version
 
 flags: -A/--allow-all, --allow-read[=paths], --allow-fs-read=<path>, --allow-write[=paths],
-       --allow-fs-write=<path>, --allow-net[=hosts], --allow-worker, --permission,
+       --allow-fs-write=<path>, --allow-net[=hosts], --allow-worker, --allow-child-process/--allow-run, --permission,
        --use-env-proxy,
        --disable-proto=throw|delete, --stack-size=<KiB>, --no-warnings, --jitless,
        --code-cache=<dir>,
@@ -97,6 +100,13 @@ struct Options {
     write: Option<Vec<PathBuf>>,
     net: Option<Vec<NetworkRule>>,
     worker: bool,
+    child_process: bool,
+    /// `-p`: the value of the `-e` script is printed.
+    print: bool,
+    /// `--permission`: Node's permission model asked for, which `main_node` otherwise leaves off.
+    permission: bool,
+    /// Started as Node (`ELECTRON_RUN_AS_NODE`): everything granted, Electron's versions kept.
+    node: bool,
     use_env_proxy: bool,
     stack_kib: Option<usize>,
     disable_proto: Option<Proto>,
@@ -136,17 +146,42 @@ pub type Setup = fn(&mut Runtime) -> Result<(), String>;
 /// [`main`] for an embedder that ships its own runner: `setup` runs on the runtime before
 /// the script does (see [`Setup`]).
 pub fn main_with(args: impl IntoIterator<Item = OsString>, setup: Setup) -> ExitCode {
+    launch(args, setup, false)
+}
+
+/// The entry of an Electron executable run as Node (`ELECTRON_RUN_AS_NODE=1 electron script.js`,
+/// which VS Code, `fork` and many tools do): `args` is Node's command line,
+/// `[options] [script | -e code | -p code | -] [args...]`, `--version` and `--help` included.
+/// Node has no permission model unless asked, so everything is granted, programs too; and
+/// `process.versions.electron` stays, as it does in Electron's own Node mode.
+pub fn main_node(args: impl IntoIterator<Item = OsString>, setup: Setup) -> ExitCode {
+    let args: Vec<OsString> = args.into_iter().collect();
+    match args.get(1).and_then(|a| a.to_str()) {
+        Some("-v" | "--version") => {
+            println!("v{}", crate::process::NODE_VERSION);
+            ExitCode::SUCCESS
+        }
+        Some("-h" | "--help") => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        _ => launch(args, setup, true),
+    }
+}
+
+fn launch(args: impl IntoIterator<Item = OsString>, setup: Setup, node: bool) -> ExitCode {
     let args: Vec<String> = args
         .into_iter()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     let argv0 = args.first().cloned().unwrap_or_else(|| "verve".into());
-    match parse(args.into_iter().skip(1).collect()) {
+    match parse(args.into_iter().skip(1).collect(), node) {
         Ok(Command::Print(text)) => {
             println!("{text}");
             ExitCode::SUCCESS
         }
-        Ok(Command::Run(options)) => {
+        Ok(Command::Run(mut options)) => {
+            options.node = node;
             let code = run(*options, argv0, setup);
             ExitCode::from((code & 0xff) as u8)
         }
@@ -157,11 +192,14 @@ pub fn main_with(args: impl IntoIterator<Item = OsString>, setup: Setup) -> Exit
     }
 }
 
-fn parse(args: Vec<String>) -> Result<Command, String> {
+fn parse(args: Vec<String>, node: bool) -> Result<Command, String> {
     let mut args = args.into_iter().peekable();
     let mut options = Options::default();
-    match args.peek().map(String::as_str) {
-        None => return Err("no script given".into()),
+    // In Node's own command line a first word is a script, whatever it is called.
+    let empty = args.peek().is_none();
+    match args.peek().map(String::as_str).filter(|_| !node) {
+        None if empty => return Err("no script given".into()),
+        None => {}
         Some("--version" | "-v" | "-V") => {
             return Ok(Command::Print(format!(
                 "verve {} (node {})",
@@ -234,8 +272,9 @@ fn parse(args: Vec<String>) -> Result<Command, String> {
                 }
             }
             "--allow-worker" => options.worker = true,
+            "--allow-child-process" | "--allow-run" => options.child_process = true,
             "--use-env-proxy" => options.use_env_proxy = true,
-            "--permission" | "--experimental-permission" => {}
+            "--permission" | "--experimental-permission" => options.permission = true,
             "--no-warnings" => options.no_warnings = true,
             "--jitless" => options.jitless = true,
             "--code-cache" => {
@@ -266,11 +305,20 @@ fn parse(args: Vec<String>) -> Result<Command, String> {
                 });
             }
             "-e" | "--eval" => options.eval = Some(needs_value("--eval")?),
-            "--allow-child-process" | "--allow-addons" | "--allow-wasi" => {
+            "-p" | "--print" => {
+                options.eval = Some(needs_value("--print")?);
+                options.print = true;
+            }
+            "--allow-addons" | "--allow-wasi" => {
                 return Err(format!(
-                    "{flag}: Verve has no child processes, native addons or WASI to allow"
+                    "{flag}: Verve has no native addons or WASI to allow"
                 ));
             }
+            // Node's and V8's many other flags mean nothing here, and are not an error there.
+            "-r" | "--require" | "--import" | "--loader" | "--experimental-loader" if node => {
+                needs_value(&flag)?;
+            }
+            _ if node => {}
             _ => return Err(format!("unknown flag {arg}")),
         }
         // `execArgv` is the runtime's own part of the command line, values and all.
@@ -332,8 +380,12 @@ fn net_rule(entry: &str) -> Result<NetworkRule, String> {
 
 /// The grants the options come to; `entry` may always be read.
 fn permissions(options: &Options, entry: Option<&Path>) -> Permissions {
-    if options.all {
-        return Permissions::all();
+    if options.all || (options.node && !options.permission) {
+        // `-A` grants programs too, which `Permissions::all()` leaves to the embedder.
+        return Permissions {
+            child_process: true,
+            ..Permissions::all()
+        };
     }
     let mut permissions = Permissions::none();
     let fs = |grant: &Option<Vec<PathBuf>>, extra: Option<&Path>| match grant {
@@ -347,6 +399,7 @@ fn permissions(options: &Options, entry: Option<&Path>) -> Permissions {
     permissions.fs_read = fs(&options.read, entry);
     permissions.fs_write = fs(&options.write, None);
     permissions.worker = options.worker;
+    permissions.child_process = options.child_process;
     if let Some(rules) = &options.net {
         let any = rules.iter().any(|r| r.host.is_none() && r.port.is_none());
         permissions.outbound = rules.clone();
@@ -473,6 +526,7 @@ fn script(options: Options, argv0: String, embedder: Setup) -> i32 {
             })
             .collect(),
         no_warnings: options.no_warnings,
+        electron: options.node,
         waker,
     };
     let context = runtime.context();
@@ -485,6 +539,10 @@ fn script(options: Options, argv0: String, embedder: Setup) -> i32 {
         return 70;
     }
     let context = runtime.context();
+    if let Err(error) = crate::child_process::join_parent(context) {
+        eprintln!("verve: {}", crate::describe(context, &error));
+        return 70;
+    }
     if let Some(proto) = options.disable_proto
         && let Err(error) = disable_proto(context, proto)
     {
@@ -492,7 +550,12 @@ fn script(options: Options, argv0: String, embedder: Setup) -> i32 {
         return 70;
     }
     let started = match (&options.eval, &entry) {
-        (Some(source), _) => eval(context, source).map(|()| None),
+        (Some(source), _) => eval(context, source).and_then(|value| {
+            if options.print {
+                print_result(context, &value)?;
+            }
+            Ok(None)
+        }),
         (None, Some(entry)) => start(context, entry),
         (None, None) => Ok(None),
     };
@@ -551,7 +614,7 @@ fn start(context: &mut Context, entry: &Path) -> JsResult<Option<(JsPromise, Str
 
 /// `node -e`: the source as a script in the global scope, with `require` (relative to the
 /// working directory), `module`, `exports`, `__filename` (`[eval]`) and `__dirname` (`.`).
-fn eval(context: &mut Context, source: &str) -> JsResult<()> {
+fn eval(context: &mut Context, source: &str) -> JsResult<JsValue> {
     let cwd = PathBuf::from(crate::shared(context).cwd.borrow().clone());
     let module = object(context);
     let exports = object(context);
@@ -559,6 +622,11 @@ fn eval(context: &mut Context, source: &str) -> JsResult<()> {
     module.set(js_string!("id"), js_text("[eval]"), false, context)?;
     module.set(js_string!("filename"), js_text("[eval]"), false, context)?;
     module.set(js_string!("loaded"), false, false, context)?;
+    // Node's `process._eval`: what `fork` needs to know not to run it again in the child.
+    let process = crate::native::global(context, "process")?;
+    if let Some(process) = process.as_object() {
+        process.set(js_string!("_eval"), js_text(source), false, context)?;
+    }
     let require = crate::modules::require_function(context, &cwd, None)?;
     let global = context.global_object();
     for (name, value) in [
@@ -570,7 +638,13 @@ fn eval(context: &mut Context, source: &str) -> JsResult<()> {
     ] {
         global.set(js_string!(name), value, false, context)?;
     }
-    context.eval(Source::from_bytes(source).with_path(Path::new("[eval]")))?;
+    context.eval(Source::from_bytes(source).with_path(Path::new("[eval]")))
+}
+
+/// `node -p`: the value of the script, written as `console.log` writes it.
+fn print_result(context: &mut Context, value: &JsValue) -> JsResult<()> {
+    let console = crate::native::global(context, "console")?;
+    crate::native::invoke(&console, "log", std::slice::from_ref(value), context)?;
     Ok(())
 }
 
@@ -664,7 +738,7 @@ mod tests {
     use super::*;
 
     fn options(args: &[&str]) -> Options {
-        match parse(args.iter().map(|a| a.to_string()).collect()) {
+        match parse(args.iter().map(|a| a.to_string()).collect(), false) {
             Ok(Command::Run(options)) => *options,
             Ok(Command::Print(text)) => panic!("printed {text}"),
             Err(error) => panic!("{error}"),
@@ -772,8 +846,9 @@ mod tests {
 
     #[test]
     fn unknown_flags_and_missing_scripts_are_errors() {
-        assert!(parse(vec!["--frobnicate".into(), "x.js".into()]).is_err());
-        assert!(parse(vec!["run".into()]).is_err());
-        assert!(parse(vec!["--allow-child-process".into(), "x.js".into()]).is_err());
+        assert!(parse(vec!["--frobnicate".into(), "x.js".into()], false).is_err());
+        assert!(parse(vec!["run".into()], false).is_err());
+        assert!(parse(vec!["--allow-addons".into(), "x.js".into()], false).is_err());
+        assert!(parse(vec!["--allow-child-process".into(), "x.js".into()], false).is_ok());
     }
 }

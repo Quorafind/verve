@@ -115,6 +115,22 @@ pub(crate) fn proxy_config(cx: &Context) -> Option<std::rc::Rc<proxy::Config>> {
         .map(|(_, config)| config.clone())
 }
 
+/// The reactor's way in, for a thread that has to be able to wake it; `None` before any socket
+/// has made it.
+pub(crate) fn sender(cx: &Context) -> Option<reactor::Sender> {
+    crate::shared(cx)
+        .network
+        .borrow()
+        .reactor
+        .as_ref()
+        .map(|reactor| reactor.sender.clone())
+}
+
+/// A resource that is gone: it no longer keeps the process waiting or hears events.
+pub(crate) fn forget(id: Id, cx: &Context) {
+    crate::shared(cx).network.borrow_mut().targets.remove(&id);
+}
+
 pub(crate) fn send(cx: &Context, cmd: Command) {
     if let Some(reactor) = &crate::shared(cx).network.borrow().reactor {
         reactor.send(cmd);
@@ -182,11 +198,13 @@ pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> us
             .and_then(|w| invoke(&w.into(), "deref", &[], cx).ok())
             .and_then(|v| v.as_object());
         if let Some(target) = target {
-            let delivered = if get(&target.clone().into(), "__udp", cx)
-                .map(|v| v.to_boolean())
-                .unwrap_or(false)
-            {
+            let flagged = |name: &str, cx: &mut Context| {
+                get(&target.clone().into(), name, cx).is_ok_and(|v| v.to_boolean())
+            };
+            let delivered = if flagged("__udp", cx) {
                 udp::deliver(id, &target, event, cx)
+            } else if flagged("__child", cx) {
+                crate::child_process::deliver(id, &target, event, cx)
             } else {
                 tcp::deliver(id, &target, event, cx)
             };

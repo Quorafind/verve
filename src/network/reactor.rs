@@ -44,6 +44,16 @@ pub(crate) enum Command {
     UdpSend(Id, Id, String, u16, Vec<u8>),
     UdpConnect(Id, Id, String, u16),
     UdpOption(Id, String, String, String),
+    /// The parent's end of a child process's pipe, to be polled like a socket.
+    Pipe(Id, crate::child_process::Io, crate::child_process::Flow),
+    /// A child process to report on when it ends.
+    Track(Id, crate::child_process::Process),
+    /// Signal a tracked child process.
+    Kill(Id, i32),
+    /// A tracked child process may have ended: Windows' wake-up from its wait callback. On Unix
+    /// the reactor looks at every turn.
+    #[cfg(windows)]
+    Reap,
     Stop,
 }
 #[derive(Debug)]
@@ -64,6 +74,8 @@ pub(crate) enum Event {
     DatagramConnected(SocketAddr, SocketAddr),
     DatagramBuffers(usize, usize),
     Error(String, String),
+    /// A child process ended: with this exit code, or because of this signal.
+    Exited(Option<i64>, Option<i32>),
     /// The proxy answered a `CONNECT` with this status rather than 200.
     TunnelRefused(u16, String),
 }
@@ -99,13 +111,13 @@ impl Drop for ThreadCount<'_> {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
-struct Output {
+pub(crate) struct Output {
     tx: mpsc::Sender<(Id, Event)>,
     counters: Arc<Counters>,
     wake: Arc<crate::WakeSlot>,
 }
 impl Output {
-    fn send(&self, event: (Id, Event)) -> Result<(), ()> {
+    pub(crate) fn send(&self, event: (Id, Event)) -> Result<(), ()> {
         let n = match &event.1 {
             Event::Data(bytes) | Event::Datagram(bytes, _) => bytes.len(),
             _ => 0,
@@ -467,6 +479,7 @@ fn run(
     let mut pending = HashMap::new();
     let mut accepted: HashMap<Id, (Id, TcpStream)> = HashMap::new();
     let mut accept_id = 1_u64 << 52;
+    let mut pipes = crate::child_process::Pipes::default();
     let mut events = Events::with_capacity(1024);
     loop {
         if out.counters.stopped.load(Ordering::Acquire) {
@@ -481,6 +494,9 @@ fn run(
                 Ok(c) => c,
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return,
+            };
+            let Some(command) = pipes.command(command, &poll, &out) else {
+                continue;
             };
             match command {
                 Command::TlsAuthorize(id) => {
@@ -622,6 +638,10 @@ fn run(
                     }
                 }
                 Command::Stop => return,
+                // Taken by `pipes` above; only a name here for the match to be whole.
+                Command::Pipe(..) | Command::Track(..) | Command::Kill(..) => {}
+                #[cfg(windows)]
+                Command::Reap => {}
                 Command::Proxies(list) => proxies = list,
                 Command::Connect(..) | Command::ConnectVia(..) => {
                     let (id, host, port, family, tunnel) = match command {
@@ -974,6 +994,7 @@ fn run(
                 error(&out, id, e);
             }
         }
+        pipes.pump(&out);
         if poll
             .poll(&mut events, Some(Duration::from_millis(20)))
             .is_err()
@@ -982,7 +1003,7 @@ fn run(
         }
         for ready in events.iter() {
             let id = ready.token().0 as Id;
-            if id == 0 {
+            if id == 0 || pipes.ready(id, ready) {
                 continue;
             }
             if let Some(d) = datagrams.get_mut(&id) {

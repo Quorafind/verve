@@ -764,7 +764,7 @@ fn call(
         m => {
             let message = format!(
                 "The property 'options.mode' must be one of: 'strip', 'transform'. Received {}",
-                shown(&m)
+                crate::native::received(&m, context)
             );
             return Err(coded(
                 context,
@@ -822,31 +822,5 @@ fn coded(context: &mut Context, kind: JsNativeError, message: &str, code: &str) 
 }
 
 fn type_error(context: &mut Context, name: &str, expected: &str, value: &JsValue) -> JsError {
-    let kind = if name.contains('.') {
-        "property"
-    } else {
-        "argument"
-    };
-    let message = format!(
-        "The \"{name}\" {kind} must be of type {expected}. Received {}",
-        shown(value)
-    );
-    coded(
-        context,
-        JsNativeError::typ(),
-        &message,
-        "ERR_INVALID_ARG_TYPE",
-    )
-}
-
-fn shown(value: &JsValue) -> String {
-    if value.is_undefined() || value.is_null() {
-        crate::print(value)
-    } else if value.is_object() {
-        "an instance of Object".into()
-    } else if value.is_string() {
-        format!("type string ('{}')", crate::print(value))
-    } else {
-        format!("type {} ({})", value.type_of(), crate::print(value))
-    }
+    crate::native::invalid_arg_type(context, name, &format!("of type {expected}"), value)
 }
