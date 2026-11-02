@@ -46,7 +46,10 @@ fn compiled_and_interpreted_runs_agree() {
     let before = interpreted.jit_stats();
     let expected = eval(&mut interpreted);
     let after = interpreted.jit_stats();
-    assert_eq!((after.compiled, after.entries), (before.compiled, before.entries));
+    assert_eq!(
+        (after.compiled, after.entries),
+        (before.compiled, before.entries)
+    );
 
     for threshold in [0, 50, 1000] {
         let mut compiled = Runtime::new();
@@ -54,7 +57,10 @@ fn compiled_and_interpreted_runs_agree() {
         compiled.jit_options_mut().threshold = threshold;
         assert_eq!(eval(&mut compiled), expected, "threshold {threshold}");
         let stats = compiled.jit_stats();
-        assert!(stats.compiled >= 1 && stats.entries >= 1, "threshold {threshold}: {stats:?}");
+        assert!(
+            stats.compiled >= 1 && stats.entries >= 1,
+            "threshold {threshold}: {stats:?}"
+        );
     }
 }
 
@@ -84,13 +90,21 @@ fn verve_run_obeys_the_environment() {
     let run = |vars: &[(&str, &str)]| {
         let mut command = Command::new(VERVE);
         command.arg("run").arg(&script);
-        command.env_remove("VERVE_JIT").env_remove("VERVE_JIT_THRESHOLD");
-        command.env_remove("BOA_JIT").env_remove("BOA_JIT_THRESHOLD");
+        command
+            .env_remove("VERVE_JIT")
+            .env_remove("VERVE_JIT_THRESHOLD");
+        command
+            .env_remove("BOA_JIT")
+            .env_remove("BOA_JIT_THRESHOLD");
         for (name, value) in vars {
             command.env(name, value);
         }
         let output = command.output().expect("verve runs");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).expect("UTF-8")
     };
     let off = run(&[("VERVE_JIT", "0")]);

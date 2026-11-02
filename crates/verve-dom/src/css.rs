@@ -1856,6 +1856,9 @@ pub fn style_of(dom: &Dom, styler: &Styler, id: NodeId) -> Style {
     style
 }
 
+/// Where a declaration ranks in the cascade: importance and origin, specificity, order.
+type Rank = (u8, (u32, u32, u32), usize);
+
 fn own_style(
     dom: &Dom,
     styler: &Styler,
@@ -1876,7 +1879,7 @@ fn own_style(
         return (style, false);
     }
     // Sorted by: importance (and, within it, origin), specificity, order.
-    let mut matched: Vec<((u8, (u32, u32, u32), usize), &Declaration)> = Vec::new();
+    let mut matched: Vec<(Rank, &Declaration)> = Vec::new();
     let mut pointer = false;
     let cx = MatchContext::default();
     for (index, k) in styler.candidates(dom, id) {
@@ -1957,10 +1960,11 @@ fn own_style(
             }
             None => {
                 style.remove(&key);
-                if !key.starts_with("--") && is_inherited(&key) {
-                    if let Some(value) = inherited.get(&key) {
-                        style.insert(key, value.clone());
-                    }
+                if !key.starts_with("--")
+                    && is_inherited(&key)
+                    && let Some(value) = inherited.get(&key)
+                {
+                    style.insert(key, value.clone());
                 }
             }
         }

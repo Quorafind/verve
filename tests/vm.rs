@@ -154,8 +154,17 @@ fn values_cross_with_their_own_realm() {
         try { new vm.Script('(').runInContext(ctx); } catch (e) { log.push(e.name); }
         "#,
         &[
-            "true", "false", "true", "true", "TypeError", "false", "true", "mine", "true",
-            "SyntaxError", "SyntaxError",
+            "true",
+            "false",
+            "true",
+            "true",
+            "TypeError",
+            "false",
+            "true",
+            "mine",
+            "true",
+            "SyntaxError",
+            "SyntaxError",
         ],
     );
 }

@@ -39,8 +39,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use boa_engine::{
-    Context, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Script,
-    Source,
+    Context, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Script, Source,
     context::intrinsics::Intrinsics,
     error::{EngineError, RuntimeLimitError},
     js_string,
@@ -339,11 +338,7 @@ fn create_context(
 }
 
 /// The object `runInNewContext` contextifies: the one given, or a fresh one.
-fn new_context(
-    value: &JsValue,
-    options: &JsValue,
-    context: &mut Context,
-) -> JsResult<Realm> {
+fn new_context(value: &JsValue, options: &JsValue, context: &mut Context) -> JsResult<Realm> {
     let sandbox = match value.as_object() {
         Some(sandbox) => sandbox,
         None if value.is_undefined() => object(context),

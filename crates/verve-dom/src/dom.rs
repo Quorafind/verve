@@ -178,7 +178,7 @@ const INDEX_MASK: u32 = (1 << INDEX_BITS) - 1;
 const MAX_GENERATION: u32 = u8::MAX as u32;
 
 fn split(id: NodeId) -> (usize, u32) {
-    ((id & INDEX_MASK) as usize, (id >> INDEX_BITS) as u32)
+    ((id & INDEX_MASK) as usize, id >> INDEX_BITS)
 }
 
 fn join(index: usize, generation: u32) -> NodeId {

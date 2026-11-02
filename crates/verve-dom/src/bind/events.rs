@@ -210,8 +210,11 @@ const TOUCH: &[(&str, F)] = &[
     ("changedTouches", F::Undefined),
 ];
 
-/// The event classes: name, parent, fields (the parent's included), whether a global.
-const CLASSES: &[(&str, &str, &[(&str, F)])] = &[
+/// An event class: its name, its parent's, and its fields (the parent's included).
+type EventClass = (&'static str, &'static str, &'static [(&'static str, F)]);
+
+/// The event classes.
+const CLASSES: &[EventClass] = &[
     ("UIEvent", "Event", UI),
     ("MouseEvent", "UIEvent", MOUSE),
     ("PointerEvent", "MouseEvent", POINTER),

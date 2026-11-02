@@ -252,7 +252,7 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
                 {
                     // What belongs in `<head>` before the body goes there, whether or not
                     // `<head>` was written; once there, it stays (this arm, not the next).
-                    #[allow(clippy::collapsible_if)]
+                    #[allow(clippy::collapsible_if, clippy::collapsible_match)]
                     if stack[0].id != head {
                         stack.truncate(1);
                         stack[0] = Open {

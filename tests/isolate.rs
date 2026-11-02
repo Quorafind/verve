@@ -197,7 +197,10 @@ fn what_a_guest_says_reaches_the_embedder_before_a_long_beat() {
     )
     .unwrap();
     // Said while it was made, and its first beat is the slow one.
-    assert_eq!(heard_within(&isolate, Duration::from_millis(1500)), ["made"]);
+    assert_eq!(
+        heard_within(&isolate, Duration::from_millis(1500)),
+        ["made"]
+    );
     // Said by a job, with another slow beat after it.
     std::thread::sleep(Duration::from_millis(2500));
     isolate.send(|guest, _| {

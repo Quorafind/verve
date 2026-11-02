@@ -2603,8 +2603,11 @@ macro_rules! url_part {
     };
 }
 
+/// One part of a URL: its property name, and how it reads from the URL.
+pub type UrlPart = (&'static str, fn(&url::Url) -> String);
+
 /// The parts of a URL as `location` and an `<a>` answer them.
-pub fn url_parts() -> [(&'static str, fn(&url::Url) -> String); 9] {
+pub fn url_parts() -> [UrlPart; 9] {
     [
         ("protocol", |u| format!("{}:", u.scheme())),
         ("host", |u| match (u.host_str(), u.port()) {

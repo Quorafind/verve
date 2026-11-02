@@ -718,8 +718,7 @@ fn process_env_finds_a_name_whatever_its_case_on_windows() {
     command.env("https_proxy", "http://127.0.0.1:1");
     let ran = wait(command.spawn().unwrap(), Instant::now());
     assert_eq!(
-        ran.stdout,
-        "http://127.0.0.1:1 http://127.0.0.1:1 true true 1 string\n",
+        ran.stdout, "http://127.0.0.1:1 http://127.0.0.1:1 true true 1 string\n",
         "{}",
         ran.stderr
     );
