@@ -3,15 +3,13 @@
 //! - `Range` and `Selection`;
 //! - `attributes` (`NamedNodeMap`, `Attr`);
 //! - shadow roots (held, and drawn as their host's content is not: see the crate's README);
-//! - custom elements: `customElements.define`, an element of the class made by
-//!   `createElement`, `connectedCallback` and `disconnectedCallback`;
 //! - a `<template>`'s `content`;
 //! - the CSSOM: a `<style>`'s `sheet`, `document.styleSheets`, `new CSSStyleSheet()` and
 //!   `adoptedStyleSheets`, `getComputedStyle` through the cascade, `CSS.escape`/`supports`;
 //! - a `<canvas>`'s 2D context — one that keeps its state and measures text, but paints
 //!   nothing — and no WebGL;
 //! - `DOMMatrix`, `DOMPoint`, `DOMRect`, `Path2D`; `DataTransfer`; `Image`, `Audio`, `Option`;
-//!   `document.fonts`; an element's `animate`.
+//!   an element's `animate`.
 //!
 //! Lifted from su-editor's Obsidian host.
 
@@ -27,7 +25,7 @@ use super::{
     get, handle_of, illegal_constructor, instance, native_instance, node_id, node_of, opt_string,
     plain_object, set, string, text, type_error,
 };
-use crate::dom::{Dom, NodeId, NodeKind};
+use crate::dom::{Dom, NodeId, NodeKind, ShadowMode, SlotAssignment};
 use crate::state::shared;
 
 // ─── Attributes ─────────────────────────────────────────────────────────────────────────────
@@ -221,30 +219,62 @@ const ATTRIBUTE_METHODS: &[Method] = &[
 
 // ─── Shadow roots ───────────────────────────────────────────────────────────────────────────
 
+/// The member `key` of `attachShadow`'s options as the enum `parse` reads, `default` when it
+/// is absent (`None`: required).
+fn shadow_option<T>(
+    options: &JsValue,
+    key: &str,
+    parse: fn(&str) -> Option<T>,
+    default: Option<T>,
+    context: &mut Context,
+) -> JsResult<T> {
+    let given = get(options, key, context)?;
+    if given.is_undefined() {
+        return default.ok_or_else(|| {
+            type_error(format!(
+                "Failed to execute 'attachShadow' on 'Element': Failed to read the '{key}' property from 'ShadowRootInit': Required member is undefined."
+            ))
+        });
+    }
+    let name = string(&given, context)?;
+    parse(&name).ok_or_else(|| {
+        type_error(format!(
+            "Failed to execute 'attachShadow' on 'Element': Failed to read the '{key}' property from 'ShadowRootInit': The provided value '{name}' is not a valid enum value."
+        ))
+    })
+}
+
 /// `element.attachShadow({ mode })`: a fragment of its own the element hosts, outside its
 /// children.
 pub fn attach_shadow(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = node_of(this)?;
-    if shared(context).borrow().shadow_roots.contains_key(&host) {
+    let options = arg(args, 0);
+    let mode = shadow_option(&options, "mode", ShadowMode::parse, None, context)?;
+    let assignment = shadow_option(
+        &options,
+        "slotAssignment",
+        SlotAssignment::parse,
+        Some(SlotAssignment::Named),
+        context,
+    )?;
+    if !read_dom(context, |dom| dom.can_host_shadow(host)) {
+        return Err(super::dom_error(
+            context,
+            "Failed to execute 'attachShadow' on 'Element': This element does not support attachShadow",
+            "NotSupportedError",
+        ));
+    }
+    let delegates_focus = get(&options, "delegatesFocus", context)?.to_boolean();
+    let root = with_dom(context, |dom| {
+        dom.attach_shadow(host, mode, delegates_focus, assignment)
+    });
+    let Some(root) = root else {
         return Err(super::dom_error(
             context,
             "Failed to execute 'attachShadow' on 'Element': Shadow root cannot be created on a host which already hosts a shadow tree.",
             "NotSupportedError",
         ));
-    }
-    let mode = get(&arg(args, 0), "mode", context)?;
-    let mode = if mode.is_undefined() {
-        "open".to_owned()
-    } else {
-        string(&mode, context)?
     };
-    let root = with_dom(context, Dom::create_fragment);
-    {
-        let state = shared(context);
-        let mut state = state.borrow_mut();
-        state.shadow_roots.insert(host, (root, mode == "open"));
-        state.shadow_hosts.insert(root, host);
-    }
     let object = wrap(context, root);
     let root_object = object.as_object().expect("a shadow root");
     // The host keeps its root alive, and the root its host.
@@ -252,15 +282,6 @@ pub fn attach_shadow(this: &JsValue, args: &[JsValue], context: &mut Context) ->
         verve::dom_events::hold(&host_object, |held| held.push(root_object.clone()));
         verve::dom_events::hold(&root_object, |held| held.push(host_object.clone()));
     }
-    set(&root_object, "mode", text(&mode), context)?;
-    let sheets = array(Vec::new(), context);
-    set(&root_object, "adoptedStyleSheets", sheets, context)?;
-    set(
-        &root_object,
-        "delegatesFocus",
-        get(&arg(args, 0), "delegatesFocus", context)?.to_boolean(),
-        context,
-    )?;
     Ok(object)
 }
 
@@ -269,8 +290,37 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
         "host",
         Some(|this, _, cx| {
             let root = node_of(this)?;
-            let host = shared(cx).borrow().shadow_hosts.get(&root).copied();
+            let host = read_dom(cx, |dom| dom.shadow_host(root));
             Ok(wrap_opt(cx, host))
+        }),
+        None,
+    ),
+    (
+        "mode",
+        Some(|this, _, cx| {
+            let root = node_of(this)?;
+            let mode = read_dom(cx, |dom| dom.shadow(root).map(|s| s.mode.as_str()));
+            Ok(mode.map_or(JsValue::null(), text))
+        }),
+        None,
+    ),
+    (
+        "delegatesFocus",
+        Some(|this, _, cx| {
+            let root = node_of(this)?;
+            Ok(read_dom(cx, |dom| {
+                dom.shadow(root).is_some_and(|s| s.delegates_focus)
+            })
+            .into())
+        }),
+        None,
+    ),
+    (
+        "slotAssignment",
+        Some(|this, _, cx| {
+            let root = node_of(this)?;
+            let assignment = read_dom(cx, |dom| dom.shadow(root).map(|s| s.assignment));
+            Ok(text(assignment.unwrap_or(SlotAssignment::Named).as_str()))
         }),
         None,
     ),
@@ -294,162 +344,21 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
         "activeElement",
         Some(|this, _, cx| {
             let root = node_of(this)?;
-            let focused = read_dom(cx, |dom| dom.focused.filter(|f| dom.contains(root, *f)));
+            let focused = read_dom(cx, |dom| {
+                dom.focused
+                    .filter(|f| dom.shadow_including_contains(root, *f))
+                    .map(|f| dom.retarget(f, Some(root)))
+            });
             Ok(wrap_opt(cx, focused))
         }),
         None,
     ),
+    (
+        "adoptedStyleSheets",
+        Some(|this, _, cx| adopted_sheets(node_of(this)?, cx)),
+        Some(|this, args, cx| set_adopted_sheets(node_of(this)?, "ShadowRoot", &arg(args, 0), cx)),
+    ),
 ];
-
-// ─── Custom elements ────────────────────────────────────────────────────────────────────────
-
-/// The class defined for a tag, if one was.
-pub fn custom_class(context: &Context, tag: &str) -> Option<JsObject> {
-    shared(context)
-        .borrow()
-        .custom_elements
-        .iter()
-        .find(|(name, _)| name == tag)
-        .map(|(_, c)| c.clone())
-}
-
-/// `HTMLElement` constructed: only as `super()` of a class `customElements.define` was given,
-/// making an element of that class's tag.
-pub fn construct_html_element(
-    new_target: &JsValue,
-    _: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let Some(target) = new_target.as_object() else {
-        return Err(type_error("Illegal constructor"));
-    };
-    let tag = shared(context)
-        .borrow()
-        .custom_elements
-        .iter()
-        .find(|(_, class)| JsObject::equals(class, &target))
-        .map(|(name, _)| name.clone());
-    let Some(tag) = tag else {
-        return Err(type_error("Illegal constructor"));
-    };
-    let prototype = super::prototype_of_target(new_target, context)?;
-    let id = with_dom(context, |dom| dom.create_element(&tag));
-    let object = verve::dom_events::host_target(prototype, super::node::host_id_of(id));
-    super::node::adopt(context, id, &object);
-    shared(context).borrow_mut().custom_nodes.insert(id);
-    Ok(object.into())
-}
-
-const CUSTOM_ELEMENTS_METHODS: &[Method] = &[
-    ("define", 3, |_, args, cx| {
-        let name = arg_string(args, 0, cx)?;
-        let Some(class) = arg(args, 1).as_object().filter(|c| c.is_constructor()) else {
-            return Err(type_error(
-                "Failed to execute 'define' on 'CustomElementRegistry': parameter 2 is not a constructor.",
-            ));
-        };
-        if !name.contains('-') || name.chars().next().is_none_or(|c| !c.is_ascii_lowercase()) {
-            return Err(super::dom_error(
-                cx,
-                &format!(
-                    "Failed to execute 'define' on 'CustomElementRegistry': \"{name}\" is not a valid custom element name"
-                ),
-                "SyntaxError",
-            ));
-        }
-        if custom_class(cx, &name).is_some() {
-            return Err(super::dom_error(
-                cx,
-                &format!(
-                    "Failed to execute 'define' on 'CustomElementRegistry': the name \"{name}\" has already been used with this registry"
-                ),
-                "NotSupportedError",
-            ));
-        }
-        shared(cx)
-            .borrow_mut()
-            .custom_elements
-            .push((name.clone(), class.clone()));
-        // Whoever waited for it hears now.
-        let waiting: Vec<JsValue> = {
-            let state = shared(cx);
-            let mut state = state.borrow_mut();
-            let (ready, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.custom_waiting)
-                .into_iter()
-                .partition(|(n, _)| *n == name);
-            state.custom_waiting = rest;
-            ready.into_iter().map(|(_, resolve)| resolve).collect()
-        };
-        for resolve in waiting {
-            verve::call(cx, &resolve, &JsValue::undefined(), &[class.clone().into()])?;
-        }
-        Ok(JsValue::undefined())
-    }),
-    ("get", 1, |_, args, cx| {
-        let name = arg_string(args, 0, cx)?;
-        Ok(custom_class(cx, &name).map_or(JsValue::undefined(), JsValue::from))
-    }),
-    ("getName", 1, |_, args, cx| {
-        let Some(class) = arg(args, 0).as_object() else {
-            return Ok(JsValue::null());
-        };
-        let name = shared(cx)
-            .borrow()
-            .custom_elements
-            .iter()
-            .find(|(_, c)| JsObject::equals(c, &class))
-            .map(|(n, _)| n.clone());
-        Ok(name.map_or(JsValue::null(), |n| text(&n)))
-    }),
-    ("whenDefined", 1, |_, args, cx| {
-        let name = arg_string(args, 0, cx)?;
-        if let Some(class) = custom_class(cx, &name) {
-            return super::resolved(class.into(), cx);
-        }
-        let (promise, resolvers) = boa_engine::object::builtins::JsPromise::new_pending(cx);
-        shared(cx)
-            .borrow_mut()
-            .custom_waiting
-            .push((name, resolvers.resolve.into()));
-        Ok(promise.into())
-    }),
-    ("upgrade", 1, |_, _, _| Ok(JsValue::undefined())),
-];
-
-/// Tells custom elements they joined or left the document: `connectedCallback` and
-/// `disconnectedCallback`, for the subtrees that moved.
-pub fn custom_moved(context: &mut Context, moved: Vec<(NodeId, bool)>) {
-    for (root, connected) in moved {
-        let ids: Vec<NodeId> = {
-            let state = shared(context);
-            let state = state.borrow();
-            state
-                .dom
-                .subtree(root)
-                .into_iter()
-                .filter(|id| state.custom_nodes.contains(id))
-                .collect()
-        };
-        for id in ids {
-            let Some(object) = super::node::existing_wrapper(context, id) else {
-                continue;
-            };
-            let name = if connected {
-                "connectedCallback"
-            } else {
-                "disconnectedCallback"
-            };
-            let callback = object
-                .get(JsString::from(name), context)
-                .unwrap_or_default();
-            if callback.is_callable()
-                && let Err(error) = verve::call(context, &callback, &object.clone().into(), &[])
-            {
-                verve::report(context, &error);
-            }
-        }
-    }
-}
 
 // ─── A template's content ───────────────────────────────────────────────────────────────────
 
@@ -773,31 +682,39 @@ pub fn style_sheets(context: &mut Context) -> JsResult<JsValue> {
     Ok(list)
 }
 
-pub fn adopted_sheets(context: &mut Context) -> JsResult<JsValue> {
+/// `adoptedStyleSheets` of the tree rooted at `tree` (a document or a shadow root).
+pub fn adopted_sheets(tree: NodeId, context: &mut Context) -> JsResult<JsValue> {
     let sheets: Vec<JsValue> = shared(context)
         .borrow()
-        .adopted_sheets
-        .iter()
-        .map(|(_, s)| s.clone().into())
-        .collect();
+        .adopted
+        .get(&tree)
+        .map(|list| list.iter().map(|(_, s)| s.clone().into()).collect())
+        .unwrap_or_default();
     Ok(array(sheets, context))
 }
 
-pub fn set_adopted_sheets(given: &JsValue, context: &mut Context) -> JsResult<JsValue> {
+/// Sets the `adoptedStyleSheets` of the tree rooted at `tree`; `owner` names its class in the
+/// error.
+pub fn set_adopted_sheets(
+    tree: NodeId,
+    owner: &str,
+    given: &JsValue,
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let mut adopted = Vec::new();
     for sheet in super::list(given, context)? {
         match (handle_of(&sheet, Kind::Constructed), sheet.as_object()) {
             (Some(id), Some(object)) => adopted.push((id, object)),
             _ => {
-                return Err(type_error(
-                    "Failed to set the 'adoptedStyleSheets' property on 'Document': Failed to convert value to 'CSSStyleSheet'.",
-                ));
+                return Err(type_error(format!(
+                    "Failed to set the 'adoptedStyleSheets' property on '{owner}': Failed to convert value to 'CSSStyleSheet'."
+                )));
             }
         }
     }
     let state = shared(context);
     let mut state = state.borrow_mut();
-    state.adopted_sheets = adopted;
+    state.adopted.insert(tree, adopted);
     state.sheets_changed();
     Ok(JsValue::undefined())
 }
@@ -826,13 +743,17 @@ pub fn computed_value(context: &Context, id: NodeId, property: &str) -> String {
     let mut state = state.borrow_mut();
     let styler = state.styler();
     let style = crate::css::style_of(&state.dom, &styler, id);
-    if let Some(value) = style.get(property) {
-        return value.clone();
-    }
-    let tag = state.dom.get(id).and_then(|n| n.tag()).map(str::to_owned);
-    crate::css::initial_value(property, tag.as_deref())
-        .unwrap_or("")
-        .to_owned()
+    let tag = state.dom.get(id).and_then(|n| n.tag());
+    crate::css::value_or_initial(&style, property, tag).to_owned()
+}
+
+/// `innerText` of `id`: see [`crate::inner_text`].
+pub fn rendered_text(context: &Context, id: NodeId) -> String {
+    let state = shared(context);
+    let mut state = state.borrow_mut();
+    let styler = state.styler();
+    let dom = &state.dom;
+    crate::inner_text::inner_text(dom, id, &|node| crate::css::style_of(dom, &styler, node))
 }
 
 const COMPUTED_METHODS: &[Method] = &[
@@ -950,43 +871,6 @@ const CSS_FUNCTIONS: &[Method] = &[
     }),
     ("registerProperty", 1, |_, _, _| Ok(JsValue::undefined())),
 ];
-
-/// `document.fonts`: every font is loaded, as on a machine that has them all.
-pub fn font_faces(context: &mut Context) -> JsResult<JsValue> {
-    let global = context.global_object();
-    let known = global.get(js_string!("__fonts"), context)?;
-    if known.is_object() {
-        return Ok(known);
-    }
-    let target = shared(context)
-        .borrow()
-        .class("EventTarget")
-        .expect("made")
-        .0;
-    let fonts = target.construct(&[], None, context)?;
-    let ready = super::resolved(fonts.clone().into(), context)?;
-    set(&fonts, "ready", ready, context)?;
-    set(&fonts, "status", text("loaded"), context)?;
-    set(&fonts, "size", 0, context)?;
-    let methods: &[Method] = &[
-        ("check", 1, |_, _, _| Ok(true.into())),
-        ("load", 1, |_, _, cx| {
-            let empty = array(Vec::new(), cx);
-            super::resolved(empty, cx)
-        }),
-        ("add", 1, |this, _, _| Ok(this.clone())),
-        ("delete", 1, |_, _, _| Ok(false.into())),
-        ("clear", 0, |_, _, _| Ok(JsValue::undefined())),
-        ("forEach", 1, |_, _, _| Ok(JsValue::undefined())),
-        ("has", 1, |_, _, _| Ok(false.into())),
-    ];
-    for (name, length, f) in methods {
-        let made = function(context, name, *length, *f);
-        set(&fonts, name, made, context)?;
-    }
-    super::hidden(&global, js_string!("__fonts"), fonts.clone(), context)?;
-    Ok(fonts.into())
-}
 
 // ─── Range and Selection ────────────────────────────────────────────────────────────────────
 
@@ -2715,10 +2599,11 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         "CustomElementRegistry",
         illegal_constructor,
         None,
-        CUSTOM_ELEMENTS_METHODS,
+        super::custom::METHODS,
         &[],
         true,
     )?;
+    super::fonts::install(context)?;
     let registry = native_instance(context, "CustomElementRegistry", Kind::Plain, 0);
     context.register_global_property(js_string!("customElements"), registry, Attribute::all())?;
     simple_class(

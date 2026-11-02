@@ -12,7 +12,7 @@
 //!
 //! Lifted from su-editor's Obsidian host.
 
-use crate::dom::{Dom, Namespace, NodeId, NodeKind};
+use crate::dom::{Dom, Namespace, NodeId, NodeKind, ShadowMode, SlotAssignment};
 
 const VOID: &[&str] = &[
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track",
@@ -302,6 +302,9 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
                 namespace,
             });
         }
+        if open_shadow_template(dom, &mut stack, context, &name, attrs) {
+            continue;
+        }
         let element = dom.create_element_ns(&name, namespace);
         set_attrs(dom, element, attrs, namespace, false);
         dom.append(current(&stack), element);
@@ -493,6 +496,42 @@ fn split_name(inside: &str) -> (String, &str) {
         .find(|c: char| c.is_whitespace())
         .unwrap_or(inside.len());
     (inside[..end].to_owned(), &inside[end..])
+}
+
+/// Opens the shadow root a `<template shadowrootmode>` of a page stands for, as the shadow root
+/// of the element it is in. Answers whether `name` was one.
+fn open_shadow_template(
+    dom: &mut Dom,
+    stack: &mut Vec<Open>,
+    context: Context,
+    name: &str,
+    attrs: &str,
+) -> bool {
+    if !matches!(context, Context::Document { .. }) || name != "template" {
+        return false;
+    }
+    let Some(root) = declarative_shadow(dom, current(stack), attrs) else {
+        return false;
+    };
+    let namespace = Namespace::Html;
+    stack.push(Open {
+        id: root,
+        tag: name.to_owned(),
+        namespace,
+    });
+    true
+}
+
+/// The shadow root `<template shadowrootmode=…>` attributes `host`, if it takes one.
+fn declarative_shadow(dom: &mut Dom, host: NodeId, attrs: &str) -> Option<NodeId> {
+    let attrs = parse_attrs(attrs);
+    let attr = |name: &str| attrs.iter().find(|(key, _)| key.eq_ignore_ascii_case(name));
+    let mode = ShadowMode::parse(&attr("shadowrootmode")?.1.to_ascii_lowercase())?;
+    if !dom.can_host_shadow(host) {
+        return None;
+    }
+    let delegates = attr("shadowrootdelegatesfocus").is_some();
+    dom.attach_shadow(host, mode, delegates, SlotAssignment::Named)
 }
 
 fn set_attrs(dom: &mut Dom, element: NodeId, attrs: &str, namespace: Namespace, only_new: bool) {

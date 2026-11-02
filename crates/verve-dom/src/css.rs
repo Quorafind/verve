@@ -28,6 +28,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod scope;
+mod styler;
+
+use scope::{Aside, Layer, Reach, matched_rules};
+use styler::RuleKey;
+pub use styler::Styler;
+
 use crate::dom::{Dom, Namespace, NodeId, NodeKind};
 
 // ─── Selectors ──────────────────────────────────────────────────────────────────────────────
@@ -66,6 +73,8 @@ struct Compound {
     pseudo: Vec<Pseudo>,
     /// `::before` and the rest: matches no element.
     element: bool,
+    /// How far the subject reaches beyond its own tree, worked out once when it is parsed.
+    reach: Reach,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,6 +126,14 @@ enum Pseudo {
     Is(SelectorList),
     Where(SelectorList),
     Has(SelectorList),
+    /// `:host`, and `:host(sel)`'s argument: the element hosting the sheet's shadow tree.
+    Host(Option<SelectorList>),
+    /// `:host-context(sel)`: a host with such an ancestor outside the shadow tree.
+    HostContext(SelectorList),
+    /// `::slotted(sel)`: what a slot shows, when it matches `sel`.
+    Slotted(SelectorList),
+    /// `::part(name)`: an element of a shadow tree its `part` attribute names.
+    Part(String),
     Lang(String),
     Dir(String),
 }
@@ -244,15 +261,15 @@ impl Selector {
             }
             let steps = if axis != 0 {
                 let next = if axis == 1 {
-                    dom.parent_element(at)
+                    self.step_out(dom, at, part)
                 } else {
                     dom.sibling(at, -1, true)
                 };
                 [(Some(at), part, 0), (next, part, axis)]
             } else {
                 let (next, axis) = match self.parts[part].1 {
-                    Combinator::Child => (dom.parent_element(at), 0),
-                    Combinator::Descendant | Combinator::None => (dom.parent_element(at), 1),
+                    Combinator::Child => (self.step_out(dom, at, part), 0),
+                    Combinator::Descendant | Combinator::None => (self.step_out(dom, at, part), 1),
                     Combinator::Next => (dom.sibling(at, -1, true), 0),
                     Combinator::Subsequent => (dom.sibling(at, -1, true), 2),
                 };
@@ -331,6 +348,11 @@ impl Selector {
         found
     }
 
+    /// The compound whose element the selector picks: its first, kept leftmost.
+    fn subject(&self) -> &Compound {
+        &self.parts[0].0
+    }
+
     fn specificity(&self) -> (u32, u32, u32) {
         self.parts.iter().fold((0, 0, 0), |sum, (compound, _)| {
             let s = compound.specificity();
@@ -380,6 +402,21 @@ fn is_field(tag: &str) -> bool {
 
 impl Compound {
     fn matches(&self, dom: &Dom, id: NodeId, cx: &MatchContext, cache: &mut MatchCache) -> bool {
+        match self.matches_scoped(dom, id, cx, cache) {
+            Some(answer) => answer,
+            None => self.matches_own(dom, id, cx, cache, Aside::None),
+        }
+    }
+
+    /// The compound's own conditions on `id`, the pseudo that sent it here set aside.
+    pub(super) fn matches_own(
+        &self,
+        dom: &Dom,
+        id: NodeId,
+        cx: &MatchContext,
+        cache: &mut MatchCache,
+        aside: Aside,
+    ) -> bool {
         if self.element {
             return false;
         }
@@ -432,6 +469,9 @@ impl Compound {
             }
         }
         self.pseudo.iter().all(|pseudo| match pseudo {
+            Pseudo::Slotted(_) | Pseudo::Part(_) | Pseudo::Host(_) | Pseudo::HostContext(_) => {
+                pseudo.matches_scoped(dom, id, aside, cx, cache)
+            }
             Pseudo::Hover => {
                 dom.is_hovered(id) || cx.hover_probe.is_some_and(|p| dom.contains(id, p))
             }
@@ -439,7 +479,7 @@ impl Compound {
                 dom.active.is_some_and(|a| dom.contains(id, a))
                     || cx.hover_probe.is_some_and(|p| dom.contains(id, p))
             }
-            Pseudo::Focus | Pseudo::FocusVisible => dom.focused == Some(id),
+            Pseudo::Focus | Pseudo::FocusVisible => dom.has_focus(id),
             Pseudo::FocusWithin => dom.focus_within(id),
             Pseudo::Checked => match tag.as_str() {
                 "input" => node.checked,
@@ -569,35 +609,34 @@ impl Compound {
             (self.tag.is_some() || self.element) as u32,
         );
         for pseudo in &self.pseudo {
-            match pseudo {
-                Pseudo::Where(_) => {}
-                Pseudo::Not(list) | Pseudo::Is(list) | Pseudo::Has(list) => {
-                    let best = list
-                        .0
-                        .iter()
-                        .map(Selector::specificity)
-                        .max()
-                        .unwrap_or_default();
-                    out.0 += best.0;
-                    out.1 += best.1;
-                    out.2 += best.2;
-                }
-                Pseudo::Nth { of: Some(list), .. } => {
-                    let best = list
-                        .0
-                        .iter()
-                        .map(Selector::specificity)
-                        .max()
-                        .unwrap_or_default();
-                    out.0 += best.0;
-                    out.1 += best.1 + 1;
-                    out.2 += best.2;
-                }
-                _ => out.1 += 1,
-            }
+            // What the pseudo adds itself, and the selector list it takes, if it counts.
+            let (own, list) = match pseudo {
+                Pseudo::Where(_) => continue,
+                Pseudo::Not(list) | Pseudo::Is(list) | Pseudo::Has(list) => ((0, 0, 0), Some(list)),
+                Pseudo::Nth { of, .. } => ((0, 1, 0), of.as_ref()),
+                Pseudo::Host(list) => ((0, 1, 0), list.as_ref()),
+                Pseudo::Slotted(list) => ((0, 0, 1), Some(list)),
+                Pseudo::Part(_) => ((0, 0, 1), None),
+                _ => ((0, 1, 0), None),
+            };
+            let best = list.map(best_specificity).unwrap_or_default();
+            out = (
+                out.0 + own.0 + best.0,
+                out.1 + own.1 + best.1,
+                out.2 + own.2 + best.2,
+            );
         }
         out
     }
+}
+
+/// The specificity of the most specific selector of `list`.
+fn best_specificity(list: &SelectorList) -> (u32, u32, u32) {
+    list.0
+        .iter()
+        .map(Selector::specificity)
+        .max()
+        .unwrap_or_default()
 }
 
 fn nth(a: i32, b: i32, index: i32) -> bool {
@@ -879,11 +918,7 @@ impl<'a> Parser<'a> {
                     self.at += 1;
                     if self.peek() == Some(':') {
                         self.at += 1;
-                        self.ident().ok_or_else(|| self.error())?;
-                        if self.peek() == Some('(') {
-                            self.skip_arguments()?;
-                        }
-                        out.element = true;
+                        self.pseudo_element(&mut out)?;
                     } else {
                         let pseudo = self.pseudo()?;
                         out.pseudo.push(pseudo);
@@ -895,6 +930,7 @@ impl<'a> Parser<'a> {
         if self.at == start {
             return Err(self.error());
         }
+        out.reach = Reach::of(&out.pseudo);
         Ok(out)
     }
 
@@ -1025,7 +1061,8 @@ impl<'a> Parser<'a> {
                         .ok_or_else(|| self.error())?
                         .to_ascii_lowercase(),
                 ),
-                "host" | "host-context" | "state" => {
+                "host" | "host-context" => self.host_pseudo(&name)?,
+                "state" => {
                     self.at -= 1;
                     self.skip_arguments()?;
                     return Ok(Pseudo::Never);
@@ -1058,6 +1095,7 @@ impl<'a> Parser<'a> {
             "placeholder-shown" => Pseudo::PlaceholderShown,
             "empty" => Pseudo::Empty,
             "root" => Pseudo::Root,
+            "host" => Pseudo::Host(None),
             "scope" => Pseudo::Scope,
             "link" | "any-link" => Pseudo::Link,
             "defined" => Pseudo::Defined,
@@ -1090,7 +1128,7 @@ impl<'a> Parser<'a> {
             }])),
             "visited" | "target" | "target-within" | "fullscreen" | "modal" | "popover-open"
             | "autofill" | "-webkit-autofill" | "indeterminate" | "invalid" | "user-invalid"
-            | "playing" | "paused" | "host" | "picture-in-picture" | "open" => Pseudo::Never,
+            | "playing" | "paused" | "picture-in-picture" | "open" => Pseudo::Never,
             "valid" | "user-valid" | "default" | "in-range" | "local-link" => Pseudo::Defined,
             // The pseudo-elements of CSS 2, written with one colon.
             "before" | "after" | "first-line" | "first-letter" => {
@@ -1585,81 +1623,6 @@ pub enum Origin {
     Author,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum RuleKey {
-    Id(String),
-    Class(String),
-    Tag(String),
-    Any,
-}
-
-/// The rules of every sheet, filed by what their subjects must be, so a node is matched only
-/// against the rules that could apply to it.
-#[derive(Clone, Default)]
-pub struct Styler {
-    rules: Vec<(Origin, usize, Rule)>,
-    buckets: HashMap<RuleKey, Vec<(usize, usize)>>,
-    env: Environment,
-}
-
-impl Styler {
-    /// The cascade of `sheets`, in order, each with where it comes from, for `env`.
-    pub fn new(sheets: &[(Origin, &Sheet)], env: &Environment) -> Self {
-        let mut out = Styler {
-            env: env.clone(),
-            ..Styler::default()
-        };
-        let mut order = 0;
-        for (origin, sheet) in sheets {
-            for rule in &sheet.rules {
-                if !rule.media.iter().all(|m| m.matches(env)) {
-                    continue;
-                }
-                order += 1;
-                let index = out.rules.len();
-                for (k, selector) in rule.selectors.0.iter().enumerate() {
-                    out.buckets
-                        .entry(selector.key())
-                        .or_default()
-                        .push((index, k));
-                }
-                out.rules.push((*origin, order, rule.clone()));
-            }
-        }
-        out
-    }
-
-    pub fn environment(&self) -> &Environment {
-        &self.env
-    }
-
-    /// The rules that could apply to `id`, each with the selector of it to try.
-    fn candidates(&self, dom: &Dom, id: NodeId) -> Vec<(usize, usize)> {
-        let Some(node) = dom.get(id) else {
-            return Vec::new();
-        };
-        let mut out: Vec<(usize, usize)> = Vec::new();
-        let mut add = |key: RuleKey| {
-            if let Some(list) = self.buckets.get(&key) {
-                out.extend(list.iter().copied());
-            }
-        };
-        add(RuleKey::Any);
-        if let Some(tag) = node.tag() {
-            add(RuleKey::Tag(tag.to_owned()));
-        }
-        if let Some(id) = node.attr("id") {
-            add(RuleKey::Id(id.to_owned()));
-        }
-        for class in &node.classes {
-            add(RuleKey::Class(class.clone()));
-        }
-        out.sort_unstable();
-        out.dedup();
-        out
-    }
-}
-
 /// The properties a child takes from its parent unless something says otherwise.
 const INHERITED: &[&str] = &[
     "color",
@@ -1779,7 +1742,7 @@ impl Computed {
             if !dom.exists(*id) || !dom.is_connected(*id) {
                 continue;
             }
-            let root = dom.parent(*id).unwrap_or(*id);
+            let root = dom.flat_parent(*id).unwrap_or(*id);
             if !roots.contains(&root) {
                 roots.push(root);
             }
@@ -1791,13 +1754,13 @@ impl Computed {
             .filter(|root| {
                 !roots
                     .iter()
-                    .any(|other| other != root && dom.contains(*other, *root))
+                    .any(|other| other != root && dom.shadow_including_contains(*other, *root))
             })
             .collect();
         let mut count = 0;
         for root in outer {
             let inherited = dom
-                .parent(root)
+                .flat_parent(root)
                 .and_then(|parent| self.styles.get(&parent).map(|style| (**style).clone()))
                 .unwrap_or_default();
             count += self.subtree(dom, styler, root, &inherited);
@@ -1824,8 +1787,8 @@ impl Computed {
         let mut cache = MatchCache::default();
         while let Some((id, inherited)) = stack.pop() {
             let (style, pointer) = own_style(dom, styler, id, &inherited, &mut cache);
-            for child in dom.children(id) {
-                stack.push((*child, style.clone()));
+            for child in dom.flat_children(id) {
+                stack.push((child, style.clone()));
             }
             self.styles.insert(id, Arc::new(style));
             if pointer {
@@ -1843,10 +1806,10 @@ impl Computed {
 /// `getComputedStyle` answers in the middle of a turn, before the document is cascaded again.
 pub fn style_of(dom: &Dom, styler: &Styler, id: NodeId) -> Style {
     let mut chain = vec![id];
-    let mut at = dom.parent(id);
+    let mut at = dom.flat_parent(id);
     while let Some(node) = at {
         chain.push(node);
-        at = dom.parent(node);
+        at = dom.flat_parent(node);
     }
     let mut style = Style::new();
     let mut cache = MatchCache::default();
@@ -1856,8 +1819,8 @@ pub fn style_of(dom: &Dom, styler: &Styler, id: NodeId) -> Style {
     style
 }
 
-/// Where a declaration ranks in the cascade: importance and origin, specificity, order.
-type Rank = (u8, (u32, u32, u32), usize);
+/// Where a declaration ranks in the cascade: its layer, specificity, order.
+type Rank = (Layer, (u32, u32, u32), usize);
 
 fn own_style(
     dom: &Dom,
@@ -1878,33 +1841,7 @@ fn own_style(
     if !node.is_element() {
         return (style, false);
     }
-    // Sorted by: importance (and, within it, origin), specificity, order.
-    let mut matched: Vec<(Rank, &Declaration)> = Vec::new();
-    let mut pointer = false;
-    let cx = MatchContext::default();
-    for (index, k) in styler.candidates(dom, id) {
-        let (origin, order, rule) = &styler.rules[index];
-        let selector = &rule.selectors.0[k];
-        if selector.matches_cached(dom, id, &cx, cache) {
-            let specificity = selector.specificity();
-            for declaration in &rule.declarations {
-                let rank = match (declaration.important, origin) {
-                    (false, Origin::UserAgent) => 0,
-                    (false, Origin::Author) => 1,
-                    (true, Origin::Author) => 3,
-                    (true, Origin::UserAgent) => 4,
-                };
-                matched.push(((rank, specificity, *order), declaration));
-            }
-        } else if rule.pointer && !pointer {
-            // Would the pointer on it make this rule apply?
-            let probe = MatchContext {
-                scope: None,
-                hover_probe: Some(id),
-            };
-            pointer = selector.matches_with(dom, id, &probe);
-        }
-    }
+    let (mut matched, pointer) = matched_rules(dom, styler, id, cache);
     // The inline style: over every rule of its importance.
     let inline: Vec<Declaration> = node
         .style
@@ -1916,8 +1853,12 @@ fn own_style(
         })
         .collect();
     for declaration in &inline {
-        let rank = if declaration.important { 3 } else { 2 };
-        matched.push(((rank, (u32::MAX, 0, 0), usize::MAX), declaration));
+        let layer = if declaration.important {
+            Layer::ImportantInline
+        } else {
+            Layer::Inline
+        };
+        matched.push(((layer, (u32::MAX, 0, 0), usize::MAX), declaration));
     }
     matched.sort_by_key(|a| a.0);
     // `hidden` is the user agent's `display: none`, under any author rule.
@@ -2006,7 +1947,7 @@ const FONT_LONGHANDS: &[&str] = &[
 /// size[/line-height] family`, every longhand it leaves out reset to `normal`. A system font
 /// (`caption`, `menu`…) or a value with no size answers `None`, and the shorthand is left as
 /// written.
-fn font_longhands(value: &str) -> Option<Vec<(&'static str, String)>> {
+pub(crate) fn font_longhands(value: &str) -> Option<Vec<(&'static str, String)>> {
     let mut style = "normal".to_owned();
     let mut variant = "normal".to_owned();
     let mut weight = "normal".to_owned();
@@ -2466,6 +2407,14 @@ fn substitute(value: &str, custom: &HashMap<String, String>, depth: usize) -> Op
     Some(out)
 }
 
+/// `property` of `style`, or its initial value for an element of `tag` when nothing set it.
+pub(crate) fn value_or_initial<'a>(style: &'a Style, property: &str, tag: Option<&str>) -> &'a str {
+    let declared = style.get(property).map(String::as_str);
+    declared
+        .or_else(|| initial_value(property, tag))
+        .unwrap_or("")
+}
+
 /// What a property is when nothing set it, as `getComputedStyle` answers it.
 pub fn initial_value(property: &str, tag: Option<&str>) -> Option<&'static str> {
     Some(match property {
@@ -2900,7 +2849,11 @@ mod tests {
     use super::*;
 
     fn styler(sheet: &Sheet) -> Styler {
-        Styler::new(&[(Origin::Author, sheet)], &Environment::default())
+        let document = Dom::new().document;
+        Styler::new(
+            &[(Origin::Author, sheet, document)],
+            &Environment::default(),
+        )
     }
 
     #[test]

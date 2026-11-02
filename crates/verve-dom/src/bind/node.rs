@@ -16,7 +16,7 @@ use super::{
     Accessor, ClassSpec, Method, arg, arg_string, array, class, dom_error, illegal_constructor,
     node_arg, node_id, node_of, opt_string, prototype_of_target, text, type_error,
 };
-use crate::dom::{Dom, Namespace, NodeId, NodeKind};
+use crate::dom::{Dom, Namespace, Node, NodeId, NodeKind};
 use crate::state::shared;
 
 /// What distinguishes a node's number among host targets.
@@ -34,18 +34,15 @@ pub fn node_of_host(id: u64) -> Option<NodeId> {
 
 pub fn with_dom<R>(context: &mut Context, f: impl FnOnce(&mut Dom) -> R) -> R {
     let state = shared(context);
-    let (result, relink_due, mutated, moved) = {
+    let (result, relink_due, mutated, reactions) = {
         let mut state = state.borrow_mut();
         let result = f(&mut state.dom);
         let mutated = state.dom.has_mutations() && !state.mutation_queued;
         let moved = state.dom.take_moved();
-        // Only custom elements hear their subtrees come and go.
-        let moved = if state.custom_nodes.is_empty() {
-            Vec::new()
-        } else {
-            moved
-        };
-        (result, state.dom.has_relinked(), mutated, moved)
+        // Only custom elements hear what happens to them.
+        let attrs = state.dom.take_attr_changes();
+        let reactions = (!state.custom.is_empty()).then_some((attrs, moved));
+        (result, state.dom.has_relinked(), mutated, reactions)
     };
     if let Err(error) = crate::media::sync(context) {
         verve::report(context, &error);
@@ -54,11 +51,12 @@ pub fn with_dom<R>(context: &mut Context, f: impl FnOnce(&mut Dom) -> R) -> R {
     if relink_due {
         relink(context);
     }
+    super::slot::slots_changed(context);
     if mutated {
         super::observers::queue_delivery(context);
     }
-    if !moved.is_empty() {
-        super::platform::custom_moved(context, moved);
+    if let Some((attrs, moved)) = reactions {
+        super::custom::react(context, attrs, moved);
     }
     result
 }
@@ -117,11 +115,10 @@ fn make_wrapper(context: &mut Context, id: NodeId) -> Option<JsObject> {
     let prototype = {
         let state = shared(context);
         let state = state.borrow();
-        let is_shadow_root = state.shadow_hosts.contains_key(&id);
-        match class_name(&state.dom, id) {
-            None => return None,
-            Some(_) if is_shadow_root => state.prototype("ShadowRoot"),
-            Some(name) => state.prototype(name),
+        if state.dom.is_shadow_root(id) {
+            state.prototype("ShadowRoot")
+        } else {
+            state.prototype(class_name(&state.dom, id)?)
         }
     };
     let object = verve::dom_events::host_target(prototype, host_id_of(id));
@@ -142,11 +139,6 @@ pub fn wrap_opt(context: &mut Context, id: Option<NodeId>) -> JsValue {
 /// The objects of `ids`, as a `NodeList`: an array, with `item`.
 pub fn node_list(ids: Vec<NodeId>, context: &mut Context) -> JsValue {
     list_of(ids, "NodeList", context)
-}
-
-/// The same as an `HTMLCollection`, with `namedItem`.
-pub fn collection(ids: Vec<NodeId>, context: &mut Context) -> JsValue {
-    list_of(ids, "HTMLCollection", context)
 }
 
 fn list_of(ids: Vec<NodeId>, class: &str, context: &mut Context) -> JsValue {
@@ -439,8 +431,9 @@ const NODE_ACCESSORS: &[Accessor] = &[
         "childNodes",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let children = read_dom(cx, |dom| dom.children(id).to_vec());
-            Ok(node_list(children, cx))
+            super::live::same_node_list(this, "childNodes", cx, move |dom| {
+                dom.children(id).to_vec()
+            })
         }),
         None,
     ),
@@ -542,7 +535,7 @@ const NODE_ACCESSORS: &[Accessor] = &[
         "isConnected",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(read_dom(cx, |dom| dom.document_of(id).is_some()).into())
+            Ok(read_dom(cx, |dom| dom.is_connected(id)).into())
         }),
         None,
     ),
@@ -609,7 +602,7 @@ const NODE_METHODS: &[Method] = &[
         let Some(inner) = node_id(&arg(args, 0)) else {
             return Ok(false.into());
         };
-        Ok(read_dom(cx, |dom| dom.contains(outer, inner)).into())
+        Ok(read_dom(cx, |dom| dom.shadow_including_contains(outer, inner)).into())
     }),
     ("hasChildNodes", 0, |this, _, cx| {
         let id = node_of(this)?;
@@ -618,15 +611,13 @@ const NODE_METHODS: &[Method] = &[
     ("getRootNode", 1, |this, args, cx| {
         let id = node_of(this)?;
         let composed = super::get(&arg(args, 0), "composed", cx)?.to_boolean();
-        let root = {
-            let state = shared(cx);
-            let state = state.borrow();
-            let mut root = state.dom.root_of(id);
-            while composed && let Some(host) = state.shadow_hosts.get(&root) {
-                root = state.dom.root_of(*host);
+        let root = read_dom(cx, |dom| {
+            if composed {
+                dom.composed_root_of(id)
+            } else {
+                dom.root_of(id)
             }
-            root
-        };
+        });
         Ok(wrap(cx, root))
     }),
     ("cloneNode", 1, |this, args, cx| {
@@ -815,7 +806,7 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
         let id = node_of(this)?;
         let classes = arg_string(args, 0, cx)?;
         let wanted: Vec<String> = classes.split_whitespace().map(str::to_owned).collect();
-        let found = read_dom(cx, |dom| {
+        super::live::collection(cx, move |dom| {
             if wanted.is_empty() {
                 return Vec::new();
             }
@@ -826,30 +817,36 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
                         .is_some_and(|n| wanted.iter().all(|c| n.has_class(c)))
                 })
                 .collect()
-        });
-        Ok(collection(found, cx))
+        })
     }),
     ("getElementsByTagName", 1, |this, args, cx| {
         let id = node_of(this)?;
         let tag = arg_string(args, 0, cx)?.to_ascii_lowercase();
-        let found = read_dom(cx, |dom| {
+        super::live::collection(cx, move |dom| {
             dom.descendants(id)
                 .into_iter()
                 .filter(|n| tag == "*" || dom.get(*n).and_then(|n| n.tag()) == Some(tag.as_str()))
                 .collect()
-        });
-        Ok(collection(found, cx))
+        })
     }),
     ("getElementsByTagNameNS", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let tag = arg_string(args, 1, cx)?.to_ascii_lowercase();
-        let found = read_dom(cx, |dom| {
-            dom.descendants(id)
-                .into_iter()
-                .filter(|n| tag == "*" || dom.get(*n).and_then(|n| n.tag()) == Some(tag.as_str()))
-                .collect()
-        });
-        Ok(collection(found, cx))
+        let namespace = opt_string(args, 0, cx)?;
+        let tag = arg_string(args, 1, cx)?;
+        super::live::collection(cx, move |dom| {
+            let in_namespace = |n: &Node| {
+                namespace.as_deref() == Some("*") || n.namespace.uri() == namespace.as_deref()
+            };
+            // HTML tags are kept lower case; the others as they were written.
+            let named = |n: &Node| {
+                tag == "*"
+                    || n.tag() == Some(tag.as_str())
+                    || (n.namespace == Namespace::Html
+                        && n.tag() == Some(&tag.to_ascii_lowercase()))
+            };
+            let wanted = |id: &NodeId| dom.get(*id).is_some_and(|n| in_namespace(n) && named(n));
+            dom.descendants(id).into_iter().filter(wanted).collect()
+        })
     }),
 ];
 
@@ -884,8 +881,7 @@ pub const PARENT_NODE_ACCESSORS: &[Accessor] = &[
         "children",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let children = read_dom(cx, |dom| element_children(dom, id));
-            Ok(collection(children, cx))
+            super::live::same_collection(this, "children", cx, move |dom| element_children(dom, id))
         }),
         None,
     ),
@@ -1384,16 +1380,7 @@ const COLLECTION_METHODS: &[Method] = &[
     }),
     ("namedItem", 1, |this, args, cx| {
         let name = arg_string(args, 0, cx)?;
-        for item in super::list(this, cx)? {
-            let Some(id) = node_id(&item) else { continue };
-            let hit = read_dom(cx, |dom| {
-                dom.get_attr(id, "id").as_deref() == Some(name.as_str())
-                    || dom.get_attr(id, "name").as_deref() == Some(name.as_str())
-            });
-            if hit {
-                return Ok(item);
-            }
-        }
-        Ok(JsValue::null())
+        let nodes: Vec<NodeId> = super::list(this, cx)?.iter().filter_map(node_id).collect();
+        Ok(wrap_opt(cx, super::live::named_item(cx, &nodes, &name)))
     }),
 ];

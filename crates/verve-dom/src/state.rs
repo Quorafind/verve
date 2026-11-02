@@ -6,12 +6,15 @@
 //! itself call a native, and that one must find the state free.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use boa_engine::object::WeakJsObject;
 use boa_engine::{Context, JsObject, JsValue};
 
+use crate::bind::custom::Registry;
+use crate::bind::fonts::Fonts;
+use crate::bind::slot::Slots;
 use crate::css::{Environment, MediaQuery, Origin, Sheet, Styler};
 use crate::dom::{Dom, NodeId};
 use crate::{Rect, Request, StorageBackend};
@@ -22,6 +25,8 @@ pub type Shared = Rc<RefCell<State>>;
 pub struct SheetRecord {
     pub owner: SheetOwner,
     pub sheet: Sheet,
+    /// The tree it applies in: the document, or a shadow root's.
+    pub tree: NodeId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,7 +112,8 @@ pub struct State {
     pub env: Environment,
     /// Each `new CSSStyleSheet()`'s rules, by its number; and which the document adopted.
     pub constructed_sheets: HashMap<u32, Vec<String>>,
-    pub adopted_sheets: Vec<(u32, JsObject)>,
+    /// What each tree (a document, or a shadow root) adopted, by the tree's root.
+    pub adopted: BTreeMap<NodeId, Vec<(u32, JsObject)>>,
     /// Where the drawer last painted each node it measured.
     pub rects: HashMap<NodeId, Rect>,
     pub scroll_offsets: HashMap<NodeId, [f32; 2]>,
@@ -125,13 +131,18 @@ pub struct State {
     pub frame_timer: Option<u32>,
     /// Every `matchMedia` list a script still holds, and whether it matched when last asked.
     pub media_lists: Vec<(WeakJsObject, MediaQuery, bool)>,
-    pub shadow_roots: HashMap<NodeId, (NodeId, bool)>,
-    pub shadow_hosts: HashMap<NodeId, NodeId>,
-    pub custom_elements: Vec<(String, JsObject)>,
-    pub custom_nodes: HashSet<NodeId>,
-    pub custom_waiting: Vec<(String, JsValue)>,
+    pub slots: Slots,
+    pub custom: Registry,
     pub template_contents: HashMap<NodeId, NodeId>,
     pub fullscreen: Option<NodeId>,
+    pub fonts: Fonts,
+    /// Whether the window is out of sight (minimized, hidden): `document.hidden`.
+    pub hidden: bool,
+    /// Whether the window has the keyboard: `document.hasFocus()`.
+    pub window_focused: bool,
+    /// The rectangles of the lines an inline box is broken over, as the drawer reported them;
+    /// `getClientRects` answers these over the one border box.
+    pub fragments: HashMap<NodeId, Vec<crate::Rect>>,
     /// The history's entries: `pushState`'s states and their addresses, and where it stands.
     pub history: Vec<(JsValue, String)>,
     pub history_at: usize,
@@ -157,7 +168,7 @@ impl State {
             styler: None,
             env: Environment::default(),
             constructed_sheets: HashMap::new(),
-            adopted_sheets: Vec::new(),
+            adopted: BTreeMap::new(),
             rects: HashMap::new(),
             scroll_offsets: HashMap::new(),
             requests: Vec::new(),
@@ -171,13 +182,14 @@ impl State {
             frames: Vec::new(),
             frame_timer: None,
             media_lists: Vec::new(),
-            shadow_roots: HashMap::new(),
-            shadow_hosts: HashMap::new(),
-            custom_elements: Vec::new(),
-            custom_nodes: HashSet::new(),
-            custom_waiting: Vec::new(),
+            slots: Default::default(),
+            custom: Default::default(),
             template_contents: HashMap::new(),
             fullscreen: None,
+            fonts: Default::default(),
+            hidden: false,
+            window_focused: true,
+            fragments: HashMap::new(),
             history_at: 0,
             next_id: 1,
             revision: 0,
@@ -216,16 +228,20 @@ impl State {
         };
         self.style_revision = Some(revision);
         // A `<style>` in a document a script made (`DOMParser`) is no sheet of the window's.
-        let adopted: Vec<(u32, String)> = self
-            .adopted_sheets
+        let adopted: Vec<(u32, String, NodeId)> = self
+            .adopted
             .iter()
-            .filter_map(|(id, _)| self.constructed_sheets.get(id).map(|r| (*id, r.join("\n"))))
+            .flat_map(|(tree, sheets)| sheets.iter().map(move |(id, _)| (*id, *tree)))
+            .filter_map(|(id, tree)| {
+                let rules = self.constructed_sheets.get(&id)?;
+                Some((id, rules.join("\n"), tree))
+            })
             .collect();
-        let known_adopted: Vec<(u32, String)> = self
+        let known_adopted: Vec<(u32, String, NodeId)> = self
             .sheets
             .iter()
             .filter_map(|r| match r.owner {
-                SheetOwner::Adopted(id) => Some((id, r.sheet.source().to_owned())),
+                SheetOwner::Adopted(id) => Some((id, r.sheet.source().to_owned(), r.tree)),
                 _ => None,
             })
             .collect();
@@ -243,12 +259,15 @@ impl State {
             self.sheets.push(SheetRecord {
                 owner: SheetOwner::Element(*id),
                 sheet: Sheet::parse(text),
+                // A `<style>` counts in the tree it is in, a shadow tree's among its own.
+                tree: self.dom.root_of(*id),
             });
         }
-        for (id, text) in adopted {
+        for (id, text, tree) in adopted {
             self.sheets.push(SheetRecord {
                 owner: SheetOwner::Adopted(id),
                 sheet: Sheet::parse(&text),
+                tree,
             });
         }
         self.style_texts = found;
@@ -269,7 +288,7 @@ impl State {
         {
             return styler.clone();
         }
-        let sheets: Vec<(Origin, &Sheet)> = self
+        let sheets: Vec<(Origin, &Sheet, NodeId)> = self
             .sheets
             .iter()
             .map(|r| {
@@ -278,7 +297,7 @@ impl State {
                 } else {
                     Origin::Author
                 };
-                (origin, &r.sheet)
+                (origin, &r.sheet, r.tree)
             })
             .collect();
         let styler = Rc::new(Styler::new(&sheets, &self.env));

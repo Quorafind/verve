@@ -165,15 +165,12 @@ to keep the installed packages somewhere of your own; about 30 MB for DSH's).
 
 - No layout: where things are is the drawer's to work out and report. Until it does, boxes
   are empty (the viewport for `<html>` and `<body>`).
-- Lists of nodes (`childNodes`, `children`, `getElementsBy…`) are arrays taken when asked, not
-  live; a script that keeps one and changes the tree sees the tree as it was.
 - No composition events (an input method's text arrives committed, through `insert_text`), no
   typing into `contenteditable` regions, no drag and drop or touch input from the interface.
-- Custom elements: an element of a defined tag made by `createElement` is of its class, and
-  hears `connectedCallback`/`disconnectedCallback`; one the parser makes is not upgraded, and
-  `attributeChangedCallback` is not called.
-- Shadow roots are held and queried, but their styles are not scoped and events are not
-  retargeted across them.
+- Custom elements: no `is="…"` built-ins, no `ElementInternals` beyond an empty object, and the
+  page's own markup is upgraded once parsed, not constructed while it is parsed. A class or
+  style change through `classList` or `style` does not reach `attributeChangedCallback`.
+- A `<template>`'s `content` is a fragment of the same document, not an inert one.
 - CSS: `calc()`, `env()` and other functions stay as written; pseudo-elements (`::before`)
   match nothing, so generated content is not in the snapshot; `@container`, animations and
   transitions are not run (`animate()` answers a finished animation).
