@@ -85,10 +85,9 @@ electron.exe（crates/verve-electron 的 bin）
 crates/
   verve-dom/          已有：无头 DOM + CSS 层叠（P22–P25 补齐）
   verve-asar/         新：app.asar 读取器与 `verve::vfs::Overlay` 实现（P11），只依赖 verve
-  verve-electron/     新：Electron API、Hub、主进程/渲染器 Guest、启动器（依赖 verve-asar）
-    src/bin/electron.rs
+  verve-electron/     新：Electron API、Hub、主进程/渲染器 Guest、无头 Shell（依赖 verve-asar；纯逻辑库，无 bin）
   verve-layout/       新：布局引擎（taffy + 行内排版 + 层叠上下文 → DisplayList），不依赖 GPUI（P30/P31）
-  verve-gpui/         新：GPUI Shell、DomView（回放 DisplayList）、TextMeasurer 的 GPUI 实现、输入桥接、菜单托盘
+  verve-gpui/         新：`electron` 二进制（src/bin/electron.rs）、GPUI Shell、DomView（回放 DisplayList）、TextMeasurer 的 GPUI 实现、输入桥接、菜单托盘
   verve-electron-npm/ 新：npm 包模板与平台包脚本（P40，非 Rust）
 src/                  Verve 内核：只允许 P03、P11、P17、P42 修改（P42 还可改 boa/core/gc，需记入 boa/SU.md）
 docs/electron/        本方案
