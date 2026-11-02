@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::layer::{History, Place};
 use super::scope::matched_rules;
 use super::selector::MatchCache;
 use super::sheet::Declaration;
@@ -203,8 +204,37 @@ pub fn style_of(dom: &Dom, styler: &Styler, id: NodeId) -> Style {
     style
 }
 
-/// Where a declaration ranks in the cascade: its precedence, specificity, order.
-pub(super) type Rank = (Precedence, (u32, u32, u32), usize);
+/// Where a declaration ranks in the cascade, lowest first: its precedence, then the layer it
+/// is in, then the specificity of its selector, then the order of its rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Rank {
+    pub(super) precedence: Precedence,
+    /// The layer's place as [`layer::key`] gives it.
+    pub(super) layer: u32,
+    pub(super) specificity: (u32, u32, u32),
+    pub(super) order: usize,
+}
+
+impl Rank {
+    /// The inline style's: over every rule of its precedence.
+    fn inline(important: bool) -> Self {
+        Self {
+            precedence: if important {
+                Precedence::ImportantInline
+            } else {
+                Precedence::Inline
+            },
+            layer: 0,
+            specificity: (u32::MAX, 0, 0),
+            order: usize::MAX,
+        }
+    }
+
+    /// The origin, importance and layer, which `revert-layer` rolls back by.
+    fn place(self) -> Place {
+        (self.precedence, self.layer)
+    }
+}
 
 fn own_style(
     dom: &Dom,
@@ -219,14 +249,9 @@ fn own_style(
             style.insert(key.clone(), value.clone());
         }
     }
-    let Some(node) = dom.get(id) else {
+    let Some(node) = dom.get(id).filter(|node| node.is_element()) else {
         return (style, false);
     };
-    if !node.is_element() {
-        return (style, false);
-    }
-    let (mut matched, pointer) = matched_rules(dom, styler, id, cache);
-    // The inline style: over every rule of its importance.
     let inline: Vec<Declaration> = node
         .style
         .iter()
@@ -236,33 +261,130 @@ fn own_style(
             important: node.important.contains(name),
         })
         .collect();
-    for declaration in &inline {
-        let precedence = if declaration.important {
-            Precedence::ImportantInline
-        } else {
-            Precedence::Inline
-        };
-        matched.push(((precedence, (u32::MAX, 0, 0), usize::MAX), declaration));
-    }
-    matched.sort_by_key(|a| a.0);
+    let (matched, pointer) = matched_declarations(dom, styler, id, &inline, cache);
     // `hidden` is the user agent's `display: none`, under any author rule.
     if node.attr("hidden").is_some() && node.namespace == Namespace::Html {
         style.insert("display".into(), "none".into());
     }
-    // The `font` shorthand is opened up once its `var()`s are resolved (below): the longhands
-    // this node declares after its own `font` win over it, as later declarations do.
-    let mut own_font = false;
-    let mut font_overridden: Vec<&str> = Vec::new();
-    for (_, declaration) in matched {
-        if declaration.name == "font" {
-            own_font = true;
-            font_overridden.clear();
-        } else if own_font && FONT_LONGHANDS.contains(&declaration.name.as_str()) {
-            font_overridden.push(declaration.name.as_str());
+    let revert = styler.revert_layer || inline.iter().any(says_revert_layer);
+    let font = apply(&mut style, matched, inherited, revert);
+    resolve_variables(&mut style, inherited);
+    font.open(&mut style);
+    compute_font_size(&mut style, inherited);
+    (style, pointer)
+}
+
+/// The declarations that apply to `id`, the rules' and its `inline` style's, lowest rank first.
+fn matched_declarations<'a>(
+    dom: &Dom,
+    styler: &'a Styler,
+    id: NodeId,
+    inline: &'a [Declaration],
+    cache: &mut MatchCache,
+) -> (Vec<(Rank, &'a Declaration)>, bool) {
+    let (mut matched, pointer) = matched_rules(dom, styler, id, cache);
+    matched.extend(
+        inline
+            .iter()
+            .map(|declaration| (Rank::inline(declaration.important), declaration)),
+    );
+    matched.sort_by_key(|a| a.0);
+    (matched, pointer)
+}
+
+/// Whether a declaration's value is the keyword `revert-layer`.
+pub(super) fn says_revert_layer(declaration: &Declaration) -> bool {
+    declaration
+        .value
+        .trim()
+        .eq_ignore_ascii_case("revert-layer")
+}
+
+/// The `font` shorthand is opened up once its `var()`s are resolved: the longhands a node
+/// declares after its own `font` win over it, as later declarations do.
+#[derive(Default)]
+struct Font<'a> {
+    own: bool,
+    overridden: Vec<&'a str>,
+}
+
+impl<'a> Font<'a> {
+    fn note(&mut self, property: &'a str) {
+        if property == "font" {
+            self.own = true;
+            self.overridden.clear();
+        } else if self.own && FONT_LONGHANDS.contains(&property) {
+            self.overridden.push(property);
         }
-        set_declared(&mut style, &declaration.name, &declaration.value, inherited);
     }
-    // `var()` resolved against what this node holds, custom properties included.
+
+    fn open(&self, style: &mut Style) {
+        if !self.own {
+            return;
+        }
+        if let Some(longhands) = style.get("font").and_then(|font| font_longhands(font)) {
+            for (name, value) in longhands {
+                if !self.overridden.contains(&name) {
+                    style.insert(name.to_owned(), value);
+                }
+            }
+        }
+    }
+}
+
+/// Sets `style` by `matched`, lowest rank first. With `revert`, what each longhand was is kept
+/// so that `revert-layer` can roll it back: by longhand, so that `padding: revert-layer` finds
+/// what `padding-top` said and the other way round.
+fn apply<'a>(
+    style: &mut Style,
+    matched: Vec<(Rank, &'a Declaration)>,
+    inherited: &Style,
+    revert: bool,
+) -> Font<'a> {
+    let mut font = Font::default();
+    let mut history = History::default();
+    for (rank, declaration) in matched {
+        let (name, value) = (declaration.name.as_str(), declaration.value.as_str());
+        font.note(name);
+        if !revert {
+            set_declared(style, name, value, inherited);
+        } else if says_revert_layer(declaration) {
+            for longhand in longhands(name) {
+                // What the layers under it said, opened up as a declaration is; `unset` when
+                // none did, as a property nothing set.
+                match history.revert(&longhand, rank.place()).map(str::to_owned) {
+                    Some(before) => style.insert(longhand, before),
+                    None => {
+                        set_declared(style, &longhand, "unset", inherited);
+                        None
+                    }
+                };
+            }
+        } else {
+            let before = style.clone();
+            set_declared(style, name, value, inherited);
+            for (key, now) in style.iter() {
+                if before.get(key) != Some(now) {
+                    history.record(key, rank.place(), now);
+                }
+            }
+        }
+    }
+    font
+}
+
+/// The properties a declaration of `name` sets: `name` itself, and what it opens into when it is
+/// a shorthand.
+fn longhands(name: &str) -> Vec<String> {
+    let mut opened = Style::new();
+    set_declared(&mut opened, name, "0", &Style::new());
+    opened.insert(name.to_owned(), String::new());
+    opened.into_keys().collect()
+}
+
+/// `var()` resolved against what `style` holds, custom properties included; a value that
+/// cannot be falls back to what it inherits, if it is inherited.
+fn resolve_variables(style: &mut Style, inherited: &Style) {
     let custom: HashMap<String, String> = style
         .iter()
         .filter(|(k, _)| k.starts_with("--"))
@@ -293,15 +415,11 @@ fn own_style(
             }
         }
     }
-    if own_font && let Some(longhands) = style.get("font").and_then(|font| font_longhands(font)) {
-        for (name, value) in longhands {
-            if !font_overridden.contains(&name) {
-                style.insert(name.to_owned(), value);
-            }
-        }
-    }
-    // A font size is computed to pixels, so what inherits it inherits the size and not `1.5em`
-    // to apply again.
+}
+
+/// A font size is computed to pixels, so what inherits it inherits the size and not `1.5em`
+/// to apply again.
+fn compute_font_size(style: &mut Style, inherited: &Style) {
     let parent_size = inherited
         .get("font-size")
         .and_then(|v| length(v, 16.))
@@ -311,5 +429,4 @@ fn own_style(
     {
         style.insert("font-size".into(), format_px(px));
     }
-    (style, pointer)
 }

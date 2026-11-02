@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 
-use super::cascade::Origin;
+use super::cascade::{Origin, says_revert_layer};
+use super::layer::LayerOrder;
 use super::media::Environment;
 use super::scope::{Reach, ScopeIndex};
 use super::sheet::{Rule, Sheet};
@@ -24,6 +25,9 @@ pub(super) struct RuleEntry {
     pub(super) origin: Origin,
     pub(super) order: usize,
     pub(super) tree: NodeId,
+    /// The place of the `@layer` the rule is in among those of all sheets; `LAYERLESS` when it
+    /// is in none.
+    pub(super) layer: u32,
     /// Whether a selector of the rule picks the node itself: only those are candidates by tree.
     own: bool,
     pub(super) rule: Rule,
@@ -38,6 +42,10 @@ pub struct Styler {
     buckets: HashMap<RuleKey, Vec<(usize, usize)>>,
     scope: ScopeIndex,
     env: Environment,
+    /// How many layers the sheets declare: the order between two layers is their numbering.
+    pub(super) layers: u32,
+    /// Whether any declaration says `revert-layer`: the history it needs is kept only then.
+    pub(super) revert_layer: bool,
 }
 
 impl Styler {
@@ -48,19 +56,27 @@ impl Styler {
             env: env.clone(),
             ..Styler::default()
         };
-        for (origin, sheet, tree) in sheets {
+        let order = LayerOrder::new(
+            &sheets
+                .iter()
+                .map(|(_, sheet, tree)| (*tree, *sheet))
+                .collect::<Vec<_>>(),
+        );
+        out.layers = order.count();
+        for (ordinal, (origin, sheet, tree)) in sheets.iter().enumerate() {
             for rule in sheet
                 .rules
                 .iter()
                 .filter(|r| r.media.iter().all(|m| m.matches(env)))
             {
-                out.add_rule(*origin, *tree, rule);
+                out.revert_layer |= rule.declarations.iter().any(says_revert_layer);
+                out.add_rule(*origin, *tree, rule, order.place(ordinal, rule.layer));
             }
         }
         out
     }
 
-    fn add_rule(&mut self, origin: Origin, tree: NodeId, rule: &Rule) {
+    fn add_rule(&mut self, origin: Origin, tree: NodeId, rule: &Rule, layer: u32) {
         let index = self.rules.len();
         let mut own = false;
         for (k, selector) in rule.selectors.0.iter().enumerate() {
@@ -77,6 +93,7 @@ impl Styler {
             origin,
             order,
             tree,
+            layer,
             own,
             rule: rule.clone(),
         });

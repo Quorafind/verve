@@ -1,0 +1,27 @@
+/* Tailwind CSS v4.1's `@import "tailwindcss"` as the compiler emits it, trimmed to the parts
+   this test reads: the layer order statement, a theme layer of `oklch()` variables, the base
+   reset, one component and a few utilities. Utilities are generated on demand, so a real
+   stylesheet holds thousands of these; the shape is the compiler's. */
+@layer theme, base, components, utilities;
+@layer theme {
+  :root, :host {
+    --font-sans: ui-sans-serif, system-ui, sans-serif;
+    --color-red-500: oklch(63.7% 0.237 25.331);
+    --spacing: 0.25rem;
+    --text-sm: 0.875rem;
+  }
+}
+@layer base {
+  * { box-sizing: border-box; }
+  h1, h2, h3 { font-size: inherit; font-weight: inherit; }
+  p, h1 { margin: 0; }
+}
+@layer components {
+  .btn { padding: calc(var(--spacing) * 2); color: var(--color-red-500); }
+}
+@layer utilities {
+  .p-4 { padding: calc(var(--spacing) * 4); }
+  .text-sm { font-size: var(--text-sm); }
+  .text-red-500 { color: var(--color-red-500); }
+  .hidden { display: none; }
+}

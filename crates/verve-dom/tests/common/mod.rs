@@ -83,6 +83,25 @@ impl Page {
     }
 }
 
+/// A page with `css` in a `<style>` element of its head, and `body` in its body.
+pub fn styled(css: &str, body: &str) -> Page {
+    let mut page = Page::new(Options::default());
+    let css = serde_json::to_string(css).expect("a string");
+    let body = serde_json::to_string(body).expect("a string");
+    page.eval(&format!(
+        "document.head.innerHTML = '<style>' + {css} + '</style>';
+         document.body.innerHTML = {body};"
+    ));
+    page
+}
+
+/// `getComputedStyle(document.getElementById(id)).getPropertyValue(property)`.
+pub fn style(page: &mut Page, id: &str, property: &str) -> String {
+    page.eval(&format!(
+        "getComputedStyle(document.getElementById('{id}')).getPropertyValue('{property}')"
+    ))
+}
+
 /// Runs `f` on a thread with a stack Boa can recurse in, as Verve's own isolates do.
 pub fn on_page<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
     const STACK: usize = 64 << 20;

@@ -11,13 +11,13 @@
 //! `querySelector`'s `SyntaxError`, and a stylesheet's rule that has one is dropped, as a
 //! browser drops it.
 //!
-//! The cascade is origin, importance, specificity and order; the inline style wins over every
-//! rule of its importance; the inherited properties come down from the parent; `inherit`,
-//! `initial` and `unset` are honoured; and `var()` reads custom properties, which inherit like
-//! any other — so `var(--text-muted)` follows whatever the document set `--text-muted` to.
-//! `@media` is evaluated against the [`Environment`] (the viewport, the colour scheme);
-//! `@supports` and `@layer` blocks apply; the rest (`@keyframes`, `@font-face`) are not rules
-//! about a node.
+//! The cascade is origin, importance, `@layer`, specificity and order; the inline style wins
+//! over every rule of its importance; the inherited properties come down from the parent;
+//! `inherit`, `initial`, `unset` and `revert-layer` are honoured; and `var()` reads custom
+//! properties, which inherit like any other — so `var(--text-muted)` follows whatever the
+//! document set `--text-muted` to. `@media` is evaluated against the [`Environment`] (the
+//! viewport, the colour scheme); `@supports` blocks apply; the rest (`@keyframes`,
+//! `@font-face`) are not rules about a node.
 //!
 //! What comes out is each property's value as text; turning `12px` into a length and `#fff`
 //! into a colour is the drawer's, with [`length`] and [`color`].
@@ -26,6 +26,7 @@
 //! selector engine of its own.
 
 mod cascade;
+mod layer;
 mod media;
 mod scope;
 mod selector;

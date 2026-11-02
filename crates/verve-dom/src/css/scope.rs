@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use super::cascade::{Precedence, Rank};
+use super::layer;
 use super::selector::{
     Compound, MatchCache, MatchContext, Parser, Pseudo, Selector, SelectorError, SelectorList,
 };
@@ -263,8 +264,13 @@ pub(super) fn matched_rules<'a>(
             let inner = matches!(selector.subject().reach, Reach::Host | Reach::Slotted)
                 && entry.tree != tree;
             for declaration in &entry.rule.declarations {
-                let precedence = Precedence::of(declaration.important, entry.origin, inner);
-                matched.push(((precedence, specificity, entry.order), declaration));
+                let rank = Rank {
+                    precedence: Precedence::of(declaration.important, entry.origin, inner),
+                    layer: layer::key(entry.layer, declaration.important, styler.layers),
+                    specificity,
+                    order: entry.order,
+                };
+                matched.push((rank, declaration));
             }
         } else if entry.rule.pointer && !pointer {
             // Would the pointer on it make this rule apply?
