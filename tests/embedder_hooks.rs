@@ -1,16 +1,19 @@
 //! The kernel's hooks for an embedder building Electron on it, a section for each: the structured
 //! clone that crosses threads, the process a realm says it is, the virtual filesystem `app.asar`
-//! is read through, the permission bit a child process needs and the natives a host defines its
-//! own modules with.
+//! is read through, the permission bit a child process needs, the natives a host defines its own
+//! modules with and what a host is told and asks for (a console sink, a user agent, a built-in
+//! made on first require).
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use boa_engine::JsValue;
+use boa_engine::{Context, JsResult, JsValue};
 use verve::clone::{CloneBytesError, Cloned};
 use verve::vfs::{DirEntry, Kind, Metadata, Overlay};
 use verve::{ExitBehavior, Permissions, ProcessInfo, Runtime, UncaughtBehavior};
@@ -814,4 +817,63 @@ fn an_embedder_can_build_an_event_emitter_class() {
         .eval("[w instanceof require('events').EventEmitter, heard.join(','), w.id].join('|')")
         .unwrap();
     assert_eq!(verve::print(&answer), "true|3|1");
+}
+#[test]
+fn console_lines_go_to_a_sink() {
+    let mut rt = Runtime::new();
+    let lines = Rc::new(RefCell::new(Vec::new()));
+    let heard = lines.clone();
+    rt.set_console_sink(Some(Box::new(move |level, text, position| {
+        assert!(position.is_none());
+        heard.borrow_mut().push(format!("{level:?}:{text}"));
+    })));
+    rt.eval("console.log('one'); console.warn('two')").unwrap();
+    assert_eq!(*lines.borrow(), ["Log:one", "Warn:two"]);
+    assert!(rt.take_console().is_empty());
+    // Taken away, the lines are kept for `take_console` again.
+    rt.set_console_sink(None);
+    rt.eval("console.log('three')").unwrap();
+    assert_eq!(rt.take_console().len(), 1);
+}
+
+#[test]
+fn the_user_agent_is_the_embedders() {
+    let mut rt = Runtime::new();
+    let agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                 Chrome/142.0.7444.59 Electron/39.2.0 MyApp/1.0 Safari/537.36";
+    rt.set_user_agent(agent.to_owned());
+    let answer = rt.eval("navigator.userAgent").unwrap();
+    assert_eq!(verve::print(&answer), agent);
+    // Set after the navigator was first read, it answers the new one too.
+    rt.set_user_agent("Another/2.0".to_owned());
+    let answer = rt.eval("navigator.userAgent").unwrap();
+    assert_eq!(verve::print(&answer), "Another/2.0");
+    let app_version = rt.eval("navigator.appVersion").unwrap();
+    assert_eq!(verve::print(&app_version), "Another/2.0");
+}
+
+static MADE: AtomicUsize = AtomicUsize::new(0);
+
+fn lazy_module(context: &mut Context, name: &str) -> JsResult<JsValue> {
+    MADE.fetch_add(1, Ordering::SeqCst);
+    let module = verve::native::object(context);
+    verve::native::hidden(
+        &module,
+        boa_engine::js_string!("name"),
+        verve::native::js_text(name),
+        context,
+    )?;
+    Ok(module.into())
+}
+
+#[test]
+fn a_lazy_builtin_is_made_on_first_require() {
+    let mut rt = realm();
+    rt.define_builtin_lazy("electron", lazy_module);
+    assert_eq!(MADE.load(Ordering::SeqCst), 0);
+    let answer = rt
+        .eval("const one = require('electron'); [one === require('node:electron'), one.name].join('|')")
+        .unwrap();
+    assert_eq!(verve::print(&answer), "true|electron");
+    assert_eq!(MADE.load(Ordering::SeqCst), 1);
 }

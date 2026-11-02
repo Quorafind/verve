@@ -95,6 +95,7 @@ pub use code_cache::CodeCacheStats;
 pub fn code_cache_user_secret() -> std::io::Result<[u8; 32]> {
     code_cache::user_secret().map(|(secret, _)| secret)
 }
+pub use embed::{ConsoleSink, SourcePos};
 pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
 pub use process::{ExitBehavior, ProcessInfo, UncaughtBehavior};
@@ -125,6 +126,10 @@ pub fn set_thread_stack(bytes: usize) {
 
 /// What makes a module of a family the host defined; see [`Runtime::define_builtin_family`].
 pub type ModuleMaker = fn(&mut Context, &str) -> JsResult<JsValue>;
+
+/// The sink as the runtime keeps it: [`ConsoleSink`] is what an embedder hands over, and this
+/// is the same function the realm holds, which a console line copies out to call.
+pub(crate) type ConsoleSinkRc = Rc<dyn Fn(Level, &str, Option<&SourcePos>)>;
 
 /// Milliseconds on the host's clock. Only differences between two readings mean anything.
 pub type Millis = f64;
@@ -193,6 +198,11 @@ struct Shared {
     /// Families of built-in modules: every name starting with the prefix is made by the
     /// function, once, and kept with the rest.
     families: RefCell<Vec<(String, ModuleMaker)>>,
+    /// Built-ins made the first time they are required, by the name each answers to.
+    lazy: RefCell<HashMap<String, ModuleMaker>>,
+    /// The lazy globals already made, by name: what a hook may mend without making one that
+    /// nothing has read.
+    lazy_values: RefCell<HashMap<String, JsValue>>,
     /// `require.cache`: the module object of every file run, by its path. A second `require`
     /// of the same file answers the same `module.exports`, as Node's cache does.
     module_cache: JsObject,
@@ -204,6 +214,13 @@ struct Shared {
     /// The working folder `process.cwd()` answers and `process.chdir` changes.
     cwd: RefCell<String>,
     console: RefCell<Vec<ConsoleLine>>,
+    /// Where console lines are pushed to as they are written, when the embedder asked for that
+    /// instead of reading them back; see [`Runtime::set_console_sink`]. Held as an `Rc` so a
+    /// line can copy it out before calling it: a sink that writes to this console again must not
+    /// find the cell borrowed.
+    console_sink: RefCell<Option<ConsoleSinkRc>>,
+    /// The user agent `navigator` answers, when the embedder set one.
+    user_agent: RefCell<Option<String>>,
     /// `console.time`'s labels and when each was started; `console.count`'s counts.
     console_timers: RefCell<HashMap<String, Millis>>,
     console_counts: RefCell<HashMap<String, u64>>,
@@ -502,6 +519,10 @@ impl Runtime {
                     .unwrap_or_else(|_| "/".into()),
             ),
             console: RefCell::new(Vec::new()),
+            console_sink: RefCell::new(None),
+            user_agent: RefCell::new(None),
+            lazy: RefCell::new(HashMap::new()),
+            lazy_values: RefCell::new(HashMap::new()),
             console_timers: RefCell::new(HashMap::new()),
             console_counts: RefCell::new(HashMap::new()),
             console_depth: std::cell::Cell::new(0),
@@ -1019,6 +1040,13 @@ pub fn console_line(context: &Context, level: Level, text: String) {
     let state = shared(context);
     if let Some(profile) = state.profile.borrow().as_ref() {
         profile.console(level, &text);
+        return;
+    }
+    // The sink is copied out first: one that writes to this console again must not find the
+    // cell borrowed.
+    let sink = state.console_sink.borrow().clone();
+    if let Some(sink) = sink {
+        sink(level, &text, None);
         return;
     }
     if state.echo {

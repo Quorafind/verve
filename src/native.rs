@@ -453,15 +453,22 @@ pub fn lazy_global(context: &mut Context, name: &str, make: GlobalMaker) -> JsRe
     let getter = FunctionObjectBuilder::new(
         context.realm(),
         NativeFunction::from_copy_closure_with_captures(
-            |_, _, (cell, make): &(JsObject, MakerBox), context| {
+            |_, _, (cell, make, name): &(JsObject, MakerBox, String), context| {
                 if cell.has_own_property(js_string!("value"), context)? {
                     return cell.get(js_string!("value"), context);
                 }
                 let value = (make.0)(context)?;
                 cell.set(js_string!("value"), value.clone(), false, context)?;
+                // The record is Verve's own; a `Context` that is not a Verve runtime has none.
+                if let Some(state) = context.get_data::<std::rc::Rc<crate::Shared>>() {
+                    state
+                        .lazy_values
+                        .borrow_mut()
+                        .insert(name.clone(), value.clone());
+                }
                 Ok(value)
             },
-            (cell.clone(), MakerBox(make)),
+            (cell.clone(), MakerBox(make), name.to_owned()),
         ),
     )
     .name(JsString::from(format!("get {name}")))
@@ -489,6 +496,16 @@ pub fn lazy_global(context: &mut Context, name: &str, make: GlobalMaker) -> JsRe
         context,
     )?;
     Ok(())
+}
+
+/// The lazy global `name`'s value, when something has already read it: a hook that mends one
+/// in place asks this, so it never makes a global nothing asked for.
+pub(crate) fn lazy_value(context: &Context, name: &str) -> Option<JsValue> {
+    crate::shared(context)
+        .lazy_values
+        .borrow()
+        .get(name)
+        .cloned()
 }
 
 /// A promise already settled with `outcome`: resolved with its value, or rejected with its error.

@@ -4,11 +4,29 @@
 //! and the plugin host have always had.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use boa_engine::JsResult;
 
 use crate::vfs;
-use crate::{ProcessInfo, Runtime, native, process, shared};
+use crate::{Level, ModuleMaker, ProcessInfo, Runtime, native, navigator, process, shared};
+
+/// Where a console line came from, when the runtime knows: the file it was written in, and the
+/// line and column in it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourcePos {
+    /// The file it was written in, as the runtime names it.
+    pub file: String,
+    /// The line in that file, counting from 1.
+    pub line: u32,
+    /// The column in that line, counting from 1.
+    pub column: u32,
+}
+
+/// What a host is told of each console line as it is written; see
+/// [`Runtime::set_console_sink`]. The third argument is the line's position, when there is one;
+/// the runtime does not work it out yet, so it is `None` today.
+pub type ConsoleSink = Box<dyn Fn(Level, &str, Option<&SourcePos>)>;
 
 impl Runtime {
     /// Makes `process` what this realm is: an Electron main process, a renderer, a utility —
@@ -56,5 +74,32 @@ impl Runtime {
     /// runtime — a program `child_process` runs, a native module; `None` when the disk has it.
     pub fn materialize(&self, path: &Path) -> Option<std::io::Result<PathBuf>> {
         vfs::View::of(&self.context).materialize(path)
+    }
+
+    /// Makes `require(name)` answer what `make` makes, the first time it is required — for a
+    /// module as large as `electron`, which a program that never reaches for it should not pay
+    /// for. What it makes is kept, as [`Runtime::define_builtin`]'s is; a later
+    /// [`Runtime::define_builtin`] of the same name replaces it for the next require.
+    pub fn define_builtin_lazy(&mut self, name: &str, make: ModuleMaker) {
+        shared(&self.context)
+            .lazy
+            .borrow_mut()
+            .insert(name.to_owned(), make);
+    }
+
+    /// Sends each console line to `sink` as it is written, instead of keeping it for
+    /// [`Runtime::take_console`]: how a renderer passes its console to the main process without
+    /// being polled. `None` keeps them again. A sink set is also where an uncaught error's line
+    /// goes, so the host sees it with the rest.
+    pub fn set_console_sink(&mut self, sink: Option<ConsoleSink>) {
+        let kept: Option<crate::ConsoleSinkRc> = sink.map(Rc::from);
+        *shared(&self.context).console_sink.borrow_mut() = kept;
+    }
+
+    /// The user agent `navigator` answers, whole: Electron's renderers carry their application's
+    /// name in theirs (`... Chrome/142.0.7444.59 Electron/39.2.0 MyApp/1.0 Safari/537.36`). Set
+    /// before the navigator is first read or after; either way it answers this from now on.
+    pub fn set_user_agent(&mut self, agent: String) {
+        navigator::set_user_agent(&mut self.context, agent);
     }
 }

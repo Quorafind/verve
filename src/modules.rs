@@ -54,6 +54,7 @@ pub(crate) fn is_builtin(context: &Context, name: &str) -> bool {
     let bare = bare_name(name);
     let state = crate::shared(context);
     state.builtins.borrow().contains_key(bare)
+        || state.lazy.borrow().contains_key(bare)
         || (node_table_answers(name) && crate::node::MODULES.iter().any(|(n, _)| *n == bare))
         || state
             .families
@@ -67,6 +68,16 @@ pub(crate) fn builtin(context: &mut Context, name: &str) -> JsResult<Option<JsVa
     let bare = bare_name(name);
     if let Some(exports) = crate::shared(context).builtins.borrow().get(bare) {
         return Ok(Some(exports.clone()));
+    }
+    // One the host said to make on first use: made now, and kept with the rest.
+    let lazy = crate::shared(context).lazy.borrow().get(bare).copied();
+    if let Some(make) = lazy {
+        let exports = make(context, bare)?;
+        crate::shared(context)
+            .builtins
+            .borrow_mut()
+            .insert(bare.to_owned(), exports.clone());
+        return Ok(Some(exports));
     }
     // One Node has only under `node:` is kept under that name, so that making it does not make
     // a bare `require('sqlite')` find it.
