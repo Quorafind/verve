@@ -58,7 +58,7 @@ fn review_variables_cycles_fallback_and_expansion_limit() {
                 out.push(getComputedStyle(at).color);
                 return out.join('|');
             })()
-        "#), "red|3px|blue|green|purple|orange|purple");
+        "#), "rgb(255, 0, 0)|3px|rgb(0, 0, 255)|rgb(0, 128, 0)|rgb(128, 0, 128)|rgb(255, 165, 0)|rgb(128, 0, 128)");
     });
 }
 
@@ -124,7 +124,7 @@ fn review_stylesheets_and_sibling_indices_remain_fresh() {
                 document.body.innerHTML = '<div id=target></div>';
                 const target = document.getElementById('target');
                 for (let n = 0; n < 20; n++) {
-                    if (getComputedStyle(target).color !== 'red') throw Error('stale style cache');
+                    if (getComputedStyle(target).color !== 'rgb(255, 0, 0)') throw Error('stale style cache');
                 }
                 const last = document.head.lastChild;
                 last.firstChild.data = '#target { color: blue }';
@@ -138,7 +138,7 @@ fn review_stylesheets_and_sibling_indices_remain_fresh() {
             })()
         "#
             ),
-            "blue|red|0|2000"
+            "rgb(0, 0, 255)|rgb(255, 0, 0)|0|2000"
         );
     });
 }
@@ -176,7 +176,10 @@ fn rules_inline_styles_and_inheritance_cascade_into_computed_style() {
         assert_eq!(snapshot.style(main, "color"), Some("rgb(0, 128, 0)"));
         assert_eq!(snapshot.style(main, "padding-top"), Some("6px"));
         assert_eq!(snapshot.style(main, "padding-left"), Some("calc(2 * 6px)"));
-        assert_eq!(snapshot.style(main, "border-top-color"), Some("blue"));
+        assert_eq!(
+            snapshot.style(main, "border-top-color"),
+            Some("rgb(0, 0, 255)")
+        );
         assert_eq!(snapshot.style(main, "margin-left"), Some("auto"));
         // Inherited down two levels; a property that does not inherit is not.
         assert_eq!(snapshot.style(deep, "color"), Some("rgb(0, 128, 0)"));
@@ -188,8 +191,8 @@ fn rules_inline_styles_and_inheritance_cascade_into_computed_style() {
         assert_eq!(snapshot.style(main, "display"), Some("block"));
         assert_eq!(snapshot.style(deep, "display"), None);
         // The inline style over every rule; an important rule over the inline style.
-        assert_eq!(snapshot.style(inline, "color"), Some("orange"));
-        assert_eq!(snapshot.style(loud, "color"), Some("purple"));
+        assert_eq!(snapshot.style(inline, "color"), Some("rgb(255, 165, 0)"));
+        assert_eq!(snapshot.style(loud, "color"), Some("rgb(128, 0, 128)"));
         // getComputedStyle answers the same, with initial values for what nothing set.
         assert_eq!(
             page.eval("(() => { const s = getComputedStyle(document.getElementById('deep')); return [s.color, s.fontSize, s.display, s.getPropertyValue('--accent'), s.position].join('|') })()"),

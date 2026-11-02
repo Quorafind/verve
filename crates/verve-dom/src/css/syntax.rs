@@ -76,3 +76,20 @@ pub(super) fn matching_brace(text: &str, open: usize) -> Option<usize> {
     }
     None
 }
+
+/// A function as a value is written it: its name and what is inside its parentheses.
+pub(super) fn function_parts(text: &str) -> Option<(&str, &str)> {
+    let open = text.find('(')?;
+    let args = text[open + 1..].strip_suffix(')')?;
+    Some((text[..open].trim(), args.trim()))
+}
+
+/// A number as CSS writes it: `0.5`, not `0.500000`, and `3`, not `3.0`.
+pub(super) fn decimal(value: f32) -> String {
+    let rounded = (value * 1000.).round() / 1000.;
+    if rounded.fract() == 0. {
+        format!("{}", rounded as i64)
+    } else {
+        format!("{rounded}")
+    }
+}

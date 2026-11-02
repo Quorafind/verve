@@ -26,6 +26,7 @@
 //! selector engine of its own.
 
 mod cascade;
+mod color;
 mod layer;
 mod media;
 mod scope;
@@ -36,11 +37,12 @@ mod syntax;
 mod values;
 
 pub use cascade::{Computed, Origin, Style, style_of};
+pub use color::{color, color_with};
 pub use media::{Environment, MediaQuery};
 pub use selector::{MatchContext, Selector, SelectorError, SelectorList};
 pub use sheet::{Declaration, Sheet, declarations, split_rules};
 pub use styler::Styler;
-pub use values::{USER_AGENT_SHEET, color, initial_value, is_inherited, length};
+pub use values::{USER_AGENT_SHEET, initial_value, is_inherited, length};
 pub(crate) use values::{font_longhands, font_size_px, value_or_initial};
 
 #[cfg(test)]
@@ -77,9 +79,9 @@ mod tests {
              #nope, .modal-title:not(.other) { text-align: center }",
         );
         let computed = Computed::cascade(&dom, &styler(&sheet));
-        assert_eq!(computed.get(modal, "color"), Some("#112233"));
+        assert_eq!(computed.get(modal, "color"), Some("rgb(17, 34, 51)"));
         assert_eq!(computed.get(modal, "padding-left"), Some("8px"));
-        assert_eq!(computed.get(title, "color"), Some("green"));
+        assert_eq!(computed.get(title, "color"), Some("rgb(0, 128, 0)"));
         assert_eq!(computed.get(title, "font-weight"), Some("600"));
         assert_eq!(computed.get(title, "font-size"), None);
         assert_eq!(computed.get(title, "font-style"), Some("italic"));

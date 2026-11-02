@@ -78,12 +78,12 @@ fn the_pointer_comes_goes_and_presses() {
         page.document.pointer_down(&mut page.runtime, &at);
         assert_eq!(
             page.document.computed().get(go, "outline-color"),
-            Some("blue")
+            Some("rgb(0, 0, 255)")
         );
         page.document.pointer_up(&mut page.runtime, &at);
         assert_ne!(
             page.document.computed().get(go, "outline-color"),
-            Some("blue")
+            Some("rgb(0, 0, 255)")
         );
         assert_eq!(log(&mut page), "mousedown mouseup click");
         // The second press of a double click.

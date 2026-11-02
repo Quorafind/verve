@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::color::color_text;
 use super::layer::{History, Place};
 use super::scope::matched_rules;
 use super::selector::MatchCache;
@@ -269,6 +270,7 @@ fn own_style(
     let revert = styler.revert_layer || inline.iter().any(says_revert_layer);
     let font = apply(&mut style, matched, inherited, revert);
     resolve_variables(&mut style, inherited);
+    normalize_colors(&mut style);
     font.open(&mut style);
     compute_font_size(&mut style, inherited);
     (style, pointer)
@@ -413,6 +415,26 @@ fn resolve_variables(style: &mut Style, inherited: &Style) {
                     style.insert(key, value.clone());
                 }
             }
+        }
+    }
+}
+
+/// Whether `property` is a color's: what `getComputedStyle` answers as `rgb()`.
+fn is_color_property(property: &str) -> bool {
+    !property.starts_with("--")
+        && (property == "color"
+            || property.ends_with("-color")
+            || matches!(property, "fill" | "stroke"))
+}
+
+/// A color is computed to the sRGB it comes to, as `getComputedStyle` answers it, except for
+/// those of the newer spaces, which keep the text and the space they were written in.
+fn normalize_colors(style: &mut Style) {
+    for (property, value) in style.iter_mut() {
+        if is_color_property(property)
+            && let Some(text) = color_text(value)
+        {
+            *value = text;
         }
     }
 }
