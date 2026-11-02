@@ -201,3 +201,44 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.regalloc2]
 opt-level = 3
+
+# A shipped binary is one codegen unit with fat LTO: the linker drops everything no native table
+# reaches, which is most of a feature-gated API. `panic` stays `unwind` on purpose — an isolate
+# catches a panic so only it dies (`src/isolate.rs`), which `panic = "abort"` would take away.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+opt-level = 3
+
+# Everything but the interpreter, its parser and the JIT's code generator is built for size:
+# those are on the hot path of every script, while the rest runs once or never.
+[profile.release.package."*"]
+opt-level = "s"
+[profile.release.package.boa_engine]
+opt-level = 3
+[profile.release.package.boa_parser]
+opt-level = 3
+[profile.release.package.boa_ast]
+opt-level = 3
+[profile.release.package.boa_gc]
+opt-level = 3
+[profile.release.package.boa_interner]
+opt-level = 3
+[profile.release.package.boa_string]
+opt-level = 3
+[profile.release.package.regress]
+opt-level = 3
+[profile.release.package.wasmi]
+opt-level = 3
+[profile.release.package.cranelift-codegen]
+opt-level = 3
+[profile.release.package.cranelift-frontend]
+opt-level = 3
+[profile.release.package.regalloc2]
+opt-level = 3
+
+# What the npm platform package ships (P40): a release under a name of its own, so a size check
+# can build the shipping profile without changing the release one.
+[profile.dist]
+inherits = "release"
