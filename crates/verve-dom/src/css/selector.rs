@@ -119,7 +119,7 @@ pub struct MatchContext {
 
 #[derive(Default)]
 pub(super) struct MatchCache {
-    // 缓存只活在一次查询内；节点、样式或 scope 改变后不复用。
+    // Lives for one query: it is not reused after the nodes, the styles or the scope change.
     states: HashMap<(usize, NodeId, usize, u8), bool>,
     relative: HashMap<(usize, NodeId), bool>,
     nth: HashMap<(usize, NodeId, String), HashMap<NodeId, i32>>,
@@ -153,18 +153,20 @@ impl SelectorList {
         )
     }
 
-    pub fn matches_with(&self, dom: &Dom, id: NodeId, cx: &MatchContext) -> bool {
-        self.matches_cached(dom, id, cx, &mut MatchCache::default())
+    pub fn matches_with(&self, dom: &Dom, id: NodeId, matching: &MatchContext) -> bool {
+        self.matches_cached(dom, id, matching, &mut MatchCache::default())
     }
 
     pub(super) fn matches_cached(
         &self,
         dom: &Dom,
         id: NodeId,
-        cx: &MatchContext,
+        matching: &MatchContext,
         cache: &mut MatchCache,
     ) -> bool {
-        self.0.iter().any(|s| s.matches_cached(dom, id, cx, cache))
+        self.0
+            .iter()
+            .any(|s| s.matches_cached(dom, id, matching, cache))
     }
 
     pub(crate) fn select(
@@ -174,14 +176,14 @@ impl SelectorList {
         scope: Option<NodeId>,
         first: bool,
     ) -> Vec<NodeId> {
-        let cx = MatchContext {
+        let matching = MatchContext {
             scope,
             hover_probe: None,
         };
         let mut cache = MatchCache::default();
         let mut found = Vec::new();
         for id in nodes {
-            if self.matches_cached(dom, id, &cx, &mut cache) {
+            if self.matches_cached(dom, id, &matching, &mut cache) {
                 found.push(id);
                 if first {
                     break;
@@ -197,19 +199,20 @@ impl SelectorList {
 }
 
 impl Selector {
-    pub fn matches_with(&self, dom: &Dom, id: NodeId, cx: &MatchContext) -> bool {
-        self.matches_cached(dom, id, cx, &mut MatchCache::default())
+    pub fn matches_with(&self, dom: &Dom, id: NodeId, matching: &MatchContext) -> bool {
+        self.matches_cached(dom, id, matching, &mut MatchCache::default())
     }
 
     pub(super) fn matches_cached(
         &self,
         dom: &Dom,
         id: NodeId,
-        cx: &MatchContext,
+        matching: &MatchContext,
         cache: &mut MatchCache,
     ) -> bool {
         let key = self as *const Self as usize;
-        // axis 为 1/2 时分别沿祖先/前兄弟寻找候选；每个状态至多求值一次。
+        // Axis 1 and 2 look for candidates among the ancestors and the previous siblings; each state
+        // is evaluated at most once.
         let mut stack = vec![(id, 0, 0, false)];
         while let Some((at, part, axis, finish)) = stack.pop() {
             let state = (key, at, part, axis);
@@ -217,7 +220,7 @@ impl Selector {
                 continue;
             }
             if axis == 0 && !finish {
-                if !self.parts[part].0.matches(dom, at, cx, cache) {
+                if !self.parts[part].0.matches(dom, at, matching, cache) {
                     cache.states.insert(state, false);
                     continue;
                 }
@@ -261,12 +264,13 @@ impl Selector {
         cache.states.get(&(key, id, 0, 0)) == Some(&true)
     }
 
-    /// 从锚点向右匹配相对选择器，左端不能越过锚点借用外部祖先。
+    /// Matches a relative selector rightwards from its anchor: its left end may not borrow an
+    /// ancestor from beyond the anchor.
     fn matches_relative(
         &self,
         dom: &Dom,
         anchor: NodeId,
-        cx: &MatchContext,
+        matching: &MatchContext,
         cache: &mut MatchCache,
     ) -> bool {
         let key = (self as *const Self as usize, anchor);
@@ -302,7 +306,7 @@ impl Selector {
                     Combinator::Subsequent => pending.extend(dom.sibling(at, 1, true)),
                     _ => {}
                 }
-                if self.parts[part].0.matches(dom, at, cx, cache) {
+                if self.parts[part].0.matches(dom, at, matching, cache) {
                     frontier.push(at);
                 }
             }
@@ -368,10 +372,16 @@ fn is_field(tag: &str) -> bool {
 }
 
 impl Compound {
-    fn matches(&self, dom: &Dom, id: NodeId, cx: &MatchContext, cache: &mut MatchCache) -> bool {
-        match self.matches_scoped(dom, id, cx, cache) {
+    fn matches(
+        &self,
+        dom: &Dom,
+        id: NodeId,
+        matching: &MatchContext,
+        cache: &mut MatchCache,
+    ) -> bool {
+        match self.matches_scoped(dom, id, matching, cache) {
             Some(answer) => answer,
-            None => self.matches_own(dom, id, cx, cache, Aside::None),
+            None => self.matches_own(dom, id, matching, cache, Aside::None),
         }
     }
 
@@ -380,7 +390,7 @@ impl Compound {
         &self,
         dom: &Dom,
         id: NodeId,
-        cx: &MatchContext,
+        matching: &MatchContext,
         cache: &mut MatchCache,
         aside: Aside,
     ) -> bool {
@@ -437,14 +447,14 @@ impl Compound {
         }
         self.pseudo.iter().all(|pseudo| match pseudo {
             Pseudo::Slotted(_) | Pseudo::Part(_) | Pseudo::Host(_) | Pseudo::HostContext(_) => {
-                pseudo.matches_scoped(dom, id, aside, cx, cache)
+                pseudo.matches_scoped(dom, id, aside, matching, cache)
             }
             Pseudo::Hover => {
-                dom.is_hovered(id) || cx.hover_probe.is_some_and(|p| dom.contains(id, p))
+                dom.is_hovered(id) || matching.hover_probe.is_some_and(|p| dom.contains(id, p))
             }
             Pseudo::Active => {
                 dom.active.is_some_and(|a| dom.contains(id, a))
-                    || cx.hover_probe.is_some_and(|p| dom.contains(id, p))
+                    || matching.hover_probe.is_some_and(|p| dom.contains(id, p))
             }
             Pseudo::Focus | Pseudo::FocusVisible => dom.has_focus(id),
             Pseudo::FocusWithin => dom.focus_within(id),
@@ -483,7 +493,7 @@ impl Compound {
             Pseudo::Root => dom
                 .parent(id)
                 .is_some_and(|p| matches!(dom.get(p).map(|n| &n.kind), Some(NodeKind::Document))),
-            Pseudo::Scope => match cx.scope {
+            Pseudo::Scope => match matching.scope {
                 Some(scope) => scope == id,
                 None => dom.parent(id).is_some_and(|p| {
                     matches!(dom.get(p).map(|n| &n.kind), Some(NodeKind::Document))
@@ -517,7 +527,7 @@ impl Compound {
                                 n.is_element() && (!*of_type || n.tag() == Some(tag.as_str()))
                             }) && of
                                 .as_ref()
-                                .is_none_or(|of| of.matches_cached(dom, *c, cx, cache))
+                                .is_none_or(|of| of.matches_cached(dom, *c, matching, cache))
                         })
                         .collect();
                     let indices = siblings
@@ -538,12 +548,12 @@ impl Compound {
                     .get(&id)
                     .is_some_and(|index| nth(*a, *b, *index))
             }
-            Pseudo::Not(list) => !list.matches_cached(dom, id, cx, cache),
-            Pseudo::Is(list) | Pseudo::Where(list) => list.matches_cached(dom, id, cx, cache),
+            Pseudo::Not(list) => !list.matches_cached(dom, id, matching, cache),
+            Pseudo::Is(list) | Pseudo::Where(list) => list.matches_cached(dom, id, matching, cache),
             Pseudo::Has(list) => list
                 .0
                 .iter()
-                .any(|s| s.matches_relative(dom, id, cx, cache)),
+                .any(|s| s.matches_relative(dom, id, matching, cache)),
             Pseudo::Lang(want) => {
                 let mut at = Some(id);
                 while let Some(node) = at {

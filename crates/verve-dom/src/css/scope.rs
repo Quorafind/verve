@@ -2,11 +2,11 @@
 //! boundary — `:host` and `:host-context()` out to the element hosting the tree, `::slotted()`
 //! out to what a slot shows, `::part()` in from the outside to an element a `part` attribute
 //! names (CSS Scoping Module Level 1). Which tree a declaration comes from also decides the
-//! cascade between it and one from another tree: [`Layer`].
+//! cascade between it and one from another tree: [`Precedence`].
 
 use std::collections::HashMap;
 
-use super::cascade::{Origin, Rank};
+use super::cascade::{Precedence, Rank};
 use super::selector::{
     Compound, MatchCache, MatchContext, Parser, Pseudo, Selector, SelectorError, SelectorList,
 };
@@ -64,11 +64,12 @@ fn host_context_matches(
     dom: &Dom,
     host: NodeId,
     list: &SelectorList,
-    cx: &MatchContext,
+    matching: &MatchContext,
     cache: &mut MatchCache,
 ) -> bool {
     std::iter::successors(Some(host), |node| dom.parent(*node)).any(|node| {
-        dom.get(node).is_some_and(|n| n.is_element()) && list.matches_cached(dom, node, cx, cache)
+        dom.get(node).is_some_and(|n| n.is_element())
+            && list.matches_cached(dom, node, matching, cache)
     })
 }
 
@@ -81,7 +82,7 @@ impl Pseudo {
         dom: &Dom,
         id: NodeId,
         aside: Aside,
-        cx: &MatchContext,
+        matching: &MatchContext,
         cache: &mut MatchCache,
     ) -> bool {
         match self {
@@ -89,8 +90,8 @@ impl Pseudo {
             Self::Part(_) => aside == Aside::Part,
             Self::Host(arg) => arg
                 .as_ref()
-                .is_none_or(|arg| arg.matches_cached(dom, id, cx, cache)),
-            Self::HostContext(list) => host_context_matches(dom, id, list, cx, cache),
+                .is_none_or(|arg| arg.matches_cached(dom, id, matching, cache)),
+            Self::HostContext(list) => host_context_matches(dom, id, list, matching, cache),
             _ => false,
         }
     }
@@ -117,7 +118,7 @@ impl Compound {
         &self,
         dom: &Dom,
         id: NodeId,
-        cx: &MatchContext,
+        matching: &MatchContext,
         cache: &mut MatchCache,
     ) -> Option<bool> {
         let pseudo = |wanted: fn(&Pseudo) -> bool| self.pseudo.iter().find(|p| wanted(p));
@@ -131,8 +132,8 @@ impl Compound {
                     return Some(false);
                 };
                 Some(
-                    list.matches_cached(dom, id, cx, cache)
-                        && self.matches_own(dom, slot, cx, cache, Aside::Slotted),
+                    list.matches_cached(dom, id, matching, cache)
+                        && self.matches_own(dom, slot, matching, cache, Aside::Slotted),
                 )
             }
             Reach::Part => {
@@ -142,7 +143,10 @@ impl Compound {
                 let Some(host) = dom.shadow_host(dom.root_of(id)) else {
                     return Some(false);
                 };
-                Some(is_part(dom, id, name) && self.matches_own(dom, host, cx, cache, Aside::Part))
+                Some(
+                    is_part(dom, id, name)
+                        && self.matches_own(dom, host, matching, cache, Aside::Part),
+                )
             }
             Reach::Own | Reach::Host => None,
         }
@@ -238,44 +242,6 @@ impl Parser<'_> {
     }
 }
 
-/// Where a declaration ranks in the cascade, lowest first: normal declarations from the user
-/// agent up to the inline style, then the `!important` ones the other way round. Between
-/// trees, the outer one wins a normal declaration and the inner one an important one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum Layer {
-    /// The user agent's normal declarations.
-    UserAgent,
-    /// Normal author declarations of an inner tree reaching out (`:host`, `::slotted`).
-    InnerAuthor,
-    /// Normal author declarations.
-    Author,
-    /// The `style` attribute.
-    Inline,
-    /// `!important` author declarations.
-    ImportantAuthor,
-    /// `!important` in the `style` attribute.
-    ImportantInline,
-    /// `!important` declarations of an inner tree reaching out.
-    ImportantInnerAuthor,
-    /// The user agent's `!important` declarations.
-    ImportantUserAgent,
-}
-
-impl Layer {
-    /// The layer of a rule's declaration; `inner` when it comes from a shadow tree and reaches
-    /// out of it.
-    pub(super) fn of(important: bool, origin: Origin, inner: bool) -> Self {
-        match (important, origin, inner) {
-            (false, Origin::UserAgent, _) => Self::UserAgent,
-            (false, Origin::Author, true) => Self::InnerAuthor,
-            (false, Origin::Author, false) => Self::Author,
-            (true, Origin::Author, true) => Self::ImportantInnerAuthor,
-            (true, Origin::Author, false) => Self::ImportantAuthor,
-            (true, Origin::UserAgent, _) => Self::ImportantUserAgent,
-        }
-    }
-}
-
 /// The declarations of the rules that match `id`, each with its rank, and whether the pointer
 /// being on it would make another rule match.
 pub(super) fn matched_rules<'a>(
@@ -286,19 +252,19 @@ pub(super) fn matched_rules<'a>(
 ) -> (Vec<(Rank, &'a Declaration)>, bool) {
     let mut matched = Vec::new();
     let mut pointer = false;
-    let cx = MatchContext::default();
+    let matching = MatchContext::default();
     let tree = dom.root_of(id);
     for (index, k) in styler.candidates(dom, id, tree) {
         let entry = &styler.rules[index];
         let selector = &entry.rule.selectors.0[k];
-        if selector.matches_cached(dom, id, &cx, cache) {
+        if selector.matches_cached(dom, id, &matching, cache) {
             let specificity = selector.specificity();
             // The tree a declaration comes from decides between it and one from another tree.
             let inner = matches!(selector.subject().reach, Reach::Host | Reach::Slotted)
                 && entry.tree != tree;
             for declaration in &entry.rule.declarations {
-                let layer = Layer::of(declaration.important, entry.origin, inner);
-                matched.push(((layer, specificity, entry.order), declaration));
+                let precedence = Precedence::of(declaration.important, entry.origin, inner);
+                matched.push(((precedence, specificity, entry.order), declaration));
             }
         } else if entry.rule.pointer && !pointer {
             // Would the pointer on it make this rule apply?

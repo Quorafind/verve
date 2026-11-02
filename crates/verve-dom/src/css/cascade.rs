@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::scope::{Layer, matched_rules};
+use super::scope::matched_rules;
 use super::selector::MatchCache;
 use super::sheet::Declaration;
 use super::styler::Styler;
@@ -20,6 +20,44 @@ pub enum Origin {
     UserAgent,
     /// The embedder's and the document's.
     Author,
+}
+
+/// Where a declaration ranks in the cascade, lowest first: normal declarations from the user
+/// agent up to the inline style, then the `!important` ones the other way round. Between
+/// trees, the outer one wins a normal declaration and the inner one an important one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Precedence {
+    /// The user agent's normal declarations.
+    UserAgent,
+    /// Normal author declarations of an inner tree reaching out (`:host`, `::slotted`).
+    InnerAuthor,
+    /// Normal author declarations.
+    Author,
+    /// The `style` attribute.
+    Inline,
+    /// `!important` author declarations.
+    ImportantAuthor,
+    /// `!important` in the `style` attribute.
+    ImportantInline,
+    /// `!important` declarations of an inner tree reaching out.
+    ImportantInnerAuthor,
+    /// The user agent's `!important` declarations.
+    ImportantUserAgent,
+}
+
+impl Precedence {
+    /// The precedence of a rule's declaration; `inner` when it comes from a shadow tree and reaches
+    /// out of it.
+    pub(super) fn of(important: bool, origin: Origin, inner: bool) -> Self {
+        match (important, origin, inner) {
+            (false, Origin::UserAgent, _) => Self::UserAgent,
+            (false, Origin::Author, true) => Self::InnerAuthor,
+            (false, Origin::Author, false) => Self::Author,
+            (true, Origin::Author, true) => Self::ImportantInnerAuthor,
+            (true, Origin::Author, false) => Self::ImportantAuthor,
+            (true, Origin::UserAgent, _) => Self::ImportantUserAgent,
+        }
+    }
 }
 
 /// A node's properties, after the cascade.
@@ -165,8 +203,8 @@ pub fn style_of(dom: &Dom, styler: &Styler, id: NodeId) -> Style {
     style
 }
 
-/// Where a declaration ranks in the cascade: its layer, specificity, order.
-pub(super) type Rank = (Layer, (u32, u32, u32), usize);
+/// Where a declaration ranks in the cascade: its precedence, specificity, order.
+pub(super) type Rank = (Precedence, (u32, u32, u32), usize);
 
 fn own_style(
     dom: &Dom,
@@ -199,19 +237,18 @@ fn own_style(
         })
         .collect();
     for declaration in &inline {
-        let layer = if declaration.important {
-            Layer::ImportantInline
+        let precedence = if declaration.important {
+            Precedence::ImportantInline
         } else {
-            Layer::Inline
+            Precedence::Inline
         };
-        matched.push(((layer, (u32::MAX, 0, 0), usize::MAX), declaration));
+        matched.push(((precedence, (u32::MAX, 0, 0), usize::MAX), declaration));
     }
     matched.sort_by_key(|a| a.0);
     // `hidden` is the user agent's `display: none`, under any author rule.
     if node.attr("hidden").is_some() && node.namespace == Namespace::Html {
         style.insert("display".into(), "none".into());
     }
-    // 先记下本节点 font 后出现的长属性；变量替换后展开 font 时不能覆盖它们。
     // The `font` shorthand is opened up once its `var()`s are resolved (below): the longhands
     // this node declares after its own `font` win over it, as later declarations do.
     let mut own_font = false;

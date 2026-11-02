@@ -124,7 +124,7 @@ fn review_stylesheets_and_sibling_indices_remain_fresh() {
                 document.body.innerHTML = '<div id=target></div>';
                 const target = document.getElementById('target');
                 for (let n = 0; n < 20; n++) {
-                    if (getComputedStyle(target).color !== 'red') throw Error('样式缓存');
+                    if (getComputedStyle(target).color !== 'red') throw Error('stale style cache');
                 }
                 const last = document.head.lastChild;
                 last.firstChild.data = '#target { color: blue }';

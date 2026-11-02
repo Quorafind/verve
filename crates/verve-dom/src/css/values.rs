@@ -58,7 +58,6 @@ pub fn is_inherited(property: &str) -> bool {
     property.starts_with("--") || INHERITED.contains(&property)
 }
 
-/// font 简写展开后的属性，未给出的项重置为 normal。
 /// What the `font` shorthand sets.
 pub(super) const FONT_LONGHANDS: &[&str] = &[
     "font-style",
@@ -361,7 +360,8 @@ fn box_sides(value: &str) -> [String; 4] {
     }
 }
 
-// 单个替换结果最多 64 KiB；循环依赖或超限均按无效值处理，不能把膨胀传给后代。
+// One substitution yields at most 64 KiB; a cycle or an overrun makes the value invalid, so
+// the blow-up is never passed on to descendants.
 const MAX_VARIABLE_BYTES: usize = 64 * 1024;
 
 fn next_var(value: &str, from: usize) -> Option<usize> {
@@ -414,7 +414,7 @@ pub(super) fn resolve_custom(custom: &HashMap<String, String>) -> HashMap<String
         let mut stack = vec![(name.clone(), 0)];
         while let Some((name, index)) = stack.last().cloned() {
             if let Some(next) = dependencies[&name].get(index) {
-                stack.last_mut().expect("依赖栈非空").1 += 1;
+                stack.last_mut().expect("the stack was just read from").1 += 1;
                 if visited.insert(next.clone()) {
                     stack.push((next.clone(), 0));
                 }
@@ -424,7 +424,8 @@ pub(super) fn resolve_custom(custom: &HashMap<String, String>) -> HashMap<String
             }
         }
     }
-    // 反向遍历完整强连通分量，不能只标记某一次回边经过的路径。
+    // Walk back over the whole strongly connected component, not only the path one back edge
+    // came along.
     let mut reversed = HashMap::<String, Vec<String>>::new();
     for (name, dependencies) in &dependencies {
         for dependency in dependencies {
