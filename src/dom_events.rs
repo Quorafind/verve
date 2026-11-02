@@ -11,7 +11,7 @@
 //! capturing listeners first, then the rest, as at the target in a page.
 //!
 //! A host with a document builds its tree on these classes rather than beside them: its nodes
-//! are targets made by [`host_target`], [`set_event_parent`] tells a dispatch what each one is
+//! are targets made by [`host_target`], [`hooks::set_event_parent`] tells a dispatch what each one is
 //! in — so an event is captured down that path, heard at its target and bubbles back up, as in a
 //! page — and [`install_window_target`] makes the global object the target at the top of it.
 //! The runtime's own targets — `AbortSignal`, `MessagePort`, `WebSocket` — are the same classes,
@@ -30,6 +30,10 @@ use boa_engine::{
     property::{Attribute, PropertyDescriptor},
 };
 use boa_gc::{Gc, GcRefCell};
+
+mod hooks;
+
+pub use hooks::{EventParent, EventScope, is_composed, set_event_parent, set_event_scope};
 
 use crate::native::{arg, closure, function, get, hidden, js_text, object, text_of, type_error};
 
@@ -650,13 +654,14 @@ const EVENT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(JsValue::undefined())
     }),
     ("composedPath", 0, |this, _, cx| {
-        let items = with_event(this, |s| {
+        let (items, current) = with_event(this, |s| {
             if s.dispatching {
-                s.path.clone()
+                (s.path.clone(), s.current.clone())
             } else {
-                Vec::new()
+                (Vec::new(), JsValue::null())
             }
         })?;
+        let items = hooks::visible_to(cx, &current, items);
         Ok(crate::native::array(cx, items))
     }),
     ("initEvent", 3, |this, args, cx| {
@@ -948,16 +953,8 @@ fn take_off(target: &JsObject, listener: &Gc<Listener>) {
     }
 }
 
-/// What a host with a tree says an event target is in: the next target on an event's path
-/// (a node's parent; the window, for its document), or `None` at the top. See
-/// [`set_event_parent`].
-pub type EventParent = fn(&JsValue, &JsObject, &mut Context) -> JsResult<Option<JsValue>>;
-
-#[derive(Clone, Copy)]
-struct ParentHook(EventParent);
-
 /// Dispatches `event` at `target`: captured down the path to it from the top (see
-/// [`set_event_parent`]; with no tree the path is the target alone), heard at the target —
+/// [`hooks::set_event_parent`]; with no tree the path is the target alone), heard at the target —
 /// capturing listeners first — and, when it bubbles, back up the path; each listener's error
 /// reported and the rest still called. Answers whether nothing cancelled it.
 pub(crate) fn dispatch(
@@ -980,18 +977,7 @@ pub fn dispatch_value(target: &JsValue, event: &JsObject, context: &mut Context)
         }
         return Ok(!get(&event.clone().into(), "defaultPrevented", context)?.to_boolean());
     }
-    let mut path = vec![target.clone()];
-    if let Some(hook) = context.get_data::<ParentHook>().copied() {
-        let mut at = target.clone();
-        while let Some(parent) = (hook.0)(&at, event, context)? {
-            // A path never loops, whatever the host answers.
-            if path.iter().any(|p| p == &parent) || path.len() > 4096 {
-                break;
-            }
-            path.push(parent.clone());
-            at = parent;
-        }
-    }
+    let path = hooks::path_of(target, event, context)?;
     let (kind, bubbles) = {
         let data = event.downcast_ref::<EventData>().expect("an event");
         let mut state = data.0.borrow_mut();
@@ -1021,12 +1007,14 @@ pub fn dispatch_value(target: &JsValue, event: &JsObject, context: &mut Context)
             steps.push((at, 3, Some(false)));
         }
     }
+    let scope = hooks::scope_of(context, event)?;
     let mut outcome = Ok(());
     for (at, phase, capture) in steps {
         let this = &path[at];
         let Some(holder) = holder(this, context) else {
             continue;
         };
+        hooks::apply(context, scope.as_ref(), this, target, event);
         {
             let data = event.downcast_ref::<EventData>().expect("an event");
             let mut state = data.0.borrow_mut();
@@ -1493,11 +1481,6 @@ pub fn hold(object: &JsObject, f: impl FnOnce(&mut Vec<JsObject>)) {
     {
         f(held);
     }
-}
-
-/// Tells every dispatch from now on what each target is in: see [`EventParent`].
-pub fn set_event_parent(context: &mut Context, parent: EventParent) {
-    context.insert_data(ParentHook(parent));
 }
 
 /// Makes the global object an event target — the window: `addEventListener` called on it (or
