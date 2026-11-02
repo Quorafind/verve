@@ -500,10 +500,8 @@ pub(crate) fn forget(context: &mut Context, filename: &Path) {
         .filter(|url| url.scheme() == "file")
         .and_then(|url| crate::esm_resolve::file_path(&url).ok())
         .unwrap_or_else(|| crate::esm::absolute(filename, context));
-    for path in [Some(path.clone()), std::fs::canonicalize(&path).ok()]
-        .into_iter()
-        .flatten()
-    {
+    let real = sys::realpath(&View::of(context), &path).ok();
+    for path in [Some(path), real].into_iter().flatten() {
         let key = JsString::from(clean(&path).to_string_lossy().as_ref());
         let _ = cache(context).delete_property_or_throw(key, context);
     }
