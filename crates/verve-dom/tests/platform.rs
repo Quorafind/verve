@@ -76,7 +76,10 @@ fn the_webs_pieces_libraries_test_for_are_there() {
                 "2 .b",
             ),
             ("document.createElement('canvas').getContext('webgl')", "null"),
+            #[cfg(feature = "canvas")]
             ("document.createElement('canvas').getContext('2d').measureText('hello').width > 0", "true"),
+            #[cfg(not(feature = "canvas"))]
+            ("document.createElement('canvas').getContext('2d')", "null"),
             ("(() => { const a = document.createElement('div'), b = document.createElement('p'); a.append(b); return a.compareDocumentPosition(b) + ' ' + b.compareDocumentPosition(a) })()", "20 10"),
             (
                 "(() => { const host = document.createElement('div'); const root = host.attachShadow({ mode: 'open' });
