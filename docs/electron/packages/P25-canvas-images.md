@@ -1,6 +1,6 @@
 # P25 canvas 2D 与图片解码
 
-**依赖**：无（可与 P02 并行；与 P20 对接图片字节、与 P35 对接位图交付）  **规模**：M  **修改**：`crates/verve-dom/src/{bind/platform.rs(Canvas 段、ImageData、Path2D),bind/element.rs(IMAGE_ACCESSORS),lib.rs(SnapshotData),state.rs}`；新增 `crates/verve-dom/src/canvas/{mod.rs,context2d.rs,path.rs,text.rs,image.rs,fonts.rs}`；`crates/verve-dom/Cargo.toml`
+**依赖**：无（可与 P02 并行；与 P20 对接图片字节、与 P35 对接位图交付）  **规模**：M  **修改**：`crates/verve-dom/src/{bind/platform.rs(Canvas 段、ImageData、Path2D),bind/element.rs(IMAGE_ACCESSORS),lib.rs(SnapshotData),state.rs}`；新增 `crates/verve-dom/src/canvas/ 下的模块（见「状态」）`；`crates/verve-dom/Cargo.toml`
 
 ## 目标
 
@@ -63,6 +63,24 @@ pub struct CanvasFrame { pub width: u32, pub height: u32, pub generation: u64, p
 #[derive(Clone)]
 pub struct ImageBytes { pub mime: Option<String>, pub bytes: Arc<[u8]>, pub natural: (u32, u32) }
 ```
+
+### 取回图片（`crates/verve-dom/src/lib.rs`）
+
+```rust
+pub enum Request { /* … */ Image(String) }   // an `<img src>` needs its bytes: the resolved URL
+impl Document {
+    /// The loader's answer: bytes that are no image mark the address broken. Fires `load`/`error`
+    /// on the elements naming `url` (as tasks) and settles their `decode()` promises.
+    pub fn set_image_bytes(&self, runtime: &mut verve::Runtime, url: &str, mime: Option<&str>, bytes: Arc<[u8]>);
+    /// The loader could not fetch it: `error` on the elements, `decode()` rejects `EncodingError`.
+    pub fn fail_image(&self, runtime: &mut verve::Runtime, url: &str);
+    /// A page's `@font-face` bytes under the family it declared, for canvas text to draw with.
+    pub fn add_web_font(&self, family: &str, descriptors: &FontFaceRule, bytes: Arc<[u8]>);
+}
+```
+
+- `data:` 图片由本包内部直接解码，不发 `Request::Image`；`load`/`error` 总是异步任务，`img.src = …` 之后设置的处理器仍能收到。
+- Cargo feature `canvas`（默认开）控制 tiny-skia/fontdb/rustybuzz/skrifa：关闭时 `getContext('2d')` 返回 `null`，`<img>` 仍读取头部尺寸。
 
 - canvas 提交新帧时把该节点放进 `Changes.nodes`（因而进入它所在分区的 `Changes.partitions`）。
 - `images` 只保留当前文档仍引用的 URL（节点移除/`src` 改变后在下次 `update()` 清理）。CSS `url()` 图片的字节由 P20 取回后放入
@@ -132,7 +150,7 @@ pub struct FontStack { /* fontdb::Database + 已加载的 @font-face */ }
 impl FontStack {
     pub fn system() -> Self;                                     // 惰性扫描系统字体（首次使用 canvas 文字时，不在启动时）
     pub fn add_web_font(&mut self, family: &str, descriptors: &FontFaceRule, bytes: Arc<[u8]>);  // P20/P23 调用
-    pub fn resolve(&self, families: &[&str], weight: u16, style: Style, ch: char) -> Option<FaceId>;  // 含逐字回退
+    pub fn resolve(&self, families: &[&str], weight: u16, italic: bool, ch: char) -> Option<fontdb::ID>;  // 含逐字回退
 }
 /// Generic family → concrete families, per platform; shared with P31 so canvas and DOM text agree.
 pub fn generic_families(generic: &str) -> &'static [&'static str];
@@ -173,7 +191,7 @@ AVIF/HEIC/JPEG XL；`filter` 除 `blur()` 外的函数；`drawFocusIfNeeded`/`sc
 
 ## 给其他包的备注
 
-- **P20**：调用 `image_size`；图片字节写入 `SnapshotData.images`（键为解析后的 URL）；CSS 中的 `url()`（`background-image`、`content`、
+- **P20**：处理 `Request::Image`，取回后调用 `Document::set_image_bytes`（失败调 `fail_image`）；调用 `image_size`；图片字节写入 `SnapshotData.images`（键为解析后的 URL）；CSS 中的 `url()`（`background-image`、`content`、
   `list-style-image`、`border-image`、`mask`）也需要取回并放入 `images`——请在 P20 范围内处理"样式中出现的 url() 资源"。
   `@font-face` 字节同时交给本包的 `FontStack::add_web_font`。
 - **P35**：读 `SnapshotData.canvases`（预乘 RGBA8，按 `generation` 判断是否需要重新上传纹理）和 `SnapshotData.images`（原始字节交给 GPUI 解码；
@@ -183,4 +201,63 @@ AVIF/HEIC/JPEG XL；`filter` 除 `blur()` 外的函数；`drawFocusIfNeeded`/`sc
 
 ## 状态
 
-（实现者完成后填写）
+### 做了什么
+
+- `canvas/` 按职责分文件：
+  - 引擎：`context2d.rs`（状态栈、变换、填充/描边、裁剪、`drawImage`、文字）、`paint.rs`（颜色/渐变/圆锥渐变/图案）、`effects.rs`（阴影与 `blur()`）、
+    `path.rs`（路径命令、`Path2D`、SVG 路径串、命中检测）、`text.rs` + `fonts.rs`（fontdb + rustybuzz + skrifa）。
+  - 脚本边界：`commands.rs`（`CanvasRenderingContext2D` 的方法）、`properties.rs`（状态属性，一张表）、`element.rs`（`<canvas>`、`getContext`、`toDataURL/toBlob`）、
+    `bitmap.rs`（`ImageBitmap`、`OffscreenCanvas`、`createImageBitmap`、`bitmaprenderer`）、`pixels.rs`（`ImageData`、导出编码）、`matrix.rs`（`DOMMatrix` 与 `Transform`）、
+    `install.rs`（类表）、`source.rs`（`drawImage` 的源）、`store.rs`（`CanvasStore`：全部画布状态）。
+  - 图片：`image.rs`（头部尺寸、解码、EXIF、LRU、`ImageStore`）、`img.rs`（`HTMLImageElement`：访问器、加载、`load`/`error`、`decode()`）、`document.rs`（`impl Document`：帧末提交、图片入口）。
+- 删除 `bind/platform.rs` 的估算桩；`<img>` 访问器读真实状态。快照新增 `canvases`、`images`，`Document::update` 内提交有变化的 canvas。
+- `Request::Image(url)` + `Document::set_image_bytes` / `fail_image`（`data:` 内部直接解码）；`load`/`error` 作为任务触发；`decode()` 成功/失败各自 resolve/reject（成功时不再误 reject）。
+- `Document::add_web_font(family, descriptors, bytes)` 是 `@font-face` 字节进入 canvas 文字的入口（P20/P23 调用）。
+- 复核后的修复：`toBlob`/`convertToBlob` 用 `verve::blob::new_blob`（此前恒为 `null`）；`getTransform()` 返回完整 `DOMMatrix`（`a`–`f`/`is2D`/`isIdentity`）；`createConicGradient(angle, x, y)`；
+  SVG 路径 `A` 命令的起始角 `atan2` 参数顺序；`roundRect` 圆角用真实圆弧；虚线用 tiny-skia 自带的 `StrokeDash`（删除了自写的 190 行）；`createImageBitmap(source, sx, sy, sw, sh)` 与 `ImageData` 源；
+  base64 / `data:` / 类型化数组 / Blob 字节全部用 `verve::encoding` 与 `verve::blob`。
+- 接上前任（DeepSeek）的未提交工作时修好的缺陷（首轮）：`arc()/ellipse()` 可选参数、整圈 `sweep`、`fillText` 的 `maxWidth`、字体库未 `warm()`、`drawImage` 参数个数与平移缩放、`toDataURL` 污染检查。
+
+### 契约改动与偏离
+
+- 契约新增（已在单独的 docs commit 写入）：`Request::Image(String)`、`Document::set_image_bytes/fail_image`。本轮另加 `Document::add_web_font`；`canvas` 只公开契约类型
+  （`CanvasFrame`、`ImageBytes`、`image_size`、`decode`、`DecodedImage`、`DecodeError`、`generic_families`、`FontStack`、`FontFaceRule`），子模块 `pub(crate)`。
+- `FontStack::resolve` 是 `(families, weight: u16, italic: bool, ch) -> Option<fontdb::ID>`，不是文档里的 `Style`/`FaceId`。
+- `Scene::measure` 走 `Measurer` trait（P30 的 `TextMeasurer` 在这里替换）。
+- feature `canvas`（默认开）：关闭时 `getContext('2d')` 为 `null`，`<img>` 仍读头部尺寸；`image` 依赖保持无条件。
+- 本轮复核后：`finite_numbers` 在 `canvas/mod.rs`；渐变/图案对象同一 id 返回同一对象，`context.canvas` 是只读原型访问器；阴影受 `clip()` 限制；圆锥渐变走 `fill_geometry`（有阴影、`blur()`）；色标插入时排序。
+- **范围说明（越出任务书「修改」行的改动，及原因）**：
+  - `bind/mod.rs`：追加 `Kind` 变体（Context2d/Gradient/Pattern/Path/Bitmap/Offscreen/BitmapRenderer，canvas 的句柄类型）。
+  - `bind/platform.rs`：删除 canvas 桩；`Matrix`/`from_2d`/`make_matrix`/`matrix_of` 改 `pub(crate)`，复用 `DOMMatrix` 而不另写一份。
+  - `bind/element.rs`：`HTMLImageElement`/`HTMLCanvasElement` 改引用 `canvas`；新增 `absolute_url`（`Reflect::Url` 与 `img.src` 共用）。净行数低于基线。
+  - `css.rs`：`font_longhands`、`font_size_px` 改 `pub(crate)`，复用 `font` 简写与字号解析。
+  - `lib.rs`：钩子（`Request::Image`、快照字段、`update`/`frame`/`sweep` 各一行）；为让 `lib.rs` 不超过棘轮上限，把 `Rect` 原样移到 `rect.rs`（`pub use`）。
+  - `state.rs`：一个 `canvas: CanvasStore` 字段（带 cfg）和 `images`。
+
+### 没做 / 已知问题
+
+- **Chrome 参考图对比（20 个用例）没做**；`measureText` 与 Chrome 的 1px 对比未冻结；`#[ignore]` 的 Chart.js / xterm.js 用例与 1080p 性能基准未写（均待后续）。
+- tiny-skia 0.11 的限制：径向渐变只支持起始半径 0（`createRadialGradient` 的 `r0` 被接受但不画）；图案只有一种扩展模式（`repeat-x`/`repeat-y` 按 `repeat` 画）。
+- 用 `setAttribute('src')` 改源的 `load`/`error` 要等下一次 `frame()` 或属性读取才发；`complete`/`naturalWidth` 以头部为准，正文损坏的文件 `load` 仍触发、`decode()` reject；`srcset/sizes` 不参与选源。
+- `drawImage` 源矩形越界按裁剪后的矩形处理；SVG 作源画透明；`<video>` 源画透明并警告一次；`putImageData` 的脏矩形参数未实现。
+- `ImageBitmap` 的 `Blob` 源同步解码；`fontStretch/fontVariantCaps/textRendering` 只回读；`filter` 只支持 `blur()`。
+- 未处理：`style-check` 的 `bind/mod.rs` 副本（`text`/`list`/`array`…）仍被调用，等 R1 迁移到 `verve::native`。
+
+### 体积
+
+`cargo build --release -p verve-dom --bin verve-dom`（`CARGO_BUILD_JOBS=4`，Windows）：不带 `canvas` feature 33,399,808 字节，带 `canvas` 35,351,552 字节，**增量 1,951,744 字节（约 1.86 MiB）**，
+在 2.5 MB 目标内。两者都含 `image`（头部读取需要它），所以这个数字是 tiny-skia + fontdb + rustybuzz + skrifa 加上绘制代码的成本。
+
+### 测试情况
+
+- 通过：`cargo fmt --all --check`、`bash scripts/style-check.sh`、`cargo clippy -p verve-dom --all-targets -- -D warnings`（默认与 `--no-default-features`）、`cargo test -p verve-dom`（含 `tests/canvas.rs` 30 个）、
+  `cargo test -p verve-dom --no-default-features --test canvas_off`。
+- 覆盖：像素与 `ImageData` 往返、变换与 `getTransform`、裁剪与命中、SVG 弧线方向、线性/圆锥渐变、合成、虚线、导出（含 `toBlob` 任务回调与 `convertToBlob`）、`measureText`、污染、帧提交、
+  `<img>`（格式、`decode()`、`load`/`error`、加载器应答、待决 `decode()` 的 resolve/reject）、9 参数 `drawImage`、阴影、文字对齐与基线、`roundRect`、`createImageBitmap` 与 `OffscreenCanvas`。
+- 仅编译通过、未被测试覆盖：图案、`blur()` 滤镜、`arcTo`、`strokeText`、`bitmaprenderer`、ICO/BMP/JPEG 作 `<img>`、EXIF 方向、`alpha:false`。
+
+### 给其他包
+
+- P20：取回图片后调用 `Document::set_image_bytes(runtime, url, mime, bytes)`（失败调 `fail_image`）；处理 `Request::Image`；CSS `url()` 的字节也走 `set_image_bytes`；`@font-face` 字节走 `Document::add_web_font`。
+- P35：`SnapshotData.canvases`（预乘 RGBA8，按 `generation` 判断）与 `images`（原始字节）。
+- P22/P23：我动了 `css.rs` 两处可见性、`lib.rs` 的少量钩子和 `Rect` 的位置、`state.rs` 一个字段；合并冲突应只在这些位置。

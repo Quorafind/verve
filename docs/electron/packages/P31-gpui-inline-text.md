@@ -13,7 +13,7 @@
 - **行布局自己做，塑形交给 GPUI 的平台文本系统**。GPUI 的 `StyledText`/`TextLayout` 只能处理"一段文字 + 若干 `TextRun`"，
   放不进原子行内盒，也不支持 `letter-spacing`、`text-indent`、`vertical-align`、`text-align: justify`、
   逐元素 `line-height`；`WhiteSpace` 只有 `Normal/Nowrap`，`TextAlign` 只有 `Left/Center/Right`。所以不用 `StyledText`。
-- 做法：P30 的 `TextMeasurer::shape` 对"同一字体的一段文字"塑形（共享的 `Arc<TextSystem>` 上已公开的 `WindowTextSystem::layout_line`，见 P30 spike），
+- 做法：P30 的 `TextMeasurer::shape` 对"同一字体的一段文字"塑形（GPUI fork 新增的 `TextSystem::layout_line`，见 P30 spike），
   拿到字形、x 偏移、字节下标；断行机会用 `unicode-linebreak`（UAX #14，体积小）计算；行内盒、原子盒按贪心算法填行。
 - 画字用 `Window::paint_glyph(origin, font_id, glyph_id, font_size, color)` 直接画已塑形字形，GPUI 线程不重新塑形。
   emoji（彩色字形）用 `paint_emoji`；`TextMeasurer` 在 `PlacedGlyph` 上标记 `is_emoji`。

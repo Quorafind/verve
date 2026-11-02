@@ -264,7 +264,7 @@ impl StreamParser {
   `import()` 对这些方案不再抛 `ERR_UNSUPPORTED_ESM_URL_SCHEME`。还需要 Rust 侧的 resolve 钩子用于 import map。
 - **P02**：`FromRenderer` 追加 `ProtocolRequest`，`ToRenderer` 追加 `ProtocolResponse`；
   `verve_dom::Request::Open` 由单字段改为 `{ url, name, features }`。
-- **P25**：提供 `fn image_size(bytes) -> Option<(u32, u32)>`（只读头部，不解码全图），本包调用。
+- **P25**：提供 `fn image_size(bytes) -> Option<(u32, u32)>`（只读头部，不解码全图），本包调用。本包必须应答 `verve_dom::Request::Image(url)`：取回后 `Document::set_image_bytes(runtime, url, mime, bytes)`，失败 `Document::fail_image(runtime, url)`；样式中的 `url()` 图片（`background-image`、`content`、`mask` 等）同样走 `set_image_bytes`。
 - **P22/P23/P31**：`@font-face` 规则、`FontFaceSet`、`SnapshotData.fonts` 的分工见上。
 
 ## 状态
