@@ -46,14 +46,14 @@ its own `intl`, so there is no big table to switch off.
 ## Profile comparison
 
 Core with the Electron feature set (`--no-default-features --features wasm`), one build each.
-Speed is `scripts`-free: `verve run bench.js`, a script of `fib(27)`, 200k object-key updates, a
+Speed: `verve run bench.js`, a script of `fib(27)`, 200k object-key updates, a
 300k-element `sort` with a comparator, a 50k-character string build and a regex replace, wall time
 by `Date.now()` in the script, three runs each (interpreter, JIT off).
 
 | configuration | size | time |
 |---|---|---|
 | everything opt-level 3 (`package."*"` = 3) | 20.76 MB | 858-888 ms |
-| `*` = "s", Boa/regress/wasmi/cranelift 3, verve = 3 (first draft) | 20.38 MB | 841-854 ms |
+| `*` = "s", verve = 3 (first draft) | 20.38 MB | 841-854 ms |
 | `*` = "s", Boa crates "s" | 18.50 MB | 1037-1085 ms (+24%, rejected) |
 | **`*` and verve = "s", Boa/regress/wasmi/cranelift 3 (chosen)** | **17.77 MB** | 886-905 ms (+5%) |
 

@@ -74,4 +74,29 @@ UPX 之类的可执行压缩（会触发杀软误报、拖慢启动）；改动�
 
 ## 状态
 
-（实现者完成后填写）
+做了（测量过的以 size.md 为准）：
+
+- `[profile.release]`：fat LTO、1 个 codegen unit、`strip = "symbols"`、`panic` 保持 unwind；
+  根 crate 和依赖用 `opt-level = "s"`，Boa 各 crate、regress、wasmi、cranelift/regalloc2 用 3；
+  `[profile.dist]` 继承 release。实测：全 3 为 20.76 MB，Boa 也用 "s" 为 18.50 MB 但慢 24%（拒绝），
+  最终 17.77 MB、慢约 5%（解释器基准，限制 10%）。与简报给的写法不同：简报让根 crate 用 3，
+  实测 "s" 省 2.6 MB，所以改了。
+- feature：`typescript`、`wasm`、`dns-records`、`x509`、`brotli`（均在默认里，默认行为不变）；`npm`、`jit` 已有。
+  关闭时 API 保留并报 `ERR_NOT_SUPPORTED` / `ENOSYS`（`wasm` 则没有 `WebAssembly` 全局）。
+  已用 `cargo check --tests` 检查默认、`--no-default-features`、`wasm`、`jit,wasm,brotli`、`typescript`、
+  `dns-records,x509,brotli,npm` 几种组合；关闭 feature 时对应测试被 `cfg` 掉。没有跑全量 `cargo test`（交给总控）。
+- `scripts/size-report.ps1` / `.sh`、`docs/electron/size.md`（基线 35,812,352 字节）。
+- 前一位实现者的 feature 门控沿用，只调整了 profile；`brotli` 只能挡住编码器（解码器是同一个 crate 之外的
+  brotli-decompressor，fetch 需要）。`fetch.rs` 的一个单元测试把 brotli 编码出的字节改成冻结值，
+  这样 `brotli` 关闭时也能测解码。
+
+没做 / 与简报不一致：
+
+- 核心（Electron 组合，无 GPUI、无 JIT）是 17.77 MB，没有达到 ≤ 14 MB 的目标，预算表（核心 ≤ 10 MB）需要在 P02 之后重估。
+  剩余大头：boa_engine/boa_parser 约 5 MiB、`std` 2.4 MiB、`.rdata` 4.4 MiB（未归因）、wasmi 0.7 MiB。
+- `jit` 在体积上 +5.9 MB（实测，当时 20.38 → 26.31 MB），默认是否开交给 P42。
+- `intl-full` 没做：`src/intl/` 只有 81 KB，Boa 没开 `intl`，没有可关的大表。
+- 步骤 5（GPUI 之后重量 `electron` bin）和步骤 6（CI 体积检查）没做：`electron` bin 还不存在。脚本已有
+  `--max-bytes` / `-MaxBytes`，等 bin 出现后在 CI 里加一行（24 MiB = 25165824）即可。
+- 没有逐个 feature 单独构建；每个开关的体积是默认构建的 cargo-bloat `.text` 估计值。
+- 注意：目录名 `default.exe` 在这台机器的 Git Bash 下无法启动（退出码 127），与 Verve 无关。
