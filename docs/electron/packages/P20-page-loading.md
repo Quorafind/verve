@@ -183,6 +183,8 @@ impl StreamParser {
 - `@font-face`：P22 把它解析成 `FontFaceRule`；本包取字体文件字节，交给 `document.fonts`
   （P23 实现真正的 `FontFaceSet`），并通过快照把字体数据交给 Shell 注册进 GPUI 文本系统（需新增
   `SnapshotData.fonts: Vec<FontData>`，P31 消费）。
+  P23 的接口：`document.fonts` 里的 `FontFace` 调 `load()` 时 `Document::take_requests()` 给出 `Request::LoadFont { face, url }`；
+  取完（或失败）后本包调 `Document::settle_font(runtime, face, FontOutcome::Loaded | Failed)`，`status`、`loaded`、`ready` 与事件随之变化。
 - `<link rel=icon|shortcut icon|apple-touch-icon>`：收集 href → `LoadEvent::Icons`。
 - `<title>` 改变 → `LoadEvent::Title`（现有 `Request::Title` 也要继续发）。
 - `<base href>`、`<meta http-equiv="Content-Security-Policy">`（v1 解析并忽略，PR 中记录）、
