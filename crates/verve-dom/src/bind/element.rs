@@ -364,6 +364,12 @@ pub fn scroll_to(
 
 // ─── Reflected attributes ───────────────────────────────────────────────────────────────────
 
+/// `value` resolved against the document's address; as written when it cannot be.
+pub(crate) fn absolute_url(context: &Context, value: String) -> String {
+    let base = shared(context).borrow().url.clone();
+    base.join(&value).map_or(value, |url| url.to_string())
+}
+
 /// How a property reflects its attribute.
 #[derive(Clone, Copy)]
 pub enum Reflect {
@@ -422,13 +428,7 @@ pub fn reflect(
                         .and_then(|v| v.trim().parse::<i32>().ok())
                         .unwrap_or(r.2)
                         .into(),
-                    3 => match value {
-                        Some(v) => {
-                            let base = shared(cx).borrow().url.clone();
-                            text(&base.join(&v).map_or(v, |u| u.to_string()))
-                        }
-                        None => text(""),
-                    },
+                    3 => text(&value.map_or(String::new(), |v| absolute_url(cx, v))),
                     _ => text(
                         &value
                             .map(|v| v.to_ascii_lowercase())
@@ -2689,41 +2689,6 @@ const ANCHOR_REFLECTED: &[(&str, &str, Reflect)] = &[
 
 // ─── Media, images, dialogs, details ────────────────────────────────────────────────────────
 
-const IMAGE_ACCESSORS: &[Accessor] = &[
-    ("naturalWidth", Some(|_, _, _| Ok(0.into())), None),
-    ("naturalHeight", Some(|_, _, _| Ok(0.into())), None),
-    ("complete", Some(|_, _, _| Ok(true.into())), None),
-    (
-        "currentSrc",
-        Some(|this, _, cx| {
-            let id = node_of(this)?;
-            Ok(text(
-                &read_dom(cx, |dom| dom.get_attr(id, "src")).unwrap_or_default(),
-            ))
-        }),
-        None,
-    ),
-];
-
-const IMAGE_METHODS: &[Method] = &[("decode", 0, |_, _, cx| {
-    super::resolved(JsValue::undefined(), cx)
-})];
-
-const IMAGE_REFLECTED: &[(&str, &str, Reflect)] = &[
-    ("src", "src", Reflect::Url),
-    ("srcset", "srcset", Reflect::Text),
-    ("sizes", "sizes", Reflect::Text),
-    ("alt", "alt", Reflect::Text),
-    ("width", "width", Reflect::Number(0)),
-    ("height", "height", Reflect::Number(0)),
-    ("loading", "loading", Reflect::Keyword("eager")),
-    ("decoding", "decoding", Reflect::Keyword("auto")),
-    ("crossOrigin", "crossorigin", Reflect::Text),
-    ("useMap", "usemap", Reflect::Text),
-    ("isMap", "ismap", Reflect::Flag),
-    ("referrerPolicy", "referrerpolicy", Reflect::Text),
-];
-
 const MEDIA_REFLECTED: &[(&str, &str, Reflect)] = &[
     ("src", "src", Reflect::Url),
     ("autoplay", "autoplay", Reflect::Flag),
@@ -3437,9 +3402,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         context,
         "HTMLImageElement",
         "HTMLElement",
-        IMAGE_METHODS,
-        IMAGE_ACCESSORS,
-        IMAGE_REFLECTED,
+        crate::canvas::IMAGE_METHODS,
+        crate::canvas::IMAGE_ACCESSORS,
+        crate::canvas::IMAGE_REFLECTED,
     )?;
     full_class(
         context,
@@ -3542,8 +3507,8 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         context,
         "HTMLCanvasElement",
         "HTMLElement",
-        super::platform::CANVAS_METHODS,
-        super::platform::CANVAS_ACCESSORS,
+        crate::canvas::CANVAS_METHODS,
+        crate::canvas::CANVAS_ACCESSORS,
         &[],
     )?;
     // The rest's own reflected attributes.

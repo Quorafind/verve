@@ -55,25 +55,17 @@ Hub.renderer_view(id) ───────────────────�
   标注废弃）；`RendererView` 追加 `display_list` 字段。**本包第一个 commit 只改 `docs/electron/` 和
   `msg.rs`，说明这一调整**（见 conventions）。
 
-### 第一步的验证：已完成（2026-11-02，见 [`spikes/p30-text-measurement.md`](../spikes/p30-text-measurement.md)）
+### 第一步必须做的验证（spike，1 天内）
 
-**结论：可行，不用改 fork 的文字部分。** 在 fork `Quorafind/zed-c@e679b519` 上（Windows 实测，macOS/Linux 待测）：
+1. 在非 GPUI 线程上用 `Arc<gpui::TextSystem>` 解析字体（`resolve_font`）、取度量（`ascent/descent/advance`）。
+   `TextSystem` 本身没有公开的整行塑形方法（`layout_line` 只在 `WindowTextSystem` 上）：在 Rebon 所用的
+   fork `Quorafind/zed-c` 里给 `TextSystem` 加一个 `pub fn layout_line(&self, text, font_size, runs: &[FontRun]) -> LineLayout`
+   （内部直接调 `platform_text_system.layout_line`），以及把 `Window::with_element_opacity` 改成 `pub`。
+   两处补丁写进 fork 的一个 commit，verve 的 `Cargo.toml` 锁到新 rev。
+2. 在渲染器线程塑形的 `FontId/GlyphId`，在 GPUI 线程用 `Window::paint_glyph` 画出来，Windows 和 macOS 都试。
 
-- `TextSystem` 与 `WindowTextSystem` 都是 `Send + Sync`；不需要 `App`/`Window`：`TextSystem::new(platform.text_system())`
-  → `WindowTextSystem::new(Arc<TextSystem>)`；应用运行时用 `cx.text_system()` 拿**同一个** `Arc` 交给渲染器线程。
-- 整行塑形用已公开的 `WindowTextSystem::layout_line` / `shape_text`（`text_system.rs:892/754`），主线程、工作线程、8 线程并发
-  结果逐字节一致；CJK 回退在工作线程同样生效。
-- `FontId` 按 `TextSystem` 实例区分，**必须共享应用的那一个**；这样渲染器线程塑形得到的 `FontId/GlyphId` 可以直接交给
-  GPUI 线程的 `Window::paint_glyph`（尚未实跑，P30 实现时第一件事验证）。
-- 注意：
-  - DirectWrite 的状态在一把 `RwLock` 后面——塑形线程安全但串行，长布局可能卡住 GPUI 线程的栅格化：`TextMeasurer`
-    自带缓存并预热字体。
-  - `WindowTextSystem::finish_frame` 是 `pub(crate)`，工作线程持有的 `WindowTextSystem` 缓存不会释放：给 fork 打**一个字**
-    的补丁（改为 `pub`），或定期重建这个包装。
-  - 垂直度量：GPUI 给的是 Windows 的 ascent（Consolas 14.719 vs hhea 11.883），`line-height: normal` 用哪个要与 Chrome 对齐，
-    P31 决定。
-- 仍需要的 fork 补丁：`Window::with_element_opacity` 改 `pub`（不透明度分组）、`finish_frame` 改 `pub`。写进 fork 的一个 commit。
-- 退回方案（GPUI 线程布局、几何晚一帧）**不需要**。
+若第 1 步在某平台不可行（平台文本系统不允许跨线程），退回方案：`LayoutEngine` 放到 GPUI 线程跑，
+rects 异步回传（即原契约的 `ToRendererInput::Layout`），几何会晚一帧。把结论写回本文档"状态"。
 
 ## 背景（先读）
 

@@ -15,7 +15,7 @@
 
 use boa_engine::{
     Context, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string,
-    object::{FunctionObjectBuilder, builtins::JsUint8ClampedArray},
+    object::FunctionObjectBuilder,
     property::{Attribute, PropertyDescriptor},
 };
 
@@ -1395,315 +1395,10 @@ const SELECTION_METHODS: &[Method] = &[
     }),
 ];
 
-// ─── Canvas ─────────────────────────────────────────────────────────────────────────────────
-
-/// The font size a canvas font names, in pixels: `bold 16px sans-serif` → 16.
-fn font_size(font: &str) -> f64 {
-    font.split_whitespace()
-        .find_map(|word| word.strip_suffix("px").and_then(|n| n.parse::<f64>().ok()))
-        .unwrap_or(10.)
-}
-
-/// About how wide `text` is in `font`: wide characters a font size each, the rest a little over
-/// half of one.
-fn text_width(text: &str, font: &str) -> f64 {
-    let size = font_size(font);
-    text.chars()
-        .map(|c| {
-            if (c as u32) >= 0x2E80 {
-                size
-            } else if c == ' ' {
-                size * 0.28
-            } else {
-                size * 0.55
-            }
-        })
-        .sum()
-}
-
-const CONTEXT_STATE: &[(&str, &str)] = &[
-    ("fillStyle", "#000000"),
-    ("strokeStyle", "#000000"),
-    ("font", "10px sans-serif"),
-    ("textAlign", "start"),
-    ("textBaseline", "alphabetic"),
-    ("direction", "inherit"),
-    ("globalCompositeOperation", "source-over"),
-    ("lineCap", "butt"),
-    ("lineJoin", "miter"),
-    ("shadowColor", "rgba(0, 0, 0, 0)"),
-    ("filter", "none"),
-    ("imageSmoothingQuality", "low"),
-    ("fontKerning", "auto"),
-    ("letterSpacing", "0px"),
-    ("wordSpacing", "0px"),
-];
-
-const CONTEXT_NUMBERS: &[(&str, f64)] = &[
-    ("lineWidth", 1.),
-    ("globalAlpha", 1.),
-    ("miterLimit", 10.),
-    ("shadowBlur", 0.),
-    ("shadowOffsetX", 0.),
-    ("shadowOffsetY", 0.),
-    ("lineDashOffset", 0.),
-];
-
-const CONTEXT_NOOPS: &[&str] = &[
-    "save",
-    "restore",
-    "scale",
-    "rotate",
-    "translate",
-    "transform",
-    "setTransform",
-    "resetTransform",
-    "clearRect",
-    "fillRect",
-    "strokeRect",
-    "beginPath",
-    "closePath",
-    "moveTo",
-    "lineTo",
-    "bezierCurveTo",
-    "quadraticCurveTo",
-    "arc",
-    "arcTo",
-    "ellipse",
-    "rect",
-    "roundRect",
-    "fill",
-    "stroke",
-    "clip",
-    "fillText",
-    "strokeText",
-    "drawImage",
-    "putImageData",
-    "setLineDash",
-    "drawFocusIfNeeded",
-    "reset",
-];
-
-fn image_data(context: &mut Context, width: u32, height: u32) -> JsResult<JsValue> {
-    let object = native_instance(context, "ImageData", Kind::Plain, 0);
-    let bytes = JsUint8ClampedArray::from_iter(
-        std::iter::repeat_n(0u8, (width * height * 4) as usize),
-        context,
-    )?;
-    set(&object, "width", width, context)?;
-    set(&object, "height", height, context)?;
-    set(&object, "data", bytes, context)?;
-    set(&object, "colorSpace", text("srgb"), context)?;
-    Ok(object.into())
-}
-
-fn construct_image_data(
-    new_target: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let first = arg(args, 0);
-    let (data, width, height) = if first.is_object() {
-        let width = arg(args, 1).to_u32(context)?;
-        let height = match arg(args, 2) {
-            h if h.is_undefined() => {
-                let length = get(&first, "length", context)?.to_u32(context)?;
-                length / 4 / width.max(1)
-            }
-            h => h.to_u32(context)?,
-        };
-        (Some(first), width, height)
-    } else {
-        (None, first.to_u32(context)?, arg(args, 1).to_u32(context)?)
-    };
-    let object = instance(new_target, Kind::Plain, 0, context)?;
-    let data = match data {
-        Some(data) => data,
-        None => JsUint8ClampedArray::from_iter(
-            std::iter::repeat_n(0u8, (width * height * 4) as usize),
-            context,
-        )?
-        .into(),
-    };
-    set(&object, "width", width, context)?;
-    set(&object, "height", height, context)?;
-    set(&object, "data", data, context)?;
-    set(&object, "colorSpace", text("srgb"), context)?;
-    Ok(object.into())
-}
-
-fn gradient(context: &mut Context) -> JsValue {
-    let object = native_instance(context, "CanvasGradient", Kind::Plain, 0);
-    let add = function(context, "addColorStop", 2, |_, _, _| {
-        Ok(JsValue::undefined())
-    });
-    let _ = set(&object, "addColorStop", add, context);
-    object.into()
-}
-
-fn context_2d(context: &mut Context, canvas: &JsValue) -> JsResult<JsValue> {
-    let object = native_instance(context, "CanvasRenderingContext2D", Kind::Plain, 0);
-    set(&object, "canvas", canvas.clone(), context)?;
-    for (name, value) in CONTEXT_STATE {
-        set(&object, name, text(value), context)?;
-    }
-    for (name, value) in CONTEXT_NUMBERS {
-        set(&object, name, *value, context)?;
-    }
-    set(&object, "imageSmoothingEnabled", true, context)?;
-    Ok(object.into())
-}
-
-const CONTEXT_METHODS: &[Method] = &[
-    ("measureText", 1, |this, args, cx| {
-        let content = arg_string(args, 0, cx)?;
-        let font = string(&get(this, "font", cx)?, cx)?;
-        let size = font_size(&font);
-        let width = text_width(&content, &font);
-        let metrics = native_instance(cx, "TextMetrics", Kind::Plain, 0);
-        for (key, value) in [
-            ("width", width),
-            ("actualBoundingBoxLeft", 0.),
-            ("actualBoundingBoxRight", width),
-            ("actualBoundingBoxAscent", size * 0.8),
-            ("actualBoundingBoxDescent", size * 0.2),
-            ("fontBoundingBoxAscent", size * 0.9),
-            ("fontBoundingBoxDescent", size * 0.25),
-            ("emHeightAscent", size * 0.8),
-            ("emHeightDescent", size * 0.2),
-            ("alphabeticBaseline", 0.),
-            ("hangingBaseline", size * 0.8),
-            ("ideographicBaseline", -size * 0.2),
-        ] {
-            set(&metrics, key, value, cx)?;
-        }
-        Ok(metrics.into())
-    }),
-    ("getImageData", 4, |_, args, cx| {
-        let width = arg(args, 2).to_u32(cx)?.min(8192);
-        let height = arg(args, 3).to_u32(cx)?.min(8192);
-        image_data(cx, width, height)
-    }),
-    ("createImageData", 2, |_, args, cx| {
-        let first = arg(args, 0);
-        let (width, height) = if first.is_object() {
-            (
-                get(&first, "width", cx)?.to_u32(cx)?,
-                get(&first, "height", cx)?.to_u32(cx)?,
-            )
-        } else {
-            (first.to_u32(cx)?, arg(args, 1).to_u32(cx)?)
-        };
-        image_data(cx, width.min(8192), height.min(8192))
-    }),
-    ("createLinearGradient", 4, |_, _, cx| Ok(gradient(cx))),
-    ("createRadialGradient", 6, |_, _, cx| Ok(gradient(cx))),
-    ("createConicGradient", 3, |_, _, cx| Ok(gradient(cx))),
-    ("createPattern", 2, |_, _, cx| {
-        Ok(native_instance(cx, "CanvasPattern", Kind::Plain, 0).into())
-    }),
-    ("getLineDash", 0, |_, _, cx| Ok(array(Vec::new(), cx))),
-    ("isPointInPath", 2, |_, _, _| Ok(false.into())),
-    ("isPointInStroke", 2, |_, _, _| Ok(false.into())),
-    ("getTransform", 0, |_, _, cx| identity_matrix(cx)),
-    ("getContextAttributes", 0, |_, _, cx| {
-        let attributes = plain_object(cx);
-        set(&attributes, "alpha", true, cx)?;
-        set(&attributes, "desynchronized", false, cx)?;
-        set(&attributes, "colorSpace", text("srgb"), cx)?;
-        set(&attributes, "willReadFrequently", false, cx)?;
-        Ok(attributes.into())
-    }),
-];
-
-/// A transparent pixel, as a PNG: what a canvas that paints nothing turns into.
-const BLANK_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
-
-fn canvas_size(
-    this: &JsValue,
-    context: &mut Context,
-    name: &str,
-    default: u32,
-) -> JsResult<JsValue> {
-    let id = node_of(this)?;
-    let value = read_dom(context, |dom| dom.get_attr(id, name))
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(default);
-    Ok(value.into())
-}
-
-fn set_canvas_size(
-    this: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-    name: &str,
-) -> JsResult<JsValue> {
-    let id = node_of(this)?;
-    let value = arg(args, 0).to_u32(context)?;
-    with_dom(context, |dom| dom.set_attr(id, name, &value.to_string()));
-    Ok(JsValue::undefined())
-}
-
-pub const CANVAS_ACCESSORS: &[Accessor] = &[
-    (
-        "width",
-        Some(|this, _, cx| canvas_size(this, cx, "width", 300)),
-        Some(|this, args, cx| set_canvas_size(this, args, cx, "width")),
-    ),
-    (
-        "height",
-        Some(|this, _, cx| canvas_size(this, cx, "height", 150)),
-        Some(|this, args, cx| set_canvas_size(this, args, cx, "height")),
-    ),
-];
-
-pub const CANVAS_METHODS: &[Method] = &[
-    ("getContext", 1, |this, args, cx| {
-        let kind = arg_string(args, 0, cx)?;
-        if kind != "2d" {
-            // No WebGL, as on a machine without the GPU for it: libraries fall back.
-            return Ok(JsValue::null());
-        }
-        let Some(canvas) = this.as_object() else {
-            return Ok(JsValue::null());
-        };
-        let key = js_string!("__context2d");
-        let known = canvas.get(key.clone(), cx)?;
-        if known.is_object() {
-            return Ok(known);
-        }
-        let made = context_2d(cx, this)?;
-        super::hidden(&canvas, key, made.clone(), cx)?;
-        Ok(made)
-    }),
-    ("toDataURL", 0, |_, _, _| Ok(text(BLANK_PNG))),
-    ("toBlob", 1, |_, args, cx| {
-        let callback = arg(args, 0);
-        let blob = cx.global_object().get(js_string!("Blob"), cx)?;
-        let made = match blob.as_constructor() {
-            Some(blob) => {
-                let options = plain_object(cx);
-                set(&options, "type", text("image/png"), cx)?;
-                let parts = array(Vec::new(), cx);
-                blob.construct(&[parts, options.into()], None, cx)?.into()
-            }
-            None => JsValue::null(),
-        };
-        if callback.is_callable() {
-            verve::call(cx, &callback, &JsValue::undefined(), &[made])?;
-        }
-        Ok(JsValue::undefined())
-    }),
-    ("captureStream", 0, |_, _, cx| Ok(plain_object(cx).into())),
-    ("transferControlToOffscreen", 0, |_, _, _| {
-        Err(type_error("OffscreenCanvas is not supported"))
-    }),
-];
-
 // ─── Geometry ───────────────────────────────────────────────────────────────────────────────
 
 /// A matrix's sixteen numbers, column by column as CSS writes them (`m11`, `m12`, … `m44`).
-type Matrix = [f64; 16];
+pub(crate) type Matrix = [f64; 16];
 
 const IDENTITY: Matrix = [
     1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
@@ -1798,7 +1493,7 @@ fn invert(m: &Matrix) -> Option<Matrix> {
     Some(inv.map(|v| v / det))
 }
 
-fn matrix_of(value: &JsValue, context: &mut Context) -> JsResult<Matrix> {
+pub(crate) fn matrix_of(value: &JsValue, context: &mut Context) -> JsResult<Matrix> {
     let mut out = [0.; 16];
     for (i, name) in MATRIX_NAMES.iter().enumerate() {
         out[i] = get(value, name, context)?.to_number(context)?;
@@ -1840,7 +1535,7 @@ fn matrix_from_init(init: &JsValue, context: &mut Context) -> JsResult<Matrix> {
     })
 }
 
-fn from_2d(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Matrix {
+pub(crate) fn from_2d(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Matrix {
     [a, b, 0., 0., c, d, 0., 0., 0., 0., 1., 0., e, f, 0., 1.]
 }
 
@@ -1914,7 +1609,7 @@ fn set_matrix(object: &JsObject, m: &Matrix, context: &mut Context) -> JsResult<
     Ok(())
 }
 
-fn make_matrix(context: &mut Context, m: &Matrix) -> JsResult<JsValue> {
+pub(crate) fn make_matrix(context: &mut Context, m: &Matrix) -> JsResult<JsValue> {
     let object = native_instance(context, "DOMMatrix", Kind::Plain, 0);
     set_matrix(&object, m, context)?;
     Ok(object.into())
@@ -2252,31 +1947,6 @@ fn install_geometry(context: &mut Context) -> JsResult<()> {
             make_rect(cx, numbers)
         });
         set(&constructor, "fromRect", from, context)?;
-    }
-    let path = simple_class(
-        context,
-        "Path2D",
-        |t, _, c| Ok(instance(t, Kind::Plain, 0, c)?.into()),
-        None,
-        &[],
-        &[],
-        true,
-    )?;
-    for name in [
-        "addPath",
-        "closePath",
-        "moveTo",
-        "lineTo",
-        "bezierCurveTo",
-        "quadraticCurveTo",
-        "arc",
-        "arcTo",
-        "ellipse",
-        "rect",
-        "roundRect",
-    ] {
-        let noop = function(context, name, 0, |_, _, _| Ok(JsValue::undefined()));
-        set(&path, name, noop, context)?;
     }
     Ok(())
 }
@@ -2667,31 +2337,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         SELECTION_ACCESSORS,
         true,
     )?;
-    let canvas_context = simple_class(
-        context,
-        "CanvasRenderingContext2D",
-        illegal_constructor,
-        None,
-        CONTEXT_METHODS,
-        &[],
-        true,
-    )?;
-    for name in CONTEXT_NOOPS {
-        let noop = function(context, name, 0, |_, _, _| Ok(JsValue::undefined()));
-        set(&canvas_context, name, noop, context)?;
-    }
-    for name in ["CanvasGradient", "CanvasPattern", "TextMetrics"] {
-        simple_class(context, name, illegal_constructor, None, &[], &[], true)?;
-    }
-    simple_class(
-        context,
-        "ImageData",
-        construct_image_data,
-        None,
-        &[],
-        &[],
-        true,
-    )?;
+    crate::canvas::install(context)?;
     simple_class(
         context,
         "DataTransfer",

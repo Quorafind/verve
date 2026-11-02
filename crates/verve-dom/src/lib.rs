@@ -25,12 +25,14 @@
 //! which can add methods to any class with [`host::extend`].
 
 mod bind;
+pub mod canvas;
 pub mod css;
 pub mod dom;
 pub mod field;
 pub mod html;
 mod inner_text;
 mod media;
+mod rect;
 mod state;
 mod window_state;
 
@@ -50,60 +52,10 @@ pub use field::Draft;
 pub use media::{
     MediaCommand, MediaCommandKind, MediaError, MediaSettings, MediaState, MediaUpdate,
 };
+pub use rect::Rect;
 pub use state::FrameClock;
 
 use state::{Shared, SheetOwner, SheetRecord, State, shared};
-
-/// A box, in CSS pixels from the viewport's top left.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.width && y < self.y + self.height
-    }
-
-    pub fn union(&self, other: &Rect) -> Rect {
-        let x = self.x.min(other.x);
-        let y = self.y.min(other.y);
-        Rect {
-            x,
-            y,
-            width: (self.x + self.width).max(other.x + other.width) - x,
-            height: (self.y + self.height).max(other.y + other.height) - y,
-        }
-    }
-
-    pub fn intersection(&self, other: &Rect) -> Option<Rect> {
-        let x = self.x.max(other.x);
-        let y = self.y.max(other.y);
-        let right = (self.x + self.width).min(other.x + other.width);
-        let bottom = (self.y + self.height).min(other.y + other.height);
-        (right >= x
-            && bottom >= y
-            && (right > x || bottom > y || self.width == 0. || self.height == 0.))
-            .then_some(Rect {
-                x,
-                y,
-                width: right - x,
-                height: bottom - y,
-            })
-    }
-}
 
 /// What a script asked of the window that only the embedder can do.
 ///
@@ -140,6 +92,9 @@ pub enum Request {
         face: FontFaceId,
         url: String,
     },
+    /// An `<img src>` needs its bytes: the embedder fetches them and calls
+    /// [`Document::set_image_bytes`] — or [`Document::fail_image`] when there are none.
+    Image(String),
 }
 
 /// Where `localStorage` lives between runs.
@@ -342,6 +297,10 @@ pub struct SnapshotData {
     pub scroll_offsets: std::collections::HashMap<NodeId, [f32; 2]>,
     /// 活跃媒体代的元数据；移除、空源和回收的节点不在这里，不保存像素。
     pub media: HashMap<NodeId, MediaState>,
+    /// Each canvas's last committed frame: premultiplied RGBA8, row-major, `width * 4` stride.
+    pub canvases: HashMap<NodeId, canvas::CanvasFrame>,
+    /// Each image the page has bytes for, by resolved address, for the drawer to decode.
+    pub images: HashMap<String, canvas::ImageBytes>,
 }
 
 impl std::ops::Deref for Snapshot {
@@ -531,6 +490,8 @@ impl Document {
     /// update.
     pub fn update(&self) -> Update {
         self.absorb();
+        self.sync_images();
+        self.commit_canvases();
         let snapshot = self.snapshot();
         let mut view = self.view.borrow_mut();
         let mut nodes: Vec<NodeId> = view.changed.drain().collect();
@@ -562,6 +523,8 @@ impl Document {
             url: state.url.to_string(),
             scroll_offsets: state.scroll_offsets.clone(),
             media: state.media.snapshot(),
+            canvases: canvas::snapshot_canvases(&state),
+            images: state.images.snapshot(),
         }))
     }
 
@@ -841,6 +804,7 @@ impl Document {
     /// callbacks ran.
     pub fn frame(&self, runtime: &mut verve::Runtime, now: f64) -> usize {
         let context = runtime.context();
+        canvas::flush_events(context);
         let ran = bind::window::run_frame(context, now);
         runtime.run_microtasks();
         self.deliver_layout(runtime);
@@ -918,6 +882,7 @@ impl Document {
                 state.scroll_offsets.remove(id);
                 state.custom.forget(*id);
             }
+            canvas::forget(&mut state, &gone);
             state
                 .template_contents
                 .retain(|t, f| !gone.contains(t) && !gone.contains(f));
