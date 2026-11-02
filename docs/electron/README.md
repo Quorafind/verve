@@ -12,12 +12,18 @@ electron-builder / electron-forge 打包出来的应用照常运行。
 
 | 指标 | 目标（Windows x64 release，strip 后） | 说明 |
 |---|---|---|
-| 运行时二进制 `electron.exe` | **≈ 20 MB**（硬上限 24 MB） | Electron 本身约 180 MB |
+| 运行时二进制 `electron.exe` | **≈ 20 MB**（硬上限 24 MB，**待 GPUI 实测后复核**，见下注） | Electron 本身约 180 MB |
 | JavaScript 层 | **≈ 10 MB** | 应用自己的 `app.asar` + 代码缓存；**Verve 不内置任何 JS 垫片** |
 | 冷启动到首帧（electron-quick-start，热代码缓存） | ≤ 250 ms | |
 | 单窗口空闲内存 | ≤ 60 MB | Electron 约 150 MB |
 | `ipcRenderer.invoke` 往返 p50 | ≤ 0.2 ms | 线程间通信，不跨进程 |
 | 2000 行列表滚动 | 60 fps | GPUI 绘制 + 分区增量 |
+
+**体积实测（P01，2026-11-02，Windows x64，strip + fat LTO）**：Verve 核心（Electron 特性组合，不含 GPUI/verve-dom/JIT）
+从 35.8 MB 降到 **17.8 MB**，比原先 ≤ 10 MB 的核心预算高约 8 MB（Boa ≈ 5 MiB、std ≈ 2.4 MiB、4.4 MiB 未归属的 `.rdata`）。
+JIT 另加 5.9 MB（数值热循环快约 8 倍）。按 GPUI ≈ 6 MB、verve-dom ≈ 2 MB 估算，合计约 26 MB（不含 JIT）。
+后续手段：`wasm` 关闭（−0.7 MB）、依赖试 `opt-level = "z"`、归属 `.rdata`、P42 决定 JIT 默认值。**P02 接入 GPUI 后实测一次，
+再定是否把硬上限调整为 ~28 MB 或继续压缩**——这是需要拍板的取舍，详见 [`size.md`](size.md)（P01 合并后可见）。
 
 ## 2. 原则（不可违反）
 
