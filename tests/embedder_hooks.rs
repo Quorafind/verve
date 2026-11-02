@@ -957,3 +957,62 @@ fn a_lazy_builtin_is_made_on_first_require() {
     assert_eq!(verve::print(&answer), "true|electron");
     assert_eq!(MADE.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn a_class_that_is_new_only_refuses_a_call_and_still_extends() {
+    use verve::native::{ClassSpec, NewOnly, class, define_global};
+    let mut rt = Runtime::new();
+    let context = rt.context();
+    let (strict, _) = class(
+        context,
+        ClassSpec {
+            name: "Strict",
+            new_only: Some(NewOnly::Class),
+            ..ClassSpec::default()
+        },
+    )
+    .unwrap();
+    let (lax, _) = class(
+        context,
+        ClassSpec {
+            name: "Lax",
+            ..ClassSpec::default()
+        },
+    )
+    .unwrap();
+    let (native_class, _) = class(
+        context,
+        ClassSpec {
+            name: "Native",
+            new_only: Some(NewOnly::Native),
+            ..ClassSpec::default()
+        },
+    )
+    .unwrap();
+    define_global(context, "Native", native_class).unwrap();
+    define_global(context, "Strict", strict).unwrap();
+    define_global(context, "Lax", lax).unwrap();
+    let answer = rt
+        .eval(
+            r#"
+            const said = (f) => { try { f(); return 'no error'; } catch (e) { return e.name + ': ' + e.message; } };
+            class Sub extends Strict {}
+            [
+                said(() => Strict()),
+                said(() => Strict.call({})),
+                said(() => Lax.call({})),
+                said(() => Native.call({})),
+                new Sub() instanceof Strict,
+            ].join('|')
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        verve::print(&answer),
+        concat!(
+            "TypeError: Class constructor Strict cannot be invoked without 'new'|",
+            "TypeError: Class constructor Strict cannot be invoked without 'new'|no error|",
+            "Error: Requires constructor call|true"
+        )
+    );
+}

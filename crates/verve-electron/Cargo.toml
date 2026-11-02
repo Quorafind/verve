@@ -1,0 +1,21 @@
+[package]
+name = "verve-electron"
+version = "0.1.0"
+edition = "2024"
+description = "Electron on Verve: the processes, the shell and the messages between them, with every API a native Rust function on Boa."
+publish = false
+
+# The logic half of the `electron` binary: the Hub that routes between threads, the main
+# process's isolate, and one isolate per rendered page. Nothing here draws or knows GPUI —
+# `crates/verve-gpui` is the shell, and headless tests build this crate alone.
+
+[dependencies]
+# The feature set docs/electron/size.md settled on for the Electron build: no defaults, WebAssembly.
+verve = { path = "../..", default-features = false, features = ["wasm"] }
+verve-dom = { path = "../verve-dom" }
+boa_engine = { version = "=0.22.0", default-features = false, features = ["annex-b"] }
+# The address `loadURL` is given, read as the kernel's `data:` processor reads it.
+url = "2.5"
+
+[lints]
+workspace = true

@@ -17,6 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # verve-gpui builds GPUI's Linux backend; these are the system libraries Zed's own CI installs
+      # for it (windowing and fonts).
+      - name: GPUI system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev pkg-config
       - uses: dtolnay/rust-toolchain@1.95
         with:
           components: rustfmt, clippy

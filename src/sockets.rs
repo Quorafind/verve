@@ -52,18 +52,7 @@ pub(crate) fn denied_dns(
 const NO_NETWORK: &str =
     "Verve does not let plugins open network connections with Node's modules: use requestUrl";
 
-pub(crate) fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
-    crate::modules::node_module(context, "events")?
-        .as_object()
-        .ok_or_else(|| crate::native::type_error("EventEmitter is not a class"))
-}
-
-/// `EventEmitter.call(this)`: an object of one of these classes set up as an emitter.
-pub(crate) fn emitter_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResult<()> {
-    let emitter = emitter_class(context)?;
-    crate::call(context, &emitter.into(), &this.clone().into(), &[])?;
-    Ok(())
-}
+pub(crate) use crate::events::{emitter_class, emitter_init};
 
 /// A microtask from now: `error` to whoever listens for it, then — if `close` says so — a
 /// socket's `close`, with `hadError`.

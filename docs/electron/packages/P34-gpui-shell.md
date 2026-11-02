@@ -10,7 +10,7 @@ GPUI 这一侧的"应用外壳"：启动 GPUI `Application`，接 Hub 的消息�
 
 ## 背景（先读）
 
-- P02 的 `ToShell`、`WindowOptions`、`WindowOp`、`FromShell`、`WindowEvent`、`AppEvent`、`Display`、`ShellPort`、`Hub::set_shell_waker`。
+- P02 的 `ToShell`、`WindowOptions`、`WindowOp`、`FromShell`、`WindowEvent`、`AppEvent`、`Display`、`ShellPort`（`send` + `wake`）、`Hub::set_shell`。
 - GPUI（Rebon 所用 fork `Quorafind/zed-c@e679b51`）：
   - `app.rs`：`Application::new().run(...)`、`App::open_window(WindowOptions, build_root)`、`App::quit`、`App::set_quit_mode(QuitMode)`
     （`Default/LastWindowClosed/Explicit`）、`App::on_reopen`（macOS 点 Dock）、`App::on_open_urls`、`App::on_window_closed`、`App::on_app_quit`、
@@ -31,8 +31,8 @@ GPUI 这一侧的"应用外壳"：启动 GPUI `Application`，接 Hub 的消息�
 
 ### 唤醒
 
-`Hub::set_shell_waker` 注册的闭包在任意线程被调用；实现为：持有 `AsyncApp`（`cx.to_async()`）不可跨线程，所以用一个
-`async_channel`/`futures::channel::mpsc` 无界通道：waker 往通道里发一个空消息；GPUI 前台用 `cx.spawn(async move |cx| { while rx.next().await … })`
+`ShellPort::wake` 在任意线程被调用（`Hub::set_shell` 注册的 Shell 就是唤醒的入口，没有第二个 waker）；实现为：持有 `AsyncApp`（`cx.to_async()`）不可跨线程，所以用一个
+容量为 1 的 `async_channel`：`wake` 往通道里 `try_send` 一个空消息，`Full` 就是合并（取队列时本来就取空）；GPUI 前台用 `cx.spawn(async move |cx| { while rx.next().await … })`
 在主线程上取 Hub 的 `ToShell` 队列和各渲染器的新 view，处理后对相关窗口 `notify`/`refresh`。**不轮询**。
 
 ### `WindowOptions`（P02）→ GPUI 逐字段映射
@@ -135,7 +135,7 @@ GPUI 这一侧的"应用外壳"：启动 GPUI `Application`，接 Hub 的消息�
 
 ### 无头模式
 
-`verve-gpui` 是 `verve-electron` 的可选依赖（feature `gui`），无头构建不编译本包任何代码；P00 的 `HeadlessShell` 实现同一个 `ShellPort`，
+`verve-electron` 不依赖 `verve-gpui`（P02 已定：没有 `gui` feature，`electron` 二进制在 `verve-gpui` 里），无头构建不编译本包任何代码；P00 的 `HeadlessShell` 实现同一个 `ShellPort`，
 并模拟窗口事件（创建后立即 `Shown`/`Focus`、按 `SetBounds` 回 `Resized`），保证主进程逻辑在两种模式下一致。
 
 ## 步骤

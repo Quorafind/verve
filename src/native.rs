@@ -355,6 +355,23 @@ fn class_apply(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     outcome
 }
 
+/// The `apply` trap of a class that is only ever constructed, as an ES `class` is:
+/// `Class(…)` and `Class.call(self, …)` throw V8's `TypeError`.
+fn class_apply_refused(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let name = get(&arg(args, 0), "name", context)?;
+    Err(type_error(format!(
+        "Class constructor {} cannot be invoked without 'new'",
+        crate::print(&name)
+    )))
+}
+
+/// The same for a class a host makes native (V8 `FunctionTemplate`): a plain `Error`.
+fn native_apply_refused(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Err(JsNativeError::error()
+        .with_message("Requires constructor call")
+        .into())
+}
+
 /// A class's `construct` trap — `new Class(…)`, `super(…)` — with
 /// `[target, arguments, new.target]`.
 fn class_construct(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -393,6 +410,21 @@ pub struct ClassSpec<'a> {
     )],
     /// The constructor's own methods: name, `length` and function.
     pub statics: &'a [(&'a str, usize, NativeFunctionPointer)],
+    /// Whether, and how, the class refuses to be called without `new`. `Class()` and
+    /// `Class.call(this)` then throw, and `util.inherits` cannot make a function-style subclass
+    /// of it. Node's own classes (`Readable`, `EventEmitter`) allow the call, so the default is
+    /// `None`.
+    pub new_only: Option<NewOnly>,
+}
+
+/// What a class that refuses a call without `new` throws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewOnly {
+    /// V8's own, for an ES `class`: `TypeError: Class constructor X cannot be invoked without
+    /// 'new'`.
+    Class,
+    /// Electron's native classes (`BrowserWindow` in 39): `Error: Requires constructor call`.
+    Native,
 }
 
 impl Default for ClassSpec<'_> {
@@ -405,6 +437,7 @@ impl Default for ClassSpec<'_> {
             methods: &[],
             accessors: &[],
             statics: &[],
+            new_only: None,
         }
     }
 }
@@ -470,7 +503,11 @@ pub fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, 
     )?;
     methods(context, &constructor, spec.statics)?;
     let class: JsObject = boa_engine::object::builtins::JsProxy::builder(constructor)
-        .apply(class_apply)
+        .apply(match spec.new_only {
+            None => class_apply,
+            Some(NewOnly::Class) => class_apply_refused,
+            Some(NewOnly::Native) => native_apply_refused,
+        })
         .construct(class_construct)
         .build(context)?
         .into();
