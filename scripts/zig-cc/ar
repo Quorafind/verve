@@ -1,0 +1,3 @@
+#!/bin/sh
+# `ar` from Zig, for the same build scripts; see `cc`.
+exec zig ar "$@"

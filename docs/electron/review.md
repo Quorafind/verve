@@ -20,7 +20,7 @@ cargo test -p <改动的 crate>          # 总控合并前再跑全量
 git rebase --exec 'cargo fmt --all --check && bash scripts/style-check.sh' <基线>
 ```
 
-**含平台分支（`cfg(windows)`/`cfg(unix)`）的包**：本地只能编一个平台，合并前必须等 PR 上 CI 的 Linux `style`（clippy）任务通过——只在一个平台用到的字段、变体会在另一个平台被判为死代码。
+**含平台分支（`cfg(windows)`/`cfg(unix)`）的包**：本地只能编一个平台，合并前必须等 PR 上 CI 的 Linux `style`（clippy）任务通过——只在一个平台用到的字段、变体会在另一个平台被判为死代码。 推送前先在本机跑 `bash scripts/linux-check.sh`（Zig 做 C 编译器，在 Windows/macOS 上也能做 Linux 的 clippy），不必等 CI。
 
 历史要成组、可读：每个提交一件事、能编译；"修上一个提交"的提交折叠进去；同一主题不拆成两个同名提交。
 

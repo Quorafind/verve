@@ -2,3 +2,7 @@
 *.sh text eol=lf
 ci/style/*.txt text eol=lf
 scripts/hooks/* text eol=lf
+# The shims `scripts/linux-check.sh` gives cc-rs: the shell ones stay LF, the Windows ones CRLF.
+scripts/zig-cc/cc text eol=lf
+scripts/zig-cc/ar text eol=lf
+scripts/zig-cc/*.cmd text eol=crlf
