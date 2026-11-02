@@ -52,6 +52,14 @@
 - **每个里程碑结束**：一次重构关卡（`R1`–`R4`，见 `README.md`）。关卡不过，下一里程碑的包不派发。
 - 重构 PR 的描述必须给出：删了多少行、合并了哪些重复、`cargo test --workspace` 与体积前后对比。
 
+## 构建纪律（多个实现者共用一台机器）
+
+- **先写，少编译**：一块完整功能写完再验证，不要每改几行就编译。
+- **验证首选 `cargo check -p <crate>`**（加 `--tests` 检查测试代码），不用 `cargo build`。
+- 不跑 release 构建、不跑全量 `cargo test --workspace`；测试在 check 通过后用 `-p <crate> --test <name>` 缩小范围跑。
+- 全量测试与 release 体积测量由总控在合并前统一跑；「状态」里写明哪些验收是 check 过的、哪些测试实际跑过。
+- `CARGO_BUILD_JOBS` 由总控设置，不要自行调大。
+
 ## 测试
 
 - 单元/集成测试放在所在 crate 的 `tests/`。Electron 行为的端到端验收用 P00 的无头夹具：
