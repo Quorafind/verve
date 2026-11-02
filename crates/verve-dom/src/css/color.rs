@@ -7,7 +7,8 @@
 //! colour (`oklch(from var(--brand) calc(l * 0.8) c h)`), which is read by converting that
 //! colour into the function's own space first.
 
-use super::syntax::{decimal, function_parts, split_outside};
+use super::calc::degrees;
+use super::syntax::{decimal, function_parts, matching_parenthesis, split_outside};
 
 /// What `currentcolor` stands for: the colour of the element a value is on.
 type Current = [f32; 4];
@@ -469,24 +470,6 @@ fn split_color(text: &str) -> Option<(&str, &str)> {
     (!rest.is_empty()).then(|| (text[..end].trim(), rest))
 }
 
-/// Where the `)` closing the `(` at `open` is.
-fn matching_parenthesis(text: &str, open: usize) -> Option<usize> {
-    let mut depth = 0;
-    for (at, c) in text[open..].char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(open + at);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 fn alpha_of(token: Option<&str>) -> f32 {
     match token {
         Some(token) => fraction(token),
@@ -531,20 +514,7 @@ fn rgb_channel(token: &str) -> f32 {
 
 /// An angle in degrees, from `deg`, `rad`, `grad` or `turn`.
 fn angle(token: &str) -> f32 {
-    let token = token.trim();
-    if let Some(value) = token.strip_suffix("deg") {
-        return number(value);
-    }
-    if let Some(value) = token.strip_suffix("grad") {
-        return number(value) * 0.9;
-    }
-    if let Some(value) = token.strip_suffix("rad") {
-        return number(value).to_degrees();
-    }
-    if let Some(value) = token.strip_suffix("turn") {
-        return number(value) * 360.;
-    }
-    number(token)
+    degrees(token).unwrap_or(0.)
 }
 
 fn gamma(value: f32) -> f32 {

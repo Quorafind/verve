@@ -175,7 +175,7 @@ fn rules_inline_styles_and_inheritance_cascade_into_computed_style() {
         // `var()`, with its fallback, and the shorthands opened up.
         assert_eq!(snapshot.style(main, "color"), Some("rgb(0, 128, 0)"));
         assert_eq!(snapshot.style(main, "padding-top"), Some("6px"));
-        assert_eq!(snapshot.style(main, "padding-left"), Some("calc(2 * 6px)"));
+        assert_eq!(snapshot.style(main, "padding-left"), Some("12px"));
         assert_eq!(
             snapshot.style(main, "border-top-color"),
             Some("rgb(0, 0, 255)")

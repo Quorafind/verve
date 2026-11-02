@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::calc::length;
 use super::cascade::Style;
 use super::color::color;
 use super::syntax::{decimal, split_outside};
@@ -119,6 +120,9 @@ pub(crate) fn font_longhands(value: &str) -> Option<Vec<(&'static str, String)>>
     None
 }
 
+/// What `1rem` is on a page that does not say otherwise: the initial `font-size`.
+pub(crate) const ROOT_FONT_SIZE: f32 = 16.;
+
 /// A font size in pixels, against the parent's: lengths, percentages, `em`, `rem`, and the
 /// keywords.
 pub(crate) fn font_size_px(value: &str, parent: f32) -> Option<f32> {
@@ -205,7 +209,7 @@ pub(super) fn set_declared(style: &mut Style, key: &str, value: &str, inherited:
             style.insert(key.to_owned(), value.to_owned());
         }
         "border" | "border-top" | "border-right" | "border-bottom" | "border-left" | "outline" => {
-            let (width, line, colour) = border_parts(value);
+            let (width, line, color) = border_parts(value);
             let targets: Vec<String> = match key {
                 "border" => sides.iter().map(|s| format!("border-{s}")).collect(),
                 other => vec![other.to_owned()],
@@ -213,13 +217,13 @@ pub(super) fn set_declared(style: &mut Style, key: &str, value: &str, inherited:
             for target in &targets {
                 style.insert(format!("{target}-width"), width.clone());
                 style.insert(format!("{target}-style"), line.clone());
-                style.insert(format!("{target}-color"), colour.clone());
+                style.insert(format!("{target}-color"), color.clone());
                 style.insert(target.clone(), value.to_owned());
             }
             if key == "border" {
                 style.insert("border-width".into(), width);
                 style.insert("border-style".into(), line);
-                style.insert("border-color".into(), colour);
+                style.insert("border-color".into(), color);
                 style.insert("border".into(), value.to_owned());
             }
         }
@@ -232,13 +236,13 @@ pub(super) fn set_declared(style: &mut Style, key: &str, value: &str, inherited:
             style.insert(key.to_owned(), value.to_owned());
         }
         "background" => {
-            // The colour is what a drawer reads; the rest is kept whole.
-            let colour = split_outside(value, ' ')
+            // The color is what a drawer reads; the rest is kept whole.
+            let color = split_outside(value, ' ')
                 .into_iter()
                 .map(|p| p.trim().to_owned())
                 .rfind(|p| color(p).is_some() || p.starts_with("var(") || p == "currentcolor")
                 .unwrap_or_else(|| "transparent".to_owned());
-            style.insert("background-color".into(), colour);
+            style.insert("background-color".into(), color);
             if value.contains("url(") || value.contains("gradient(") {
                 style.insert("background-image".into(), value.to_owned());
             }
@@ -295,13 +299,13 @@ pub(super) fn set_declared(style: &mut Style, key: &str, value: &str, inherited:
 fn border_parts(value: &str) -> (String, String, String) {
     let mut width = "medium".to_owned();
     let mut line = "none".to_owned();
-    let mut colour = "currentcolor".to_owned();
+    let mut color = "currentcolor".to_owned();
     for part in split_outside(value, ' ') {
         let part = part.trim();
         if part.is_empty() {
             continue;
         }
-        if length(part, 16.).is_some() || matches!(part, "thin" | "medium" | "thick") {
+        if length(part, ROOT_FONT_SIZE).is_some() || matches!(part, "thin" | "medium" | "thick") {
             width = part.to_owned();
         } else if matches!(
             part,
@@ -318,13 +322,13 @@ fn border_parts(value: &str) -> (String, String, String) {
         ) {
             line = part.to_owned();
         } else {
-            colour = part.to_owned();
+            color = part.to_owned();
         }
     }
     if line == "none" {
         width = "0".to_owned();
     }
-    (width, line, colour)
+    (width, line, color)
 }
 
 fn flex_parts(value: &str) -> (String, String, String) {
@@ -695,18 +699,3 @@ hr { border: 1px inset; margin-top: 0.5em; margin-bottom: 0.5em }
 button { cursor: default }
 center { text-align: center }
 "#;
-
-/// A length in pixels: `12px`, `0.5em` against `font_size`, `1rem` against 16, `pt`, a bare
-/// number or `0`.
-pub fn length(text: &str, font_size: f32) -> Option<f32> {
-    let text = text.trim();
-    if text == "0" {
-        return Some(0.);
-    }
-    let number = |suffix: &str| text.strip_suffix(suffix)?.trim().parse::<f32>().ok();
-    number("px")
-        .or_else(|| number("rem").map(|n| n * 16.))
-        .or_else(|| number("em").map(|n| n * font_size))
-        .or_else(|| number("pt").map(|n| n * 4. / 3.))
-        .or_else(|| text.parse::<f32>().ok())
-}

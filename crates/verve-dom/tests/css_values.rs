@@ -1,5 +1,5 @@
-//! Values: what each colour notation comes to in sRGB, and what `getComputedStyle` writes
-//! back.
+//! Values: what each colour notation comes to in sRGB, what `getComputedStyle` writes back, and
+//! how `calc()` folds into pixels or a `calc()` the drawer resolves.
 
 mod common;
 
@@ -271,4 +271,218 @@ fn a_variable_holding_a_color_reads_as_one() {
             "oklch(63.7% 0.237 25.331)"
         );
     });
+}
+
+#[test]
+fn calc_folds_absolute_lengths_into_pixels() {
+    on_page(|| {
+        let mut page = styled(
+            "#target {
+               --step: 6px;
+               padding-left: calc(2 * var(--step));
+               margin-top: calc(1rem + 2px);
+               height: min(10px, 2em);
+               border-top-width: max(1px, 2px);
+               letter-spacing: calc(0.5px * 3);
+               z-index: calc(2 + 3);
+               font-size: calc(1em + 2px);
+               line-height: calc(1.5 * 2);
+               margin: 0 calc(1px + 2px);
+             }",
+            r#"<div id="target">t</div>"#,
+        );
+        assert_eq!(style(&mut page, "target", "padding-left"), "12px");
+        assert_eq!(style(&mut page, "target", "border-top-width"), "2px");
+        assert_eq!(style(&mut page, "target", "letter-spacing"), "1.5px");
+        assert_eq!(style(&mut page, "target", "z-index"), "5");
+        // A font size is computed first: `1em` is the parent's 16.
+        assert_eq!(style(&mut page, "target", "font-size"), "18px");
+        assert_eq!(style(&mut page, "target", "line-height"), "3");
+        // A function in a shorthand is folded in the longhand it lands in.
+        assert_eq!(style(&mut page, "target", "margin-right"), "3px");
+        assert_eq!(page.console(), "");
+    });
+}
+
+#[test]
+fn em_and_rem_are_measured_from_the_font_sizes_they_belong_to() {
+    on_page(|| {
+        let mut page = styled(
+            "html { font-size: 20px }
+             #target { font-size: 10px; margin-top: calc(1rem + 2px); height: calc(2em + 1rem) }
+             #big { font-size: 1.5rem }
+             #wide { font-size: calc(1rem + 100%) }",
+            r#"<div id="target">t</div><div id="big"></div><div id="wide"></div>"#,
+        );
+        // `rem` is the root element's font size, `em` the element's own.
+        assert_eq!(style(&mut page, "target", "margin-top"), "22px");
+        assert_eq!(style(&mut page, "target", "height"), "40px");
+        assert_eq!(style(&mut page, "big", "font-size"), "30px");
+        // A percentage in a font size is of the parent's.
+        assert_eq!(style(&mut page, "wide", "font-size"), "40px");
+        // Changing the root's size changes what its descendants' `rem` come to.
+        page.eval("document.documentElement.style.fontSize = '10px'");
+        assert_eq!(style(&mut page, "target", "margin-top"), "12px");
+    });
+}
+
+#[test]
+fn a_calc_with_a_percentage_keeps_it_for_the_drawer() {
+    on_page(|| {
+        let mut page = styled(
+            "#target {
+               width: calc(100% - 12px);
+               height: calc((100% - 20px) / 2);
+               max-width: calc(50% + 10px);
+               top: calc(25%);
+               left: min(50%, 10px);
+             }",
+            r#"<div id="target">t</div>"#,
+        );
+        assert_eq!(style(&mut page, "target", "width"), "calc(100% - 12px)");
+        assert_eq!(style(&mut page, "target", "height"), "calc(50% - 10px)");
+        assert_eq!(style(&mut page, "target", "max-width"), "calc(50% + 10px)");
+        assert_eq!(style(&mut page, "target", "top"), "25%");
+        // `min()` of a percentage and a length needs the layout, so it keeps its text.
+        assert_eq!(style(&mut page, "target", "left"), "min(50%, 10px)");
+        assert_eq!(page.console(), "");
+    });
+}
+
+#[test]
+fn a_slash_is_not_division_outside_a_math_function() {
+    on_page(|| {
+        // `col-span-full` and `aspect-video`: two numbers and a slash are a line range and a
+        // ratio, and stay what they were written as.
+        let mut page = styled(
+            "#target {
+               grid-column: 1 / -1;
+               grid-row: 2 / span 2;
+               aspect-ratio: 16 / 9;
+               font: 12px/1.5 serif;
+             }",
+            r#"<div id="target">t</div>"#,
+        );
+        assert_eq!(style(&mut page, "target", "grid-column"), "1 / -1");
+        assert_eq!(style(&mut page, "target", "grid-row"), "2 / span 2");
+        assert_eq!(style(&mut page, "target", "aspect-ratio"), "16 / 9");
+        assert_eq!(style(&mut page, "target", "line-height"), "1.5");
+        assert_eq!(page.console(), "");
+    });
+}
+
+#[test]
+fn clamp_prefers_its_minimum_when_the_bounds_cross() {
+    on_page(|| {
+        // CSS Values 4: `clamp(MIN, VAL, MAX)` is `max(MIN, min(VAL, MAX))`, so MIN wins.
+        let mut page = styled(
+            "#target {
+               width: clamp(100px, 5px, 20px);
+               height: clamp(10px, 50px, 20px);
+               top: clamp(10px, 15px, 20px);
+               left: clamp(10px, 5px, 20px);
+             }",
+            r#"<div id="target">t</div>"#,
+        );
+        assert_eq!(style(&mut page, "target", "width"), "100px");
+        assert_eq!(style(&mut page, "target", "height"), "20px");
+        assert_eq!(style(&mut page, "target", "top"), "15px");
+        assert_eq!(style(&mut page, "target", "left"), "10px");
+    });
+}
+
+#[test]
+fn durations_keep_their_unit_and_only_a_number_divides() {
+    on_page(|| {
+        let mut page = styled(
+            "#target {
+               transition-duration: calc(0.3s);
+               transition-delay: calc(1s + 500ms);
+               animation-duration: calc(300ms);
+               width: calc(10px / 2px);
+               height: calc(10px / 2);
+               top: calc(10px / 0);
+             }",
+            r#"<div id="target">t</div>"#,
+        );
+        // Chrome: `0.3s` and `1.5s` — a time is written in seconds, as a duration is.
+        assert_eq!(style(&mut page, "target", "transition-duration"), "0.3s");
+        assert_eq!(style(&mut page, "target", "transition-delay"), "1.5s");
+        assert_eq!(style(&mut page, "target", "animation-duration"), "0.3s");
+        // Chrome drops a length over a length as invalid, so it is kept as written here; a
+        // division by zero is infinity, which is the largest length.
+        assert_eq!(style(&mut page, "target", "width"), "calc(10px / 2px)");
+        assert_eq!(style(&mut page, "target", "height"), "5px");
+        assert_eq!(style(&mut page, "target", "top"), "33554400px");
+    });
+}
+
+#[test]
+fn lengths_are_read_by_one_table_of_units() {
+    use verve_dom::css::length;
+    assert_eq!(length("1.5em", 10.), Some(15.));
+    assert_eq!(length("2rem", 10.), Some(32.));
+    assert_eq!(length("12pt", 10.), Some(16.));
+    assert_eq!(length("0", 10.), Some(0.));
+    assert_eq!(length("-3px", 10.), Some(-3.));
+    assert_eq!(length("calc(1px + 2px)", 10.), Some(3.));
+    // A percentage is of something, and arithmetic outside a function is not a length.
+    assert_eq!(length("50%", 10.), None);
+    assert_eq!(length("1 / -1", 10.), None);
+    assert_eq!(length("16 / 9", 10.), None);
+    assert_eq!(length("45deg", 10.), None);
+}
+
+#[test]
+fn the_drawer_resolves_a_length_against_its_basis() {
+    let env = verve_dom::Environment {
+        width: 800.,
+        height: 600.,
+        ..verve_dom::Environment::default()
+    };
+    let calc = |text: &str| verve_dom::css::length_calc(text, 16., 16., &env);
+    let half = calc("calc(50% - 10px)").unwrap();
+    assert_eq!((half.px, half.percent), (-10., 50.));
+    assert_eq!(calc("10vw").unwrap().px, 80.);
+    assert_eq!(calc("5vh").unwrap().px, 30.);
+    assert_eq!(calc("2em").unwrap().px, 32.);
+    assert_eq!(calc("calc(1rem + 2px)").unwrap().px, 18.);
+    assert_eq!(calc("50%").unwrap().percent, 50.);
+    // A container unit is the layout's to know; so is what is not a length.
+    assert_eq!(calc("10cqw"), None);
+    assert_eq!(calc("auto"), None);
+}
+
+#[test]
+fn infinity_is_the_largest_length_and_makes_a_pill() {
+    on_page(|| {
+        // Tailwind v4's `rounded-full` is `calc(infinity * 1px)`: a radius so large the corners
+        // meet. Chrome writes it `3.35544e+07px`; the value is the same.
+        let mut page = styled(
+            "#target {
+               border-radius: calc(infinity * 1px);
+               top: calc(-infinity * 1px);
+               left: calc(NaN * 1px);
+               width: calc(pi * 1px);
+               height: calc(e * 10px);
+               z-index: calc(1 + infinity);
+             }",
+            r#"<div id="target">t</div>"#,
+        );
+        assert_eq!(
+            style(&mut page, "target", "border-top-left-radius"),
+            "33554400px"
+        );
+        assert_eq!(style(&mut page, "target", "top"), "-33554400px");
+        assert_eq!(style(&mut page, "target", "left"), "0px");
+        assert_eq!(style(&mut page, "target", "width"), "3.142px");
+        assert_eq!(style(&mut page, "target", "height"), "27.183px");
+    });
+}
+
+#[test]
+fn angles_are_read_with_the_same_units() {
+    near(color("hsl(0.5turn 100% 50%)").unwrap(), [0., 1., 1., 1.]);
+    near(color("hsl(200grad 100% 50%)").unwrap(), [0., 1., 1., 1.]);
+    near(color("hwb(3.14159rad 0% 0%)").unwrap(), [0., 1., 1., 1.]);
 }

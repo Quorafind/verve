@@ -3,16 +3,19 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::calc::{length, length_calc, math_text};
 use super::color::color_text;
 use super::layer::{History, Place};
+use super::media::Environment;
 use super::scope::matched_rules;
 use super::selector::MatchCache;
 use super::sheet::Declaration;
 use super::styler::Styler;
 use super::values::{
-    FONT_LONGHANDS, font_longhands, font_size_px, format_px, is_inherited, length, resolve_custom,
-    set_declared, substitute,
+    FONT_LONGHANDS, font_longhands, format_px, is_inherited, resolve_custom, set_declared,
+    substitute,
 };
+use super::{ROOT_FONT_SIZE, font_size_px};
 use crate::dom::{Dom, Namespace, NodeId};
 
 /// Where a sheet comes from, which decides first between two declarations.
@@ -170,9 +173,14 @@ impl Computed {
     fn subtree(&mut self, dom: &Dom, styler: &Styler, root: NodeId, inherited: &Style) -> usize {
         let mut count = 0;
         let mut stack = vec![(root, inherited.clone())];
-        let mut cache = MatchCache::default();
+        let root_font_size = self
+            .style(dom.html)
+            .and_then(|style| style.get("font-size"))
+            .and_then(|size| length(size, ROOT_FONT_SIZE))
+            .unwrap_or(ROOT_FONT_SIZE);
+        let mut walk = Walk::new(dom, styler, root_font_size);
         while let Some((id, inherited)) = stack.pop() {
-            let (style, pointer) = own_style(dom, styler, id, &inherited, &mut cache);
+            let (style, pointer) = walk.style(id, &inherited);
             for child in dom.flat_children(id) {
                 stack.push((child, style.clone()));
             }
@@ -198,9 +206,9 @@ pub fn style_of(dom: &Dom, styler: &Styler, id: NodeId) -> Style {
         at = dom.flat_parent(node);
     }
     let mut style = Style::new();
-    let mut cache = MatchCache::default();
+    let mut walk = Walk::new(dom, styler, ROOT_FONT_SIZE);
     for node in chain.into_iter().rev() {
-        style = own_style(dom, styler, node, &style, &mut cache).0;
+        style = walk.style(node, &style).0;
     }
     style
 }
@@ -237,43 +245,72 @@ impl Rank {
     }
 }
 
-fn own_style(
-    dom: &Dom,
-    styler: &Styler,
-    id: NodeId,
-    inherited: &Style,
-    cache: &mut MatchCache,
-) -> (Style, bool) {
-    let mut style = Style::new();
-    for (key, value) in inherited {
-        if is_inherited(key) {
-            style.insert(key.clone(), value.clone());
+/// One pass of the cascade over a tree: what it reads, and what it keeps from one node to the
+/// next.
+struct Walk<'a> {
+    dom: &'a Dom,
+    styler: &'a Styler,
+    cache: MatchCache,
+    /// The root element's font size, which `rem` is measured against; sixteen until the root
+    /// is styled.
+    root_font_size: f32,
+}
+
+impl<'a> Walk<'a> {
+    fn new(dom: &'a Dom, styler: &'a Styler, root_font_size: f32) -> Self {
+        Self {
+            dom,
+            styler,
+            cache: MatchCache::default(),
+            root_font_size,
         }
     }
-    let Some(node) = dom.get(id).filter(|node| node.is_element()) else {
-        return (style, false);
-    };
-    let inline: Vec<Declaration> = node
-        .style
-        .iter()
-        .map(|(name, value)| Declaration {
-            name: name.clone(),
-            value: value.clone(),
-            important: node.important.contains(name),
-        })
-        .collect();
-    let (matched, pointer) = matched_declarations(dom, styler, id, &inline, cache);
-    // `hidden` is the user agent's `display: none`, under any author rule.
-    if node.attr("hidden").is_some() && node.namespace == Namespace::Html {
-        style.insert("display".into(), "none".into());
+
+    /// The style of one node from what it `inherited`, and whether the pointer being on it
+    /// would make another rule apply.
+    fn style(&mut self, id: NodeId, inherited: &Style) -> (Style, bool) {
+        let mut style = Style::new();
+        for (key, value) in inherited {
+            if is_inherited(key) {
+                style.insert(key.clone(), value.clone());
+            }
+        }
+        let Some(node) = self.dom.get(id).filter(|node| node.is_element()) else {
+            return (style, false);
+        };
+        let inline: Vec<Declaration> = node
+            .style
+            .iter()
+            .map(|(name, value)| Declaration {
+                name: name.clone(),
+                value: value.clone(),
+                important: node.important.contains(name),
+            })
+            .collect();
+        let (matched, pointer) =
+            matched_declarations(self.dom, self.styler, id, &inline, &mut self.cache);
+        // `hidden` is the user agent's `display: none`, under any author rule.
+        if node.attr("hidden").is_some() && node.namespace == Namespace::Html {
+            style.insert("display".into(), "none".into());
+        }
+        let revert = self.styler.revert_layer || inline.iter().any(says_revert_layer);
+        let font = apply(&mut style, matched, inherited, revert);
+        resolve_variables(&mut style, inherited);
+        normalize_colors(&mut style);
+        font.open(&mut style);
+        // `rem` on the root element is the initial font size, not its own.
+        let root = if id == self.dom.html {
+            ROOT_FONT_SIZE
+        } else {
+            self.root_font_size
+        };
+        let font_size = compute_font_size(&mut style, inherited, root, self.styler.environment());
+        compute_math(&mut style, font_size, root, self.styler.environment());
+        if id == self.dom.html {
+            self.root_font_size = font_size;
+        }
+        (style, pointer)
     }
-    let revert = styler.revert_layer || inline.iter().any(says_revert_layer);
-    let font = apply(&mut style, matched, inherited, revert);
-    resolve_variables(&mut style, inherited);
-    normalize_colors(&mut style);
-    font.open(&mut style);
-    compute_font_size(&mut style, inherited);
-    (style, pointer)
 }
 
 /// The declarations that apply to `id`, the rules' and its `inline` style's, lowest rank first.
@@ -439,16 +476,47 @@ fn normalize_colors(style: &mut Style) {
     }
 }
 
+/// [`font_size_px`], with what `rem` and the viewport units are measured against, and
+/// `calc()` too.
+fn computed_font_size(value: &str, parent: f32, root: f32, env: &Environment) -> Option<f32> {
+    let value = value.trim();
+    if value.contains('(') || value.ends_with("rem") {
+        let amount = length_calc(value, parent, root, env)?;
+        return Some(amount.px + amount.percent / 100. * parent);
+    }
+    font_size_px(value, parent)
+}
+
 /// A font size is computed to pixels, so what inherits it inherits the size and not `1.5em`
-/// to apply again.
-fn compute_font_size(style: &mut Style, inherited: &Style) {
+/// to apply again. Answers the size in pixels, the node's own or its parent's.
+fn compute_font_size(style: &mut Style, inherited: &Style, root: f32, env: &Environment) -> f32 {
     let parent_size = inherited
         .get("font-size")
-        .and_then(|v| length(v, 16.))
-        .unwrap_or(16.);
-    if let Some(size) = style.get("font-size").cloned()
-        && let Some(px) = font_size_px(&size, parent_size)
-    {
+        .and_then(|v| length(v, ROOT_FONT_SIZE))
+        .unwrap_or(ROOT_FONT_SIZE);
+    let own = style
+        .get("font-size")
+        .and_then(|size| computed_font_size(size, parent_size, root, env));
+    if let Some(px) = own {
         style.insert("font-size".into(), format_px(px));
+        return px;
+    }
+    // Written in pixels already, or not a size at all: the parent's.
+    style
+        .get("font-size")
+        .and_then(|size| length(size, parent_size))
+        .unwrap_or(parent_size)
+}
+
+/// A value that is a mathematical function is computed: what is all absolute folds into
+/// pixels, what has a percentage in it keeps a `calc()` for the drawer to resolve against its
+/// basis.
+fn compute_math(style: &mut Style, font_size: f32, root: f32, env: &Environment) {
+    for (property, value) in style.iter_mut() {
+        if !property.starts_with("--")
+            && let Some(text) = math_text(value, font_size, root, env)
+        {
+            *value = text;
+        }
     }
 }

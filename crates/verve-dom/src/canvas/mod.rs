@@ -62,11 +62,6 @@ pub(crate) use install::install;
 #[cfg(feature = "canvas")]
 pub(crate) use store::{CanvasStore, commit, snapshot_canvases};
 
-/// The font size relative lengths in canvas text properties resolve against: the document's
-/// default, as `letterSpacing: '1em'` is read in a canvas with no style of its own.
-#[cfg(feature = "canvas")]
-pub(crate) const ROOT_FONT_SIZE: f32 = 16.;
-
 /// The size of a `<canvas>` that sets none (HTML, "the canvas element").
 const DEFAULT_WIDTH: u32 = 300;
 const DEFAULT_HEIGHT: u32 = 150;

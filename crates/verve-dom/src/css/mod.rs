@@ -25,6 +25,7 @@
 //! Lifted from su-editor's Obsidian host (its cascade, `var()` and incremental restyle) with a
 //! selector engine of its own.
 
+mod calc;
 mod cascade;
 mod color;
 mod layer;
@@ -36,14 +37,15 @@ mod styler;
 mod syntax;
 mod values;
 
+pub use calc::{LengthCalc, length, length_calc};
 pub use cascade::{Computed, Origin, Style, style_of};
 pub use color::{color, color_with};
 pub use media::{Environment, MediaQuery};
 pub use selector::{MatchContext, Selector, SelectorError, SelectorList};
 pub use sheet::{Declaration, Sheet, declarations, split_rules};
 pub use styler::Styler;
-pub use values::{USER_AGENT_SHEET, initial_value, is_inherited, length};
-pub(crate) use values::{font_longhands, font_size_px, value_or_initial};
+pub(crate) use values::{ROOT_FONT_SIZE, font_longhands, font_size_px, value_or_initial};
+pub use values::{USER_AGENT_SHEET, initial_value, is_inherited};
 
 #[cfg(test)]
 mod tests {

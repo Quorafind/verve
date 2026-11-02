@@ -93,3 +93,20 @@ pub(super) fn decimal(value: f32) -> String {
         format!("{rounded}")
     }
 }
+/// Where the `)` closing the `(` at `open` is.
+pub(super) fn matching_parenthesis(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (at, c) in text[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
