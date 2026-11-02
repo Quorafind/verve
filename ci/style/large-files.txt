@@ -12,7 +12,6 @@ src/indexeddb.rs 2612
 src/intl.rs 1997
 src/network/http.rs 1766
 src/path.rs 1507
-src/sockets.rs 1598
 src/stream.rs 4600
 src/streams.rs 4034
 src/util.rs 3498

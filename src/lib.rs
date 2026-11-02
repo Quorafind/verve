@@ -28,6 +28,7 @@ pub use boa_gc;
 mod assert;
 pub mod blob;
 mod buffer;
+mod child_process;
 mod cjs_exports;
 pub mod cli;
 pub mod clone;
