@@ -262,3 +262,30 @@ impl Document { pub fn font_faces(&self) -> Vec<FontFaceRule>; }   // 需新增�
 - `p::before span` 这类伪元素不在末尾的选择器按规范视为无效并整条丢弃。
 - `bind/window.rs` 里新增了一处对遗留 `bind::opt_string` 的调用（R1 迁到 `verve::native` 时一并处理）。
 
+
+### P22b（分支 `electron/p22b-animations`）
+
+**完成**
+
+- `css/easing.rs`（关键字、`cubic-bezier()`、`steps()`、`linear()`）、`css/interpolate.rs`（按类型插值的表）、`css/animate.rs`（`Timing`、`Keyframes`、`AnimationStore`）、`css/shorthand.rs`（其余简写从 `set_declared` 搬进来，`set_declared` 只剩关键字和一次查表；`transition`/`animation` 用同一张"槽位表"展开，第一个时间是 duration、第二个是 delay，`spin-forms` 这样的名字不会被当成时间）、`src/animation.rs`（帧驱动、事件投递、`finished` 的结算）、`bind/animation.rs`（`Animation`、`CSSAnimation`、`CSSTransition`）。
+- `var()`：`animation: var(--animate-spin)`、tw-animate-css 的 `var(--tw-duration, 150ms)` 在 `var()` 替换之后重新展开简写；关键帧里的 `var()` 在动画所在元素的上下文里读。
+- 取值：元素没有设过的属性（`opacity`、`transform`……）从它的初始值出发，`none` 是被插值对象的恒等（所以 `@keyframes spin { to { transform: rotate(360deg) } }` 会转）；`transition-property` 和关键帧里的简写（`border-color`、`background`）展开成长属性；`visibility` 在两端有一个是 `visible` 时整段都是 `visible`；每个关键帧自己的 `animation-timing-function` 管它到下一帧，`animation-timing-function` 本身是帧间缓动、不是整个迭代的缓动；`linear()` 按 CSS Easing 2 铺点。
+- 过渡：`transition-property: all` 移动所有变了且能插值的属性（只写了长属性时 `all` 和 `ease` 是缺省）；被打断的过渡从当前显示的值重新开始并给旧的发 `transitioncancel`；时长为 0 的新值结束正在进行的过渡；延迟期间显示起点值（fill backwards）；`elapsedTime` 不含延迟（`transitionend` 是时长，负延迟的 `transitionrun` 是已经走过的部分）；`animationstart` 在延迟结束时发，`animationiteration` 是迭代数乘时长。动画：`animation-name` 消失会取消并发 `animationcancel`；`animation-play-state: paused`；`fill-mode` 保留最后一帧；小数的迭代次数停在那一段；`reverse` 的 `backwards` 延迟显示该方向的起点。
+- 帧：`FrameClock::Host` 走 `Document::frame`，动画先于 `requestAnimationFrame` 回调更新、发事件，回调读到的是这一帧的值；有动画在动、或有事件等着通知时 `wants_frame()` 为真，store 由空变非空或有事件排队时推一个 `Request::Frame`；`FrameClock::Timer` 在页面改了 DOM 且样式表里有 `transition*`/`animation*`/`@keyframes` 时启动帧定时器，没有 `requestAnimationFrame` 循环也能走完过渡并发 `transitionend`。离开文档的节点上由样式产生的动画静默取消（`finished` 被拒绝），`display: none` 下的和无限的脚本动画不再要帧；父元素在动画的可继承属性（`color`）也让子元素看到当前值。
+- `Animation` 对象：`EventTarget`（`onfinish`/`oncancel`/`addEventListener`），用带标记的 host id 编号，脚本看不到任何隐藏属性；`play`/`pause`/`reverse`/`updatePlaybackRate`/`finish`/`cancel`/`commitStyles` 只作用于这一个动画，脚本的请求在下一帧才在时间轴上就位，所以隔了很久再 `play()` 也从停下的地方接着走；`cancel()` 之后 `playState` 是 `idle`、`currentTime` 是 `null`，还能 `play()`、`finish()`、设置 `currentTime`；`playbackRate` 可以是 0；`finish()` 对永不结束的动画抛 `InvalidStateError`；`cancel()` 用 `AbortError` reject `finished`（已标记为已处理）；`finish()`/`cancel()` 的事件在脚本结束后投递，所以 `a.finish(); a.onfinish = …` 照样触发；`persist()` 抛 `ERR_NOT_SUPPORTED`；`getAnimations()`（元素与 `document`）返回脚本已经持有的同一批对象，CSS 过渡和动画产生的是 `CSSTransition`/`CSSAnimation` 实例（`transitionProperty`/`animationName`），`finished` 真的等到结束；`element.animate()` 的关键帧可以是对象数组，也可以是按属性给的 `{opacity: [0, 1]}`，关键帧的 `easing` 管到下一帧。
+- 生命周期：`finished` 未结算时记录强持有对象，所以没人引用的 `box.animate(…).finished.then(…)` 在 sweep 之后照样结算；结算后只留弱引用，对象被回收时记录和 store 里已完成的脚本动画一起被放掉；`sweep` 调用 `AnimationStore::forget`，被释放节点上的动画让等着它们 `finished` 的脚本听到取消。
+- 测试：`css_animation`(42)，`animation.rs`、`css/animate.rs`、`css/easing.rs`、`css/interpolate.rs`、`css/shorthand.rs` 里的单元测试；`cargo test -p verve-dom` 全部通过，`--no-default-features` 也是。
+
+**性能**（同一个 5000 元素、4004 条规则的基准，debug 构建，同一台机器，取 5 次最好；"之前"是在 P22a 合并后的树上跑同一个测试量的）：全量层叠 P22b 之前 818–821 ms，P22b 787–816 ms（没有变慢）；经 `Document::update()` 的第一次更新 811–833 ms，500 个元素改了类之后的更新 215–219 ms（后两项是新加的测量，P22b 之前没有数字）。页面没有动画时，新增的工作只是每次重算节点后的一次空 store 判断；`animation.rs` 里的单元测试断言重算只看被重算的节点，而不是整棵树。没有测 release（全工作区 fat LTO，太慢）。
+
+**已知差异**
+
+- `Animation` 不是 `Handle`/`Kind::Animation`：它是带标记 host id 的 `EventTarget`（Handle 与 EventTarget 的原生数据不能同时挂在一个对象上），效果相同——没有隐藏 JS 属性。`bind/animation.rs` 仍用遗留的 `bind::class`/`ClassSpec`（它们把类登记进文档的类表，`verve::native::class` 不做），R1 时一并迁移。
+- 由重算引起的取消事件在下一帧投递（重算发生在没有 `Context` 的 `Document::update()` 里），所以宿主要为它再来一帧（`wants_frame()` 与 `Request::Frame` 已经为此保证）。
+- 插值：颜色在 sRGB 里混合（Chrome 对现代色彩空间用 oklab）；`transform`、`box-shadow`、`filter` 只在函数列表逐项对得上时才插值（`none` 例外），否则离散，没有矩阵分解；离散属性（`display` 等）不过渡（没有 `transition-behavior: allow-discrete`）；不做过渡的反向缩短；`animation-composition` 与 `composite` 被忽略。
+- `animate()`：`endDelay`/`iterationStart` 被忽略；`effect`/`timeline` 为 `null`，`ready` 立即 resolve，`startTime` 为 `null`，`pending` 为 `false`，`replaceState` 恒为 `active`，没有 `id` 的写入。`finished` 在结算之后每次读都是新的已结算的 promise（Chrome 是同一个）。
+- 样式里 `cancel()` 掉的 CSS 动画不能再 `play()`（它已经不在 store 里）；`display: none` 下的 CSS 动画不被取消，只是不再要帧。
+- `FrameClock::Timer` 只在样式表声明了动画时才会在 DOM 改动后起帧；只靠元素的内联 `style.transition` 的页面需要宿主调用 `update()`/`frame()`。
+- `getComputedStyle()` 的时间按写的样子回答（`150ms` 不会变成 `0.15s`），没设过的 `transitionProperty`/`transitionTimingFunction` 是空串，Chrome 是 `all`/`ease`；动画 id 是裸 `u32`。
+- 脚本动画在 fill 为 `forwards`/`both` 且已结束时一直留在 store 里，直到被替换或 `cancel()`（和 Chrome 一样），不随对象被回收而放掉。
+- 属于其他包的部分不变：`prefers-reduced-motion` 只影响媒体查询；`@property` 的初始值与过渡不在本包。
