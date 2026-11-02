@@ -230,6 +230,7 @@ fn require_keeps_commonjs_resolution_unhooked() {
     assert_eq!(run(&dir, main).unwrap(), r#"{"value":"file","calls":0}"#);
 }
 
+#[cfg(feature = "typescript")]
 #[test]
 fn strip_typescript_types_erases_types_in_place() {
     let dir = folder("strip", &[]);
