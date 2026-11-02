@@ -251,6 +251,7 @@ fn verification_code(
     error: &rustls::Error,
     cert: &rustls::pki_types::CertificateDer<'_>,
 ) -> &'static str {
+    #[cfg(feature = "x509")]
     if format!("{error:?}").contains("UnknownIssuer") {
         use x509_parser::prelude::FromDer;
         if let Ok((_, certificate)) =
@@ -260,6 +261,8 @@ fn verification_code(
             return "DEPTH_ZERO_SELF_SIGNED_CERT";
         }
     }
+    #[cfg(not(feature = "x509"))]
+    let _ = cert;
     certificate_code(error)
 }
 impl rustls::client::danger::ServerCertVerifier for Verification {
@@ -533,41 +536,51 @@ fn check_identity(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<J
                     .is_some_and(|prefix| !prefix.is_empty() && !prefix.contains('.'))
             })
     };
+    #[cfg(feature = "x509")]
     let raw = crate::encoding::bytes_of(&get(&cert, "raw", cx)?, cx)?;
+    #[cfg(not(feature = "x509"))]
+    let raw: Option<Vec<u8>> = None;
     if let Some(raw) = raw {
-        use x509_parser::{extensions::GeneralName, prelude::FromDer};
-        if let Ok((_, certificate)) = x509_parser::certificate::X509Certificate::from_der(&raw) {
-            if let Ok(Some(san)) = certificate.subject_alternative_name() {
-                for name in &san.value.general_names {
-                    match name {
-                        GeneralName::DNSName(name) if host.parse::<std::net::IpAddr>().is_err() => {
-                            matched |= name_matches(name)
-                        }
-                        GeneralName::IPAddress(bytes) => {
-                            let address = if bytes.len() == 4 {
-                                <[u8; 4]>::try_from(*bytes).ok().map(std::net::IpAddr::from)
-                            } else {
-                                <[u8; 16]>::try_from(*bytes)
-                                    .ok()
-                                    .map(std::net::IpAddr::from)
-                            };
-                            if let (Some(address), Ok(host)) =
-                                (address, host.parse::<std::net::IpAddr>())
+        #[cfg(feature = "x509")]
+        {
+            use x509_parser::{extensions::GeneralName, prelude::FromDer};
+            if let Ok((_, certificate)) = x509_parser::certificate::X509Certificate::from_der(&raw) {
+                if let Ok(Some(san)) = certificate.subject_alternative_name() {
+                    for name in &san.value.general_names {
+                        match name {
+                            GeneralName::DNSName(name)
+                                if host.parse::<std::net::IpAddr>().is_err() =>
                             {
-                                matched |= address == host;
+                                matched |= name_matches(name)
                             }
+                            GeneralName::IPAddress(bytes) => {
+                                let address = if bytes.len() == 4 {
+                                    <[u8; 4]>::try_from(*bytes).ok().map(std::net::IpAddr::from)
+                                } else {
+                                    <[u8; 16]>::try_from(*bytes)
+                                        .ok()
+                                        .map(std::net::IpAddr::from)
+                                };
+                                if let (Some(address), Ok(host)) =
+                                    (address, host.parse::<std::net::IpAddr>())
+                                {
+                                    matched |= address == host;
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
-                }
-            } else if host.parse::<std::net::IpAddr>().is_err() {
-                for cn in certificate.subject().iter_common_name() {
-                    if let Ok(cn) = cn.as_str() {
-                        matched |= name_matches(cn);
+                } else if host.parse::<std::net::IpAddr>().is_err() {
+                    for cn in certificate.subject().iter_common_name() {
+                        if let Ok(cn) = cn.as_str() {
+                            matched |= name_matches(cn);
+                        }
                     }
                 }
             }
         }
+        #[cfg(not(feature = "x509"))]
+        let _ = raw;
     } else if !alt.is_undefined() {
         for name in text_of(&alt, cx)?.split(", ") {
             if let Some(name) = name.strip_prefix("DNS:") {
@@ -765,6 +778,7 @@ pub(crate) fn accepted(
 }
 pub(crate) fn peer_certificate(bytes: &[u8], cx: &mut Context) -> JsResult<JsObject> {
     use sha2::Digest;
+    #[cfg(feature = "x509")]
     use x509_parser::prelude::FromDer;
     let peer = object(cx);
     if bytes.is_empty() {
@@ -797,6 +811,7 @@ pub(crate) fn peer_certificate(bytes: &[u8], cx: &mut Context) -> JsResult<JsObj
         false,
         cx,
     )?;
+    #[cfg(feature = "x509")]
     if let Ok((_, cert)) = x509_parser::certificate::X509Certificate::from_der(bytes) {
         for (key, name) in [("subject", cert.subject()), ("issuer", cert.issuer())] {
             let o = object(cx);

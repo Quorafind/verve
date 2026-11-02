@@ -78,6 +78,7 @@ pub(crate) fn global_object(intrinsics: &Intrinsics) -> JsObject {
 struct Contextified {
     #[unsafe_ignore_trace]
     strings: bool,
+    #[cfg(feature = "wasm")]
     #[unsafe_ignore_trace]
     wasm: bool,
     /// Set while `compileFunction` compiles in the realm: the ban is on the context's code.
@@ -102,6 +103,7 @@ pub(crate) fn ensure_can_compile_strings(realm: &Realm) -> JsResult<()> {
 }
 
 /// Whether `WebAssembly` may compile in the running realm (`codeGeneration.wasm`).
+#[cfg(feature = "wasm")]
 pub(crate) fn wasm_allowed(context: &Context) -> bool {
     contextified(context.realm(), |c| c.wasm).unwrap_or(true)
 }
@@ -267,6 +269,7 @@ fn in_realm<R>(context: &mut Context, realm: &Realm, f: impl FnOnce(&mut Context
 /// and `importModuleDynamically`.
 struct ContextOptions {
     strings: bool,
+    #[cfg(feature = "wasm")]
     wasm: bool,
     import: JsValue,
 }
@@ -285,8 +288,10 @@ fn context_options(
     } else {
         JsValue::undefined()
     };
+    let strings = allowed(generation.clone(), "strings", context)?;
     Ok(ContextOptions {
-        strings: allowed(generation.clone(), "strings", context)?,
+        strings,
+        #[cfg(feature = "wasm")]
         wasm: allowed(generation, "wasm", context)?,
         import: if options.is_object() {
             get(options, "importModuleDynamically", context)?
@@ -313,6 +318,7 @@ fn create_context(
     let realm = made?;
     in_realm(context, &realm, |cx| -> JsResult<()> {
         crate::intl::install(cx)?;
+        #[cfg(feature = "wasm")]
         crate::wasm::install(cx)?;
         if let Some(DisabledProto(script)) = cx.get_data::<DisabledProto>().copied() {
             cx.eval(Source::from_bytes(script))?;
@@ -328,6 +334,7 @@ fn create_context(
     )?;
     realm.host_defined_mut().insert(Contextified {
         strings: options.strings,
+        #[cfg(feature = "wasm")]
         wasm: options.wasm,
         compiling: Cell::new(false),
         import: GcRefCell::new(options.import),

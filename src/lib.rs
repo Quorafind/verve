@@ -65,11 +65,13 @@ mod stream;
 mod streams;
 mod string_decoder;
 mod timers;
+#[cfg(feature = "typescript")]
 mod typescript;
 mod url;
 mod url_pattern;
 mod util;
 mod vm;
+#[cfg(feature = "wasm")]
 mod wasm;
 mod web;
 mod worker;
@@ -215,6 +217,7 @@ struct Shared {
     /// IndexedDB's databases, transactions and cursors.
     idb: RefCell<indexeddb::IdbState>,
     /// WebAssembly's modules and instances.
+    #[cfg(feature = "wasm")]
     wasm: RefCell<wasm::WasmState>,
     /// Who to wake when the network or a worker has something for this realm.
     wake: std::sync::Arc<WakeSlot>,
@@ -501,6 +504,7 @@ impl Runtime {
             workers: RefCell::new(Vec::new()),
             port: RefCell::new(None),
             idb: RefCell::new(indexeddb::IdbState::default()),
+            #[cfg(feature = "wasm")]
             wasm: RefCell::new(wasm::WasmState::default()),
             wake: std::sync::Arc::default(),
             profile: RefCell::new(None),
@@ -1260,6 +1264,7 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
     navigator::install(context)?;
     worker::install(context)?;
     indexeddb::install(context)?;
+    #[cfg(feature = "wasm")]
     wasm::install(context)?;
     // Node's own modules, which Electron gives a desktop plugin, are made when first required;
     // `process` is a global too, and an `EventEmitter`.

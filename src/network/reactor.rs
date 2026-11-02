@@ -559,7 +559,9 @@ fn run(
                                     host,
                                     kind: format!("connect:{port}"),
                                     family,
+                                    #[cfg(feature = "dns-records")]
                                     servers: Vec::new(),
+                                    #[cfg(feature = "dns-records")]
                                     ttl: false,
                                 },
                             ))
@@ -596,7 +598,9 @@ fn run(
                                 host,
                                 kind: format!("connect:{port}"),
                                 family,
+                                #[cfg(feature = "dns-records")]
                                 servers: Vec::new(),
+                                #[cfg(feature = "dns-records")]
                                 ttl: false,
                             },
                         ))
@@ -670,7 +674,9 @@ fn run(
                                 host,
                                 kind: format!("connect:{port}"),
                                 family,
+                                #[cfg(feature = "dns-records")]
                                 servers: Vec::new(),
+                                #[cfg(feature = "dns-records")]
                                 ttl: false,
                             },
                         ))

@@ -939,11 +939,12 @@ mod tests {
             flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
         raw.write_all(&text).unwrap();
         let raw = raw.finish().unwrap();
-        let mut br = Vec::new();
-        {
-            let mut w = brotli::CompressorWriter::new(&mut br, 4096, 5, 22);
-            w.write_all(&text).unwrap();
-        }
+        // Encoded once with Node's brotli: the decoder is tested without `zlib`'s optional
+        // encoder.
+        let br: Vec<u8> = vec![
+            27, 75, 4, 248, 29, 7, 110, 44, 199, 59, 55, 175, 179, 4, 33, 115, 107, 5, 157, 55,
+            58, 29, 86, 246, 118, 39, 49, 32, 168, 176, 10, 160, 132, 138, 81, 11, 124, 195, 15,
+        ];
         for (coding, body) in [
             ("gzip", gzip),
             ("deflate", zlib),

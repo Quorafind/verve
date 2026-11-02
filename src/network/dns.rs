@@ -1,8 +1,10 @@
 //! System getaddrinfo and DNS records run on the reactor's fixed resolver pool, never on the
 //! JavaScript thread. Unsupported record types fail with ENOSYS rather than fabricated data.
 use super::{Id, reactor::Command};
+#[cfg(feature = "dns-records")]
+use crate::native::invoke;
 use crate::native::{
-    arg, array, closure, coded_error_value, get, invoke, js_text, object, text_of,
+    arg, array, closure, coded_error_value, get, js_text, object, text_of,
 };
 use boa_engine::{Context, JsObject, JsResult, JsValue, js_string, object::builtins::JsPromise};
 use std::{
@@ -15,13 +17,16 @@ pub(crate) struct Query {
     pub host: String,
     pub kind: String,
     pub family: u8,
+    #[cfg(feature = "dns-records")]
     pub servers: Vec<SocketAddr>,
+    #[cfg(feature = "dns-records")]
     pub ttl: bool,
 }
 #[derive(Debug)]
 pub(crate) enum Answer {
     Connect(Vec<SocketAddr>),
     Lookup(Vec<(String, u8)>),
+    #[cfg(feature = "dns-records")]
     Records(serde_json::Value),
 }
 #[derive(Default)]
@@ -71,56 +76,62 @@ pub(crate) fn resolve(query: Query) -> Result<Answer, String> {
     if !["resolve4", "resolve6", "resolveTxt", "resolveSrv"].contains(&query.kind.as_str()) {
         return Err("ENOSYS".into());
     }
-    use hickory_resolver::{
-        Resolver,
-        config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts},
-    };
-    let resolver = if query.servers.is_empty() {
-        Resolver::from_system_conf()
-    } else {
-        let mut config = ResolverConfig::new();
-        for address in query.servers {
-            config.add_name_server(NameServerConfig::new(address, Protocol::Udp));
-        }
-        Resolver::new(config, ResolverOpts::default())
-    }
-    .map_err(|_| "ESERVFAIL".to_owned())?;
-    let failed = |_| "ENOTFOUND".to_owned();
-    if query.ttl && ["resolve4", "resolve6"].contains(&query.kind.as_str()) {
-        use hickory_resolver::proto::rr::{RData, RecordType};
-        let kind = if query.kind == "resolve4" {
-            RecordType::A
-        } else {
-            RecordType::AAAA
+    #[cfg(not(feature = "dns-records"))]
+    return Err("ENOSYS".into());
+    #[cfg(feature = "dns-records")]
+    {
+        use hickory_resolver::{
+            Resolver,
+            config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts},
         };
-        let lookup = retry(|| resolver.lookup(query.host.as_str(), kind)).map_err(failed)?;
-        let records = lookup
-            .record_iter()
-            .filter_map(|record| {
-                let address = match record.data()? {
-                    RData::A(ip) => ip.to_string(),
-                    RData::AAAA(ip) => ip.to_string(),
-                    _ => return None,
-                };
-                Some(serde_json::json!({"address":address,"ttl":record.ttl()}))
-            })
-            .collect::<Vec<_>>();
-        return Ok(Answer::Records(serde_json::json!(records)));
+        let resolver = if query.servers.is_empty() {
+            Resolver::from_system_conf()
+        } else {
+            let mut config = ResolverConfig::new();
+            for address in query.servers {
+                config.add_name_server(NameServerConfig::new(address, Protocol::Udp));
+            }
+            Resolver::new(config, ResolverOpts::default())
+        }
+        .map_err(|_| "ESERVFAIL".to_owned())?;
+        let failed = |_| "ENOTFOUND".to_owned();
+        if query.ttl && ["resolve4", "resolve6"].contains(&query.kind.as_str()) {
+            use hickory_resolver::proto::rr::{RData, RecordType};
+            let kind = if query.kind == "resolve4" {
+                RecordType::A
+            } else {
+                RecordType::AAAA
+            };
+            let lookup = retry(|| resolver.lookup(query.host.as_str(), kind)).map_err(failed)?;
+            let records = lookup
+                .record_iter()
+                .filter_map(|record| {
+                    let address = match record.data()? {
+                        RData::A(ip) => ip.to_string(),
+                        RData::AAAA(ip) => ip.to_string(),
+                        _ => return None,
+                    };
+                    Some(serde_json::json!({"address":address,"ttl":record.ttl()}))
+                })
+                .collect::<Vec<_>>();
+            return Ok(Answer::Records(serde_json::json!(records)));
+        }
+        let value = match query.kind.as_str() {
+            "resolve4" => serde_json::json!(retry(|| resolver.ipv4_lookup(query.host.as_str())).map_err(failed)?.iter().map(|ip| ip.to_string()).collect::<Vec<_>>()),
+            "resolve6" => serde_json::json!(retry(|| resolver.ipv6_lookup(query.host.as_str())).map_err(failed)?.iter().map(|ip| ip.to_string()).collect::<Vec<_>>()),
+            "resolveTxt" => serde_json::json!(retry(|| resolver.txt_lookup(query.host.as_str())).map_err(failed)?.iter().map(|r| r.txt_data().iter().map(|v| String::from_utf8_lossy(v).into_owned()).collect::<Vec<_>>()).collect::<Vec<_>>()),
+            "resolveSrv" => serde_json::json!(retry(|| resolver.srv_lookup(query.host.as_str())).map_err(failed)?.iter().map(|r| serde_json::json!({"name":r.target().to_utf8().trim_end_matches('.'),"port":r.port(),"priority":r.priority(),"weight":r.weight()})).collect::<Vec<_>>()),
+            _ => return Err("ENOSYS".into()),
+        };
+        Ok(Answer::Records(value))
     }
-    let value = match query.kind.as_str() {
-        "resolve4" => serde_json::json!(retry(|| resolver.ipv4_lookup(query.host.as_str())).map_err(failed)?.iter().map(|ip| ip.to_string()).collect::<Vec<_>>()),
-        "resolve6" => serde_json::json!(retry(|| resolver.ipv6_lookup(query.host.as_str())).map_err(failed)?.iter().map(|ip| ip.to_string()).collect::<Vec<_>>()),
-        "resolveTxt" => serde_json::json!(retry(|| resolver.txt_lookup(query.host.as_str())).map_err(failed)?.iter().map(|r| r.txt_data().iter().map(|v| String::from_utf8_lossy(v).into_owned()).collect::<Vec<_>>()).collect::<Vec<_>>()),
-        "resolveSrv" => serde_json::json!(retry(|| resolver.srv_lookup(query.host.as_str())).map_err(failed)?.iter().map(|r| serde_json::json!({"name":r.target().to_utf8().trim_end_matches('.'),"port":r.port(),"priority":r.priority(),"weight":r.weight()})).collect::<Vec<_>>()),
-        _ => return Err("ENOSYS".into()),
-    };
-    Ok(Answer::Records(value))
 }
 
 /// A record query, tried again when binding its UDP source port was refused. Hickory picks a
 /// random port for each query, and Windows answers WSAEACCES for ports in its excluded ranges
 /// (Hyper-V and WinNAT reserve blocks of them): that is the system's port choice failing, not
 /// the name server's answer.
+#[cfg(feature = "dns-records")]
 fn retry<T>(
     mut query: impl FnMut() -> Result<T, hickory_resolver::error::ResolveError>,
 ) -> Result<T, hickory_resolver::error::ResolveError> {
@@ -166,6 +177,7 @@ fn start(args: &[JsValue], kind: &str, promise: bool, cx: &mut Context) -> JsRes
     }
     let family = family as u8;
     let all = get(&options, "all", cx)?.to_boolean();
+    #[cfg(feature = "dns-records")]
     let ttl = get(&options, "ttl", cx)?.to_boolean();
     let (result, callback, reject) = if promise {
         let (p, r) = JsPromise::new_pending(cx);
@@ -185,6 +197,7 @@ fn start(args: &[JsValue], kind: &str, promise: bool, cx: &mut Context) -> JsRes
     // an id from the same monotonically increasing realm namespace.
     let marker = object(cx);
     let id = super::register(&marker, cx)?;
+    #[cfg(feature = "dns-records")]
     let servers = crate::shared(cx).network.borrow().dns.servers.clone();
     crate::shared(cx).network.borrow_mut().targets.remove(&id);
     let requested_order = get(&options, "order", cx)?;
@@ -222,7 +235,9 @@ fn start(args: &[JsValue], kind: &str, promise: bool, cx: &mut Context) -> JsRes
                 host,
                 kind: kind.into(),
                 family,
+                #[cfg(feature = "dns-records")]
                 servers,
+                #[cfg(feature = "dns-records")]
                 ttl,
             },
         ),
@@ -378,6 +393,7 @@ pub(crate) fn deliver(id: Id, result: Result<Answer, String>, cx: &mut Context) 
                 Ok(addresses.first().map(|a| js_text(&a.0)).unwrap_or_default())
             }
         }
+        #[cfg(feature = "dns-records")]
         Ok(Answer::Records(value)) => {
             let json = cx.global_object().get(js_string!("JSON"), cx)?;
             let value = invoke(&json, "parse", &[js_text(&value.to_string())], cx)?;

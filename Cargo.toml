@@ -64,15 +64,16 @@ serde_json = "1"
 unicode-segmentation = "1.12"
 # The zone the system's clock is set to, by its IANA name: `Intl`'s default `timeZone`.
 iana-time-zone = "0.1"
-# WebAssembly, run by an interpreter written in Rust.
-wasmi = "0.35"
+# WebAssembly, run by an interpreter written in Rust. Only with the `wasm` feature.
+wasmi = { version = "0.35", optional = true }
 
 # Permissioned TCP/UDP: one portable readiness reactor, with kernel socket options.
 mio = { version = "1.2", features = ["net", "os-poll"] }
 # TCP keepalive and datagram options, without a connection-per-thread runtime.
 socket2 = { version = "0.6", features = ["all"] }
-# System-configured DNS record queries, confined to the fixed resolver pool.
-hickory-resolver = { version = "0.24", features = ["system-config"] }
+# System-configured DNS record queries, confined to the fixed resolver pool. Only with the
+# `dns-records` feature; `dns.lookup` is the system resolver and needs none of it.
+hickory-resolver = { version = "0.24", features = ["system-config"], optional = true }
 
 # TLS client/server handshakes and certificate verification within the mio reactor.
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
@@ -80,8 +81,9 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 rustls-native-certs = "0.8"
 # Node's PEM ca/cert/key options, parsed without OpenSSL.
 rustls-pemfile = "2.2"
-# Decode getPeerCertificate metadata; TLS verification itself remains rustls/webpki.
-x509-parser = "0.18"
+# Decode getPeerCertificate metadata; TLS verification itself remains rustls/webpki. Only with
+# the `x509` feature.
+x509-parser = { version = "0.18", optional = true }
 
 # Incremental HTTP/1 head parsing without a blocking HTTP client or async runtime.
 httparse = "1.10"
@@ -91,16 +93,16 @@ tungstenite = { version = "0.28", default-features = false, features = ["handsha
 
 # `module.stripTypeScriptTypes`: oxc's TypeScript parser, for the spans the strip mode blanks
 # out, and its transformer and printer for the transform mode. 0.146 is the newest oxc that
-# builds on Rust 1.95; later releases ask for 1.96 and up.
-oxc_allocator = "0.146"
-oxc_ast = "0.146"
-oxc_ast_visit = "0.146"
-oxc_codegen = "0.146"
-oxc_diagnostics = "0.146"
-oxc_parser = "0.146"
-oxc_semantic = "0.146"
-oxc_span = "0.146"
-oxc_transformer = "0.146"
+# builds on Rust 1.95; later releases ask for 1.96 and up. Only with the `typescript` feature.
+oxc_allocator = { version = "0.146", optional = true }
+oxc_ast = { version = "0.146", optional = true }
+oxc_ast_visit = { version = "0.146", optional = true }
+oxc_codegen = { version = "0.146", optional = true }
+oxc_diagnostics = { version = "0.146", optional = true }
+oxc_parser = { version = "0.146", optional = true }
+oxc_semantic = { version = "0.146", optional = true }
+oxc_span = { version = "0.146", optional = true }
+oxc_transformer = { version = "0.146", optional = true }
 
 # `verve::npm`: installing a package.json's dependencies without npm. A blocking HTTP client
 # on the rustls Verve's network stack already carries, and tar for the tarballs (gzip is flate2).
@@ -116,9 +118,34 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [features]
-default = ["npm"]
+# Every API Verve carries by default. An Electron build turns off what its compatibility target
+# does not need, one switch at a time; see `docs/electron/size.md`.
+default = ["npm", "typescript", "wasm", "dns-records", "x509", "brotli"]
 # The npm installer: an embedder that installs no packages leaves out its HTTP client.
 npm = ["dep:ureq", "dep:tar", "dep:base64"]
+# `module.stripTypeScriptTypes`: oxc's TypeScript parser and transformer. Without it the
+# function is still there and throws `ERR_NOT_SUPPORTED`.
+typescript = [
+    "dep:oxc_allocator",
+    "dep:oxc_ast",
+    "dep:oxc_ast_visit",
+    "dep:oxc_codegen",
+    "dep:oxc_diagnostics",
+    "dep:oxc_parser",
+    "dep:oxc_semantic",
+    "dep:oxc_span",
+    "dep:oxc_transformer",
+]
+# `WebAssembly`, run by wasmi. Without it there is no `WebAssembly` global.
+wasm = ["dep:wasmi"]
+# `dns.resolve4/6/Txt/Srv`: record queries by hickory. Without it only `dns.lookup` answers.
+dns-records = ["dep:hickory-resolver"]
+# `getPeerCertificate`'s subject, issuer, validity and SANs, by x509-parser. Without it the
+# certificate keeps `raw` and its fingerprints, as documented in `docs/electron/size.md`.
+x509 = ["dep:x509-parser"]
+# `zlib.brotliCompress`: brotli's encoder. Decoding (`fetch`'s `br`, `zlib.brotliDecompress`)
+# stays, so the crate stays; the feature only keeps the encoder out of the link.
+brotli = []
 # Boa's baseline JIT: hot functions run as native code (see `docs/jit.md`). Switched off at
 # runtime with `VERVE_JIT=0` or `Runtime::set_jit_enabled(false)`.
 jit = ["boa_engine/jit"]

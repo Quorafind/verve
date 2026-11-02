@@ -31,6 +31,7 @@ fn run(body: &str) -> Vec<String> {
     result_of(&mut Runtime::new(), body)
 }
 
+#[cfg(feature = "brotli")]
 #[test]
 fn every_format_synchronously_and_what_node_made() {
     let result = run(r#"
