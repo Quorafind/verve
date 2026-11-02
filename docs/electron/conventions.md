@@ -54,6 +54,11 @@
 - **每个里程碑结束**：一次重构关卡（`R1`–`R4`，见 `README.md`）。关卡不过，下一里程碑的包不派发。
 - 重构 PR 的描述必须给出：删了多少行、合并了哪些重复、`cargo test --workspace` 与体积前后对比。
 
+## 提交钩子
+
+仓库的 `core.hooksPath` 指向 `scripts/hooks`：每次 commit 自动跑 `cargo fmt --all --check` 和 `scripts/style-check.sh`，
+不过就提交不了。**不许用 `--no-verify` 绕过**；钩子拦下了就按提示修。
+
 ## 构建纪律（多个实现者共用一台机器）
 
 - **先写，少编译**：一块完整功能写完再验证，不要每改几行就编译。
