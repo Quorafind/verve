@@ -188,3 +188,26 @@ fn an_emitter_extends_and_mixes_in_as_old_code_does() {
     "#);
     assert_eq!(result, ["true", "7", "3", "function", "true"]);
 }
+
+#[test]
+fn once_is_this_on_and_prepend_once_is_this_prepend_listener() {
+    let (result, _) = run(r#"
+        const EventEmitter = require('events');
+        const seen = [];
+        class Loud extends EventEmitter {
+            on(type, fn) { seen.push('on ' + type); return super.on(type, fn) }
+            prependListener(type, fn) { seen.push('prepend ' + type); return super.prependListener(type, fn) }
+        }
+        const e = new Loud();
+        const heard = [];
+        const f = (v) => heard.push(v);
+        const returned = e.once('x', f);
+        e.prependOnceListener('y', f);
+        e.addListener('z', f);
+        e.emit('x', 1); e.emit('x', 2); e.emit('y', 3);
+        exports.result = [
+            seen.join(','), String(returned === e), heard.join(','), String(e.listenerCount('x')),
+        ];
+    "#);
+    assert_eq!(result, ["on x,prepend y", "true", "1,3", "0"]);
+}

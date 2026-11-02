@@ -543,11 +543,11 @@ const EMITTER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("once", 2, |this, args, cx| {
         let wrapper = once_wrapper(this, &arg(args, 0), &arg(args, 1), cx)?;
-        add_listener(this, &arg(args, 0), &wrapper, false, cx)
+        invoke(this, "on", &[arg(args, 0), wrapper], cx)
     }),
     ("prependOnceListener", 2, |this, args, cx| {
         let wrapper = once_wrapper(this, &arg(args, 0), &arg(args, 1), cx)?;
-        add_listener(this, &arg(args, 0), &wrapper, true, cx)
+        invoke(this, "prependListener", &[arg(args, 0), wrapper], cx)
     }),
     ("off", 2, |this, args, cx| {
         remove_listener(this, &arg(args, 0), &arg(args, 1), cx)
