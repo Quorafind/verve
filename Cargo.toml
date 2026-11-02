@@ -16,7 +16,7 @@ path = "src/bin/verve.rs"
 
 [workspace]
 # `verve-dom`: a document for the realm, opt-in — see its README.
-members = ["crates/verve-dom"]
+members = ["crates/verve-dom", "crates/verve-asar"]
 # Boa keeps its own workspace, as upstream has it, so `git subtree pull` stays a plain merge.
 exclude = ["boa"]
 
