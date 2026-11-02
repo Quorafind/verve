@@ -44,11 +44,19 @@ pub(crate) fn abort_error(context: &mut Context, reason: JsValue) -> JsValue {
     error.into()
 }
 
-/// The `EventEmitter` class, made once for the realm.
-pub(crate) fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
+/// The `EventEmitter` class, made once for the realm: what a host's own emitter classes extend.
+pub fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
     crate::modules::node_module(context, "events")?
         .as_object()
         .ok_or_else(|| crate::native::type_error("EventEmitter is not a class"))
+}
+
+/// `EventEmitter.call(this)`: an object of a class extending [`emitter_class`] set up as an
+/// emitter. The `init` of such a class runs it first.
+pub fn emitter_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResult<()> {
+    let emitter = emitter_class(context)?;
+    crate::call(context, &emitter.into(), &this.clone().into(), &[])?;
+    Ok(())
 }
 
 // ─── Where listeners are kept ────────────────────────────────────────────────────────────────
