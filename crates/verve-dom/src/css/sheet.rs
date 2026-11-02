@@ -2,7 +2,7 @@
 
 use super::media::MediaQuery;
 use super::selector::{Pseudo, SelectorList};
-use super::split_outside;
+use super::syntax::{matching_brace, split_outside, strip_comments};
 
 /// One declaration of a rule or an inline style.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,41 +112,6 @@ pub fn split_rules(css: &str) -> Vec<String> {
         rest = trimmed.get(close + 1..).unwrap_or("");
     }
     out
-}
-
-fn strip_comments(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("/*") {
-        out.push_str(&rest[..start]);
-        rest = match rest[start + 2..].find("*/") {
-            Some(end) => &rest[start + 2 + end + 2..],
-            None => "",
-        };
-    }
-    out.push_str(rest);
-    out
-}
-
-fn matching_brace(text: &str, open: usize) -> Option<usize> {
-    let mut depth = 0;
-    let mut quote: Option<char> = None;
-    for (offset, c) in text[open..].char_indices() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), _) => {}
-            (None, '"' | '\'') => quote = Some(c),
-            (None, '{') => depth += 1,
-            (None, '}') => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(open + offset);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn parse_block(text: &str, media: &[MediaQuery], rules: &mut Vec<Rule>) {

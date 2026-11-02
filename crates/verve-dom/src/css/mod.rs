@@ -31,6 +31,7 @@ mod scope;
 mod selector;
 mod sheet;
 mod styler;
+mod syntax;
 mod values;
 
 pub use cascade::{Computed, Origin, Style, style_of};
@@ -40,43 +41,6 @@ pub use sheet::{Declaration, Sheet, declarations, split_rules};
 pub use styler::Styler;
 pub use values::{USER_AGENT_SHEET, color, initial_value, is_inherited, length};
 pub(crate) use values::{font_longhands, font_size_px, value_or_initial};
-
-fn split_outside(text: &str, separator: char) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut depth = 0i32;
-    let mut quote: Option<char> = None;
-    let mut current = String::new();
-    let mut escaped = false;
-    for c in text.chars() {
-        if escaped {
-            current.push(c);
-            escaped = false;
-            continue;
-        }
-        match (quote, c) {
-            (_, '\\') => {
-                escaped = true;
-                current.push(c);
-                continue;
-            }
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), _) => {}
-            (None, '"' | '\'') => quote = Some(c),
-            (None, '(' | '[') => depth += 1,
-            (None, ')' | ']') => depth -= 1,
-            (None, c) if c == separator && depth <= 0 => {
-                out.push(std::mem::take(&mut current));
-                continue;
-            }
-            _ => {}
-        }
-        current.push(c);
-    }
-    if !current.trim().is_empty() {
-        out.push(current);
-    }
-    out
-}
 
 #[cfg(test)]
 mod tests {

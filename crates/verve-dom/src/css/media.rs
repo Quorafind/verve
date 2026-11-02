@@ -1,6 +1,6 @@
 //! `@media` and `matchMedia`: what the viewport and the window's preferences answer.
 
-use super::split_outside;
+use super::syntax::split_outside;
 use super::values::length;
 
 /// A media query, as `@media` and `matchMedia` give it.

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::cascade::Style;
-use super::split_outside;
+use super::syntax::split_outside;
 
 /// The properties a child takes from its parent unless something says otherwise.
 const INHERITED: &[&str] = &[
