@@ -138,7 +138,7 @@ impl<G: Guest> Shared<G> {
 /// finish: once it has done what it was sent, the guest's [`Guest::shutdown`] runs and the thread
 /// ends.
 pub struct Isolate<G: Guest> {
-    inbox: Sender<(u64, Job<G>)>,
+    inbox: Arc<Sender<(u64, Job<G>)>>,
     shared: Arc<Shared<G>>,
     next: std::cell::Cell<u64>,
 }
@@ -174,7 +174,7 @@ impl<G: Guest> Isolate<G> {
                 run(make, jobs, &thread_shared, idle)
             })?;
         Ok(Self {
-            inbox,
+            inbox: Arc::new(inbox),
             shared,
             next: std::cell::Cell::new(0),
         })
@@ -187,6 +187,20 @@ impl<G: Guest> Isolate<G> {
         self.next.set(n);
         let _ = self.inbox.send((n, Box::new(job)));
         n
+    }
+
+    /// A function that wakes the isolate's thread, from any thread, so it runs its beat now
+    /// rather than at its next due time: what a guest hands its runtime's `set_waker`, so work
+    /// finished elsewhere (a socket, a worker) is not left waiting for the idle sleep. It holds
+    /// the isolate's inbox weakly, so keeping it does not keep the isolate alive, and it does
+    /// nothing once the [`Isolate`] is dropped.
+    pub fn poker(&self) -> crate::Waker {
+        let inbox = Arc::downgrade(&self.inbox);
+        Arc::new(move || {
+            if let Some(inbox) = inbox.upgrade() {
+                let _ = inbox.send((0, Box::new(|_, _| {})));
+            }
+        })
     }
 
     /// The newest view published since this was last asked.
@@ -328,8 +342,11 @@ fn run<G: Guest>(
             for (n, job) in batch {
                 job(&mut guest, &mut out);
                 guest.drain(&mut out);
-                applied = n;
-                shared.applied.store(n, Ordering::SeqCst);
+                // Job 0 is a poke: it ran the beat, and is no job anyone waits for.
+                if n != 0 {
+                    applied = n;
+                    shared.applied.store(n, Ordering::SeqCst);
+                }
             }
             // What the jobs made happen is told before the beat, which may run long.
             if deliver(shared, &mut out) {

@@ -212,3 +212,68 @@ fn what_a_guest_says_reaches_the_embedder_before_a_long_beat() {
         ["from a job"]
     );
 }
+
+/// A guest that counts its beats, and says when it was dropped.
+struct Counting {
+    beats: Arc<AtomicUsize>,
+    ended: Arc<AtomicUsize>,
+}
+
+impl Guest for Counting {
+    type View = ();
+    type Event = ();
+
+    fn tick(&mut self) {
+        self.beats.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn next_due(&self) -> Option<Duration> {
+        None
+    }
+
+    fn drain(&mut self, _: &mut Outbox<()>) {}
+
+    fn publish(&mut self, _: u64, _: bool) -> Option<()> {
+        None
+    }
+
+    fn shutdown(&mut self) {
+        self.ended.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn a_poke_runs_the_beat_at_once_and_does_not_keep_the_isolate_alive() {
+    let (beats, ended) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let guest = Counting {
+        beats: Arc::clone(&beats),
+        ended: Arc::clone(&ended),
+    };
+    let isolate = Isolate::spawn(
+        Options {
+            idle: Duration::from_secs(30),
+            ..Options::default()
+        },
+        move || guest,
+        || {},
+    )
+    .unwrap();
+    let poke = isolate.poker();
+    let before = beats.load(Ordering::SeqCst);
+    poke();
+    let started = Instant::now();
+    while beats.load(Ordering::SeqCst) == before && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(beats.load(Ordering::SeqCst) > before, "the poke ran a beat");
+    assert_eq!(isolate.applied(), 0, "a poke is no numbered job");
+
+    // The poker is still held, and the isolate still ends when it is let go.
+    drop(isolate);
+    let started = Instant::now();
+    while ended.load(Ordering::SeqCst) == 0 && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(ended.load(Ordering::SeqCst), 1);
+    poke();
+}
