@@ -9,13 +9,20 @@
 //! An object that stands for something else the document keeps — a node's `classList`, its
 //! `style`, a `<style>`'s sheet — carries a [`Handle`]: what kind of thing, and its number.
 
+pub mod animation;
+pub mod computed;
+pub mod custom;
 pub mod document;
 pub mod element;
 pub mod events;
 pub mod fetch;
+pub mod fonts;
+pub mod live;
 pub mod node;
 pub mod observers;
 pub mod platform;
+pub mod reveal;
+pub mod slot;
 pub mod traversal;
 pub mod window;
 pub mod xhr;
@@ -33,6 +40,20 @@ use crate::state::shared;
 
 /// A method: its name, how many arguments it declares, and the native.
 pub type Method = (&'static str, usize, NativeFunctionPointer);
+/// Runs the native `f` in a microtask, through the global `queueMicrotask`. If a script has
+/// broken that there is no one to tell, and nothing else to do: the work is dropped.
+/// R1: once `verve::native` is public (P03) this goes through the runtime's own microtask queue,
+/// which a script cannot replace.
+pub fn queue_microtask(context: &mut Context, name: &str, f: NativeFunctionPointer) {
+    let task = function(context, name, 0, f);
+    let queue = context
+        .global_object()
+        .get(js_string!("queueMicrotask"), context);
+    if let Ok(queue) = queue {
+        let _ = verve::call(context, &queue, &JsValue::undefined(), &[task.into()]);
+    }
+}
+
 /// An accessor: its name, its getter and its setter.
 pub type Accessor = (
     &'static str,
@@ -51,6 +72,27 @@ pub enum Kind {
     Sheet,
     /// A `new CSSStyleSheet()`, by its number.
     Constructed,
+    /// A `CanvasRenderingContext2D`, by the canvas it draws into.
+    #[cfg(feature = "canvas")]
+    Context2d,
+    /// A `CanvasGradient`, by its number.
+    #[cfg(feature = "canvas")]
+    Gradient,
+    /// A `CanvasPattern`, by its number.
+    #[cfg(feature = "canvas")]
+    Pattern,
+    /// A `Path2D`, by its number.
+    #[cfg(feature = "canvas")]
+    Path,
+    /// An `ImageBitmap`, by its number.
+    #[cfg(feature = "canvas")]
+    Bitmap,
+    /// An `OffscreenCanvas`, by its canvas's number.
+    #[cfg(feature = "canvas")]
+    Offscreen,
+    /// An `ImageBitmapRenderingContext`, by the canvas it shows.
+    #[cfg(feature = "canvas")]
+    BitmapRenderer,
     /// An instance whose state is all in its own properties.
     Plain,
 }
@@ -61,6 +103,9 @@ pub struct Handle {
     pub kind: Kind,
     #[unsafe_ignore_trace]
     pub id: u32,
+    /// For a computed style: the part of the element, if any, that it is about.
+    #[unsafe_ignore_trace]
+    pub target: computed::Target,
 }
 
 pub fn handle(value: &JsValue) -> Option<(Kind, u32)> {
@@ -357,7 +402,11 @@ pub fn instance(
     let prototype = prototype_of_target(new_target, context)?;
     Ok(JsObject::from_proto_and_data(
         prototype,
-        Handle { kind, id },
+        Handle {
+            kind,
+            id,
+            target: computed::Target::default(),
+        },
     ))
 }
 
@@ -377,7 +426,14 @@ pub fn prototype_of_target(new_target: &JsValue, context: &mut Context) -> JsRes
 /// An instance of one of the classes made here, made by the host itself.
 pub fn native_instance(context: &Context, class: &str, kind: Kind, id: u32) -> JsObject {
     let prototype = shared(context).borrow().prototype(class);
-    JsObject::from_proto_and_data(prototype, Handle { kind, id })
+    JsObject::from_proto_and_data(
+        prototype,
+        Handle {
+            kind,
+            id,
+            target: computed::Target::default(),
+        },
+    )
 }
 
 /// The constructor of a class made here, by name.

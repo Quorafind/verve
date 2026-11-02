@@ -7,7 +7,7 @@
 //! (`clipboard`, `geolocation`, `share`…) belongs to the host's window, which may put its own
 //! `navigator` in place of this one.
 
-use boa_engine::{Context, JsResult, JsString, JsValue, js_string};
+use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 
 use crate::native::{array, exports, js_text, object};
 use crate::process::{CHROME_VERSION, ELECTRON_VERSION};
@@ -21,7 +21,7 @@ fn machine() -> (&'static str, &'static str) {
     }
 }
 
-/// The user agent Electron's renderer sends.
+/// What the user agent Electron's renderer sends.
 pub(crate) fn user_agent() -> String {
     format!(
         "Mozilla/5.0 ({}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION} Electron/{ELECTRON_VERSION} Safari/537.36",
@@ -29,39 +29,53 @@ pub(crate) fn user_agent() -> String {
     )
 }
 
-fn make(context: &mut Context) -> JsResult<JsValue> {
-    let navigator = object(context);
-    let agent = user_agent();
-    let major = CHROME_VERSION.split('.').next().unwrap_or("138");
-    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let platform = machine().1;
-    let values: [(&str, JsValue); 18] = [
-        ("userAgent", js_text(&agent)),
-        ("appVersion", js_text(agent.trim_start_matches("Mozilla/"))),
-        ("appName", js_text("Netscape")),
-        ("appCodeName", js_text("Mozilla")),
-        ("product", js_text("Gecko")),
-        ("productSub", js_text("20030107")),
-        ("vendor", js_text("Google Inc.")),
-        ("vendorSub", js_text("")),
-        ("platform", js_text(platform)),
-        ("language", js_text("en-US")),
-        ("hardwareConcurrency", cores.into()),
-        ("deviceMemory", 8.into()),
-        ("maxTouchPoints", 0.into()),
-        ("onLine", true.into()),
-        ("cookieEnabled", true.into()),
-        ("pdfViewerEnabled", true.into()),
-        ("webdriver", false.into()),
-        ("doNotTrack", JsValue::null()),
-    ];
-    for (key, value) in values {
-        navigator.set(JsString::from(key), value, false, context)?;
-    }
-    let languages = array(context, vec![js_text("en-US"), js_text("en")]);
-    navigator.set(js_string!("languages"), languages, false, context)?;
+/// `navigator.appVersion`, from the whole user agent: what follows `Mozilla/`, as browsers
+/// answer it.
+fn app_version(agent: &str) -> &str {
+    agent.trim_start_matches("Mozilla/")
+}
 
-    // `userAgentData`: Chromium's client hints.
+/// The user agent `navigator` answers: the embedder's when it set one, else Electron's.
+fn agent_of(context: &Context) -> String {
+    let set = crate::shared(context).user_agent.borrow().clone();
+    set.unwrap_or_else(user_agent)
+}
+
+/// Puts `agent`, and the `appVersion` that follows from it, on `navigator`.
+fn set_agent(navigator: &JsObject, agent: &str, context: &mut Context) -> JsResult<()> {
+    navigator.set(js_string!("userAgent"), js_text(agent), false, context)?;
+    navigator.set(
+        js_string!("appVersion"),
+        js_text(app_version(agent)),
+        false,
+        context,
+    )?;
+    Ok(())
+}
+
+/// The user agent `navigator` answers from now on, whole. The realm's own record is replaced,
+/// and a `navigator` the scripts already read is mended in place; one they never read is made
+/// from the record when they do, so this makes nothing they do not ask for.
+pub(crate) fn set_user_agent(context: &mut Context, agent: String) {
+    crate::shared(context)
+        .user_agent
+        .borrow_mut()
+        .replace(agent);
+    let Some(navigator) = crate::native::lazy_value(context, "navigator") else {
+        return;
+    };
+    let Some(navigator) = navigator.as_object() else {
+        return;
+    };
+    let agent = agent_of(context);
+    // The scripts' own `navigator` can have been frozen; it then keeps the agent it had, and the
+    // record above is what a `navigator` made later answers.
+    let _ = set_agent(&navigator, &agent, context);
+}
+
+/// `navigator.userAgentData`: Chromium's client hints.
+fn client_hints(context: &mut Context) -> JsResult<JsObject> {
+    let major = CHROME_VERSION.split('.').next().unwrap_or("138");
     let data = object(context);
     let mut brands = Vec::new();
     for (brand, version) in [("Not)A;Brand", "8"), ("Chromium", major)] {
@@ -121,6 +135,41 @@ fn make(context: &mut Context) -> JsResult<JsValue> {
             }),
         ],
     )?;
+    Ok(data)
+}
+
+fn make(context: &mut Context) -> JsResult<JsValue> {
+    let navigator = object(context);
+    let agent = agent_of(context);
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let platform = machine().1;
+    let values: [(&str, JsValue); 18] = [
+        ("userAgent", js_text(&agent)),
+        ("appVersion", js_text(app_version(&agent))),
+        ("appName", js_text("Netscape")),
+        ("appCodeName", js_text("Mozilla")),
+        ("product", js_text("Gecko")),
+        ("productSub", js_text("20030107")),
+        ("vendor", js_text("Google Inc.")),
+        ("vendorSub", js_text("")),
+        ("platform", js_text(platform)),
+        ("language", js_text("en-US")),
+        ("hardwareConcurrency", cores.into()),
+        ("deviceMemory", 8.into()),
+        ("maxTouchPoints", 0.into()),
+        ("onLine", true.into()),
+        ("cookieEnabled", true.into()),
+        ("pdfViewerEnabled", true.into()),
+        ("webdriver", false.into()),
+        ("doNotTrack", JsValue::null()),
+    ];
+    for (key, value) in values {
+        navigator.set(JsString::from(key), value, false, context)?;
+    }
+    let languages = array(context, vec![js_text("en-US"), js_text("en")]);
+    navigator.set(js_string!("languages"), languages, false, context)?;
+
+    let data = client_hints(context)?;
     navigator.set(js_string!("userAgentData"), data, false, context)?;
     exports(
         context,

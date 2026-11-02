@@ -14,6 +14,13 @@ use std::sync::Arc;
 
 use crate::field::Draft;
 
+mod reclaim;
+mod shadow;
+
+use shadow::Shadows;
+pub(crate) use shadow::is_custom_element_name;
+pub use shadow::{Shadow, ShadowMode, SlotAssignment};
+
 /// 节点编号保持 32 位：低 24 位是槽位，高 8 位是代数；代数耗尽的槽位不再复用。
 pub type NodeId = u32;
 
@@ -178,7 +185,7 @@ const INDEX_MASK: u32 = (1 << INDEX_BITS) - 1;
 const MAX_GENERATION: u32 = u8::MAX as u32;
 
 fn split(id: NodeId) -> (usize, u32) {
-    ((id & INDEX_MASK) as usize, (id >> INDEX_BITS) as u32)
+    ((id & INDEX_MASK) as usize, id >> INDEX_BITS)
 }
 
 fn join(index: usize, generation: u32) -> NodeId {
@@ -187,6 +194,15 @@ fn join(index: usize, generation: u32) -> NodeId {
 
 /// How many nodes an arena holds at most, unless told otherwise ([`Dom::max_nodes`]).
 pub const DEFAULT_MAX_NODES: usize = 1 << 24;
+
+/// An attribute that changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AttrChange {
+    pub node: NodeId,
+    pub name: String,
+    pub old: Option<String>,
+    pub new: Option<String>,
+}
 
 /// What a script's change was, as a `MutationObserver` hears it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,6 +275,11 @@ pub struct Dom {
     mutations: Vec<(Mutation, Vec<NodeId>)>,
     /// Whether to keep [`Mutation`]s: while a `MutationObserver` watches.
     pub record_mutations: bool,
+    /// Attribute changes since the bindings last looked, kept while [`Dom::watch_attrs`] says:
+    /// what `attributeChangedCallback` is told.
+    attr_log: Vec<AttrChange>,
+    /// Whether to keep the attribute log: once a custom element observes attributes.
+    pub(crate) watch_attrs: bool,
     /// Trees in no tree: candidates for reclaiming.
     roots: HashSet<NodeId>,
     /// Nodes the host itself holds — the document, the places it puts things — never reclaimed.
@@ -267,6 +288,10 @@ pub struct Dom {
     partitions: HashSet<NodeId>,
     /// Every `<style>` element made: the ones in the document are stylesheets.
     styles: HashSet<NodeId>,
+    /// The shadow roots and what is assigned to their slots.
+    shadows: Shadows,
+    /// Whether something that decides a slot's assignment changed since it was last asked.
+    slot_dirty: bool,
     /// Moves when what a `<style>` holds, or which are in the document, may have changed.
     styles_revision: u64,
     /// Where the last child looked up was among its parent's children: walking siblings one
@@ -307,6 +332,8 @@ impl Dom {
             changed_set: HashSet::new(),
             media_changed: HashSet::new(),
             moved: Vec::new(),
+            attr_log: Vec::new(),
+            watch_attrs: false,
             relinked: Vec::new(),
             mutations: Vec::new(),
             record_mutations: false,
@@ -314,6 +341,8 @@ impl Dom {
             pinned: HashSet::new(),
             partitions: HashSet::new(),
             styles: HashSet::new(),
+            shadows: Shadows::default(),
+            slot_dirty: false,
             styles_revision: 0,
             sibling_hint: Default::default(),
             max_nodes: DEFAULT_MAX_NODES,
@@ -435,6 +464,11 @@ impl Dom {
     /// Subtrees that joined (`true`) or left (`false`) the document since this was last asked.
     pub fn take_moved(&mut self) -> Vec<(NodeId, bool)> {
         std::mem::take(&mut self.moved)
+    }
+
+    /// The attribute changes since this was last asked, while [`Dom::watch_attrs`] is on.
+    pub(crate) fn take_attr_changes(&mut self) -> Vec<AttrChange> {
+        std::mem::take(&mut self.attr_log)
     }
 
     pub(crate) fn take_relinked(&mut self) -> Vec<NodeId> {
@@ -690,7 +724,8 @@ impl Dom {
 
     /// Whether the element with the keyboard is `id` or inside it: `:focus-within`.
     pub fn focus_within(&self, id: NodeId) -> bool {
-        self.focused.is_some_and(|f| self.contains(id, f))
+        self.focused
+            .is_some_and(|f| self.shadow_including_contains(id, f))
     }
 
     /// The root of the tree `id` is in.
@@ -735,6 +770,7 @@ impl Dom {
             if let Some(node) = &slot.node {
                 style |= node.tag() == Some("style");
                 stack.extend(node.children.iter().copied());
+                stack.extend(self.shadows.root_of_host(at));
                 if node.namespace == Namespace::Html
                     && matches!(node.tag(), Some("video" | "audio"))
                 {
@@ -808,6 +844,7 @@ impl Dom {
         if let Some(node) = self.node_mut(parent) {
             node.children.remove(at);
         }
+        self.note_slot_input(None);
         self.unlink(id);
         self.mark(parent);
         self.record(Mutation::ChildList {
@@ -994,6 +1031,7 @@ impl Dom {
 
     /// Puts `nodes`, in no tree now, in `parent` before `before` (or last), as one change.
     fn place(&mut self, parent: NodeId, nodes: Vec<NodeId>, before: Option<NodeId>) -> bool {
+        self.note_slot_input(None);
         let connected = self.is_connected(parent);
         let at = before
             .and_then(|before| self.index_of(parent, before))
@@ -1041,6 +1079,7 @@ impl Dom {
             Some(node) if !node.children.is_empty() => std::mem::take(&mut node.children),
             _ => return,
         };
+        self.note_slot_input(None);
         for (at, child) in children.iter().enumerate() {
             self.unlink(*child);
             if self.record_mutations {
@@ -1133,7 +1172,7 @@ impl Dom {
         } else {
             name.to_owned()
         };
-        let old = if self.record_mutations {
+        let old = if self.record_mutations || self.watch_attrs {
             self.get_attr(id, &name)
         } else {
             None
@@ -1168,12 +1207,26 @@ impl Dom {
             }
             _ => upsert(&mut node.attrs, &name, value),
         }
+        self.note_slot_input(Some(&name));
         self.mark(id);
+        self.log_attr(id, &name, old.clone(), Some(value.to_owned()));
         self.record(Mutation::Attributes {
             target: id,
             name,
             old,
         });
+    }
+
+    fn log_attr(&mut self, id: NodeId, name: &str, old: Option<String>, new: Option<String>) {
+        if self.watch_attrs {
+            let name = name.to_owned();
+            self.attr_log.push(AttrChange {
+                node: id,
+                name,
+                old,
+                new,
+            });
+        }
     }
 
     pub fn remove_attr(&mut self, id: NodeId, name: &str) {
@@ -1201,6 +1254,8 @@ impl Dom {
             node.attrs.retain(|(key, _)| *key != name);
             self.mark(id);
         }
+        self.note_slot_input(Some(&name));
+        self.log_attr(id, &name, old.clone(), None);
         self.record(Mutation::Attributes {
             target: id,
             name,
@@ -1529,7 +1584,8 @@ impl Dom {
     }
 
     /// Whether the node is drawn: in the document, and neither it nor anything it is in hidden
-    /// by its own inline style or the `hidden` attribute.
+    /// by its own inline style or the `hidden` attribute. Taken along the flat tree, so a
+    /// slotted node is hidden when what it is slotted into is.
     pub fn is_shown(&self, id: NodeId) -> bool {
         let mut at = Some(id);
         while let Some(node) = at {
@@ -1538,73 +1594,13 @@ impl Dom {
             }) {
                 return false;
             }
-            at = self.parent(node);
+            at = self.flat_parent(node);
+            // A host's child that no slot takes is not drawn.
+            if at.is_none() && self.parent(node).is_some() {
+                return false;
+            }
         }
         self.is_connected(id)
-    }
-
-    /// The roots of detached trees, the candidates for [`Dom::free`].
-    pub fn detached_roots(&self) -> Vec<NodeId> {
-        self.roots
-            .iter()
-            .copied()
-            .filter(|id| *id != self.document && !self.pinned.contains(id))
-            .collect()
-    }
-
-    /// Forgets the node and everything in it. Only for what no handle can reach any more:
-    /// answers the ids freed, so whoever kept something against them can let it go.
-    pub fn free(&mut self, id: NodeId) -> Vec<NodeId> {
-        self.detach(id);
-        let mut freed = Vec::new();
-        let mut stack = vec![id];
-        while let Some(at) = stack.pop() {
-            let (index, generation) = split(at);
-            let Some(slot) = self.slots.get_mut(index) else {
-                continue;
-            };
-            if slot.generation != generation {
-                continue;
-            }
-            if let Some(node) = slot.node.take() {
-                match Arc::try_unwrap(node) {
-                    Ok(node) => stack.extend(node.children),
-                    Err(shared) => stack.extend(shared.children.iter().copied()),
-                }
-                slot.connected = false;
-                // A place whose generations ran out is retired: no id is ever given twice.
-                if slot.generation < MAX_GENERATION {
-                    slot.generation += 1;
-                    self.free.push(index as u32);
-                }
-                self.live -= 1;
-                self.roots.remove(&at);
-                self.partitions.remove(&at);
-                self.styles.remove(&at);
-                self.pinned.remove(&at);
-                freed.push(at);
-            }
-        }
-        let gone: HashSet<NodeId> = freed.iter().copied().collect();
-        self.hovered.retain(|h| !gone.contains(h));
-        if self.focused.is_some_and(|f| gone.contains(&f)) {
-            self.focused = None;
-        }
-        if self.active.is_some_and(|a| gone.contains(&a)) {
-            self.active = None;
-        }
-        let mut was_changed = false;
-        for id in &freed {
-            was_changed |= self.changed_set.remove(id);
-        }
-        if was_changed {
-            self.changed.retain(|c| !gone.contains(c));
-        }
-        self.relinked.retain(|r| !gone.contains(r));
-        self.moved.retain(|(id, _)| !gone.contains(id));
-        self.mutations.retain(|(m, _)| !gone.contains(&m.target()));
-        self.revision = self.revision.wrapping_add(1);
-        freed
     }
 
     /// How many nodes are alive.

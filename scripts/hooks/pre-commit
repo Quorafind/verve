@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# The fast half of the style checks, before every commit: formatting and scripts/style-check.sh.
+# Clippy and the tests are too slow for a hook; CI and the merge review run them.
+# Enabled for every worktree of this repository by `git config core.hooksPath scripts/hooks`.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+[ -f scripts/style-check.sh ] || exit 0
+if ! cargo fmt --all --check >/dev/null 2>&1; then
+    echo "pre-commit: run \`cargo fmt --all\` first" >&2
+    exit 1
+fi
+bash scripts/style-check.sh

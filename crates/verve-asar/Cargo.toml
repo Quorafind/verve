@@ -1,0 +1,24 @@
+[package]
+name = "verve-asar"
+version = "0.1.0"
+edition = "2024"
+description = "Electron's app.asar for Verve: the archive reader and the virtual filesystem that lets fs, require and import read inside it."
+publish = false
+
+# A standalone crate, with nothing of the GUI in it: `verve-electron` installs its overlay on
+# the runtimes it makes. It reads `.asar` archives and implements `verve::vfs::Overlay` for them.
+
+[dependencies]
+verve = { path = "../..", default-features = false }
+# The archive's header is JSON; its files' integrity blocks and cache keys are SHA-256.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+# The name of the folder packed files are extracted to: no one can guess it.
+getrandom = "0.3"
+
+[dev-dependencies]
+boa_engine = { version = "=0.22.0", default-features = false, features = ["annex-b"] }
+
+[lints]
+workspace = true

@@ -274,11 +274,11 @@ fn settle(
             .resolvers
             .clone();
         match &reason {
-            Some(reason) => {
-                resolvers
-                    .reject
-                    .call(&JsValue::undefined(), &[reason.clone()], context)?
-            }
+            Some(reason) => resolvers.reject.call(
+                &JsValue::undefined(),
+                std::slice::from_ref(reason),
+                context,
+            )?,
             None => {
                 resolvers
                     .resolve
@@ -696,10 +696,13 @@ fn same_generation(context: &Context, node: NodeId, generation: u64) -> bool {
             .is_some_and(|r| r.data.generation == generation)
 }
 
+/// A play promise settled: which one (none for all), and the error it was rejected with.
+type Settlement = (Option<u64>, Option<(String, String)>);
+
 #[derive(Default)]
 struct Effects {
     events: Vec<&'static str>,
-    settlement: Option<(Option<u64>, Option<(String, String)>)>,
+    settlement: Option<Settlement>,
     transport: Option<(u64, bool)>,
 }
 

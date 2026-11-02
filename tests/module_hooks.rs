@@ -2,7 +2,7 @@
 //! vendored payload of `.js` modules with no `package.json`, source handed to the loader for a
 //! file it could not read itself, hooks chained, and hooks taken out again.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use boa_engine::{builtins::promise::PromiseState, object::builtins::JsPromise};
 use verve::Runtime;
@@ -21,7 +21,7 @@ fn folder(test: &str, files: &[(&str, &str)]) -> PathBuf {
 
 /// Runs `main` as the module `main.mjs` in `dir` until it settles; answers `globalThis.result`
 /// as JSON, or the rejection.
-fn run(dir: &PathBuf, main: &str) -> Result<String, String> {
+fn run(dir: &Path, main: &str) -> Result<String, String> {
     let mut runtime = Runtime::new();
     let promise: JsPromise = runtime.load_esm(&dir.join("main.mjs"), main).unwrap();
     for _ in 0..20 {
@@ -56,7 +56,11 @@ impl CallWith for Runtime {
         body: &str,
     ) -> Result<boa_engine::JsValue, String> {
         let f = self.eval(&format!("(e) => {body}"))?;
-        self.call(&f, &boa_engine::JsValue::undefined(), &[value.clone()])
+        self.call(
+            &f,
+            &boa_engine::JsValue::undefined(),
+            std::slice::from_ref(value),
+        )
     }
 }
 
@@ -67,11 +71,19 @@ fn an_import_map_over_a_payload_of_untyped_js_modules() {
     let dir = folder(
         "map",
         &[
-            ("payload/vendor/cordis/index.js", "import { tag } from 'cosmokit';\nexport const name = 'cordis/' + tag;\n"),
-            ("payload/vendor/cosmokit/index.js", "export const tag = 'cosmokit';\n"),
+            (
+                "payload/vendor/cordis/index.js",
+                "import { tag } from 'cosmokit';\nexport const name = 'cordis/' + tag;\n",
+            ),
+            (
+                "payload/vendor/cosmokit/index.js",
+                "export const tag = 'cosmokit';\n",
+            ),
         ],
     );
-    let payload = url::Url::from_directory_path(dir.join("payload")).unwrap().to_string();
+    let payload = url::Url::from_directory_path(dir.join("payload"))
+        .unwrap()
+        .to_string();
     let main = format!(
         r#"
         import {{ registerHooks }} from 'node:module';
@@ -134,7 +146,10 @@ fn a_load_hook_hands_the_loader_source_it_could_not_read() {
 fn hooks_chain_last_registered_first_and_deregister() {
     let dir = folder(
         "chain",
-        &[("a.mjs", "export default 'a';\n"), ("b.mjs", "export default 'b';\n")],
+        &[
+            ("a.mjs", "export default 'a';\n"),
+            ("b.mjs", "export default 'b';\n"),
+        ],
     );
     let main = r#"
         import { registerHooks } from 'node:module';
@@ -196,7 +211,10 @@ fn a_hook_answering_the_wrong_shape_is_refused_by_name() {
         import { registerHooks } from 'node:module';
         try { registerHooks({ resolve: 1 }); } catch (e) { globalThis.result = e.code; }
     "#;
-    assert_eq!(run(&dir, not_a_function).unwrap(), r#""ERR_INVALID_ARG_TYPE""#);
+    assert_eq!(
+        run(&dir, not_a_function).unwrap(),
+        r#""ERR_INVALID_ARG_TYPE""#
+    );
 }
 
 #[test]
@@ -212,6 +230,7 @@ fn require_keeps_commonjs_resolution_unhooked() {
     assert_eq!(run(&dir, main).unwrap(), r#"{"value":"file","calls":0}"#);
 }
 
+#[cfg(feature = "typescript")]
 #[test]
 fn strip_typescript_types_erases_types_in_place() {
     let dir = folder("strip", &[]);

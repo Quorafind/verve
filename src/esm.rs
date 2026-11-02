@@ -17,7 +17,9 @@ use boa_engine::{
 use url::Url;
 
 use crate::esm_resolve::{self as resolve, Mode};
+use crate::fs::sys;
 use crate::native::{arg, closure, js_text, text_of};
+use crate::vfs::View;
 
 fn coded_error(context: &mut Context, message: &str, code: &str) -> JsError {
     if matches!(
@@ -134,7 +136,8 @@ impl Loader {
         let parent = self.parent(parent, context)?;
         let result = {
             let _resolving = crate::permission::Resolving::enter(context);
-            resolve::resolve(specifier, &parent, mode, &self.conditions.borrow())
+            let view = View::of(context);
+            resolve::resolve(&view, specifier, &parent, mode, &self.conditions.borrow())
         };
         let url = result.map_err(|e| resolve_error(context, e))?;
         match url.scheme() {
@@ -160,7 +163,7 @@ impl Loader {
             }
         }
         if check_file {
-            resolve::finalize(url).map_err(|e| resolve_error(context, e))
+            resolve::finalize(&View::of(context), url).map_err(|e| resolve_error(context, e))
         } else {
             if url.scheme() == "file" {
                 resolve::file_path(&url).map_err(|e| resolve_error(context, e))?;
@@ -249,10 +252,11 @@ impl Loader {
             _ => resolve::file_url(&absolute(filename, context))
                 .map_err(|e| resolve_error(context, e))?,
         };
+        let view = View::of(context);
         let url = if url.scheme() == "file"
-            && resolve::file_path(&url).is_ok_and(|path| path.is_file())
+            && resolve::file_path(&url).is_ok_and(|path| sys::is_file(&view, &path))
         {
-            resolve::finalize(url).map_err(|e| resolve_error(context, e))?
+            resolve::finalize(&view, url).map_err(|e| resolve_error(context, e))?
         } else {
             url
         };
@@ -281,7 +285,7 @@ impl Loader {
                     ));
                 }
                 crate::permission::read(context, &path)?;
-                let text = std::fs::read_to_string(&path).map_err(|e| {
+                let text = sys::read_to_string(&View::of(context), &path).map_err(|e| {
                     coded_error(
                         context,
                         &format!("{}: {e}", path.display()),
@@ -509,7 +513,7 @@ impl Loader {
         let url = if self.sources.borrow().contains_key(url.as_str()) {
             url
         } else {
-            resolve::finalize(url).map_err(|e| resolve_error(context, e))?
+            resolve::finalize(&View::of(context), url).map_err(|e| resolve_error(context, e))?
         };
         let key = url.to_string();
         if !self.requiring.borrow_mut().insert(key.clone()) {
@@ -584,7 +588,8 @@ impl Loader {
             .filter(|u| matches!(u.scheme(), "file" | "data" | "blob" | "node"))
             .or_else(|| resolve::file_url(&absolute(filename, context)).ok());
         if let Some(url) = url {
-            let canonical = resolve::finalize(url.clone()).unwrap_or(url.clone());
+            let canonical =
+                resolve::finalize(&View::of(context), url.clone()).unwrap_or(url.clone());
             for key in [url.as_str(), canonical.as_str()] {
                 self.modules.borrow_mut().remove(key);
                 self.sources.borrow_mut().remove(key);
@@ -688,7 +693,7 @@ pub(crate) fn is_esm(path: &Path, source: &str, context: &mut Context) -> JsResu
     }
     let scope = {
         let _resolving = crate::permission::Resolving::enter(context);
-        resolve::scope(path)
+        resolve::scope(&View::of(context), path)
     };
     if let Some((_, json)) = scope.map_err(|e| resolve_error(context, e))? {
         match json.get("type").and_then(resolve::Value::as_str) {
@@ -808,7 +813,7 @@ fn cjs_names(
                 && let Ok(path) = resolve::file_path(&url)
                 && !seen.contains(&path)
                 && crate::permission::read(context, &path).is_ok()
-                && let Ok(source) = std::fs::read_to_string(&path)
+                && let Ok(source) = sys::read_to_string(&View::of(context), &path)
             {
                 pending.push((path, source));
             }
@@ -837,7 +842,7 @@ fn data_source(url: &Url, context: &mut Context) -> JsResult<(String, bool)> {
     }
     let decoded = resolve::percent_decode(body).map_err(|e| resolve_error(context, e))?;
     let source = if header.split(';').any(|s| s.eq_ignore_ascii_case("base64")) {
-        let bytes = decode_base64(&decoded)
+        let bytes = crate::encoding::unbase64(&decoded)
             .ok_or_else(|| coded_error(context, "Invalid base64 data URL", "ERR_INVALID_URL"))?;
         String::from_utf8(bytes)
             .map_err(|_| coded_error(context, "Module source is not UTF-8", "ERR_INVALID_URL"))?
@@ -845,29 +850,4 @@ fn data_source(url: &Url, context: &mut Context) -> JsResult<(String, bool)> {
         decoded
     };
     Ok((source, json))
-}
-
-fn decode_base64(text: &str) -> Option<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut bits = 0u32;
-    let mut count = 0u32;
-    for byte in text.bytes().filter(|b| !b.is_ascii_whitespace()) {
-        let digit = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' => break,
-            _ => return None,
-        };
-        bits = (bits << 6) | u32::from(digit);
-        count += 6;
-        if count >= 8 {
-            count -= 8;
-            output.push((bits >> count) as u8);
-            bits &= (1 << count) - 1;
-        }
-    }
-    Some(output)
 }

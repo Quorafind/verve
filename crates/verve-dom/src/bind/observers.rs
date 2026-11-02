@@ -272,16 +272,10 @@ const OBSERVER_METHODS: &[Method] = &[
 /// Queues the delivery of the mutations recorded, a microtask from now.
 pub fn queue_delivery(context: &mut Context) {
     shared(context).borrow_mut().mutation_queued = true;
-    let deliver = super::function(context, "deliver", 0, |_, _, cx| {
+    super::queue_microtask(context, "deliver", |_, _, cx| {
         deliver_mutations(cx)?;
         Ok(JsValue::undefined())
     });
-    let queue = context
-        .global_object()
-        .get(js_string!("queueMicrotask"), context);
-    if let Ok(queue) = queue {
-        let _ = verve::call(context, &queue, &JsValue::undefined(), &[deliver.into()]);
-    }
 }
 
 /// Whether `observer` (with `options` on `target`) hears `mutation`.

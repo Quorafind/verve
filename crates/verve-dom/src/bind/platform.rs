@@ -3,21 +3,19 @@
 //! - `Range` and `Selection`;
 //! - `attributes` (`NamedNodeMap`, `Attr`);
 //! - shadow roots (held, and drawn as their host's content is not: see the crate's README);
-//! - custom elements: `customElements.define`, an element of the class made by
-//!   `createElement`, `connectedCallback` and `disconnectedCallback`;
 //! - a `<template>`'s `content`;
 //! - the CSSOM: a `<style>`'s `sheet`, `document.styleSheets`, `new CSSStyleSheet()` and
-//!   `adoptedStyleSheets`, `getComputedStyle` through the cascade, `CSS.escape`/`supports`;
+//!   `adoptedStyleSheets`, `CSS.escape`/`supports`;
 //! - a `<canvas>`'s 2D context — one that keeps its state and measures text, but paints
 //!   nothing — and no WebGL;
 //! - `DOMMatrix`, `DOMPoint`, `DOMRect`, `Path2D`; `DataTransfer`; `Image`, `Audio`, `Option`;
-//!   `document.fonts`; an element's `animate`.
+//!   an element's `animate`.
 //!
 //! Lifted from su-editor's Obsidian host.
 
 use boa_engine::{
     Context, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string,
-    object::{FunctionObjectBuilder, builtins::JsUint8ClampedArray},
+    object::FunctionObjectBuilder,
     property::{Attribute, PropertyDescriptor},
 };
 
@@ -27,7 +25,7 @@ use super::{
     get, handle_of, illegal_constructor, instance, native_instance, node_id, node_of, opt_string,
     plain_object, set, string, text, type_error,
 };
-use crate::dom::{Dom, NodeId, NodeKind};
+use crate::dom::{Dom, NodeId, NodeKind, ShadowMode, SlotAssignment};
 use crate::state::shared;
 
 // ─── Attributes ─────────────────────────────────────────────────────────────────────────────
@@ -221,30 +219,62 @@ const ATTRIBUTE_METHODS: &[Method] = &[
 
 // ─── Shadow roots ───────────────────────────────────────────────────────────────────────────
 
+/// The member `key` of `attachShadow`'s options as the enum `parse` reads, `default` when it
+/// is absent (`None`: required).
+fn shadow_option<T>(
+    options: &JsValue,
+    key: &str,
+    parse: fn(&str) -> Option<T>,
+    default: Option<T>,
+    context: &mut Context,
+) -> JsResult<T> {
+    let given = get(options, key, context)?;
+    if given.is_undefined() {
+        return default.ok_or_else(|| {
+            type_error(format!(
+                "Failed to execute 'attachShadow' on 'Element': Failed to read the '{key}' property from 'ShadowRootInit': Required member is undefined."
+            ))
+        });
+    }
+    let name = string(&given, context)?;
+    parse(&name).ok_or_else(|| {
+        type_error(format!(
+            "Failed to execute 'attachShadow' on 'Element': Failed to read the '{key}' property from 'ShadowRootInit': The provided value '{name}' is not a valid enum value."
+        ))
+    })
+}
+
 /// `element.attachShadow({ mode })`: a fragment of its own the element hosts, outside its
 /// children.
 pub fn attach_shadow(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = node_of(this)?;
-    if shared(context).borrow().shadow_roots.contains_key(&host) {
+    let options = arg(args, 0);
+    let mode = shadow_option(&options, "mode", ShadowMode::parse, None, context)?;
+    let assignment = shadow_option(
+        &options,
+        "slotAssignment",
+        SlotAssignment::parse,
+        Some(SlotAssignment::Named),
+        context,
+    )?;
+    if !read_dom(context, |dom| dom.can_host_shadow(host)) {
+        return Err(super::dom_error(
+            context,
+            "Failed to execute 'attachShadow' on 'Element': This element does not support attachShadow",
+            "NotSupportedError",
+        ));
+    }
+    let delegates_focus = get(&options, "delegatesFocus", context)?.to_boolean();
+    let root = with_dom(context, |dom| {
+        dom.attach_shadow(host, mode, delegates_focus, assignment)
+    });
+    let Some(root) = root else {
         return Err(super::dom_error(
             context,
             "Failed to execute 'attachShadow' on 'Element': Shadow root cannot be created on a host which already hosts a shadow tree.",
             "NotSupportedError",
         ));
-    }
-    let mode = get(&arg(args, 0), "mode", context)?;
-    let mode = if mode.is_undefined() {
-        "open".to_owned()
-    } else {
-        string(&mode, context)?
     };
-    let root = with_dom(context, Dom::create_fragment);
-    {
-        let state = shared(context);
-        let mut state = state.borrow_mut();
-        state.shadow_roots.insert(host, (root, mode == "open"));
-        state.shadow_hosts.insert(root, host);
-    }
     let object = wrap(context, root);
     let root_object = object.as_object().expect("a shadow root");
     // The host keeps its root alive, and the root its host.
@@ -252,15 +282,6 @@ pub fn attach_shadow(this: &JsValue, args: &[JsValue], context: &mut Context) ->
         verve::dom_events::hold(&host_object, |held| held.push(root_object.clone()));
         verve::dom_events::hold(&root_object, |held| held.push(host_object.clone()));
     }
-    set(&root_object, "mode", text(&mode), context)?;
-    let sheets = array(Vec::new(), context);
-    set(&root_object, "adoptedStyleSheets", sheets, context)?;
-    set(
-        &root_object,
-        "delegatesFocus",
-        get(&arg(args, 0), "delegatesFocus", context)?.to_boolean(),
-        context,
-    )?;
     Ok(object)
 }
 
@@ -269,8 +290,37 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
         "host",
         Some(|this, _, cx| {
             let root = node_of(this)?;
-            let host = shared(cx).borrow().shadow_hosts.get(&root).copied();
+            let host = read_dom(cx, |dom| dom.shadow_host(root));
             Ok(wrap_opt(cx, host))
+        }),
+        None,
+    ),
+    (
+        "mode",
+        Some(|this, _, cx| {
+            let root = node_of(this)?;
+            let mode = read_dom(cx, |dom| dom.shadow(root).map(|s| s.mode.as_str()));
+            Ok(mode.map_or(JsValue::null(), text))
+        }),
+        None,
+    ),
+    (
+        "delegatesFocus",
+        Some(|this, _, cx| {
+            let root = node_of(this)?;
+            Ok(read_dom(cx, |dom| {
+                dom.shadow(root).is_some_and(|s| s.delegates_focus)
+            })
+            .into())
+        }),
+        None,
+    ),
+    (
+        "slotAssignment",
+        Some(|this, _, cx| {
+            let root = node_of(this)?;
+            let assignment = read_dom(cx, |dom| dom.shadow(root).map(|s| s.assignment));
+            Ok(text(assignment.unwrap_or(SlotAssignment::Named).as_str()))
         }),
         None,
     ),
@@ -294,162 +344,21 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
         "activeElement",
         Some(|this, _, cx| {
             let root = node_of(this)?;
-            let focused = read_dom(cx, |dom| dom.focused.filter(|f| dom.contains(root, *f)));
+            let focused = read_dom(cx, |dom| {
+                dom.focused
+                    .filter(|f| dom.shadow_including_contains(root, *f))
+                    .map(|f| dom.retarget(f, Some(root)))
+            });
             Ok(wrap_opt(cx, focused))
         }),
         None,
     ),
+    (
+        "adoptedStyleSheets",
+        Some(|this, _, cx| adopted_sheets(node_of(this)?, cx)),
+        Some(|this, args, cx| set_adopted_sheets(node_of(this)?, "ShadowRoot", &arg(args, 0), cx)),
+    ),
 ];
-
-// ─── Custom elements ────────────────────────────────────────────────────────────────────────
-
-/// The class defined for a tag, if one was.
-pub fn custom_class(context: &Context, tag: &str) -> Option<JsObject> {
-    shared(context)
-        .borrow()
-        .custom_elements
-        .iter()
-        .find(|(name, _)| name == tag)
-        .map(|(_, c)| c.clone())
-}
-
-/// `HTMLElement` constructed: only as `super()` of a class `customElements.define` was given,
-/// making an element of that class's tag.
-pub fn construct_html_element(
-    new_target: &JsValue,
-    _: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let Some(target) = new_target.as_object() else {
-        return Err(type_error("Illegal constructor"));
-    };
-    let tag = shared(context)
-        .borrow()
-        .custom_elements
-        .iter()
-        .find(|(_, class)| JsObject::equals(class, &target))
-        .map(|(name, _)| name.clone());
-    let Some(tag) = tag else {
-        return Err(type_error("Illegal constructor"));
-    };
-    let prototype = super::prototype_of_target(new_target, context)?;
-    let id = with_dom(context, |dom| dom.create_element(&tag));
-    let object = verve::dom_events::host_target(prototype, super::node::host_id_of(id));
-    super::node::adopt(context, id, &object);
-    shared(context).borrow_mut().custom_nodes.insert(id);
-    Ok(object.into())
-}
-
-const CUSTOM_ELEMENTS_METHODS: &[Method] = &[
-    ("define", 3, |_, args, cx| {
-        let name = arg_string(args, 0, cx)?;
-        let Some(class) = arg(args, 1).as_object().filter(|c| c.is_constructor()) else {
-            return Err(type_error(
-                "Failed to execute 'define' on 'CustomElementRegistry': parameter 2 is not a constructor.",
-            ));
-        };
-        if !name.contains('-') || name.chars().next().is_none_or(|c| !c.is_ascii_lowercase()) {
-            return Err(super::dom_error(
-                cx,
-                &format!(
-                    "Failed to execute 'define' on 'CustomElementRegistry': \"{name}\" is not a valid custom element name"
-                ),
-                "SyntaxError",
-            ));
-        }
-        if custom_class(cx, &name).is_some() {
-            return Err(super::dom_error(
-                cx,
-                &format!(
-                    "Failed to execute 'define' on 'CustomElementRegistry': the name \"{name}\" has already been used with this registry"
-                ),
-                "NotSupportedError",
-            ));
-        }
-        shared(cx)
-            .borrow_mut()
-            .custom_elements
-            .push((name.clone(), class.clone()));
-        // Whoever waited for it hears now.
-        let waiting: Vec<JsValue> = {
-            let state = shared(cx);
-            let mut state = state.borrow_mut();
-            let (ready, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.custom_waiting)
-                .into_iter()
-                .partition(|(n, _)| *n == name);
-            state.custom_waiting = rest;
-            ready.into_iter().map(|(_, resolve)| resolve).collect()
-        };
-        for resolve in waiting {
-            verve::call(cx, &resolve, &JsValue::undefined(), &[class.clone().into()])?;
-        }
-        Ok(JsValue::undefined())
-    }),
-    ("get", 1, |_, args, cx| {
-        let name = arg_string(args, 0, cx)?;
-        Ok(custom_class(cx, &name).map_or(JsValue::undefined(), JsValue::from))
-    }),
-    ("getName", 1, |_, args, cx| {
-        let Some(class) = arg(args, 0).as_object() else {
-            return Ok(JsValue::null());
-        };
-        let name = shared(cx)
-            .borrow()
-            .custom_elements
-            .iter()
-            .find(|(_, c)| JsObject::equals(c, &class))
-            .map(|(n, _)| n.clone());
-        Ok(name.map_or(JsValue::null(), |n| text(&n)))
-    }),
-    ("whenDefined", 1, |_, args, cx| {
-        let name = arg_string(args, 0, cx)?;
-        if let Some(class) = custom_class(cx, &name) {
-            return super::resolved(class.into(), cx);
-        }
-        let (promise, resolvers) = boa_engine::object::builtins::JsPromise::new_pending(cx);
-        shared(cx)
-            .borrow_mut()
-            .custom_waiting
-            .push((name, resolvers.resolve.into()));
-        Ok(promise.into())
-    }),
-    ("upgrade", 1, |_, _, _| Ok(JsValue::undefined())),
-];
-
-/// Tells custom elements they joined or left the document: `connectedCallback` and
-/// `disconnectedCallback`, for the subtrees that moved.
-pub fn custom_moved(context: &mut Context, moved: Vec<(NodeId, bool)>) {
-    for (root, connected) in moved {
-        let ids: Vec<NodeId> = {
-            let state = shared(context);
-            let state = state.borrow();
-            state
-                .dom
-                .subtree(root)
-                .into_iter()
-                .filter(|id| state.custom_nodes.contains(id))
-                .collect()
-        };
-        for id in ids {
-            let Some(object) = super::node::existing_wrapper(context, id) else {
-                continue;
-            };
-            let name = if connected {
-                "connectedCallback"
-            } else {
-                "disconnectedCallback"
-            };
-            let callback = object
-                .get(JsString::from(name), context)
-                .unwrap_or_default();
-            if callback.is_callable()
-                && let Err(error) = verve::call(context, &callback, &object.clone().into(), &[])
-            {
-                verve::report(context, &error);
-            }
-        }
-    }
-}
 
 // ─── A template's content ───────────────────────────────────────────────────────────────────
 
@@ -773,31 +682,39 @@ pub fn style_sheets(context: &mut Context) -> JsResult<JsValue> {
     Ok(list)
 }
 
-pub fn adopted_sheets(context: &mut Context) -> JsResult<JsValue> {
+/// `adoptedStyleSheets` of the tree rooted at `tree` (a document or a shadow root).
+pub fn adopted_sheets(tree: NodeId, context: &mut Context) -> JsResult<JsValue> {
     let sheets: Vec<JsValue> = shared(context)
         .borrow()
-        .adopted_sheets
-        .iter()
-        .map(|(_, s)| s.clone().into())
-        .collect();
+        .adopted
+        .get(&tree)
+        .map(|list| list.iter().map(|(_, s)| s.clone().into()).collect())
+        .unwrap_or_default();
     Ok(array(sheets, context))
 }
 
-pub fn set_adopted_sheets(given: &JsValue, context: &mut Context) -> JsResult<JsValue> {
+/// Sets the `adoptedStyleSheets` of the tree rooted at `tree`; `owner` names its class in the
+/// error.
+pub fn set_adopted_sheets(
+    tree: NodeId,
+    owner: &str,
+    given: &JsValue,
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let mut adopted = Vec::new();
     for sheet in super::list(given, context)? {
         match (handle_of(&sheet, Kind::Constructed), sheet.as_object()) {
             (Some(id), Some(object)) => adopted.push((id, object)),
             _ => {
-                return Err(type_error(
-                    "Failed to set the 'adoptedStyleSheets' property on 'Document': Failed to convert value to 'CSSStyleSheet'.",
-                ));
+                return Err(type_error(format!(
+                    "Failed to set the 'adoptedStyleSheets' property on '{owner}': Failed to convert value to 'CSSStyleSheet'."
+                )));
             }
         }
     }
     let state = shared(context);
     let mut state = state.borrow_mut();
-    state.adopted_sheets = adopted;
+    state.adopted.insert(tree, adopted);
     state.sheets_changed();
     Ok(JsValue::undefined())
 }
@@ -815,98 +732,6 @@ fn construct_sheet(
         id
     };
     Ok(instance(new_target, Kind::Constructed, id, context)?.into())
-}
-
-// ─── Computed style ─────────────────────────────────────────────────────────────────────────
-
-/// A node's computed value of `property`: the cascade over every sheet, `var()` resolved, and
-/// the property's initial value when nothing set it.
-pub fn computed_value(context: &Context, id: NodeId, property: &str) -> String {
-    let state = shared(context);
-    let mut state = state.borrow_mut();
-    let styler = state.styler();
-    let style = crate::css::style_of(&state.dom, &styler, id);
-    if let Some(value) = style.get(property) {
-        return value.clone();
-    }
-    let tag = state.dom.get(id).and_then(|n| n.tag()).map(str::to_owned);
-    crate::css::initial_value(property, tag.as_deref())
-        .unwrap_or("")
-        .to_owned()
-}
-
-const COMPUTED_METHODS: &[Method] = &[
-    ("getPropertyValue", 1, |this, args, cx| {
-        let id = handle_of(this, Kind::Computed).ok_or_else(|| type_error("Illegal invocation"))?;
-        let property = arg_string(args, 0, cx)?;
-        Ok(text(computed_value(cx, id, property.trim()).trim()))
-    }),
-    ("getPropertyPriority", 1, |_, _, _| Ok(text(""))),
-    ("item", 1, |this, args, cx| {
-        let id = handle_of(this, Kind::Computed).ok_or_else(|| type_error("Illegal invocation"))?;
-        let at = arg(args, 0).to_number(cx)? as usize;
-        let state = shared(cx);
-        let mut state = state.borrow_mut();
-        let styler = state.styler();
-        let style = crate::css::style_of(&state.dom, &styler, id);
-        let mut names: Vec<&String> = style.keys().collect();
-        names.sort();
-        Ok(names.get(at).map_or(text(""), |n| text(n)))
-    }),
-    ("setProperty", 2, |_, _, cx| {
-        Err(super::dom_error(
-            cx,
-            "Failed to execute 'setProperty' on 'CSSStyleDeclaration': These styles are computed, and therefore read-only.",
-            "NoModificationAllowedError",
-        ))
-    }),
-    ("removeProperty", 1, |_, _, cx| {
-        Err(super::dom_error(
-            cx,
-            "Failed to execute 'removeProperty' on 'CSSStyleDeclaration': These styles are computed, and therefore read-only.",
-            "NoModificationAllowedError",
-        ))
-    }),
-];
-
-/// `getComputedStyle(element)`: the element's style after the cascade, read as properties —
-/// `style.color`, `style.getPropertyValue('--text-muted')`.
-pub fn computed_style(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
-    let target = native_instance(context, "CSSStyleDeclaration", Kind::Computed, id);
-    let proxy = boa_engine::object::builtins::JsProxyBuilder::new(target)
-        .get(|_, args, cx| {
-            let target = arg(args, 0);
-            let key = arg(args, 1);
-            let Some(name) = key.as_string().map(|n| n.to_std_string_escaped()) else {
-                return Ok(JsValue::undefined());
-            };
-            if let Some((_, length, f)) = COMPUTED_METHODS.iter().find(|(m, ..)| *m == name) {
-                let method = function(cx, &name, *length, *f);
-                return super::call_method(&method.into(), "bind", &[target], cx);
-            }
-            let id = handle_of(&target, Kind::Computed).unwrap_or_default();
-            match name.as_str() {
-                "constructor" => return get(&target, "constructor", cx),
-                "length" => {
-                    let state = shared(cx);
-                    let mut state = state.borrow_mut();
-                    let styler = state.styler();
-                    return Ok(crate::css::style_of(&state.dom, &styler, id).len().into());
-                }
-                "cssText" => return Ok(text("")),
-                "parentRule" => return Ok(JsValue::null()),
-                _ => {}
-            }
-            let property = if name.contains('-') {
-                name
-            } else {
-                crate::dom::css_name(&name)
-            };
-            Ok(text(computed_value(cx, id, &property).trim()))
-        })
-        .set(|_, _, _| Ok(true.into()))
-        .build(context)?;
-    Ok(JsObject::from(proxy).into())
 }
 
 const CSS_FUNCTIONS: &[Method] = &[
@@ -950,43 +775,6 @@ const CSS_FUNCTIONS: &[Method] = &[
     }),
     ("registerProperty", 1, |_, _, _| Ok(JsValue::undefined())),
 ];
-
-/// `document.fonts`: every font is loaded, as on a machine that has them all.
-pub fn font_faces(context: &mut Context) -> JsResult<JsValue> {
-    let global = context.global_object();
-    let known = global.get(js_string!("__fonts"), context)?;
-    if known.is_object() {
-        return Ok(known);
-    }
-    let target = shared(context)
-        .borrow()
-        .class("EventTarget")
-        .expect("made")
-        .0;
-    let fonts = target.construct(&[], None, context)?;
-    let ready = super::resolved(fonts.clone().into(), context)?;
-    set(&fonts, "ready", ready, context)?;
-    set(&fonts, "status", text("loaded"), context)?;
-    set(&fonts, "size", 0, context)?;
-    let methods: &[Method] = &[
-        ("check", 1, |_, _, _| Ok(true.into())),
-        ("load", 1, |_, _, cx| {
-            let empty = array(Vec::new(), cx);
-            super::resolved(empty, cx)
-        }),
-        ("add", 1, |this, _, _| Ok(this.clone())),
-        ("delete", 1, |_, _, _| Ok(false.into())),
-        ("clear", 0, |_, _, _| Ok(JsValue::undefined())),
-        ("forEach", 1, |_, _, _| Ok(JsValue::undefined())),
-        ("has", 1, |_, _, _| Ok(false.into())),
-    ];
-    for (name, length, f) in methods {
-        let made = function(context, name, *length, *f);
-        set(&fonts, name, made, context)?;
-    }
-    super::hidden(&global, js_string!("__fonts"), fonts.clone(), context)?;
-    Ok(fonts.into())
-}
 
 // ─── Range and Selection ────────────────────────────────────────────────────────────────────
 
@@ -1511,315 +1299,10 @@ const SELECTION_METHODS: &[Method] = &[
     }),
 ];
 
-// ─── Canvas ─────────────────────────────────────────────────────────────────────────────────
-
-/// The font size a canvas font names, in pixels: `bold 16px sans-serif` → 16.
-fn font_size(font: &str) -> f64 {
-    font.split_whitespace()
-        .find_map(|word| word.strip_suffix("px").and_then(|n| n.parse::<f64>().ok()))
-        .unwrap_or(10.)
-}
-
-/// About how wide `text` is in `font`: wide characters a font size each, the rest a little over
-/// half of one.
-fn text_width(text: &str, font: &str) -> f64 {
-    let size = font_size(font);
-    text.chars()
-        .map(|c| {
-            if (c as u32) >= 0x2E80 {
-                size
-            } else if c == ' ' {
-                size * 0.28
-            } else {
-                size * 0.55
-            }
-        })
-        .sum()
-}
-
-const CONTEXT_STATE: &[(&str, &str)] = &[
-    ("fillStyle", "#000000"),
-    ("strokeStyle", "#000000"),
-    ("font", "10px sans-serif"),
-    ("textAlign", "start"),
-    ("textBaseline", "alphabetic"),
-    ("direction", "inherit"),
-    ("globalCompositeOperation", "source-over"),
-    ("lineCap", "butt"),
-    ("lineJoin", "miter"),
-    ("shadowColor", "rgba(0, 0, 0, 0)"),
-    ("filter", "none"),
-    ("imageSmoothingQuality", "low"),
-    ("fontKerning", "auto"),
-    ("letterSpacing", "0px"),
-    ("wordSpacing", "0px"),
-];
-
-const CONTEXT_NUMBERS: &[(&str, f64)] = &[
-    ("lineWidth", 1.),
-    ("globalAlpha", 1.),
-    ("miterLimit", 10.),
-    ("shadowBlur", 0.),
-    ("shadowOffsetX", 0.),
-    ("shadowOffsetY", 0.),
-    ("lineDashOffset", 0.),
-];
-
-const CONTEXT_NOOPS: &[&str] = &[
-    "save",
-    "restore",
-    "scale",
-    "rotate",
-    "translate",
-    "transform",
-    "setTransform",
-    "resetTransform",
-    "clearRect",
-    "fillRect",
-    "strokeRect",
-    "beginPath",
-    "closePath",
-    "moveTo",
-    "lineTo",
-    "bezierCurveTo",
-    "quadraticCurveTo",
-    "arc",
-    "arcTo",
-    "ellipse",
-    "rect",
-    "roundRect",
-    "fill",
-    "stroke",
-    "clip",
-    "fillText",
-    "strokeText",
-    "drawImage",
-    "putImageData",
-    "setLineDash",
-    "drawFocusIfNeeded",
-    "reset",
-];
-
-fn image_data(context: &mut Context, width: u32, height: u32) -> JsResult<JsValue> {
-    let object = native_instance(context, "ImageData", Kind::Plain, 0);
-    let bytes = JsUint8ClampedArray::from_iter(
-        std::iter::repeat_n(0u8, (width * height * 4) as usize),
-        context,
-    )?;
-    set(&object, "width", width, context)?;
-    set(&object, "height", height, context)?;
-    set(&object, "data", bytes, context)?;
-    set(&object, "colorSpace", text("srgb"), context)?;
-    Ok(object.into())
-}
-
-fn construct_image_data(
-    new_target: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let first = arg(args, 0);
-    let (data, width, height) = if first.is_object() {
-        let width = arg(args, 1).to_u32(context)?;
-        let height = match arg(args, 2) {
-            h if h.is_undefined() => {
-                let length = get(&first, "length", context)?.to_u32(context)?;
-                length / 4 / width.max(1)
-            }
-            h => h.to_u32(context)?,
-        };
-        (Some(first), width, height)
-    } else {
-        (None, first.to_u32(context)?, arg(args, 1).to_u32(context)?)
-    };
-    let object = instance(new_target, Kind::Plain, 0, context)?;
-    let data = match data {
-        Some(data) => data,
-        None => JsUint8ClampedArray::from_iter(
-            std::iter::repeat_n(0u8, (width * height * 4) as usize),
-            context,
-        )?
-        .into(),
-    };
-    set(&object, "width", width, context)?;
-    set(&object, "height", height, context)?;
-    set(&object, "data", data, context)?;
-    set(&object, "colorSpace", text("srgb"), context)?;
-    Ok(object.into())
-}
-
-fn gradient(context: &mut Context) -> JsValue {
-    let object = native_instance(context, "CanvasGradient", Kind::Plain, 0);
-    let add = function(context, "addColorStop", 2, |_, _, _| {
-        Ok(JsValue::undefined())
-    });
-    let _ = set(&object, "addColorStop", add, context);
-    object.into()
-}
-
-fn context_2d(context: &mut Context, canvas: &JsValue) -> JsResult<JsValue> {
-    let object = native_instance(context, "CanvasRenderingContext2D", Kind::Plain, 0);
-    set(&object, "canvas", canvas.clone(), context)?;
-    for (name, value) in CONTEXT_STATE {
-        set(&object, name, text(value), context)?;
-    }
-    for (name, value) in CONTEXT_NUMBERS {
-        set(&object, name, *value, context)?;
-    }
-    set(&object, "imageSmoothingEnabled", true, context)?;
-    Ok(object.into())
-}
-
-const CONTEXT_METHODS: &[Method] = &[
-    ("measureText", 1, |this, args, cx| {
-        let content = arg_string(args, 0, cx)?;
-        let font = string(&get(this, "font", cx)?, cx)?;
-        let size = font_size(&font);
-        let width = text_width(&content, &font);
-        let metrics = native_instance(cx, "TextMetrics", Kind::Plain, 0);
-        for (key, value) in [
-            ("width", width),
-            ("actualBoundingBoxLeft", 0.),
-            ("actualBoundingBoxRight", width),
-            ("actualBoundingBoxAscent", size * 0.8),
-            ("actualBoundingBoxDescent", size * 0.2),
-            ("fontBoundingBoxAscent", size * 0.9),
-            ("fontBoundingBoxDescent", size * 0.25),
-            ("emHeightAscent", size * 0.8),
-            ("emHeightDescent", size * 0.2),
-            ("alphabeticBaseline", 0.),
-            ("hangingBaseline", size * 0.8),
-            ("ideographicBaseline", -size * 0.2),
-        ] {
-            set(&metrics, key, value, cx)?;
-        }
-        Ok(metrics.into())
-    }),
-    ("getImageData", 4, |_, args, cx| {
-        let width = arg(args, 2).to_u32(cx)?.min(8192);
-        let height = arg(args, 3).to_u32(cx)?.min(8192);
-        image_data(cx, width, height)
-    }),
-    ("createImageData", 2, |_, args, cx| {
-        let first = arg(args, 0);
-        let (width, height) = if first.is_object() {
-            (
-                get(&first, "width", cx)?.to_u32(cx)?,
-                get(&first, "height", cx)?.to_u32(cx)?,
-            )
-        } else {
-            (first.to_u32(cx)?, arg(args, 1).to_u32(cx)?)
-        };
-        image_data(cx, width.min(8192), height.min(8192))
-    }),
-    ("createLinearGradient", 4, |_, _, cx| Ok(gradient(cx))),
-    ("createRadialGradient", 6, |_, _, cx| Ok(gradient(cx))),
-    ("createConicGradient", 3, |_, _, cx| Ok(gradient(cx))),
-    ("createPattern", 2, |_, _, cx| {
-        Ok(native_instance(cx, "CanvasPattern", Kind::Plain, 0).into())
-    }),
-    ("getLineDash", 0, |_, _, cx| Ok(array(Vec::new(), cx))),
-    ("isPointInPath", 2, |_, _, _| Ok(false.into())),
-    ("isPointInStroke", 2, |_, _, _| Ok(false.into())),
-    ("getTransform", 0, |_, _, cx| identity_matrix(cx)),
-    ("getContextAttributes", 0, |_, _, cx| {
-        let attributes = plain_object(cx);
-        set(&attributes, "alpha", true, cx)?;
-        set(&attributes, "desynchronized", false, cx)?;
-        set(&attributes, "colorSpace", text("srgb"), cx)?;
-        set(&attributes, "willReadFrequently", false, cx)?;
-        Ok(attributes.into())
-    }),
-];
-
-/// A transparent pixel, as a PNG: what a canvas that paints nothing turns into.
-const BLANK_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
-
-fn canvas_size(
-    this: &JsValue,
-    context: &mut Context,
-    name: &str,
-    default: u32,
-) -> JsResult<JsValue> {
-    let id = node_of(this)?;
-    let value = read_dom(context, |dom| dom.get_attr(id, name))
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(default);
-    Ok(value.into())
-}
-
-fn set_canvas_size(
-    this: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-    name: &str,
-) -> JsResult<JsValue> {
-    let id = node_of(this)?;
-    let value = arg(args, 0).to_u32(context)?;
-    with_dom(context, |dom| dom.set_attr(id, name, &value.to_string()));
-    Ok(JsValue::undefined())
-}
-
-pub const CANVAS_ACCESSORS: &[Accessor] = &[
-    (
-        "width",
-        Some(|this, _, cx| canvas_size(this, cx, "width", 300)),
-        Some(|this, args, cx| set_canvas_size(this, args, cx, "width")),
-    ),
-    (
-        "height",
-        Some(|this, _, cx| canvas_size(this, cx, "height", 150)),
-        Some(|this, args, cx| set_canvas_size(this, args, cx, "height")),
-    ),
-];
-
-pub const CANVAS_METHODS: &[Method] = &[
-    ("getContext", 1, |this, args, cx| {
-        let kind = arg_string(args, 0, cx)?;
-        if kind != "2d" {
-            // No WebGL, as on a machine without the GPU for it: libraries fall back.
-            return Ok(JsValue::null());
-        }
-        let Some(canvas) = this.as_object() else {
-            return Ok(JsValue::null());
-        };
-        let key = js_string!("__context2d");
-        let known = canvas.get(key.clone(), cx)?;
-        if known.is_object() {
-            return Ok(known);
-        }
-        let made = context_2d(cx, this)?;
-        super::hidden(&canvas, key, made.clone(), cx)?;
-        Ok(made)
-    }),
-    ("toDataURL", 0, |_, _, _| Ok(text(BLANK_PNG))),
-    ("toBlob", 1, |_, args, cx| {
-        let callback = arg(args, 0);
-        let blob = cx.global_object().get(js_string!("Blob"), cx)?;
-        let made = match blob.as_constructor() {
-            Some(blob) => {
-                let options = plain_object(cx);
-                set(&options, "type", text("image/png"), cx)?;
-                let parts = array(Vec::new(), cx);
-                blob.construct(&[parts, options.into()], None, cx)?.into()
-            }
-            None => JsValue::null(),
-        };
-        if callback.is_callable() {
-            verve::call(cx, &callback, &JsValue::undefined(), &[made])?;
-        }
-        Ok(JsValue::undefined())
-    }),
-    ("captureStream", 0, |_, _, cx| Ok(plain_object(cx).into())),
-    ("transferControlToOffscreen", 0, |_, _, _| {
-        Err(type_error("OffscreenCanvas is not supported"))
-    }),
-];
-
 // ─── Geometry ───────────────────────────────────────────────────────────────────────────────
 
 /// A matrix's sixteen numbers, column by column as CSS writes them (`m11`, `m12`, … `m44`).
-type Matrix = [f64; 16];
+pub(crate) type Matrix = [f64; 16];
 
 const IDENTITY: Matrix = [
     1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
@@ -1914,7 +1397,7 @@ fn invert(m: &Matrix) -> Option<Matrix> {
     Some(inv.map(|v| v / det))
 }
 
-fn matrix_of(value: &JsValue, context: &mut Context) -> JsResult<Matrix> {
+pub(crate) fn matrix_of(value: &JsValue, context: &mut Context) -> JsResult<Matrix> {
     let mut out = [0.; 16];
     for (i, name) in MATRIX_NAMES.iter().enumerate() {
         out[i] = get(value, name, context)?.to_number(context)?;
@@ -1956,7 +1439,7 @@ fn matrix_from_init(init: &JsValue, context: &mut Context) -> JsResult<Matrix> {
     })
 }
 
-fn from_2d(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Matrix {
+pub(crate) fn from_2d(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Matrix {
     [a, b, 0., 0., c, d, 0., 0., 0., 0., 1., 0., e, f, 0., 1.]
 }
 
@@ -2030,7 +1513,7 @@ fn set_matrix(object: &JsObject, m: &Matrix, context: &mut Context) -> JsResult<
     Ok(())
 }
 
-fn make_matrix(context: &mut Context, m: &Matrix) -> JsResult<JsValue> {
+pub(crate) fn make_matrix(context: &mut Context, m: &Matrix) -> JsResult<JsValue> {
     let object = native_instance(context, "DOMMatrix", Kind::Plain, 0);
     set_matrix(&object, m, context)?;
     Ok(object.into())
@@ -2369,31 +1852,6 @@ fn install_geometry(context: &mut Context) -> JsResult<()> {
         });
         set(&constructor, "fromRect", from, context)?;
     }
-    let path = simple_class(
-        context,
-        "Path2D",
-        |t, _, c| Ok(instance(t, Kind::Plain, 0, c)?.into()),
-        None,
-        &[],
-        &[],
-        true,
-    )?;
-    for name in [
-        "addPath",
-        "closePath",
-        "moveTo",
-        "lineTo",
-        "bezierCurveTo",
-        "quadraticCurveTo",
-        "arc",
-        "arcTo",
-        "ellipse",
-        "rect",
-        "roundRect",
-    ] {
-        let noop = function(context, name, 0, |_, _, _| Ok(JsValue::undefined()));
-        set(&path, name, noop, context)?;
-    }
     Ok(())
 }
 
@@ -2482,38 +1940,6 @@ pub fn empty_ranges(context: &mut Context) -> JsResult<JsValue> {
         set(&ranges, name, f, context)?;
     }
     Ok(ranges.into())
-}
-
-/// `element.animate(…)`: an animation already finished, as a page with animations off has.
-pub fn finished_animation(context: &mut Context) -> JsResult<JsValue> {
-    let target = shared(context)
-        .borrow()
-        .class("EventTarget")
-        .expect("made")
-        .0;
-    let animation = target.construct(&[], None, context)?;
-    let done = super::resolved(animation.clone().into(), context)?;
-    set(&animation, "finished", done.clone(), context)?;
-    set(&animation, "ready", done, context)?;
-    set(&animation, "playState", text("finished"), context)?;
-    set(&animation, "currentTime", 0, context)?;
-    set(&animation, "playbackRate", 1, context)?;
-    set(&animation, "onfinish", JsValue::null(), context)?;
-    set(&animation, "oncancel", JsValue::null(), context)?;
-    for name in [
-        "play",
-        "pause",
-        "cancel",
-        "finish",
-        "reverse",
-        "persist",
-        "commitStyles",
-        "updatePlaybackRate",
-    ] {
-        let f = function(context, name, 0, |_, _, _| Ok(JsValue::undefined()));
-        set(&animation, name, f, context)?;
-    }
-    Ok(animation.into())
 }
 
 fn construct_data_transfer(
@@ -2715,10 +2141,11 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         "CustomElementRegistry",
         illegal_constructor,
         None,
-        CUSTOM_ELEMENTS_METHODS,
+        super::custom::METHODS,
         &[],
         true,
     )?;
+    super::fonts::install(context)?;
     let registry = native_instance(context, "CustomElementRegistry", Kind::Plain, 0);
     context.register_global_property(js_string!("customElements"), registry, Attribute::all())?;
     simple_class(
@@ -2782,31 +2209,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         SELECTION_ACCESSORS,
         true,
     )?;
-    let canvas_context = simple_class(
-        context,
-        "CanvasRenderingContext2D",
-        illegal_constructor,
-        None,
-        CONTEXT_METHODS,
-        &[],
-        true,
-    )?;
-    for name in CONTEXT_NOOPS {
-        let noop = function(context, name, 0, |_, _, _| Ok(JsValue::undefined()));
-        set(&canvas_context, name, noop, context)?;
-    }
-    for name in ["CanvasGradient", "CanvasPattern", "TextMetrics"] {
-        simple_class(context, name, illegal_constructor, None, &[], &[], true)?;
-    }
-    simple_class(
-        context,
-        "ImageData",
-        construct_image_data,
-        None,
-        &[],
-        &[],
-        true,
-    )?;
+    crate::canvas::install(context)?;
     simple_class(
         context,
         "DataTransfer",

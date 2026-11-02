@@ -41,7 +41,7 @@ fn random_uuid() -> String {
     let mut b = random_bytes(16);
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
-    let hex = to_hex(&b);
+    let hex = crate::encoding::hex(&b);
     format!(
         "{}-{}-{}-{}-{}",
         &hex[0..8],
@@ -97,10 +97,6 @@ fn fill_random(
 }
 
 // ─── Text and bytes ─────────────────────────────────────────────────────────────────────────
-
-fn to_hex(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 fn from_hex(text: &str) -> Vec<u8> {
     text.as_bytes()
@@ -160,7 +156,7 @@ fn bytes_out(bytes: Vec<u8>, encoding: &JsValue, context: &mut Context) -> JsRes
     let encoding = text_of(encoding, context)?.to_ascii_lowercase();
     let text = match encoding.as_str() {
         "buffer" => return crate::encoding::make_buffer(context, bytes),
-        "hex" => to_hex(&bytes),
+        "hex" => crate::encoding::hex(&bytes),
         "base64" => crate::encoding::base64(&bytes, false),
         "base64url" => crate::encoding::base64(&bytes, true),
         "latin1" | "binary" => bytes.iter().map(|b| char::from(*b)).collect(),
@@ -2499,7 +2495,7 @@ mod tests {
         let key = from_hex("00112233445566778899aabbccddeeff");
         let wrapped = key_wrap(&kek, &key).unwrap();
         assert_eq!(
-            to_hex(&wrapped),
+            crate::encoding::hex(&wrapped),
             "1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5"
         );
         assert_eq!(key_unwrap(&kek, &wrapped).unwrap(), key);
@@ -2516,7 +2512,7 @@ mod tests {
         let aad = from_hex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
         let sealed = gcm_seal(&key, &iv, &aad, &plain, 16).unwrap();
         assert_eq!(
-            to_hex(&sealed),
+            crate::encoding::hex(&sealed),
             "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e0915bc94fbc3221a5db94fae95ae7121a47"
         );
         assert_eq!(gcm_open(&key, &iv, &aad, &sealed, 16).unwrap(), plain);
@@ -2526,7 +2522,7 @@ mod tests {
         );
         let sealed = gcm_seal(&key, &iv, &aad, &plain, 16).unwrap();
         assert_eq!(
-            to_hex(&sealed[sealed.len() - 16..]),
+            crate::encoding::hex(&sealed[sealed.len() - 16..]),
             "619cc5aefffe0bfa462af43c1699d050"
         );
     }

@@ -1058,10 +1058,10 @@ fn new_request(
     for handler in ["onsuccess", "onerror"] {
         request.set(JsString::from(handler), JsValue::null(), false, context)?;
     }
-    if let Some(id) = tx {
-        if let Some(t) = idb(context).idb.borrow_mut().transactions.get_mut(&id) {
-            t.pending += 1;
-        }
+    if let Some(id) = tx
+        && let Some(t) = idb(context).idb.borrow_mut().transactions.get_mut(&id)
+    {
+        t.pending += 1;
     }
     Ok(request)
 }
@@ -1915,12 +1915,15 @@ fn record(context: &Context, db: &str, store: &str, primary: &Key) -> JsResult<O
     with_store(context, db, store, |s| s.records.get(primary).cloned())
 }
 
+/// How a store or index answers a ranged read (`getAll`, `getAllKeys`, `count`…).
+type Reader = fn(&mut Context, &str, &str, Vec<(Key, Key)>, Option<usize>) -> JsResult<JsValue>;
+
 /// One read: the request answered with what `read` made of the entries in range.
 fn read(
     this: &JsValue,
     args: &[JsValue],
     context: &mut Context,
-    read: fn(&mut Context, &str, &str, Vec<(Key, Key)>, Option<usize>) -> JsResult<JsValue>,
+    read: Reader,
 ) -> JsResult<JsValue> {
     let (tx, db, store, index) = target_of(this, context, false)?;
     let range = range_of(&arg(args, 0), context)?;

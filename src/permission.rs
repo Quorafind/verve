@@ -467,6 +467,9 @@ fn has(args: &[JsValue], context: &mut Context) -> JsResult<bool> {
             Some(path) => grants.may_write(&real(Path::new(&path), true)),
         },
         "worker" => permissions.worker,
+        // The reserved child-process bit: it says whether this realm may start one, once
+        // anything could (P17).
+        "child" => permissions.child_process,
         // Verve's own: the outbound rules, for a `host` or `host:port`.
         "net" => match reference {
             None => permissions

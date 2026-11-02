@@ -36,6 +36,11 @@ always agree with one another.
   template. Before, the parser stopped at the call and `return super(x).then(f)` was a
   `SyntaxError: expected token ';', got '.'` (Terminal's bundle).
 
+- `boa_engine`, `builtins/symbol`: `Symbol.for` finds or makes its symbol under the registry
+  key's entry, not by a lookup followed by an insert. Two threads asking for a key the registry
+  lacked each made a symbol, the registry kept one, and a realm that had the other never matched
+  `Symbol.for(key)` again (React's `react.element`, so `Minified React error #31`).
+
 - `boa_engine`, `builtins/regexp`: a compiled pattern is kept per thread by its source and flags
   (`COMPILED`, up to 1024 of them), so a regular expression literal evaluated again — once per
   line of a note, in Dataview's parser — no longer compiles its pattern every time.

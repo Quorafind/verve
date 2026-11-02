@@ -2,6 +2,8 @@
 //! bytes, its functions called both ways, its memory read and written from JavaScript and
 //! grown, an error thrown through it, a trap, and its globals and tables.
 
+#![cfg(feature = "wasm")]
+
 use verve::Runtime;
 
 fn js(rt: &mut Runtime, source: &str) -> String {

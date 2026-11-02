@@ -407,10 +407,7 @@ fn module_worker_runs_static_import_and_top_level_await() {
             break;
         }
     }
-    assert_eq!(
-        verve::print(&runtime.eval("workerAnswer").unwrap()),
-        "42"
-    );
+    assert_eq!(verve::print(&runtime.eval("workerAnswer").unwrap()), "42");
 }
 
 #[test]

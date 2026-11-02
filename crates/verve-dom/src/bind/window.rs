@@ -469,7 +469,7 @@ pub fn run_frame(context: &mut Context, now: f64) -> usize {
     count
 }
 
-fn schedule_frame(context: &mut Context) {
+pub(crate) fn schedule_frame(context: &mut Context) {
     let due = {
         let state = shared(context);
         let state = state.borrow();
@@ -489,6 +489,10 @@ fn schedule_frame(context: &mut Context) {
     let delay = 16. - now.rem_euclid(16.);
     let tick = function(context, "frame", 0, |_, _, cx| {
         let now = verve::now(cx);
+        shared(cx).borrow_mut().frame_timer = None;
+        // Nothing draws the document on this clock, so a transition or animation is what
+        // keeps the beat going; it moves before the callbacks run, as it does in a frame.
+        crate::animation::tick(cx, now);
         run_frame(cx, now);
         Ok(JsValue::undefined())
     });
@@ -702,7 +706,8 @@ const WINDOW_FUNCTIONS: &[Method] = &[
     ("matchMedia", 1, match_media),
     ("getComputedStyle", 2, |_, args, cx| {
         let id = super::node_arg(args, 0, "getComputedStyle", "Window")?;
-        super::platform::computed_style(cx, id)
+        let pseudo = super::opt_string(args, 1, cx)?;
+        super::computed::computed_style(cx, id, super::computed::Target::named(pseudo.as_deref()))
     }),
     ("scrollTo", 2, |_, args, cx| {
         let root = read_dom(cx, |dom| dom.html);

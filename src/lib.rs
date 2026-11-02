@@ -26,18 +26,23 @@ pub use boa_engine;
 pub use boa_gc;
 
 mod assert;
+pub mod blob;
 mod buffer;
+mod child_process;
 mod cjs_exports;
 pub mod cli;
+pub mod clone;
 mod code_cache;
 mod crypto;
 pub mod dom_events;
-mod encoding;
+mod embed;
+pub mod encoding;
 mod esm;
 mod esm_resolve;
-mod events;
+pub mod events;
 mod fetch;
 mod fs;
+mod globals;
 mod hooks;
 mod indexeddb;
 mod intl;
@@ -45,7 +50,7 @@ pub mod isolate;
 mod messaging;
 mod module_hooks;
 mod modules;
-mod native;
+pub mod native;
 mod navigator;
 mod network;
 mod node;
@@ -64,11 +69,14 @@ mod stream;
 mod streams;
 mod string_decoder;
 mod timers;
+#[cfg(feature = "typescript")]
 mod typescript;
 mod url;
 mod url_pattern;
 mod util;
+pub mod vfs;
 mod vm;
+#[cfg(feature = "wasm")]
 mod wasm;
 mod web;
 mod worker;
@@ -88,8 +96,10 @@ pub use code_cache::CodeCacheStats;
 pub fn code_cache_user_secret() -> std::io::Result<[u8; 32]> {
     code_cache::user_secret().map(|(secret, _)| secret)
 }
+pub use embed::{ConsoleSink, SourcePos};
 pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
+pub use process::{ExitBehavior, ProcessInfo, UncaughtBehavior};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -97,12 +107,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, Source,
+    Context, JsError, JsNativeError, JsObject, JsResult, JsValue, Source,
     context::ContextBuilder,
     job::{Job, JobExecutor, PromiseJob},
     js_string,
-    object::ObjectInitializer,
-    property::Attribute,
 };
 
 thread_local! {
@@ -119,6 +127,10 @@ pub fn set_thread_stack(bytes: usize) {
 
 /// What makes a module of a family the host defined; see [`Runtime::define_builtin_family`].
 pub type ModuleMaker = fn(&mut Context, &str) -> JsResult<JsValue>;
+
+/// The sink as the runtime keeps it: [`ConsoleSink`] is what an embedder hands over, and this
+/// is the same function the realm holds, which a console line copies out to call.
+pub(crate) type ConsoleSinkRc = Rc<dyn Fn(Level, &str, Option<&SourcePos>)>;
 
 /// Milliseconds on the host's clock. Only differences between two readings mean anything.
 pub type Millis = f64;
@@ -187,6 +199,11 @@ struct Shared {
     /// Families of built-in modules: every name starting with the prefix is made by the
     /// function, once, and kept with the rest.
     families: RefCell<Vec<(String, ModuleMaker)>>,
+    /// Built-ins made the first time they are required, by the name each answers to.
+    lazy: RefCell<HashMap<String, ModuleMaker>>,
+    /// The lazy globals already made, by name: what a hook may mend without making one that
+    /// nothing has read.
+    lazy_values: RefCell<HashMap<String, JsValue>>,
     /// `require.cache`: the module object of every file run, by its path. A second `require`
     /// of the same file answers the same `module.exports`, as Node's cache does.
     module_cache: JsObject,
@@ -198,6 +215,13 @@ struct Shared {
     /// The working folder `process.cwd()` answers and `process.chdir` changes.
     cwd: RefCell<String>,
     console: RefCell<Vec<ConsoleLine>>,
+    /// Where console lines are pushed to as they are written, when the embedder asked for that
+    /// instead of reading them back; see [`Runtime::set_console_sink`]. Held as an `Rc` so a
+    /// line can copy it out before calling it: a sink that writes to this console again must not
+    /// find the cell borrowed.
+    console_sink: RefCell<Option<ConsoleSinkRc>>,
+    /// The user agent `navigator` answers, when the embedder set one.
+    user_agent: RefCell<Option<String>>,
     /// `console.time`'s labels and when each was started; `console.count`'s counts.
     console_timers: RefCell<HashMap<String, Millis>>,
     console_counts: RefCell<HashMap<String, u64>>,
@@ -214,11 +238,16 @@ struct Shared {
     /// IndexedDB's databases, transactions and cursors.
     idb: RefCell<indexeddb::IdbState>,
     /// WebAssembly's modules and instances.
+    #[cfg(feature = "wasm")]
     wasm: RefCell<wasm::WasmState>,
     /// Who to wake when the network or a worker has something for this realm.
     wake: std::sync::Arc<WakeSlot>,
     /// Set when this realm is a process of its own (`verve run`): see `process::Profile`.
     profile: RefCell<Option<Rc<process::Profile>>>,
+    /// What this realm's `process` is, as its embedder described it: see [`ProcessInfo`].
+    process: RefCell<ProcessInfo>,
+    /// The virtual filesystem this realm reads through: see [`vfs`].
+    vfs: RefCell<vfs::Layers>,
     /// Where compiled modules are kept between runs, if anywhere: see `code_cache`.
     code_cache: RefCell<code_cache::Shared>,
     /// 即使 Worker 自身不启用缓存，也会继承这些访问拒绝规则。
@@ -491,6 +520,10 @@ impl Runtime {
                     .unwrap_or_else(|_| "/".into()),
             ),
             console: RefCell::new(Vec::new()),
+            console_sink: RefCell::new(None),
+            user_agent: RefCell::new(None),
+            lazy: RefCell::new(HashMap::new()),
+            lazy_values: RefCell::new(HashMap::new()),
             console_timers: RefCell::new(HashMap::new()),
             console_counts: RefCell::new(HashMap::new()),
             console_depth: std::cell::Cell::new(0),
@@ -500,13 +533,16 @@ impl Runtime {
             workers: RefCell::new(Vec::new()),
             port: RefCell::new(None),
             idb: RefCell::new(indexeddb::IdbState::default()),
+            #[cfg(feature = "wasm")]
             wasm: RefCell::new(wasm::WasmState::default()),
             wake: std::sync::Arc::default(),
             profile: RefCell::new(None),
+            process: RefCell::new(ProcessInfo::default()),
+            vfs: RefCell::new(vfs::Layers::default()),
             code_cache: RefCell::new(code_cache),
             code_cache_protection: RefCell::new(code_cache_protection),
         }));
-        install_globals(&mut context).expect("the globals install");
+        globals::install(&mut context).expect("the globals install");
         Self { context }
     }
 
@@ -1007,6 +1043,13 @@ pub fn console_line(context: &Context, level: Level, text: String) {
         profile.console(level, &text);
         return;
     }
+    // The sink is copied out first: one that writes to this console again must not find the
+    // cell borrowed.
+    let sink = state.console_sink.borrow().clone();
+    if let Some(sink) = sink {
+        sink(level, &text, None);
+        return;
+    }
     if state.echo {
         eprintln!("[verve {level:?}] {text}");
     }
@@ -1026,7 +1069,8 @@ pub fn report(context: &mut Context, error: &JsError) {
     } else {
         format!("Uncaught {text} ({frames})")
     };
-    console_line(context, Level::Error, line);
+    console_line(context, Level::Error, line.clone());
+    process::after_uncaught(context, |_| line);
 }
 
 /// Where an error was thrown: the first few frames of its stack, enough to find the line.
@@ -1113,157 +1157,6 @@ pub fn print(value: &JsValue) -> String {
         Some(text) => text.to_std_string_escaped(),
         None => value.display().to_string(),
     }
-}
-
-fn install_globals(context: &mut Context) -> JsResult<()> {
-    let global = context.global_object();
-    context.register_global_property(js_string!("global"), global.clone(), Attribute::all())?;
-
-    // Timers.
-    let functions: [(
-        &str,
-        usize,
-        boa_engine::native_function::NativeFunctionPointer,
-    ); 6] = [
-        ("setTimeout", 2, |_, args, context| {
-            set_timer(args, false, context)
-        }),
-        ("setInterval", 2, |_, args, context| {
-            set_timer(args, true, context)
-        }),
-        ("setImmediate", 1, |_, args, context| {
-            let mut with_zero = vec![args.first().cloned().unwrap_or_default(), 0.into()];
-            with_zero.extend(args.iter().skip(1).cloned());
-            set_timer(&with_zero, false, context)
-        }),
-        ("clearTimeout", 1, clear_timer_native),
-        ("clearInterval", 1, clear_timer_native),
-        ("clearImmediate", 1, clear_timer_native),
-    ];
-    for (name, length, function) in functions {
-        context.register_global_callable(
-            JsString::from(name),
-            length,
-            NativeFunction::from_fn_ptr(function),
-        )?;
-    }
-    context.register_global_callable(
-        js_string!("queueMicrotask"),
-        1,
-        NativeFunction::from_fn_ptr(|_, args, context| {
-            let callback = args.first().cloned().unwrap_or_default();
-            if !callback.is_callable() {
-                return Err(JsNativeError::typ()
-                    .with_message("queueMicrotask: callback is not a function")
-                    .into());
-            }
-            microtask(context, callback, Vec::new());
-            Ok(JsValue::undefined())
-        }),
-    )?;
-
-    // The console.
-    let mut console = ObjectInitializer::new(context);
-    let levels: [(&str, boa_engine::native_function::NativeFunctionPointer); 6] = [
-        ("log", |_, args, context| log(Level::Log, args, context)),
-        ("info", |_, args, context| log(Level::Info, args, context)),
-        ("warn", |_, args, context| log(Level::Warn, args, context)),
-        ("error", |_, args, context| log(Level::Error, args, context)),
-        ("debug", |_, args, context| log(Level::Debug, args, context)),
-        ("trace", |_, args, context| log(Level::Debug, args, context)),
-    ];
-    for (name, function) in levels {
-        console.function(
-            NativeFunction::from_fn_ptr(function),
-            JsString::from(name),
-            0,
-        );
-    }
-    let more: [(&str, boa_engine::native_function::NativeFunctionPointer); 12] = [
-        ("dir", |_, args, context| {
-            log(Level::Log, &args[..args.len().min(1)], context)
-        }),
-        ("table", |_, args, context| log(Level::Log, args, context)),
-        ("assert", |_, args, context| {
-            if args.first().is_some_and(JsValue::to_boolean) {
-                return Ok(JsValue::undefined());
-            }
-            let mut rest = vec![JsValue::from(js_string!("Assertion failed:"))];
-            rest.extend(args.iter().skip(1).cloned());
-            log(Level::Error, &rest, context)
-        }),
-        ("time", |_, args, context| {
-            let label = console_label(args, context)?;
-            let state = shared(context);
-            let now = (state.clock)();
-            state.console_timers.borrow_mut().insert(label, now);
-            Ok(JsValue::undefined())
-        }),
-        ("timeLog", |_, args, context| {
-            console_time(args, context, false)
-        }),
-        ("timeEnd", |_, args, context| {
-            console_time(args, context, true)
-        }),
-        ("count", |_, args, context| {
-            let label = console_label(args, context)?;
-            let count = {
-                let state = shared(context);
-                let mut counts = state.console_counts.borrow_mut();
-                let count = counts.entry(label.clone()).or_default();
-                *count += 1;
-                *count
-            };
-            console_line(context, Level::Log, format!("{label}: {count}"));
-            Ok(JsValue::undefined())
-        }),
-        ("countReset", |_, args, context| {
-            let label = console_label(args, context)?;
-            shared(context).console_counts.borrow_mut().remove(&label);
-            Ok(JsValue::undefined())
-        }),
-        ("group", |_, args, context| console_group(args, context)),
-        ("groupCollapsed", |_, args, context| {
-            console_group(args, context)
-        }),
-        ("groupEnd", |_, _, context| {
-            let state = shared(context);
-            state
-                .console_depth
-                .set(state.console_depth.get().saturating_sub(1));
-            Ok(JsValue::undefined())
-        }),
-        ("clear", |_, _, _| Ok(JsValue::undefined())),
-    ];
-    for (name, function) in more {
-        console.function(
-            NativeFunction::from_fn_ptr(function),
-            JsString::from(name),
-            0,
-        );
-    }
-    let console = console.build();
-    context.register_global_property(js_string!("console"), console, Attribute::all())?;
-
-    intl::install(context)?;
-    encoding::install(context)?;
-    url::install(context)?;
-    url_pattern::install(context)?;
-    web::install(context)?;
-    crypto::install(context)?;
-    streams::install(context)?;
-    fetch::install(context)?;
-    zlib::install(context)?;
-    dom_events::install(context)?;
-    messaging::install(context)?;
-    navigator::install(context)?;
-    worker::install(context)?;
-    indexeddb::install(context)?;
-    wasm::install(context)?;
-    // Node's own modules, which Electron gives a desktop plugin, are made when first required;
-    // `process` is a global too, and an `EventEmitter`.
-    process::install(context)?;
-    Ok(())
 }
 
 pub(crate) fn microtask(context: &mut Context, callback: JsValue, args: Vec<JsValue>) {

@@ -155,12 +155,18 @@ mod tests {
     #[test]
     fn objects_keep_source_order_and_a_repeated_key_its_first_place() {
         let json: Json =
-            serde_json::from_str(r#"{"z":1,"import":{"b":2,"a":3},"default":"x","z":4}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"z":1,"import":{"b":2,"a":3},"default":"x","z":4}"#).unwrap();
         let keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
         assert_eq!(keys, ["z", "import", "default"]);
         assert_eq!(json.get("z"), Some(&Json::Number(4.)));
-        let inner: Vec<_> = json.get("import").unwrap().as_object().unwrap().keys().cloned().collect();
+        let inner: Vec<_> = json
+            .get("import")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         assert_eq!(inner, ["b", "a"]);
         assert_eq!(json.get("default").and_then(Json::as_str), Some("x"));
     }

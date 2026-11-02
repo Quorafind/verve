@@ -83,6 +83,25 @@ impl Page {
     }
 }
 
+/// A page with `css` in a `<style>` element of its head, and `body` in its body.
+pub fn styled(css: &str, body: &str) -> Page {
+    let mut page = Page::new(Options::default());
+    let css = serde_json::to_string(css).expect("a string");
+    let body = serde_json::to_string(body).expect("a string");
+    page.eval(&format!(
+        "document.head.innerHTML = '<style>' + {css} + '</style>';
+         document.body.innerHTML = {body};"
+    ));
+    page
+}
+
+/// `getComputedStyle(document.getElementById(id)).getPropertyValue(property)`.
+pub fn style(page: &mut Page, id: &str, property: &str) -> String {
+    page.eval(&format!(
+        "getComputedStyle(document.getElementById('{id}')).getPropertyValue('{property}')"
+    ))
+}
+
 /// Runs `f` on a thread with a stack Boa can recurse in, as Verve's own isolates do.
 pub fn on_page<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
     const STACK: usize = 64 << 20;
@@ -95,4 +114,37 @@ pub fn on_page<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
         .expect("a thread")
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// A 1x1 PNG, as an `<img src>` takes it.
+pub const PNG_1X1: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+impl Page {
+    /// The addresses the page has asked the loader for as images since this was last asked.
+    pub fn image_requests(&mut self) -> Vec<String> {
+        self.document.update();
+        self.document
+            .take_requests()
+            .into_iter()
+            .filter_map(|request| match request {
+                verve_dom::Request::Image(url) => Some(url),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// A page with a `width` by `height` canvas `c` in the body, its 2D context `g`, and `px(x, y)`
+/// answering that pixel as `r,g,b,a`.
+pub fn canvas_page(width: u32, height: u32) -> Page {
+    let mut page = Page::new(Options {
+        url: "https://app.test/index.html".into(),
+        ..Options::default()
+    });
+    page.eval(&format!(
+        "globalThis.c = document.createElement('canvas'); c.width = {width}; c.height = {height};
+         document.body.append(c); globalThis.g = c.getContext('2d');
+         globalThis.px = (x, y) => Array.from(g.getImageData(x, y, 1, 1).data).join(',');"
+    ));
+    page
 }

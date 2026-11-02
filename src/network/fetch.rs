@@ -110,7 +110,7 @@ fn begin(
         .map_err(|_| crate::native::type_error(format!("Invalid URL: {}", outgoing.url)))?;
     match url.scheme() {
         "http" | "https" => {}
-        "data" => return answer(local_data(&url), &url, resolvers, cx),
+        "data" => return answer(crate::encoding::data_url(&url), &url, resolvers, cx),
         "blob" => {
             let found = (outgoing.method == "GET")
                 .then(|| crate::shared(cx).blobs.borrow().get(url.as_str()).cloned())
@@ -805,61 +805,6 @@ fn fetch_failed(cx: &mut Context, cause: JsValue) -> JsValue {
     type_error_with_cause(cx, "fetch failed", cause)
 }
 
-// ─── data: ──────────────────────────────────────────────────────────────────────────────────
-
-/// A `data:` address's type and bytes, by the standard's data: URL processor.
-fn local_data(url: &url::Url) -> Result<(String, Vec<u8>), String> {
-    let mut url = url.clone();
-    url.set_fragment(None);
-    let rest = &url.as_str()["data:".len()..];
-    let (kind, body) = rest
-        .split_once(',')
-        .ok_or_else(|| "invalid data: URL".to_owned())?;
-    let mut kind = kind
-        .trim_matches([' ', '\t', '\n', '\r', '\x0c'])
-        .to_owned();
-    let mut bytes = percent_decode(body);
-    let lower = kind.to_ascii_lowercase();
-    if let Some(head) = lower.strip_suffix("base64")
-        && head.trim_end_matches(' ').ends_with(';')
-    {
-        let text: String = String::from_utf8_lossy(&bytes)
-            .chars()
-            .filter(|c| !c.is_ascii_whitespace())
-            .collect();
-        bytes = crate::encoding::unbase64(&text)
-            .ok_or_else(|| "invalid base64 in data: URL".to_owned())?;
-        let cut = head.trim_end_matches(' ').len() - 1;
-        kind.truncate(cut);
-    }
-    if kind.starts_with(';') {
-        kind.insert_str(0, "text/plain");
-    }
-    if kind.is_empty() || !kind.contains('/') {
-        kind = "text/plain;charset=US-ASCII".into();
-    }
-    Ok((kind, bytes))
-}
-
-fn percent_decode(text: &str) -> Vec<u8> {
-    let bytes = text.as_bytes();
-    let hex = |b: Option<&u8>| b.and_then(|b| (*b as char).to_digit(16));
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let (Some(high), Some(low)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2)))
-        {
-            out.push((high * 16 + low) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    out
-}
-
 // ─── content-encoding ───────────────────────────────────────────────────────────────────────
 
 /// One coding undone, chunk by chunk.
@@ -994,11 +939,12 @@ mod tests {
             flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
         raw.write_all(&text).unwrap();
         let raw = raw.finish().unwrap();
-        let mut br = Vec::new();
-        {
-            let mut w = brotli::CompressorWriter::new(&mut br, 4096, 5, 22);
-            w.write_all(&text).unwrap();
-        }
+        // Encoded once with Node's brotli: the decoder is tested without `zlib`'s optional
+        // encoder.
+        let br: Vec<u8> = vec![
+            27, 75, 4, 248, 29, 7, 110, 44, 199, 59, 55, 175, 179, 4, 33, 115, 107, 5, 157, 55, 58,
+            29, 86, 246, 118, 39, 49, 32, 168, 176, 10, 160, 132, 138, 81, 11, 124, 195, 15,
+        ];
         for (coding, body) in [
             ("gzip", gzip),
             ("deflate", zlib),
@@ -1014,26 +960,5 @@ mod tests {
             assert_eq!(out, text, "{coding}");
         }
         assert!(Decoder::chain("compress").is_empty());
-    }
-
-    #[test]
-    fn data_urls_decode_as_the_standard_says() {
-        let parse = |s: &str| local_data(&url::Url::parse(s).unwrap()).unwrap();
-        assert_eq!(
-            parse("data:,Hello%2C%20World"),
-            (
-                "text/plain;charset=US-ASCII".into(),
-                b"Hello, World".to_vec()
-            )
-        );
-        assert_eq!(
-            parse("data:text/plain;base64,SGVsbG8=#frag"),
-            ("text/plain".into(), b"Hello".to_vec())
-        );
-        assert_eq!(
-            parse("data:;charset=utf-8,x"),
-            ("text/plain;charset=utf-8".into(), b"x".to_vec())
-        );
-        assert!(local_data(&url::Url::parse("data:;base64,%%%").unwrap()).is_err());
     }
 }

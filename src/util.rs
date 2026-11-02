@@ -676,18 +676,8 @@ fn custom_symbol(context: &mut Context) -> JsResult<JsValue> {
     Ok(symbol)
 }
 
-/// `Symbol.for(key)`, asked one thread at a time.
-///
-/// Boa's registry of such symbols is shared by every thread, and two threads asking for a key
-/// it does not have yet can each make a symbol of their own — the registry keeps only one, so
-/// a realm that cached the other would never match `Symbol.for(key)` again. Every realm asks
-/// for the runtime's own keys (`util.inspect.custom`) as it is made, so asking under one lock
-/// means the first realm makes the symbol and every other finds it.
+/// `Symbol.for(key)`: the one symbol every realm, on any thread, gets for `key`.
 pub(crate) fn symbol_for(context: &mut Context, key: &str) -> JsResult<JsValue> {
-    static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _turn = ASKING
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let symbol = context.intrinsics().constructors().symbol().constructor();
     let for_fn = symbol.get(js_string!("for"), context)?;
     crate::call(context, &for_fn, &JsValue::undefined(), &[js_text(key)])
