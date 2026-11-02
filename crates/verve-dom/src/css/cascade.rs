@@ -12,6 +12,7 @@ use super::pseudo::{PseudoBox, PseudoElement};
 use super::scope::matched_rules;
 use super::selector::MatchCache;
 use super::sheet::Declaration;
+use super::shorthand::{expansion, longhands, pending};
 use super::styler::Styler;
 use super::values::{
     FONT_LONGHANDS, font_longhands, format_px, is_inherited, resolve_custom, set_declared,
@@ -87,25 +88,49 @@ pub struct Computed {
     pointer: HashSet<NodeId>,
     /// The boxes of the pseudo-elements.
     boxes: Boxes,
+    /// What an animation makes of the nodes it drives, over what the cascade made of them.
+    overlay: HashMap<NodeId, Arc<Style>>,
 }
 
 impl Computed {
-    /// The value of `property` on `node`, after the cascade and `var()`.
+    /// The value of `property` on `node`, after the cascade and `var()` — and the animation
+    /// that drives it, if one does.
     pub fn get(&self, node: NodeId, property: &str) -> Option<&str> {
-        self.styles
-            .get(&node)
+        self.style(node)
             .and_then(|style| style.get(property))
             .map(String::as_str)
     }
 
-    /// The node's style, if it has been worked out.
+    /// The node's style as it shows now, if it has been worked out: an animation's values over
+    /// the cascade's.
     pub fn style(&self, node: NodeId) -> Option<&Style> {
-        self.styles.get(&node).map(|style| &**style)
+        self.overlay
+            .get(&node)
+            .or_else(|| self.styles.get(&node))
+            .map(|style| &**style)
     }
 
-    /// The node's style, shared.
-    pub fn shared(&self, node: NodeId) -> Option<Arc<Style>> {
+    /// The node's style as the cascade made it, animations aside, shared: what a restyle is
+    /// compared with and an animation starts from.
+    pub(crate) fn cascaded(&self, node: NodeId) -> Option<Arc<Style>> {
         self.styles.get(&node).cloned()
+    }
+
+    /// Puts the values animations give the nodes they drive over the cascade's. Answers the
+    /// nodes whose shown style changed by it.
+    pub(crate) fn set_overlay(&mut self, overlay: HashMap<NodeId, Arc<Style>>) -> Vec<NodeId> {
+        let moved = |a: &HashMap<NodeId, Arc<Style>>, b: &HashMap<NodeId, Arc<Style>>| {
+            a.iter()
+                .filter(|(node, style)| b.get(node) != Some(style))
+                .map(|(node, _)| *node)
+                .collect::<Vec<_>>()
+        };
+        let mut changed = moved(&overlay, &self.overlay);
+        changed.extend(moved(&self.overlay, &overlay));
+        changed.sort_unstable();
+        changed.dedup();
+        self.overlay = overlay;
+        changed
     }
 
     /// Whether a `:hover` or `:active` rule would change how `node` looks.
@@ -189,6 +214,7 @@ impl Computed {
         for id in ids {
             self.styles.remove(id);
             self.pointer.remove(id);
+            self.overlay.remove(id);
         }
         self.boxes.forget(ids);
     }
@@ -559,15 +585,6 @@ fn apply<'a>(
     font
 }
 
-/// The properties a declaration of `name` sets: `name` itself, and what it opens into when it is
-/// a shorthand.
-fn longhands(name: &str) -> Vec<String> {
-    let mut opened = Style::new();
-    set_declared(&mut opened, name, "0", &Style::new());
-    opened.insert(name.to_owned(), String::new());
-    opened.into_keys().collect()
-}
-
 /// `var()` resolved against what `style` holds, custom properties included; a value that
 /// cannot be falls back to what it inherits, if it is inherited.
 fn resolve_variables(style: &mut Style, inherited: &Style) {
@@ -578,16 +595,23 @@ fn resolve_variables(style: &mut Style, inherited: &Style) {
         .collect();
     let custom = resolve_custom(&custom);
     let keys: Vec<String> = style.keys().cloned().collect();
+    let mut reopen = Vec::new();
     for key in keys {
+        let varied = !key.starts_with("--") && style[&key].contains("var(");
         let resolved = if key.starts_with("--") {
             custom.get(&key).cloned()
-        } else if style[&key].contains("var(") {
+        } else if varied {
             substitute(&style[&key], &custom, 0)
         } else {
             Some(style[&key].clone())
         };
         match resolved {
             Some(value) => {
+                // What a `var()` stood for may be several words of a shorthand's, which can be
+                // told apart only now.
+                if varied && matches!(key.as_str(), "transition" | "animation") {
+                    reopen.push((key.clone(), value.clone()));
+                }
                 style.insert(key, value);
             }
             None => {
@@ -601,6 +625,19 @@ fn resolve_variables(style: &mut Style, inherited: &Style) {
             }
         }
     }
+    for (key, value) in reopen {
+        if let Some(expand) = expansion(&key) {
+            // Only the longhands nothing declared after the shorthand take what it comes to.
+            let mut opened = Style::new();
+            expand(&mut opened, &key, &value);
+            for (longhand, text) in opened {
+                if longhand == key || style.contains_key(&pending(&longhand)) {
+                    style.insert(longhand, text);
+                }
+            }
+        }
+    }
+    style.retain(|k, _| !k.starts_with('\u{0}'));
 }
 
 /// Whether `property` is a color's: what `getComputedStyle` answers as `rgb()`.

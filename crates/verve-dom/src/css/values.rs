@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::calc::length;
 use super::cascade::Style;
-use super::shorthand::expansion;
+use super::shorthand::{expansion, pending};
 use super::syntax::{decimal, split_outside};
 
 /// The properties a child takes from its parent unless something says otherwise.
@@ -191,6 +191,9 @@ pub(super) fn set_declared(style: &mut Style, key: &str, value: &str, inherited:
     match expansion(key) {
         Some(expand) => expand(style, key, value),
         None => {
+            if key.starts_with("animation") || key.starts_with("transition") {
+                style.remove(&pending(key));
+            }
             style.insert(key.to_owned(), value.to_owned());
         }
     }
@@ -415,7 +418,8 @@ pub fn initial_value(property: &str, tag: Option<&str>) -> Option<&'static str> 
         "white-space" => "normal",
         "text-align" => "start",
         "direction" => "ltr",
-        "transform" | "max-width" | "max-height" | "border-style" => "none",
+        "transform" | "translate" | "rotate" | "scale" | "filter" | "backdrop-filter"
+        | "box-shadow" | "text-shadow" | "max-width" | "max-height" | "border-style" => "none",
         "min-width" | "min-height" => "0px",
         "margin-top"
         | "margin-right"

@@ -17,8 +17,9 @@
 //! `inherit`, `initial`, `unset` and `revert-layer` are honoured; and `var()` reads custom
 //! properties, which inherit like any other — so `var(--text-muted)` follows whatever the
 //! document set `--text-muted` to. `@media` is evaluated against the [`Environment`] (the
-//! viewport, the colour scheme); `@supports` blocks apply; the rest (`@keyframes`,
-//! `@font-face`) are not rules about a node.
+//! viewport, the colour scheme); `@supports` blocks apply; `@keyframes` are what an
+//! animation runs, moved along by [`crate::Document::frame`]; the rest (`@font-face`) is not a
+//! rule about a node.
 //!
 //! What comes out is each property's value as text; turning `12px` into a length and `#fff`
 //! into a colour is the drawer's, with [`length`] and [`color`].
@@ -26,11 +27,14 @@
 //! Lifted from su-editor's Obsidian host (its cascade, `var()` and incremental restyle) with a
 //! selector engine of its own.
 
+mod animate;
 mod boxes;
 mod calc;
 mod cascade;
 mod color;
 mod counters;
+mod easing;
+mod interpolate;
 mod layer;
 mod media;
 mod pseudo;
@@ -42,10 +46,15 @@ mod styler;
 mod syntax;
 mod values;
 
+pub(crate) use animate::{
+    AnimationStore, Direction, Event as AnimationEvent, Fill, Keyframes,
+    Outcome as AnimationOutcome, PlayState, Timing,
+};
 pub use calc::{LengthCalc, length, length_calc};
 pub(crate) use cascade::style_of_part;
 pub use cascade::{Computed, Origin, Style, style_of};
 pub use color::{color, color_with};
+pub(crate) use easing::Easing;
 pub use media::{Environment, MediaQuery};
 pub use pseudo::{ContentItem, PseudoBox, PseudoElement, ScrollbarPart};
 pub use selector::{MatchContext, Selector, SelectorError, SelectorList};

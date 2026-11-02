@@ -6,16 +6,17 @@
 //! itself call a native, and that one must find the state free.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use boa_engine::object::WeakJsObject;
+use boa_engine::object::builtins::JsFunction;
 use boa_engine::{Context, JsObject, JsValue};
 
 use crate::bind::custom::Registry;
 use crate::bind::fonts::Fonts;
 use crate::bind::slot::Slots;
-use crate::css::{Environment, MediaQuery, Origin, Sheet, Styler};
+use crate::css::{AnimationStore, Environment, MediaQuery, Origin, Sheet, Styler};
 use crate::dom::{Dom, NodeId};
 use crate::{Rect, Request, StorageBackend};
 
@@ -92,6 +93,28 @@ pub enum FrameClock {
     Host,
 }
 
+/// A `finished` promise that has not been settled, and how to settle it.
+pub struct Pending {
+    pub promise: JsObject,
+    pub resolve: JsFunction,
+    pub reject: JsFunction,
+}
+
+/// What the realm keeps of an animation's object. While the animation is in the store with its
+/// `finished` unsettled the object is held, since a script may have let go of it and the promise
+/// it made must still settle; once settled only a weak reference is kept, and the record goes
+/// when the object does.
+pub struct AnimationRecord {
+    pub object: WeakJsObject,
+    /// The object, while `finished` waits.
+    pub held: Option<JsObject>,
+    pub finished: Option<Pending>,
+    /// How `finished` was settled.
+    pub outcome: Option<crate::css::AnimationOutcome>,
+    /// Milliseconds into its effect where it last ended or was cancelled.
+    pub ended_at: f64,
+}
+
 pub struct State {
     pub dom: Dom,
     pub url: url::Url,
@@ -134,6 +157,17 @@ pub struct State {
     pub frames: Vec<(u32, JsValue)>,
     /// The timer that runs the next frame, on [`FrameClock::Timer`].
     pub frame_timer: Option<u32>,
+    /// Every transition and animation the document runs.
+    pub animations: AnimationStore,
+    /// The objects of the animations a script has been handed, by animation.
+    pub animation_records: HashMap<u32, AnimationRecord>,
+    /// The time of the last frame, in milliseconds.
+    pub now: f64,
+    /// Whether any sheet says something about transitions or animations: a realm with a
+    /// [`FrameClock::Timer`] only keeps a frame coming for the page that does.
+    pub animates: bool,
+    /// The revision of the arena a frame was last asked for at.
+    pub woken: u64,
     /// Every `matchMedia` list a script still holds, and whether it matched when last asked.
     pub media_lists: Vec<(WeakJsObject, MediaQuery, bool)>,
     pub slots: Slots,
@@ -189,6 +223,11 @@ impl State {
             frame_clock: FrameClock::Timer,
             frames: Vec::new(),
             frame_timer: None,
+            animations: AnimationStore::default(),
+            animation_records: HashMap::new(),
+            now: 0.,
+            animates: false,
+            woken: 0,
             media_lists: Vec::new(),
             slots: Default::default(),
             custom: Default::default(),
@@ -309,6 +348,7 @@ impl State {
             })
             .collect();
         let styler = Rc::new(Styler::new(&sheets, &self.env));
+        self.animates = styler.animates();
         self.styler = Some((self.sheets_key, styler.clone()));
         styler
     }
@@ -332,4 +372,66 @@ pub fn shared(context: &Context) -> Shared {
 /// The state, when a document is installed.
 pub fn try_shared(context: &Context) -> Option<Shared> {
     context.get_data::<Shared>().cloned()
+}
+
+impl State {
+    /// The detached trees among `roots` that are still wanted: some object of a node in them is
+    /// alive, or the arena pins one, or a template keeps them through its content.
+    pub fn reachable(&self, roots: &[NodeId]) -> HashSet<NodeId> {
+        let mut alive = HashSet::from([self.dom.document]);
+        let in_use = |id: &NodeId| {
+            self.dom.is_pinned(*id) || self.wrappers.get(id).is_some_and(|w| w.is_alive())
+        };
+        for root in roots {
+            if self.dom.shadow_including_tree(*root).iter().any(in_use) {
+                alive.insert(*root);
+            }
+        }
+        // A template keeps its content alive, and the other way round only through the objects
+        // of the nodes. Only real ownership edges keep a tree.
+        let mut edges = HashMap::<NodeId, Vec<NodeId>>::new();
+        for (template, content) in &self.template_contents {
+            edges
+                .entry(self.dom.root_of(*template))
+                .or_default()
+                .push(*content);
+        }
+        let mut pending: Vec<NodeId> = alive.iter().copied().collect();
+        while let Some(root) = pending.pop() {
+            for next in edges.get(&root).into_iter().flatten() {
+                if alive.insert(*next) {
+                    pending.push(*next);
+                }
+            }
+        }
+        alive
+    }
+
+    /// Forgets what is kept against the nodes `freed`, which a sweep has freed.
+    pub fn forget_nodes(&mut self, freed: &[NodeId], gone: &HashSet<NodeId>) {
+        for id in freed {
+            self.wrappers.remove(id);
+            self.links.remove(id);
+            self.rects.remove(id);
+            self.fragments.remove(id);
+            self.scroll_offsets.remove(id);
+            self.custom.forget(*id);
+        }
+        crate::canvas::forget(self, gone);
+        self.template_contents
+            .retain(|t, f| !gone.contains(t) && !gone.contains(f));
+        if self.fullscreen.is_some_and(|id| gone.contains(&id)) {
+            self.fullscreen = None;
+        }
+        for observer in &mut self.observers {
+            observer.targets.retain(|t| !gone.contains(&t.node));
+            observer.transient.retain(|(node, _)| !gone.contains(node));
+        }
+        self.observers
+            .retain(|o| o.object.is_alive() && (!o.targets.is_empty() || !o.records.is_empty()));
+        self.dom.record_mutations = self
+            .observers
+            .iter()
+            .any(|o| o.watch == Watch::Mutation && !o.targets.is_empty());
+    }
 }

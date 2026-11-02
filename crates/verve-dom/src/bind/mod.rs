@@ -9,6 +9,7 @@
 //! An object that stands for something else the document keeps — a node's `classList`, its
 //! `style`, a `<style>`'s sheet — carries a [`Handle`]: what kind of thing, and its number.
 
+pub mod animation;
 pub mod computed;
 pub mod custom;
 pub mod document;

@@ -48,7 +48,16 @@ fn style_of_target(context: &Context, id: NodeId, target: Target) -> Style {
     let mut state = state.borrow_mut();
     let styler = state.styler();
     match target {
-        Target::Element => style_of(&state.dom, &styler, id),
+        Target::Element => {
+            // What an animation drives is the value of the moment, over the cascade's.
+            let mut style = style_of(&state.dom, &styler, id);
+            if let Some(animated) = state.animations.animated(id, state.now) {
+                style.extend(animated);
+            }
+            drop(state);
+            style.extend(crate::animation::inherited(context, id, &style));
+            style
+        }
         Target::Part(part) => style_of_part(&state.dom, &styler, id, part),
         Target::Nothing => Style::new(),
     }
