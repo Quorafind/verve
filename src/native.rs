@@ -14,6 +14,10 @@
 //! Boa calls a native constructor called without `new` with no `this` at all, so the class
 //! JavaScript sees is a `Proxy` of it, whose traps are native too: `construct` hands `new.target`
 //! on, and `apply` hands on the `this` the caller gave, which the constructor then sets up.
+//!
+//! This module is also the embedder's toolkit: the native functions, classes and objects a host
+//! defining `obsidian`, `electron` or a document's own API builds its modules out of. Every
+//! item here is public for that; the runtime's own modules use the same ones.
 
 use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
@@ -23,28 +27,34 @@ use boa_engine::{
     property::{Attribute, PropertyDescriptor},
 };
 
-pub(crate) fn arg(args: &[JsValue], at: usize) -> JsValue {
+/// The argument at `at`, or `undefined` when the call gave fewer.
+pub fn arg(args: &[JsValue], at: usize) -> JsValue {
     args.get(at).cloned().unwrap_or_default()
 }
 
-pub(crate) fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
+/// `value` converted to a string as JavaScript's `String(value)` does, which may run its
+/// `toString` and so may throw.
+pub fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
     Ok(value.to_string(context)?.to_std_string_escaped())
 }
 
-pub(crate) fn js_text(text: &str) -> JsValue {
+/// `text` as a JavaScript string value.
+pub fn js_text(text: &str) -> JsValue {
     JsString::from(text).into()
 }
 
-pub(crate) fn type_error(message: impl Into<String>) -> JsError {
+/// A `TypeError` with `message`.
+pub fn type_error(message: impl Into<String>) -> JsError {
     JsNativeError::typ().with_message(message.into()).into()
 }
 
-pub(crate) fn range_error(message: impl Into<String>) -> JsError {
+/// A `RangeError` with `message`.
+pub fn range_error(message: impl Into<String>) -> JsError {
     JsNativeError::range().with_message(message.into()).into()
 }
 
 /// An `Error` with Node's `code` on it: `ERR_INVALID_ARG_TYPE`, `ENOENT`, `ABORT_ERR`.
-pub(crate) fn coded_error(context: &mut Context, message: &str, code: &str) -> JsError {
+pub fn coded_error(context: &mut Context, message: &str, code: &str) -> JsError {
     let error = JsNativeError::error()
         .with_message(message.to_owned())
         .into_opaque(context);
@@ -53,17 +63,19 @@ pub(crate) fn coded_error(context: &mut Context, message: &str, code: &str) -> J
 }
 
 /// The same, as a value: what a callback or an `error` event is handed.
-pub(crate) fn coded_error_value(context: &mut Context, message: &str, code: &str) -> JsValue {
+pub fn coded_error_value(context: &mut Context, message: &str, code: &str) -> JsValue {
     coded_error(context, message, code)
         .into_opaque(context)
         .unwrap_or_default()
 }
 
-pub(crate) fn object(context: &mut Context) -> JsObject {
+/// A new empty object on `Object.prototype`.
+pub fn object(context: &mut Context) -> JsObject {
     JsObject::with_object_proto(context.intrinsics())
 }
 
-pub(crate) fn function(
+/// A native function `name` of `length` parameters, running `f`.
+pub fn function(
     context: &mut Context,
     name: &str,
     length: usize,
@@ -77,7 +89,7 @@ pub(crate) fn function(
 }
 
 /// A function holding `captures`, which it is handed each time it is called.
-pub(crate) fn closure<T: boa_gc::Trace + 'static>(
+pub fn closure<T: boa_gc::Trace + 'static>(
     context: &mut Context,
     name: &str,
     length: usize,
@@ -95,7 +107,7 @@ pub(crate) fn closure<T: boa_gc::Trace + 'static>(
 }
 
 /// A property that is there but not listed: a method, or state kept on an object.
-pub(crate) fn hidden(
+pub fn hidden(
     target: &JsObject,
     key: impl Into<boa_engine::property::PropertyKey>,
     value: impl Into<JsValue>,
@@ -114,7 +126,7 @@ pub(crate) fn hidden(
 }
 
 /// Methods on `target`, listed nowhere, as a class's own are.
-pub(crate) fn methods(
+pub fn methods(
     context: &mut Context,
     target: &JsObject,
     list: &[(&str, usize, NativeFunctionPointer)],
@@ -127,7 +139,7 @@ pub(crate) fn methods(
 }
 
 /// Functions on `target` as plain properties: a module's exports.
-pub(crate) fn exports(
+pub fn exports(
     context: &mut Context,
     target: &JsObject,
     list: &[(&str, usize, NativeFunctionPointer)],
@@ -140,7 +152,7 @@ pub(crate) fn exports(
 }
 
 /// Accessors on `target`: a getter each, and a setter where there is one.
-pub(crate) fn accessors(
+pub fn accessors(
     context: &mut Context,
     target: &JsObject,
     list: &[(&str, NativeFunctionPointer, Option<NativeFunctionPointer>)],
@@ -160,7 +172,7 @@ pub(crate) fn accessors(
 }
 
 /// A property of `value` when it is an object; `undefined` otherwise.
-pub(crate) fn get(value: &JsValue, key: &str, context: &mut Context) -> JsResult<JsValue> {
+pub fn get(value: &JsValue, key: &str, context: &mut Context) -> JsResult<JsValue> {
     match value.as_object() {
         Some(object) => object.get(JsString::from(key), context),
         None => Ok(JsValue::undefined()),
@@ -168,7 +180,7 @@ pub(crate) fn get(value: &JsValue, key: &str, context: &mut Context) -> JsResult
 }
 
 /// Calls the method `name` of `target` with `args`.
-pub(crate) fn invoke(
+pub fn invoke(
     target: &JsValue,
     name: &str,
     args: &[JsValue],
@@ -179,7 +191,7 @@ pub(crate) fn invoke(
 }
 
 /// The items of an array (or anything with a `length` and indices), as a list.
-pub(crate) fn list_of(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
+pub fn list_of(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
     let Some(object) = value.as_object() else {
         return Ok(Vec::new());
     };
@@ -194,21 +206,18 @@ pub(crate) fn list_of(value: &JsValue, context: &mut Context) -> JsResult<Vec<Js
     (0..length).map(|at| object.get(at, context)).collect()
 }
 
-pub(crate) fn array(context: &mut Context, items: Vec<JsValue>) -> JsValue {
+/// A JavaScript array of `items`.
+pub fn array(context: &mut Context, items: Vec<JsValue>) -> JsValue {
     JsArray::from_iter(items, context).into()
 }
 
 /// A global by name.
-pub(crate) fn global(context: &mut Context, name: &str) -> JsResult<JsValue> {
+pub fn global(context: &mut Context, name: &str) -> JsResult<JsValue> {
     context.global_object().get(JsString::from(name), context)
 }
 
 /// `new Name(...args)`, for the global class `Name`.
-pub(crate) fn construct_global(
-    context: &mut Context,
-    name: &str,
-    args: &[JsValue],
-) -> JsResult<JsObject> {
+pub fn construct_global(context: &mut Context, name: &str, args: &[JsValue]) -> JsResult<JsObject> {
     let class = global(context, name)?;
     let class = class
         .as_object()
@@ -218,7 +227,7 @@ pub(crate) fn construct_global(
 }
 
 /// Whether `prototype` is `ancestor` or inherits it.
-pub(crate) fn inherits(prototype: &JsObject, ancestor: &JsObject) -> bool {
+pub fn inherits(prototype: &JsObject, ancestor: &JsObject) -> bool {
     let mut at = Some(prototype.clone());
     // Bounded, against a prototype chain made circular by a proxy.
     for _ in 0..10_000 {
@@ -232,7 +241,7 @@ pub(crate) fn inherits(prototype: &JsObject, ancestor: &JsObject) -> bool {
 }
 
 /// Whether `value` is an instance of the class whose prototype is `prototype`.
-pub(crate) fn is_instance(value: &JsValue, prototype: &JsObject) -> bool {
+pub fn is_instance(value: &JsValue, prototype: &JsObject) -> bool {
     value
         .as_object()
         .and_then(|o| o.prototype())
@@ -244,6 +253,9 @@ pub(crate) fn is_instance(value: &JsValue, prototype: &JsObject) -> bool {
 /// handed nothing, and the class's `apply` trap has left the caller's `this` in the runtime's
 /// state: that object is set up, unless it is nothing or the global object — then, as
 /// `Readable()` without `new` in Node, a fresh one is made.
+///
+/// Not part of the embedder's toolkit: it depends on the handshake with [`class`]'s `apply` trap,
+/// which only classes made here keep.
 pub(crate) fn instance(
     this: &JsValue,
     prototype: &JsObject,
@@ -293,22 +305,28 @@ fn class_construct(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
 }
 
 /// How a class sets up an object made by, or handed to, its constructor.
-pub(crate) type Init = fn(&JsObject, &[JsValue], &mut Context) -> JsResult<()>;
+pub type Init = fn(&JsObject, &[JsValue], &mut Context) -> JsResult<()>;
 
 /// A class to make with [`class`].
-pub(crate) struct ClassSpec<'a> {
+pub struct ClassSpec<'a> {
+    /// The class's name, as `Class.name` and a stack trace show it.
     pub name: &'a str,
+    /// The constructor's `length`: how many parameters it declares.
     pub length: usize,
+    /// Sets up the object the constructor was called on or made.
     pub init: Init,
     /// The class it extends: its constructor. The prototype inherits the parent's, and the
     /// constructor the parent constructor, so statics are inherited as with `class … extends`.
     pub parent: Option<&'a JsObject>,
+    /// The prototype's methods: name, `length` and function.
     pub methods: &'a [(&'a str, usize, NativeFunctionPointer)],
+    /// The prototype's accessors: name, getter and optional setter.
     pub accessors: &'a [(
         &'a str,
         NativeFunctionPointer,
         Option<NativeFunctionPointer>,
     )],
+    /// The constructor's own methods: name, `length` and function.
     pub statics: &'a [(&'a str, usize, NativeFunctionPointer)],
 }
 
@@ -350,7 +368,7 @@ unsafe impl boa_gc::Trace for InitBox {
 
 /// Makes a class: answers its constructor — the `Proxy` JavaScript sees — and its prototype.
 /// It is not made a global; see [`define_global`].
-pub(crate) fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, JsObject)> {
+pub fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, JsObject)> {
     let prototype = object(context);
     let parent_prototype = match spec.parent {
         Some(parent) => parent.get(js_string!("prototype"), context)?.as_object(),
@@ -402,11 +420,7 @@ pub(crate) fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsO
 
 /// `value` as the global `name`, writable and configurable so an embedder can put its own in
 /// its place.
-pub(crate) fn define_global(
-    context: &mut Context,
-    name: &str,
-    value: impl Into<JsValue>,
-) -> JsResult<()> {
+pub fn define_global(context: &mut Context, name: &str, value: impl Into<JsValue>) -> JsResult<()> {
     context.register_global_property(
         JsString::from(name),
         value,
@@ -415,7 +429,7 @@ pub(crate) fn define_global(
 }
 
 /// What makes a global, the first time it is read.
-pub(crate) type GlobalMaker = fn(&mut Context) -> JsResult<JsValue>;
+pub type GlobalMaker = fn(&mut Context) -> JsResult<JsValue>;
 
 #[derive(Clone, Copy)]
 struct MakerBox(GlobalMaker);
@@ -433,21 +447,28 @@ unsafe impl boa_gc::Trace for MakerBox {
 /// The global stays an accessor, its value kept in a cell the getter and setter share: turning
 /// it into a data property once made would be the plain way, but Boa's lookup of a global by
 /// name, cached by an earlier read, then calls the next `new Name()` without its `new.target`.
-pub(crate) fn lazy_global(context: &mut Context, name: &str, make: GlobalMaker) -> JsResult<()> {
+pub fn lazy_global(context: &mut Context, name: &str, make: GlobalMaker) -> JsResult<()> {
     let key = JsString::from(name);
     let cell = JsObject::with_null_proto();
     let getter = FunctionObjectBuilder::new(
         context.realm(),
         NativeFunction::from_copy_closure_with_captures(
-            |_, _, (cell, make): &(JsObject, MakerBox), context| {
+            |_, _, (cell, make, name): &(JsObject, MakerBox, String), context| {
                 if cell.has_own_property(js_string!("value"), context)? {
                     return cell.get(js_string!("value"), context);
                 }
                 let value = (make.0)(context)?;
                 cell.set(js_string!("value"), value.clone(), false, context)?;
+                // The record is Verve's own; a `Context` that is not a Verve runtime has none.
+                if let Some(state) = context.get_data::<std::rc::Rc<crate::Shared>>() {
+                    state
+                        .lazy_values
+                        .borrow_mut()
+                        .insert(name.clone(), value.clone());
+                }
                 Ok(value)
             },
-            (cell.clone(), MakerBox(make)),
+            (cell.clone(), MakerBox(make), name.to_owned()),
         ),
     )
     .name(JsString::from(format!("get {name}")))
@@ -477,8 +498,18 @@ pub(crate) fn lazy_global(context: &mut Context, name: &str, make: GlobalMaker) 
     Ok(())
 }
 
+/// The lazy global `name`'s value, when something has already read it: a hook that mends one
+/// in place asks this, so it never makes a global nothing asked for.
+pub(crate) fn lazy_value(context: &Context, name: &str) -> Option<JsValue> {
+    crate::shared(context)
+        .lazy_values
+        .borrow()
+        .get(name)
+        .cloned()
+}
+
 /// A promise already settled with `outcome`: resolved with its value, or rejected with its error.
-pub(crate) fn settled(outcome: JsResult<JsValue>, context: &mut Context) -> JsResult<JsValue> {
+pub fn settled(outcome: JsResult<JsValue>, context: &mut Context) -> JsResult<JsValue> {
     use boa_engine::object::builtins::JsPromise;
     match outcome {
         Ok(value) => Ok(JsPromise::resolve(value, context)?.into()),

@@ -455,10 +455,24 @@ fn remove_all_listeners(
     Ok(this.clone())
 }
 
+/// Emits `name` on `target` with `args`, as `target.emit(name, ...args)` does: every listener
+/// in order, on a copy of the list, and an `error` nobody hears thrown. What a host writing an
+/// `EventEmitter` subclass of its own — `BrowserWindow`, `webContents`, `app` — emits with.
+pub fn emit_event(
+    context: &mut Context,
+    target: &JsValue,
+    name: &str,
+    args: &[JsValue],
+) -> JsResult<JsValue> {
+    let mut all = vec![js_text(name)];
+    all.extend_from_slice(args);
+    emit(target, &all, context)
+}
+
 /// `emit`: every listener of `name`, in order, on a copy of the list — one added or removed
 /// while they are heard changes the next `emit`, not this one. An `error` nobody hears is
 /// thrown.
-pub(crate) fn emit(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn emit(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let name = arg(args, 0);
     let rest = &args[1.min(args.len())..];
     let is_error = name

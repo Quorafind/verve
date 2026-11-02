@@ -1,12 +1,16 @@
-//! What the stream and fetch tests share: running an async body to its end on a test's clock.
+//! What the tests share: running an async body to its end on a test's clock, a folder of a
+//! test's own, and reading the `result` a script left on its exports.
 
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
+use boa_engine::JsValue;
 use verve::Runtime;
 
 /// Runs `body` — an async function's body, which sets `result` to an array — on a clock the
 /// test moves, until it has set it; answers the array's items as strings.
+#[allow(dead_code)] // Not every test file uses every helper.
 pub fn run_async(body: &str) -> Vec<String> {
     let time = Rc::new(Cell::new(0.));
     let read = Rc::clone(&time);
@@ -36,6 +40,63 @@ pub fn run_async(body: &str) -> Vec<String> {
     parsed
         .as_array()
         .unwrap_or_else(|| panic!("result is not an array: {parsed}"))
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| v.to_string())
+        })
+        .collect()
+}
+
+/// A folder of the test's own, removed when it is done; `.0` is its path.
+#[allow(dead_code)]
+pub struct Dir(pub PathBuf);
+
+impl Dir {
+    /// An empty folder for `test`, at its real path: what the runtime resolves to, so grants and
+    /// answers compare, and without Windows' `\\?\` prefix, which a `file:` URL would keep.
+    #[allow(dead_code)]
+    pub fn new(test: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("verve-test-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = std::fs::canonicalize(&dir).unwrap_or(dir);
+        Self(match real.to_string_lossy().strip_prefix(r"\\?\") {
+            Some(rest) => PathBuf::from(rest),
+            None => real,
+        })
+    }
+
+    /// Writes `text` to `name` in the folder, making the folders on the way; answers its path.
+    #[allow(dead_code)]
+    pub fn file(&self, name: &str, text: &str) -> PathBuf {
+        let path = self.0.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The items of `exports.result`, an array a script set, as strings.
+#[allow(dead_code)]
+pub fn result_of(rt: &mut Runtime, exports: JsValue) -> Vec<String> {
+    let json = rt.eval("JSON.stringify").unwrap();
+    let text = rt
+        .call(&json, &JsValue::undefined(), &[exports])
+        .unwrap_or_else(|e| panic!("{e}"));
+    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
+    parsed["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no result in {parsed}"))
         .iter()
         .map(|v| {
             v.as_str()
