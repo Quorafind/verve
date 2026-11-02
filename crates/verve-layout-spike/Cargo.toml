@@ -1,0 +1,76 @@
+[package]
+name = "verve-layout-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Throwaway P30 spike: text measurement off the GPUI main thread, and GPUI's size cost. Not part of the workspace."
+
+# Its own workspace: GPUI's dependency tree stays out of the root Cargo.lock.
+[workspace]
+
+[features]
+# Link the Electron-profile `verve` runtime into size-app (size question 2b).
+verve = ["dep:verve"]
+# rustybuzz comparison bin (own-stack): GPUI vs our own shaping on the same font files.
+own-stack = ["dep:rustybuzz"]
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+verve = { path = "../..", default-features = false, optional = true }
+rustybuzz = { version = "0.20", optional = true }
+
+[patch."https://github.com/zed-industries/zed"]
+gpui = { git = "https://github.com/Quorafind/zed-c", rev = "e679b519961d280cb878183709e31c28684fb5e0", version = "=0.2.2" }
+gpui_platform = { git = "https://github.com/Quorafind/zed-c", rev = "e679b519961d280cb878183709e31c28684fb5e0" }
+gpui_macros = { git = "https://github.com/Quorafind/zed-c", rev = "e679b519961d280cb878183709e31c28684fb5e0" }
+sum_tree = { git = "https://github.com/Quorafind/zed-c", rev = "e679b519961d280cb878183709e31c28684fb5e0" }
+
+[patch.crates-io]
+boa_ast = { path = "../../boa/core/ast" }
+boa_engine = { path = "../../boa/core/engine" }
+boa_gc = { path = "../../boa/core/gc" }
+boa_interner = { path = "../../boa/core/interner" }
+boa_macros = { path = "../../boa/core/macros" }
+boa_parser = { path = "../../boa/core/parser" }
+boa_string = { path = "../../boa/core/string" }
+
+# Same release profile as the root Cargo.toml (copied, so the size numbers are comparable).
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+opt-level = "s"
+
+[profile.release.package.boa_engine]
+opt-level = 3
+[profile.release.package.boa_parser]
+opt-level = 3
+[profile.release.package.boa_ast]
+opt-level = 3
+[profile.release.package.boa_gc]
+opt-level = 3
+[profile.release.package.boa_interner]
+opt-level = 3
+[profile.release.package.boa_string]
+opt-level = 3
+[profile.release.package.regress]
+opt-level = 3
+[profile.release.package.wasmi]
+opt-level = 3
+[profile.release.package.cranelift-codegen]
+opt-level = 3
+[profile.release.package.cranelift-frontend]
+opt-level = 3
+[profile.release.package.regalloc2]
+opt-level = 3
+
+[[bin]]
+name = "own-stack"
+path = "src/bin/own-stack.rs"
+required-features = ["own-stack"]
+
+[[bin]]
+name = "size-verve-only"
+path = "src/bin/size-verve-only.rs"
+required-features = ["verve"]
