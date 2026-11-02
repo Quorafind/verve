@@ -3,8 +3,11 @@
 
 use std::collections::HashMap;
 
+use super::cascade::Origin;
+use super::media::Environment;
 use super::scope::{Reach, ScopeIndex};
-use super::{Dom, Environment, NodeId, Origin, Rule, Sheet};
+use super::sheet::{Rule, Sheet};
+use crate::dom::{Dom, NodeId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum RuleKey {

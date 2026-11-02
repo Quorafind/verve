@@ -6,10 +6,13 @@
 
 use std::collections::HashMap;
 
-use super::{
-    Compound, Declaration, Dom, MatchCache, MatchContext, NodeId, Origin, Parser, Pseudo, Rank,
-    Selector, SelectorError, SelectorList, Styler,
+use super::cascade::{Origin, Rank};
+use super::selector::{
+    Compound, MatchCache, MatchContext, Parser, Pseudo, Selector, SelectorError, SelectorList,
 };
+use super::sheet::Declaration;
+use super::styler::Styler;
+use crate::dom::{Dom, NodeId};
 
 /// How far a compound's subject reaches beyond the tree its sheet is in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

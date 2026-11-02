@@ -1,6 +1,5 @@
 crates/verve-dom/src/bind/element.rs 3824
 crates/verve-dom/src/bind/platform.rs 2355
-crates/verve-dom/src/css.rs 2939
 crates/verve-dom/src/dom.rs 1769
 crates/verve-dom/src/lib.rs 1835
 src/buffer.rs 1742
