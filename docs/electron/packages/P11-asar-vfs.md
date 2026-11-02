@@ -1,6 +1,6 @@
 # P11 asar 与虚拟文件系统
 
-**依赖**：P03（`verve::vfs::Overlay`、`Runtime::set_vfs`、`original-fs` 绕过 overlay）  **规模**：M  **修改**：新建 `crates/verve-electron/src/asar/`（`mod.rs`、`archive.rs`、`overlay.rs`、`integrity.rs`）；`MainGuest`/`RendererGuest` 安装 overlay
+**依赖**：P03（`verve::vfs::Overlay`、`Runtime::set_vfs`、`original-fs` 绕过 overlay）  **规模**：M  **修改**：新建独立 crate `crates/verve-asar/`（`src/{lib,archive,overlay,integrity,extract}.rs`，依赖 `verve`，不依赖 GUI），加入 workspace members；`MainGuest`/`RendererGuest` 安装 overlay 由 P10 负责（`verve-electron` 依赖 `verve-asar`）；内核仅限 P03 遗留项（`src/vfs.rs`、`src/fs.rs`、`src/fs/sys.rs`、`src/modules.rs`）
 
 ## 目标
 
@@ -161,7 +161,7 @@ trait Overlay: Send + Sync {
 - `cwd` 在归档内 → 换成 `.asar.unpacked` 对应目录（存在时），否则报 `ENOTDIR`（Electron 报错 `spawn ENOTDIR`）。
 - `fork(modulePath)`：`modulePath` 在归档内照常（子进程是 Verve 的 `ELECTRON_RUN_AS_NODE` 模式，overlay 在子进程里同样安装）。
 - 参数里出现的其他 asar 路径不改写。
-- 本包提供 `pub fn resolve_for_exec(path: &Path) -> io::Result<PathBuf>` 给 P17 调用。
+- 入口是 `Runtime::materialize(path)`（内核已有），由 `AsarOverlay` 实现上面的规则；没有全局的 `resolve_for_exec`（overlay 属于 realm）。
 
 ## 代码缓存
 
@@ -174,13 +174,13 @@ asar 内脚本的缓存键 = `归档真实路径 + 条目 offset + 条目 size +
 2. 用 npm `@electron/asar` 打出的真实归档做 ignored 测试（夹具准备方式写进 PR）。
 3. `overlay.rs`：实现 P03 trait；路径识别与 `noAsar`。
 4. `MainGuest`、`RendererGuest`（含 `nodeIntegration: false` 时的 preload）安装同一个 overlay 实例。
-5. `copy_out` 与 `resolve_for_exec`。
+5. `copy_out`（实现为 `Overlay::materialize`）。
 6. 冻结 Electron 观测：写一个脚本 `tests/electron/asar/observe.js`，在真实 Electron 39 里对一组路径调用上表所有 API，
    输出 JSON；结果放 `tests/electron/asar/electron-39.json`，测试逐项比对（时间戳、ino 等不稳定字段只比类型）。
 
 ## 验收
 
-- `cargo test -p verve-electron --test asar`：上表每一行至少一个用例；错误 message/code 与冻结观测一致。
+- `cargo test -p verve-asar`：上表每一行至少一个用例；错误 message/code 与冻结观测一致。
 - 夹具应用 `tests/electron/apps/packaged/`（P00）打成 `app.asar` 放到 `resources/`，`electron.exe` 直接启动：
   主进程 `require('./lib')`、ESM `import`、读取 JSON、`fs.readdirSync(__dirname)` 都正确；渲染器的 preload 从归档加载。
 - 性能：10 000 个文件、50 MB 的归档，`Archive::open` ≤ 20 ms；`require` 500 个归档内模块与解包成目录相比耗时差 ≤ 10%。
@@ -192,4 +192,62 @@ asar 内脚本的缓存键 = `归档真实路径 + 条目 offset + 条目 size +
 
 ## 状态
 
-（实现者完成后填写）
+### 完成了什么
+
+- **独立 crate `crates/verve-asar`**（不是 `verve-electron`：P02 尚未合并，两边都建会冲突）。公开面：`Archive::{open, path, header_hash}`、
+  `AsarOverlay`（实现 `verve::vfs::Overlay`）、`AsarOptions { validate_integrity, on_integrity_failure, disabled }`、`AsarError`、`IntegrityFailure`。
+  P10 依赖它并 `rt.set_vfs(Some(Arc::new(AsarOverlay::new(..))))`；主进程与各渲染器共用同一个 `Arc`，归档只打开一次。
+- 格式解析（Pickle 头、`offset` 十进制字符串按 `u64`、`unpacked`、`executable`、`link` 最多 40 层、目录 `unpacked` 向下继承、
+  头上限 256 MiB 是 Verve 自己的防护）、定位读（无锁）、路径识别（任一段以 `.asar` 结尾且为合法归档；普通目录 `x.asar` 缓存为"不是归档"，
+  不存在的名字不缓存）、归档真实路径在 `open` 时算一次。名字含分隔符或为 `.`/`..` 的头条目被丢弃；链接目标在 Windows 上按 `/` 和 `\` 切分。
+- 覆盖 `stat`/`lstat`/`read`/`read_dir`/`realpath`/`write_denied`/`access_denied`/`materialize`/`error_message`/`cache_key`。
+  `fs` 的 sync/回调/promise/流/`openSync`/`opendir`/`copyFile`/`cp`，`require`/`import()`/`require.resolve`、`package.json` 的 `main`、`original-fs`、
+  `process.noAsar`、`.asar.unpacked`、归档内写入、归档内缺失文件，均有测试。
+- **integrity**：`validate_integrity` 开启时，每次读取打包文件，比较整个文件的 SHA-256 与头里的 `integrity.hash`（Electron 的 `fs` 读取路径
+  `ValidateIntegrityOrDie` 如此；`blocks` 是 Chromium 流式校验用的，不读）。失败返回 `AsarError`（`is_integrity()`），并先调用
+  `on_integrity_failure`；**库本身不打印也不退出**，Electron 的 `LOG(FATAL)` 等价物由 P10 在回调里做。
+  `Archive::header_hash()` 返回头 JSON 的 SHA-256（十六进制）。
+- **`materialize`**（`Runtime::materialize`，P17 调用）：unpacked 文件 → `.asar.unpacked` 下真实路径；打包文件 → 解到随机名的私有目录
+  （`<temp>/verve-electron-asar-<pid>-<16 位十六进制>`，`DirBuilder` 0o700、必须新建；文件 `create_new`、0o600/0o700，不跟随链接；
+  每个条目只解一次，不同条目的解包互不等待；overlay 释放时删除）；目录/归档本身 → `.asar.unpacked` 对应目录（存在时），否则 `ENOTDIR`。
+- **内核的 P03 遗留项（各自独立提交）**：`Overlay::lstat`；`Kind::mode` 公开；`Overlay::access_denied`（`accessSync(.., W_OK)`：归档内打包文件
+  报 Electron 的 `EACCES: permission denied, access '<归档内路径>'`，unpacked 文件问真实文件）；`modules::forget` 经 overlay 的 `realpath`；
+  `verve::encoding::hex`（去掉 `code_cache`/`crypto`/`npm` 里的三份副本）。
+
+### 与 Electron / 任务书不同、已知差异
+
+- 写入归档内路径：`write_denied` 返回 `ENOTDIR`（P03 的测试 overlay 用 `ENOTSUP`）。归档文件本身不拦截，交给磁盘，与 Electron 一致。
+- `mode` 按 Electron 的 `statMode`：`0o644`+类型位；目录、链接、可执行再加 `0o111`；链接再加 `0o022`。时间戳取归档文件的 mtime
+  （Electron 是固定值）；链接的 `size` 取目标路径长度。`Metadata` 只有 `kind/size/mtime/mode`，所以 `dev`/`nlink`/`ino`/`uid`/`gid` 是内核的默认值
+  （Electron：`dev=1`、`nlink=1`、`blksize=4096`、真实 uid/gid、递增的 `ino`）；要补齐需要 R1/P03 给 `Metadata` 加字段。
+- 链接成环：返回 `ENOENT, … not found in …` 而不是 `ELOOP`（`io::ErrorKind` 没有稳定的 `FilesystemLoop`；Electron 对成环也答找不到）。
+- 打包文件的 `open`/`createReadStream`/`fs.promises.open` 沿用 P03 的 `Handle::Overlay`（整文件读入内存），不解到临时文件；只有 `materialize` 才落盘。
+- `errno` 沿用 `fs.rs` 的平台映射（Windows 上 ENOENT 为 -4058），不是 Electron 写死的 -2。`Invalid package` 的 `code` 是 `EIO`，Electron 无 code。
+- 损坏的 `x.asar` 本身当作普通文件读，访问其内部才报 `Invalid package`。
+- 头里**一条**记录畸形（缺 `size`/`offset` 等）会让整个归档判为 `Invalid package`，而 Electron 只让那一条找不到。
+- `.asar` 后缀在所有平台都不区分大小写（与 Electron 一致）。
+- `ELECTRON_NO_ASAR`：库不读环境变量。Electron 只在 `process.type` 既非 `browser` 也非 `renderer` 时才应用它；P10 按此规则决定是否传
+  `AsarOptions { disabled: true, .. }`（或干脆不安装 overlay）。
+- 没做：`watch`/`watchFile` 对归档内路径报 `ENOENT`（P03 的永不触发的 watcher 未改，overlay trait 没有对应入口）；`statfs`；
+  代码缓存键没有接 `cache_key`：`code_cache` 以源码内容为键，asar 里的模块照样命中，改成"归档路径+偏移+mtime"会变弱；`cache_key` 已实现并测试，是否接入留给 P42；
+  `readlink` 对归档内路径仍是操作系统的答案（Electron 也不补丁它）。
+- 没做：用 `@electron/asar` 打的真实归档的 ignored 测试、冻结 Electron 39 观测 JSON（`tests/electron/asar/`）、`electron.exe` 夹具验收、
+  `require` 500 个模块 vs 目录的性能对比：这些依赖 npm/真实 Electron/P00。行为按 `asar-fs-wrapper.ts`、`asar_util.cc`、`@electron/asar` 的源码写，
+  **未与真实 Electron 39 逐项比对**。`ELECTRON_NO_ASAR` 由 P10 负责，这里只有 `disabled` 的测试。
+- 10 000 个文件的头解析有测试，但带墙钟上限，标了 `#[ignore]`（`cargo test -p verve-asar -- --ignored`）；release 下 ≤ 20 ms 未测。
+
+### 测试
+
+- `cargo test -p verve-asar`：单元测试（格式、链接、unpacked、integrity、畸形头、名字加固、解包目录不被占用）与 `--test asar`（`fs`/`require`/`import`/`original-fs`/
+  `noAsar`/写入/access/mode/解包/完整性回调）全过；`cargo test --test embedder_hooks` 含 `lstat` 与 `W_OK` 用例。
+
+### 给其他包的备注
+
+- **P10**：依赖 `verve-asar`，在主进程与每个渲染器的 runtime 上安装同一个 `Arc<AsarOverlay>`。要做的事：
+  `--verve-skip-asar-integrity` → `validate_integrity: false` 并打印警告；`on_integrity_failure` 里打印并终止进程（Electron 的 `LOG(FATAL)`）；
+  `ELECTRON_NO_ASAR` 非空且 `process.type` 既非 `browser` 也非 `renderer` 时 `disabled: true`；fuse `EnableEmbeddedAsarIntegrityValidation` 打开时，
+  用 `Archive::open(..).header_hash()` 与 exe 资源里的 `ElectronAsarIntegrity` 比对（本包只做文件摘要校验）。`process.noAsar` 由内核提供。
+- **P17**：`Runtime::materialize(path)` 给出可执行的真实路径；`cwd` 在归档内时先 `materialize`，返回 `ENOTDIR` 即报 `spawn ENOTDIR`。
+- **P42**：`Archive::header_hash()` 就是头 JSON 的 SHA-256；`AsarOverlay::cache_key` 可用但未接入 `code_cache`。
+- **P40**：本 crate 没有 `.asar` 写入器（只有测试里的 `tests/support`）；`ElectronAsarIntegrity` 的比对移到了 P10。
+- **R1/P03**：`Metadata` 需要 `dev/ino/uid/gid/nlink` 才能与 Electron 的 `Stats` 一致。

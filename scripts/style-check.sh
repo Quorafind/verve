@@ -21,7 +21,7 @@ COPIES=ci/style/toolkit-copies.txt
 # Each helper has one home: the native-function toolkit in src/native.rs, the encoders in
 # src/encoding.rs. A definition of one of these names anywhere else is a copy.
 NATIVE='arg|js_text|text_of|type_error|range_error|coded_error|coded_error_value|object|function|closure|hidden|methods|exports|accessors|get|invoke|list_of|array|global|class|instance'
-ENCODING='base64|unbase64|percent_decode|decode_base64|data_url'
+ENCODING='hex|base64|unbase64|percent_decode|decode_base64|data_url'
 
 # Only the folders that exist: a crate without tests/ is not an error.
 existing() { for d in "$@"; do [ -d "$d" ] && echo "$d"; done; return 0; }

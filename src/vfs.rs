@@ -36,7 +36,7 @@ pub enum Kind {
 
 impl Kind {
     /// `fs.Stats.mode`'s kind bits for this kind: `S_IFREG`, `S_IFDIR` or `S_IFLNK`.
-    pub(crate) fn mode(self) -> u32 {
+    pub fn mode(self) -> u32 {
         match self {
             Self::File => 0o100000,
             Self::Dir => 0o040000,
@@ -96,6 +96,12 @@ pub trait Overlay: Send + Sync {
     /// What `path` is, when it is this overlay's.
     fn stat(&self, path: &Path) -> Option<io::Result<Metadata>>;
 
+    /// What `path` is itself, a link at its end not followed — what `lstat` asks. An overlay
+    /// without links answers as [`Overlay::stat`] does.
+    fn lstat(&self, path: &Path) -> Option<io::Result<Metadata>> {
+        self.stat(path)
+    }
+
     /// The bytes of `path`, when it is this overlay's file.
     fn read(&self, path: &Path) -> Option<io::Result<Cow<'static, [u8]>>>;
 
@@ -106,9 +112,16 @@ pub trait Overlay: Send + Sync {
     fn realpath(&self, path: &Path) -> Option<io::Result<PathBuf>>;
 
     /// The error a write to `path` fails with, when the overlay holds it and keeps it as it is
-    /// — `app.asar` is read-only, and Electron says so with `ENOTSUP`.
+    /// — a path inside `app.asar` fails as a path through a file does, with `ENOTDIR`.
     fn write_denied(&self, _path: &Path) -> Option<io::Error> {
         None
+    }
+
+    /// The error `access(path, W_OK)` fails with, when the overlay holds the path and it is not
+    /// writable. Apart from [`Overlay::write_denied`] because the two differ: Electron asks the
+    /// real file about an unpacked one, and words the refusal for a packed one its own way.
+    fn access_denied(&self, path: &Path) -> Option<io::Error> {
+        self.write_denied(path)
     }
 
     /// Where a file only the overlay holds can be read by a program that is not this runtime —
@@ -201,6 +214,12 @@ impl View {
         overlay.stat(&path)
     }
 
+    pub(crate) fn lstat(&self, path: &Path) -> Option<io::Result<Metadata>> {
+        let overlay = self.overlay.as_ref()?;
+        let path = self.absolute(path)?;
+        overlay.lstat(&path)
+    }
+
     pub(crate) fn read(&self, path: &Path) -> Option<io::Result<Cow<'static, [u8]>>> {
         let overlay = self.overlay.as_ref()?;
         let path = self.absolute(path)?;
@@ -223,6 +242,12 @@ impl View {
         let overlay = self.overlay.as_ref()?;
         let path = self.absolute(path)?;
         overlay.write_denied(&path)
+    }
+
+    pub(crate) fn access_denied(&self, path: &Path) -> Option<io::Error> {
+        let overlay = self.overlay.as_ref()?;
+        let path = self.absolute(path)?;
+        overlay.access_denied(&path)
     }
 
     pub(crate) fn materialize(&self, path: &Path) -> Option<io::Result<PathBuf>> {

@@ -3460,6 +3460,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "verve-asar"
+version = "0.1.0"
+dependencies = [
+ "boa_engine",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "verve",
+]
+
+[[package]]
 name = "verve-dom"
 version = "0.1.0"
 dependencies = [

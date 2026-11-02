@@ -501,6 +501,11 @@ impl Overlay for Memory {
             .map(|_| io::Error::new(io::ErrorKind::Unsupported, "EROFS: read-only file system"))
     }
 
+    fn access_denied(&self, path: &Path) -> Option<io::Error> {
+        self.under(path)
+            .map(|_| io::ErrorKind::PermissionDenied.into())
+    }
+
     fn error_message(&self, err: &io::Error, path: &Path) -> Option<String> {
         let name = self.under(path)?;
         (err.kind() == io::ErrorKind::NotFound).then(|| {
@@ -692,6 +697,81 @@ fn the_overlay_is_asked_about_absolute_clean_paths() {
         "#,
     );
     assert_eq!(result, ["packed bytes", "packed bytes", "false"]);
+}
+
+/// An overlay of one link: `stat` follows it to a file, `lstat` is the link.
+struct Linked;
+
+impl Overlay for Linked {
+    fn stat(&self, path: &Path) -> Option<io::Result<Metadata>> {
+        path.ends_with("linked")
+            .then(|| Ok(Metadata::new(Kind::File, 3, 0., 0o100644)))
+    }
+
+    fn lstat(&self, path: &Path) -> Option<io::Result<Metadata>> {
+        path.ends_with("linked")
+            .then(|| Ok(Metadata::new(Kind::Symlink, 6, 0., 0o120777)))
+    }
+
+    fn read(&self, _: &Path) -> Option<io::Result<Cow<'static, [u8]>>> {
+        None
+    }
+
+    fn read_dir(&self, _: &Path) -> Option<io::Result<Vec<DirEntry>>> {
+        None
+    }
+
+    fn realpath(&self, _: &Path) -> Option<io::Result<PathBuf>> {
+        None
+    }
+}
+
+/// `lstat` asks the overlay for the link itself; `stat` for what it leads to.
+#[test]
+fn lstat_asks_the_overlay_for_the_link_and_stat_for_its_target() {
+    let dir = Dir::new("lstat");
+    let mut rt = realm();
+    let root = dir.0.clone();
+    rt.set_vfs(Some(Arc::new(Linked)));
+    let result = run_in(
+        &mut rt,
+        &root,
+        r#"
+        const fs = require('fs');
+        const link = require('path').join(__dirname, 'linked');
+        const lstat = fs.lstatSync(link);
+        const stat = fs.statSync(link);
+        exports.result = [lstat.isSymbolicLink(), lstat.size, stat.isFile(), stat.size].map(String);
+        "#,
+    );
+    assert_eq!(result, ["true", "6", "true", "3"]);
+}
+
+/// `W_OK` on a file the overlay keeps read-only is `EACCES`, once the file is found; `R_OK` is
+/// fine, and a file that is not there is still `ENOENT`.
+#[test]
+fn write_access_to_an_overlay_file_is_refused_with_eacces() {
+    let dir = Dir::new("access");
+    let mut rt = realm();
+    let root = dir.0.clone();
+    rt.set_vfs(Some(Arc::new(packed(&root))));
+    let result = run_in(
+        &mut rt,
+        &root,
+        r#"
+        const fs = require('fs');
+        const data = require('path').join(__dirname, 'app.asar', 'data.txt');
+        const code = (file, mode) => {
+            try { fs.accessSync(file, mode); return 'ok'; } catch (e) { return e.code; }
+        };
+        exports.result = [
+            code(data, fs.constants.R_OK),
+            code(data, fs.constants.W_OK),
+            code(data + '.missing', fs.constants.W_OK),
+        ];
+        "#,
+    );
+    assert_eq!(result, ["ok", "EACCES", "ENOENT"]);
 }
 
 #[test]

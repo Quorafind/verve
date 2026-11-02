@@ -127,9 +127,31 @@ impl Meta {
     }
 }
 
+/// The error `access(path, mode)` fails with, `path` being found as `meta` and `write` whether
+/// `mode` asks for `W_OK`: the mode says it is read-only, or the overlay that holds it refuses.
+pub(crate) fn write_refusal(
+    view: &View,
+    meta: &Meta,
+    path: &Path,
+    write: bool,
+) -> Option<io::Error> {
+    if !write {
+        return None;
+    }
+    if meta.is_readonly() {
+        return Some(io::ErrorKind::PermissionDenied.into());
+    }
+    view.access_denied(path)
+}
+
 /// What `path` is, following a link at its end when `follow` says so.
 pub(crate) fn stat(view: &View, path: &Path, follow: bool) -> io::Result<Meta> {
-    if let Some(found) = view.stat(path) {
+    let held = if follow {
+        view.stat(path)
+    } else {
+        view.lstat(path)
+    };
+    if let Some(found) = held {
         return found.map(Meta::Overlay);
     }
     let meta = if follow {
