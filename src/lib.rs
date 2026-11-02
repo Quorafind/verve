@@ -26,14 +26,13 @@ pub use boa_engine;
 pub use boa_gc;
 
 mod assert;
+pub mod blob;
 mod buffer;
 mod cjs_exports;
 pub mod cli;
 mod code_cache;
 mod crypto;
 pub mod dom_events;
-/// Base64, percent-decoding and `data:` URLs as the runtime reads them, for embedders: no crate
-/// writes its own (docs/electron/style.md §1).
 pub mod encoding;
 mod esm;
 mod esm_resolve;
@@ -73,12 +72,6 @@ mod util;
 mod vm;
 mod wasm;
 mod web;
-
-/// `Blob`s as the runtime keeps them, for embedders that make or read one (a canvas's `toBlob`,
-/// a dropped file) instead of reaching into how they are stored.
-pub mod blob {
-    pub use crate::web::{blob_bytes, is_blob, new_blob};
-}
 mod worker;
 mod zlib;
 

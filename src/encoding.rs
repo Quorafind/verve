@@ -4,6 +4,9 @@
 //! A `Buffer` is a `Uint8Array`, as Node's is: its prototype is `Buffer.prototype`, which
 //! inherits `Uint8Array.prototype`, so indexing, `length`, `subarray` and the rest are the
 //! engine's own, and only what Node adds is here.
+//!
+//! Base64, percent-decoding and `data:` URLs are public (`verve::encoding`) so that no other
+//! crate writes its own (docs/electron/style.md §1).
 
 use boa_engine::{
     Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string,
