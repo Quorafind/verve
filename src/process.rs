@@ -18,6 +18,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use boa_engine::{
     Context, JsBigInt, JsError, JsObject, JsResult, JsString, JsSymbol, JsValue, js_string,
@@ -34,6 +35,115 @@ pub const NODE_VERSION: &str = "22.20.0";
 pub const ELECTRON_VERSION: &str = "39.2.0";
 pub const CHROME_VERSION: &str = "142.0.7444.59";
 const V8_VERSION: &str = "14.2.231.17-electron.0";
+
+/// What a realm's `process` is: the process an embedder is building — Electron's main process,
+/// its renderers, a utility — rather than the plugin host this runtime was first made for.
+///
+/// [`ProcessInfo::default`] is the plugin host's shape, exactly: `type` is `"renderer"`, `title`
+/// is `"obsidian"`, `versions` has Electron's and Chromium's numbers in it. An embedder replaces
+/// it with [`crate::Runtime::set_process_info`]. `verve run` makes one of its own, so a script
+/// that is the whole program has Node's `process`.
+#[derive(Clone, Debug)]
+pub struct ProcessInfo {
+    /// `process.title`.
+    pub title: String,
+    /// `process.type`: `"browser"`, `"renderer"`, `"utility"`; `None` deletes it, as Node's
+    /// `process` has no such property.
+    pub process_type: Option<String>,
+    /// `process.argv`, whole: the executable, the entry, its arguments.
+    pub argv: Vec<String>,
+    /// `process.argv0`.
+    pub argv0: String,
+    /// `process.execPath`.
+    pub exec_path: String,
+    /// `process.execArgv`.
+    pub exec_argv: Vec<String>,
+    /// `process.resourcesPath`; `None` leaves it undefined, as Node's is.
+    pub resources_path: Option<String>,
+    /// `process.defaultApp`, which Electron defines only for an app run from a folder.
+    pub default_app: bool,
+    /// Whether the Electron-only fields appear: `versions.electron`, `versions.chrome`.
+    pub electron_fields: bool,
+    /// `process.sandboxed`, which Electron's renderers have; `None` leaves it undefined, as
+    /// Node's `process` has no such property.
+    pub sandboxed: Option<bool>,
+    /// `process.contextIsolated`, which Electron has in a renderer when it says so.
+    pub context_isolated: Option<bool>,
+    /// What `process.exit` does.
+    pub exit: ExitBehavior,
+    /// What an error nobody caught does here.
+    pub on_uncaught: UncaughtBehavior,
+}
+
+impl Default for ProcessInfo {
+    fn default() -> Self {
+        let exec_path = std::env::current_exe()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "electron".into());
+        Self {
+            title: "obsidian".into(),
+            process_type: Some("renderer".into()),
+            argv: vec![exec_path.clone()],
+            argv0: "electron".into(),
+            exec_path,
+            exec_argv: Vec::new(),
+            resources_path: None,
+            default_app: false,
+            electron_fields: true,
+            sandboxed: None,
+            context_isolated: None,
+            exit: ExitBehavior::Note,
+            on_uncaught: UncaughtBehavior::Log,
+        }
+    }
+}
+
+/// What `process.exit` does in a realm.
+#[derive(Clone)]
+pub enum ExitBehavior {
+    /// Noted — `exitCode` set, the `exit` event heard, a warning on the console — and nothing
+    /// ends: how this runtime has always served a plugin's `process.exit`.
+    Note,
+    /// The process ends here, as Node's does: `verve run`.
+    Process,
+    /// Handed to the host — an Electron main process turns it into `app.exit(code)` — and the
+    /// script that called it ends with an interrupt it cannot catch. The interrupt stays asked
+    /// for until something runs and meets it, so a host that runs nothing after the call clears
+    /// it with `Runtime::interrupt_handle().clear()` before the next job.
+    Host(Arc<dyn Fn(i32) + Send + Sync>),
+}
+
+/// What an uncaught error does in a realm.
+#[derive(Clone)]
+pub enum UncaughtBehavior {
+    /// Written to the console, and the realm goes on: the plugin host's, as it always was.
+    Log,
+    /// The process ends with 1, as Node's does.
+    Exit,
+    /// Told to the host, which decides: an Electron main process keeps running (and may show a
+    /// dialog) until it quits.
+    Report(Arc<dyn Fn(&str) + Send + Sync>),
+}
+
+impl std::fmt::Debug for ExitBehavior {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Note => out.write_str("Note"),
+            Self::Process => out.write_str("Process"),
+            Self::Host(_) => out.write_str("Host(..)"),
+        }
+    }
+}
+
+impl std::fmt::Debug for UncaughtBehavior {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Log => out.write_str("Log"),
+            Self::Exit => out.write_str("Exit"),
+            Self::Report(_) => out.write_str("Report(..)"),
+        }
+    }
+}
 
 fn arch() -> &'static str {
     match std::env::consts::ARCH {
@@ -189,33 +299,21 @@ const PROCESS_FUNCTIONS: &[(
         }
         Ok(JsValue::undefined())
     }),
-    ("exit", 1, |this, args, cx| {
-        let code = arg(args, 0);
-        if let Some(process) = this.as_object() {
-            if !code.is_undefined() {
-                process.set(js_string!("exitCode"), code.clone(), false, cx)?;
-            }
-            let code = process.get(js_string!("exitCode"), cx)?;
+    ("exit", 1, exit),
+    ("reallyExit", 1, |_, args, cx| match exit_behavior(cx) {
+        ExitBehavior::Process => finish(exit_code_of(&arg(args, 0), cx)?.unwrap_or(0)),
+        _ => Ok(JsValue::undefined()),
+    }),
+    ("abort", 0, |_, _, cx| match exit_behavior(cx) {
+        ExitBehavior::Process => std::process::abort(),
+        _ => {
             console_line(
                 cx,
                 Level::Warn,
-                format!(
-                    "process.exit({}) ignored: a plugin cannot end the app",
-                    crate::print(&code)
-                ),
+                "process.abort() ignored: a plugin cannot end the app".to_owned(),
             );
-            let _ = invoke(this, "emit", &[js_text("exit"), code], cx);
+            Ok(JsValue::undefined())
         }
-        Ok(JsValue::undefined())
-    }),
-    ("reallyExit", 1, |_, _, _| Ok(JsValue::undefined())),
-    ("abort", 0, |_, _, cx| {
-        console_line(
-            cx,
-            Level::Warn,
-            "process.abort() ignored: a plugin cannot end the app".to_owned(),
-        );
-        Ok(JsValue::undefined())
     }),
     ("kill", 2, |_, args, cx| {
         let pid = crate::print(&arg(args, 0));
@@ -266,6 +364,53 @@ const PROCESS_FUNCTIONS: &[(
         Ok(crate::modules::builtin(cx, &name)?.unwrap_or_default())
     }),
 ];
+
+/// What `process.exit` does in this realm, copied out so no borrow is held while a listener
+/// runs: one may call `set_process_info` itself.
+fn exit_behavior(context: &Context) -> ExitBehavior {
+    crate::shared(context).process.borrow().exit.clone()
+}
+
+/// `process.exit(code)`: what the realm's [`ExitBehavior`] says happens.
+fn exit(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    match exit_behavior(context) {
+        ExitBehavior::Note => note_exit(this, args, context),
+        ExitBehavior::Process => {
+            let code = exit_code_of(&arg(args, 0), context)?;
+            end_process(context, code)
+        }
+        ExitBehavior::Host(host) => {
+            let code = exit_code_of(&arg(args, 0), context)?;
+            let code = exiting(context, code);
+            host(code);
+            // The script that asked to quit ends here, and cannot catch it: what the host does
+            // next is on its own thread's terms.
+            context.interrupt_handle().interrupt();
+            Ok(JsValue::undefined())
+        }
+    }
+}
+
+/// `process.exit` as a plugin host has always served it: noted, not acted on.
+fn note_exit(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let code = arg(args, 0);
+    if let Some(process) = this.as_object() {
+        if !code.is_undefined() {
+            process.set(js_string!("exitCode"), code.clone(), false, context)?;
+        }
+        let code = process.get(js_string!("exitCode"), context)?;
+        console_line(
+            context,
+            Level::Warn,
+            format!(
+                "process.exit({}) ignored: a plugin cannot end the app",
+                crate::print(&code)
+            ),
+        );
+        let _ = invoke(this, "emit", &[js_text("exit"), code], context);
+    }
+    Ok(JsValue::undefined())
+}
 
 /// `process.memoryUsage()`: Boa does not say how big its heap is, so this is a shape with
 /// plausible numbers for code that only logs them or compares them with a limit.
@@ -388,32 +533,32 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
         process.set(js_string!("getgroups"), groups, false, context)?;
     }
 
+    // Set in the order a plugin host's `process` has always had its keys in, so `Object.keys`
+    // answers the same; `apply` sets them again, in place, when an embedder replaces the info.
+    let info = crate::shared(context).process.borrow().clone();
     let platform = crate::node::platform();
-    let exec_path = std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "electron".into());
-    let values: [(&str, JsValue); 11] = [
-        ("title", js_text("obsidian")),
+    let head: [(&str, JsValue); 6] = [
+        ("title", js_text(&info.title)),
         ("version", js_text(&format!("v{NODE_VERSION}"))),
         ("platform", js_text(platform)),
         ("arch", js_text(arch())),
         ("pid", std::process::id().into()),
         ("ppid", 0.into()),
-        ("execPath", js_text(&exec_path)),
-        ("type", js_text("renderer")),
-        ("exitCode", JsValue::undefined()),
-        ("debugPort", 9229.into()),
-        ("noDeprecation", false.into()),
     ];
-    for (key, value) in values {
+    for (key, value) in head {
         process.set(JsString::from(key), value, false, context)?;
     }
-    let argv = array(context, vec![js_text(&exec_path)]);
-    process.set(js_string!("argv"), argv, false, context)?;
-    let argv0 = js_text("electron");
-    process.set(js_string!("argv0"), argv0, false, context)?;
-    let exec_argv = JsArray::new(context)?;
-    process.set(js_string!("execArgv"), exec_argv, false, context)?;
+    process.set(
+        js_string!("execPath"),
+        js_text(&info.exec_path),
+        false,
+        context,
+    )?;
+    apply_kind(context, &process, &info)?;
+    process.set(js_string!("exitCode"), JsValue::undefined(), false, context)?;
+    process.set(js_string!("debugPort"), 9229, false, context)?;
+    process.set(js_string!("noDeprecation"), false, false, context)?;
+    apply_arguments(context, &process, &info)?;
 
     let vars: Vec<(String, String)> = std::env::vars_os()
         .map(|(key, value)| {
@@ -425,23 +570,8 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
         .collect();
     let env = env_object(context, &vars)?;
     process.set(js_string!("env"), env, false, context)?;
+    apply_versions(context, &process, &info)?;
 
-    let versions = object(context);
-    for (key, value) in [
-        ("node", NODE_VERSION),
-        ("electron", ELECTRON_VERSION),
-        ("chrome", CHROME_VERSION),
-        ("v8", V8_VERSION),
-        ("uv", "1.51.0"),
-        ("zlib", "1.3.0.1-motley"),
-        ("modules", "136"),
-        ("napi", "10"),
-        ("openssl", "0.0.0"),
-        ("unicode", "16.0"),
-    ] {
-        versions.set(JsString::from(key), js_text(value), false, context)?;
-    }
-    process.set(js_string!("versions"), versions, false, context)?;
     let release = object(context);
     release.set(js_string!("name"), js_text("node"), false, context)?;
     release.set(js_string!("lts"), js_text("Jod"), false, context)?;
@@ -470,6 +600,87 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
     }
     crate::permission::install(context, &process)?;
     crate::native::define_global(context, "process", process)?;
+    Ok(())
+}
+
+/// Puts what [`ProcessInfo`] says on `process`: its title, type, arguments, Electron's fields
+/// and versions. Called whenever an embedder replaces the [`ProcessInfo`]; `install` makes the
+/// same properties piece by piece, in the order they have always had.
+pub(crate) fn apply(context: &mut Context, process: &JsObject, info: &ProcessInfo) -> JsResult<()> {
+    process.set(js_string!("title"), js_text(&info.title), false, context)?;
+    process.set(
+        js_string!("execPath"),
+        js_text(&info.exec_path),
+        false,
+        context,
+    )?;
+    apply_kind(context, process, info)?;
+    apply_arguments(context, process, info)?;
+    apply_versions(context, process, info)
+}
+
+/// `type` and the fields Electron's processes have: set when the info says so, and taken off
+/// again when it does not, so replacing a renderer's info with a utility's leaves no trace.
+fn apply_kind(context: &mut Context, process: &JsObject, info: &ProcessInfo) -> JsResult<()> {
+    let renderer = info.process_type.as_deref() == Some("renderer");
+    for (key, value) in [
+        ("type", info.process_type.as_deref().map(js_text)),
+        ("resourcesPath", info.resources_path.as_deref().map(js_text)),
+        ("contextIsolated", info.context_isolated.map(JsValue::from)),
+        (
+            "defaultApp",
+            info.default_app.then_some(JsValue::from(true)),
+        ),
+        (
+            "sandboxed",
+            info.sandboxed.filter(|_| renderer).map(JsValue::from),
+        ),
+    ] {
+        match value {
+            Some(value) => {
+                process.set(JsString::from(key), value, false, context)?;
+            }
+            None => {
+                // Deleting what is not there succeeds; only a property that cannot be removed
+                // fails, and all of these are ordinary ones.
+                process.delete_property_or_throw(JsString::from(key), context)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_arguments(context: &mut Context, process: &JsObject, info: &ProcessInfo) -> JsResult<()> {
+    let argv: Vec<JsValue> = info.argv.iter().map(|a| js_text(a)).collect();
+    let argv = array(context, argv);
+    process.set(js_string!("argv"), argv, false, context)?;
+    process.set(js_string!("argv0"), js_text(&info.argv0), false, context)?;
+    let exec_argv: Vec<JsValue> = info.exec_argv.iter().map(|a| js_text(a)).collect();
+    let exec_argv = array(context, exec_argv);
+    process.set(js_string!("execArgv"), exec_argv, false, context)?;
+    Ok(())
+}
+
+fn apply_versions(context: &mut Context, process: &JsObject, info: &ProcessInfo) -> JsResult<()> {
+    let versions = object(context);
+    versions.set(js_string!("node"), js_text(NODE_VERSION), false, context)?;
+    if info.electron_fields {
+        for (key, value) in [("electron", ELECTRON_VERSION), ("chrome", CHROME_VERSION)] {
+            versions.set(JsString::from(key), js_text(value), false, context)?;
+        }
+    }
+    for (key, value) in [
+        ("v8", V8_VERSION),
+        ("uv", "1.51.0"),
+        ("zlib", "1.3.0.1-motley"),
+        ("modules", "136"),
+        ("napi", "10"),
+        ("openssl", "0.0.0"),
+        ("unicode", "16.0"),
+    ] {
+        versions.set(JsString::from(key), js_text(value), false, context)?;
+    }
+    process.set(js_string!("versions"), versions, false, context)?;
     Ok(())
 }
 
@@ -507,11 +718,17 @@ struct Stdin {
 pub(crate) struct Setup {
     /// `process.argv`, whole: the executable, the entry (none for `-e`), its arguments.
     pub argv: Vec<String>,
+    /// `process.argv0`.
     pub argv0: String,
+    /// `process.execPath`.
     pub exec_path: String,
+    /// `process.execArgv`.
     pub exec_argv: Vec<String>,
+    /// The environment `process.env` starts as.
     pub env: Vec<(String, String)>,
+    /// Whether `process.emitWarning` stays quiet (`--no-warnings`).
     pub no_warnings: bool,
+    /// How the process wakes its host.
     pub waker: crate::Waker,
 }
 
@@ -555,7 +772,7 @@ fn class_of(context: &mut Context, module: &str, name: &str) -> JsResult<JsObjec
         .ok_or_else(|| crate::native::type_error(format!("{name} is not a class")))
 }
 
-/// The realm made a process: see [`Profile`].
+/// The realm made a process: see [`Profile`]. Its `process` is Node's, as Node's is.
 pub(crate) fn become_process(context: &mut Context, setup: Setup) -> JsResult<()> {
     let profile = Rc::new(Profile {
         no_warnings: setup.no_warnings,
@@ -567,45 +784,29 @@ pub(crate) fn become_process(context: &mut Context, setup: Setup) -> JsResult<()
     let process = crate::native::global(context, "process")?
         .as_object()
         .ok_or_else(|| crate::native::type_error("process is not an object"))?;
-    let argv: Vec<JsValue> = setup.argv.iter().map(|a| js_text(a)).collect();
-    let argv = array(context, argv);
-    process.set(js_string!("argv"), argv, false, context)?;
-    process.set(js_string!("argv0"), js_text(&setup.argv0), false, context)?;
-    process.set(
-        js_string!("execPath"),
-        js_text(&setup.exec_path),
-        false,
-        context,
-    )?;
-    let exec_argv: Vec<JsValue> = setup.exec_argv.iter().map(|a| js_text(a)).collect();
-    let exec_argv = array(context, exec_argv);
-    process.set(js_string!("execArgv"), exec_argv, false, context)?;
-    process.set(js_string!("title"), js_text("verve"), false, context)?;
-    process.delete_property_or_throw(js_string!("type"), context)?;
+    let info = ProcessInfo {
+        title: "verve".into(),
+        process_type: None,
+        argv: setup.argv.clone(),
+        argv0: setup.argv0.clone(),
+        exec_path: setup.exec_path.clone(),
+        exec_argv: setup.exec_argv.clone(),
+        resources_path: None,
+        default_app: false,
+        electron_fields: false,
+        sandboxed: None,
+        context_isolated: None,
+        exit: ExitBehavior::Process,
+        on_uncaught: UncaughtBehavior::Exit,
+    };
+    *crate::shared(context).process.borrow_mut() = info.clone();
+    apply(context, &process, &info)?;
     let env = env_object(context, &setup.env)?;
     process.set(js_string!("env"), env, false, context)?;
     if let Some(versions) = process.get(js_string!("versions"), context)?.as_object() {
-        for key in ["electron", "chrome"] {
-            versions.delete_property_or_throw(JsString::from(key), context)?;
-        }
         let verve = js_text(env!("CARGO_PKG_VERSION"));
         versions.set(js_string!("verve"), verve, false, context)?;
     }
-    exports(
-        context,
-        &process,
-        &[
-            ("exit", 1, |_, args, cx| {
-                let code = exit_code_of(&arg(args, 0), cx)?;
-                exit(cx, code)
-            }),
-            ("reallyExit", 1, |_, args, cx| {
-                let code = exit_code_of(&arg(args, 0), cx)?.unwrap_or(0);
-                finish(code)
-            }),
-            ("abort", 0, |_, _, _| std::process::abort()),
-        ],
-    )?;
 
     let readable = class_of(context, "stream", "Readable")?;
     let options = object(context);
@@ -873,11 +1074,13 @@ pub(crate) fn exit_code(context: &mut Context) -> i32 {
 pub(crate) fn exiting(context: &mut Context, code: Option<i32>) -> i32 {
     // What the code cache compiled is written before the process can end.
     crate::code_cache::flush(context, true);
-    let Some(profile) = profile(context) else {
-        return code.unwrap_or(0);
-    };
+    // `process.exit()` with nothing said takes the `exitCode` a script already set, as Node's.
     let code = code.unwrap_or_else(|| exit_code(context));
-    if profile.exiting.replace(true) {
+    // `verve run`'s `exit` listeners are told once; a host's realm has no such latch, and the
+    // host decides what happens next anyway.
+    if let Some(profile) = profile(context)
+        && profile.exiting.replace(true)
+    {
         return code;
     }
     let process = crate::native::global(context, "process").unwrap_or_default();
@@ -893,7 +1096,7 @@ pub(crate) fn exiting(context: &mut Context, code: Option<i32>) -> i32 {
 }
 
 /// `process.exit`: listeners told, output flushed, and the process ended right here.
-fn exit(context: &mut Context, code: Option<i32>) -> ! {
+fn end_process(context: &mut Context, code: Option<i32>) -> ! {
     let code = exiting(context, code);
     finish(code)
 }
@@ -950,12 +1153,25 @@ pub(crate) fn uncaught(context: &mut Context, error: &JsError) {
             Ok(_) => return,
             Err(error) => {
                 print_uncaught(context, &error);
-                exit(context, Some(7));
+                end_process(context, Some(7));
             }
         }
     }
     print_uncaught(context, error);
-    exit(context, Some(1))
+    // Only a host that is told reads the error's `name` and `message`, which may be getters.
+    after_uncaught(context, |context| crate::describe(context, error));
+}
+
+/// What an uncaught error does, in both paths that report one: the process ends with 1, the
+/// host hears it, or the console's line is all there is. `line` makes the text the host is told,
+/// and runs only for a host that is: describing an error can run its getters.
+pub(crate) fn after_uncaught(context: &mut Context, line: impl FnOnce(&mut Context) -> String) {
+    let behavior = crate::shared(context).process.borrow().on_uncaught.clone();
+    match behavior {
+        UncaughtBehavior::Log => {}
+        UncaughtBehavior::Exit => end_process(context, Some(1)),
+        UncaughtBehavior::Report(report) => report(&line(context)),
+    }
 }
 
 /// A rejection nobody handled, with no `unhandledRejection` listener: Node's default

@@ -3,46 +3,15 @@
 //! flags, Node's spellings beside Deno's.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod common;
+
+use common::Dir;
+
 const VERVE: &str = env!("CARGO_BIN_EXE_verve");
-
-/// A folder of the test's own, removed when it is done.
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new(test: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("verve-cli-{}-{test}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // The real path: what the runtime resolves to, so grants and answers compare.
-        Self(std::fs::canonicalize(&dir).map(unverbatim).unwrap_or(dir))
-    }
-
-    fn file(&self, name: &str, text: &str) -> PathBuf {
-        let path = self.0.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&path, text).unwrap();
-        path
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn unverbatim(path: PathBuf) -> PathBuf {
-    match path.to_string_lossy().strip_prefix(r"\\?\") {
-        Some(rest) => PathBuf::from(rest),
-        None => path,
-    }
-}
 
 struct Ran {
     code: i32,
@@ -218,6 +187,13 @@ fn exit_codes_are_nodes() {
     let ran = eval("setTimeout(() => { throw new Error('later') }, 5)", &[]);
     assert_eq!(ran.code, 1);
     assert!(ran.stderr.contains("Error: later"), "{}", ran.stderr);
+    // An error nobody reports is not described: its getters do not run for a line no one reads.
+    let ran = eval(
+        "throw { get message() { console.log('getter ran'); return 'm' } }",
+        &[],
+    );
+    assert_eq!(ran.code, 1);
+    assert!(!ran.stdout.contains("getter ran"), "{}", ran.stdout);
     // ... unless an `uncaughtException` listener hears it.
     let ran = eval(
         "process.on('uncaughtException', (e, origin) => console.log('heard', e.message, origin)); setTimeout(() => { throw new Error('x') }, 1); setTimeout(() => console.log('still running'), 20);",

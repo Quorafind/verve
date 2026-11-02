@@ -34,6 +34,7 @@ pub mod clone;
 mod code_cache;
 mod crypto;
 pub mod dom_events;
+mod embed;
 pub mod encoding;
 mod esm;
 mod esm_resolve;
@@ -95,6 +96,7 @@ pub fn code_cache_user_secret() -> std::io::Result<[u8; 32]> {
 }
 pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
+pub use process::{ExitBehavior, ProcessInfo, UncaughtBehavior};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -223,6 +225,8 @@ struct Shared {
     wake: std::sync::Arc<WakeSlot>,
     /// Set when this realm is a process of its own (`verve run`): see `process::Profile`.
     profile: RefCell<Option<Rc<process::Profile>>>,
+    /// What this realm's `process` is, as its embedder described it: see [`ProcessInfo`].
+    process: RefCell<ProcessInfo>,
     /// Where compiled modules are kept between runs, if anywhere: see `code_cache`.
     code_cache: RefCell<code_cache::Shared>,
     /// 即使 Worker 自身不启用缓存，也会继承这些访问拒绝规则。
@@ -508,6 +512,7 @@ impl Runtime {
             wasm: RefCell::new(wasm::WasmState::default()),
             wake: std::sync::Arc::default(),
             profile: RefCell::new(None),
+            process: RefCell::new(ProcessInfo::default()),
             code_cache: RefCell::new(code_cache),
             code_cache_protection: RefCell::new(code_cache_protection),
         }));
@@ -1031,7 +1036,8 @@ pub fn report(context: &mut Context, error: &JsError) {
     } else {
         format!("Uncaught {text} ({frames})")
     };
-    console_line(context, Level::Error, line);
+    console_line(context, Level::Error, line.clone());
+    process::after_uncaught(context, |_| line);
 }
 
 /// Where an error was thrown: the first few frames of its stack, enough to find the line.

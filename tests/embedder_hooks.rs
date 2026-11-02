@@ -1,9 +1,15 @@
 //! The kernel's hooks for an embedder building Electron on it, a section for each: the structured
-//! clone that crosses threads.
+//! clone that crosses threads and the process a realm says it is.
+
+use std::sync::{Arc, Mutex};
 
 use boa_engine::JsValue;
-use verve::Runtime;
 use verve::clone::{CloneBytesError, Cloned};
+use verve::{ExitBehavior, ProcessInfo, Runtime, UncaughtBehavior};
+
+mod common;
+
+use common::Dir;
 
 // ─── A value between realms ───────────────────────────────────────────────────────────────
 
@@ -128,6 +134,201 @@ fn what_cannot_be_cloned_is_a_data_clone_error() {
     assert!(verve::describe(rt.context(), &denied).contains("DataCloneError"));
     let symbol = rt.eval("Symbol('s')").unwrap();
     assert!(Cloned::from_value(&symbol, rt.context()).is_err());
+}
+
+// ─── The process a realm is ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn process_info_shapes_the_process_object() {
+    let mut rt = Runtime::new();
+    let exit_seen = Arc::new(Mutex::new(Vec::new()));
+    let heard_exit = exit_seen.clone();
+    rt.set_process_info(ProcessInfo {
+        title: "my app".into(),
+        process_type: Some("browser".into()),
+        argv: vec!["electron.exe".into(), "app".into()],
+        argv0: "electron".into(),
+        exec_path: r"C:\app\electron.exe".into(),
+        exec_argv: vec!["--trace".into()],
+        resources_path: Some(r"C:\app\resources".into()),
+        default_app: true,
+        electron_fields: true,
+        sandboxed: Some(false),
+        context_isolated: None,
+        exit: ExitBehavior::Host(Arc::new(move |code| heard_exit.lock().unwrap().push(code))),
+        on_uncaught: UncaughtBehavior::Report(Arc::new(|_| ())),
+    })
+    .unwrap();
+    let answer = rt
+        .eval(
+            "[process.type, process.title, process.argv.join(','), process.execArgv.join(','), \
+             process.resourcesPath, process.defaultApp, process.versions.electron, \
+             'contextIsolated' in process, 'sandboxed' in process].join('|')",
+        )
+        .unwrap();
+    assert_eq!(
+        verve::print(&answer),
+        r"browser|my app|electron.exe,app|--trace|C:\app\resources|true|39.2.0|false|false"
+    );
+    // A renderer, as Electron's is: context isolation said, sandboxing said, no app path.
+    rt.set_process_info(ProcessInfo {
+        process_type: Some("renderer".into()),
+        context_isolated: Some(true),
+        sandboxed: Some(true),
+        resources_path: None,
+        electron_fields: false,
+        ..ProcessInfo::default()
+    })
+    .unwrap();
+    let answer = rt
+        .eval(
+            "[process.type, process.sandboxed, process.contextIsolated, \
+             String(process.versions.electron), 'resourcesPath' in process].join('|')",
+        )
+        .unwrap();
+    assert_eq!(verve::print(&answer), "renderer|true|true|undefined|false");
+    // Node's own process, as `verve run` makes it: no type at all.
+    rt.set_process_info(ProcessInfo {
+        process_type: None,
+        title: "verve".into(),
+        electron_fields: false,
+        ..ProcessInfo::default()
+    })
+    .unwrap();
+    let answer = rt
+        .eval("[process.title, 'type' in process].join('|')")
+        .unwrap();
+    assert_eq!(verve::print(&answer), "verve|false");
+}
+
+#[test]
+fn process_exit_asks_the_host_and_stops_the_script() {
+    let mut rt = Runtime::new();
+    let codes = Arc::new(Mutex::new(Vec::new()));
+    let heard = codes.clone();
+    rt.set_process_info(ProcessInfo {
+        exit: ExitBehavior::Host(Arc::new(move |code| heard.lock().unwrap().push(code))),
+        ..ProcessInfo::default()
+    })
+    .unwrap();
+    // The `exit` event is heard first, then the host, then the script ends uncatchably — at its
+    // next call, which is all a host's `app.exit` can promise.
+    let outcome = rt.eval(
+        "globalThis.exited = false; \
+         process.on('exit', () => { globalThis.exited = true }); \
+         process.exit(3); \
+         (function later() { globalThis.after = true })();",
+    );
+    assert!(outcome.is_err(), "the script goes on after process.exit");
+    assert_eq!(*codes.lock().unwrap(), [3]);
+    assert_eq!(verve::print(&rt.eval("globalThis.exited").unwrap()), "true");
+    assert_eq!(
+        verve::print(&rt.eval("globalThis.after").unwrap()),
+        "undefined"
+    );
+}
+
+#[test]
+fn the_default_process_is_the_plugin_hosts_unchanged() {
+    let mut rt = Runtime::new();
+    let answer = rt
+        .eval(
+            "[process.type, process.title, 'sandboxed' in process, 'resourcesPath' in process, \
+             'noAsar' in process, Object.keys(process).filter((k) => !k.startsWith('_')).join(',')].join('|')",
+        )
+        .unwrap();
+    let text = verve::print(&answer);
+    assert!(
+        text.starts_with("renderer|obsidian|false|false|false|"),
+        "{text}"
+    );
+    // The keys keep the order they were always made in.
+    let keys = text.rsplit('|').next().unwrap();
+    let at = |name: &str| keys.split(',').position(|k| k == name).expect(name);
+    assert!(at("title") < at("version"));
+    assert!(at("execPath") < at("type"));
+    assert!(at("type") < at("exitCode"));
+    assert!(at("noDeprecation") < at("argv"));
+    assert!(at("env") < at("versions"));
+}
+
+#[test]
+fn a_host_exit_honours_the_exit_code_a_script_set() {
+    let mut rt = Runtime::new();
+    let codes = Arc::new(Mutex::new(Vec::new()));
+    let heard = codes.clone();
+    rt.set_process_info(ProcessInfo {
+        exit: ExitBehavior::Host(Arc::new(move |code| heard.lock().unwrap().push(code))),
+        ..ProcessInfo::default()
+    })
+    .unwrap();
+    let _ = rt.eval("process.exitCode = 2; process.exit();");
+    assert_eq!(*codes.lock().unwrap(), [2]);
+}
+
+#[test]
+fn a_noted_exit_sets_the_code_and_goes_on() {
+    let mut rt = Runtime::new();
+    rt.set_process_info(ProcessInfo {
+        exit: ExitBehavior::Note,
+        ..ProcessInfo::default()
+    })
+    .unwrap();
+    let answer = rt
+        .eval(
+            "[(() => { process.on('exit', (c) => { globalThis.heard = c }); \
+              process.exit(7); return 'went on' })(), process.exitCode, globalThis.heard].join('|')",
+        )
+        .unwrap();
+    assert_eq!(verve::print(&answer), "went on|7|7");
+    // The warning a plugin's exit is noted with, on the console the host takes.
+    assert!(
+        rt.take_console()
+            .iter()
+            .any(|line| line.text.contains("process.exit(7) ignored")),
+        "no warning"
+    );
+    // The realm still runs: nothing was interrupted.
+    assert_eq!(verve::print(&rt.eval("1 + 1").unwrap()), "2");
+}
+
+#[test]
+fn an_uncaught_error_goes_to_the_host_that_asked() {
+    let mut rt = Runtime::new();
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let heard = lines.clone();
+    rt.set_process_info(ProcessInfo {
+        on_uncaught: UncaughtBehavior::Report(Arc::new(move |line| {
+            heard.lock().unwrap().push(line.to_owned())
+        })),
+        ..ProcessInfo::default()
+    })
+    .unwrap();
+    rt.eval("queueMicrotask(() => { throw new Error('boom') })")
+        .unwrap();
+    let lines = lines.lock().unwrap();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("boom"), "{lines:?}");
+    // And the realm goes on.
+    assert_eq!(verve::print(&rt.eval("1 + 1").unwrap()), "2");
+}
+
+#[test]
+fn verve_run_still_ends_the_process_itself() {
+    let dir = Dir::new("exit");
+    let script = dir.0.join("exit.js");
+    std::fs::write(
+        &script,
+        "process.on('exit', () => console.log('bye')); process.exit(3);",
+    )
+    .unwrap();
+    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_verve"))
+        .arg(&script)
+        .current_dir(&dir.0)
+        .output()
+        .unwrap();
+    assert_eq!(ran.status.code(), Some(3));
+    assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "bye");
 }
 
 // ─── The rest of the hooks ─────────────────────────────────────────────────────────────────
