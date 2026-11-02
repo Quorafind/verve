@@ -12,6 +12,8 @@
 
 ## 代码
 
+**完整的风格规则见 [`style.md`](style.md)，合并前按 [`review.md`](review.md) 审查。** 下面是要点。
+
 - Rust edition 2024，toolchain 与仓库一致（Rust 1.95）。`cargo clippy --workspace --all-targets` 无警告，
   `cargo fmt` 过。
 - **不写 JS 垫片**。所有 JS 可见的东西用 `src/native.rs` 的工具（`class`、`function`、`closure`、
@@ -68,7 +70,8 @@
   Electron 跑出的结果（脚本 + 输出），测试里把期望值冻结下来（参考 `tests/network.rs` 冻结
   Node 观测值的做法）。
 - 需要联网或 npm 的测试标 `#[ignore]`，并在包文档里写如何准备夹具。
-- 合并前必须通过：`cargo test --workspace`（Windows），以及你的包列出的验收命令。
+- 完成前必须自查通过：`cargo fmt --all --check`、`bash scripts/style-check.sh`、`cargo clippy -p <你的 crate> --all-targets -- -D warnings`，
+  以及你的包列出的验收命令；全量 `cargo test --workspace` 由总控在合并前跑。
 
 ## Commit
 

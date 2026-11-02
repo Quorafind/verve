@@ -148,10 +148,10 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 
 | 关卡 | 时机 | 重点 |
 |---|---|---|
-| R1 | M0 + M1 合并后 | `verve-electron` 的 API 定义方式统一（方法表/宏）、Hub 与两个 Guest 的消息分发去重、P03 内核钩子的命名与文档；公开 `verve::encoding`（base64、data: URL 解析、percent-decode），删除 `esm.rs`、`network/fetch.rs`、`verve-dom/src/canvas/mod.rs` 里各自手写的副本 |
-| R2 | M2 合并后 | 页面加载管线、preload/world、verve-dom 新增部分的模块边界；verve-dom 超长文件拆分 |
+| R1 | M0 + M1 合并后 | `verve-electron` 的 API 定义方式统一（方法表/宏）、Hub 与两个 Guest 的消息分发去重、P03 内核钩子的命名与文档；公开 `verve::encoding`（base64、data: URL 解析、percent-decode），删除 `esm.rs`、`network/fetch.rs`、`verve-dom/src/canvas/mod.rs` 里各自手写的副本；把根 crate 各模块与 verve-dom `bind/mod.rs` 的工具箱副本迁到 `verve::native`，`ci/style/toolkit-copies.txt` 清空 |
+| R2 | M2 合并后 | 页面加载管线、preload/world、verve-dom 新增部分的模块边界；拆分 `ci/style/large-files.txt` 里的 verve-dom 文件；`verve-dom` 接入 `[lints] workspace = true` |
 | R3 | M3 合并后 | verve-layout 的样式解析与 verve-dom 的 CSS 值解析合并为一处；DisplayList 与 GPUI 回放的边界；输入翻译表 |
-| R4 | M4 前 | 全仓库：死代码、未用的 feature 与公开 API、依赖与体积复查 |
+| R4 | M4 前 | 全仓库：死代码、未用的 feature 与公开 API、依赖与体积复查；拆分根 crate 的超长文件，`verve` 接入 `[lints] workspace = true` |
 
 此外每合并约 3 个功能 PR，插一个同区域的小重构 PR（见 `DISPATCH.md`）。
 

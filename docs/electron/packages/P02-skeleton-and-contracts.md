@@ -301,7 +301,9 @@ pub trait ShellPort: Send + Sync {
 ## API 定义辅助（精炼要求）
 
 Electron 有几十个类、几百个方法，绝大多数是"校验参数 → 发一条消息 / 读一个缓存值"。本包必须先给出一套声明式辅助
-（`crates/verve-electron/src/api/define.rs`），后续包都用它，不手写样板。形态由实现者定，至少做到：
+（`crates/verve-electron/src/api/define.rs`），后续包都用它，不手写样板。它**建立在 `verve::native`（P03 公开）之上**，
+只加 Electron 特有的部分，不另起一套通用工具（见 `style.md` §1）。三个新 crate 的 `Cargo.toml` 都写 `[lints] workspace = true`。
+形态由实现者定，至少做到：
 
 - 一张表声明一个类：类名、是否继承 `EventEmitter`、构造函数、方法（名字、参数个数、实现函数）、getter/setter、静态方法；
   继承关系（`class X extends BrowserWindow`、`util.inherits`）由辅助统一处理。

@@ -1,0 +1,28 @@
+name: Style
+
+# The rules in docs/electron/style.md a machine can check: formatting, clippy with no warnings,
+# and scripts/style-check.sh (file length ratchet, one toolkit, no stray macros or TODOs).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+        with:
+          components: rustfmt, clippy
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Style rules
+        run: bash scripts/style-check.sh
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings

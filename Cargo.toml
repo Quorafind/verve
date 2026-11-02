@@ -20,6 +20,19 @@ members = ["crates/verve-dom"]
 # Boa keeps its own workspace, as upstream has it, so `git subtree pull` stays a plain merge.
 exclude = ["boa"]
 
+# The stricter lints every new crate takes (`[lints] workspace = true`); see docs/electron/style.md.
+# `verve` and `verve-dom` take them once the refactor gates have cleaned them up.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+too_many_lines = "warn"
+undocumented_unsafe_blocks = "warn"
+
 [dependencies]
 boa_engine = { version = "=0.22.0", default-features = false, features = ["annex-b"] }
 boa_gc = "=0.22.0"

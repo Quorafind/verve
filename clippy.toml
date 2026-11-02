@@ -1,0 +1,5 @@
+# Thresholds for the lints in [workspace.lints] (docs/electron/style.md §9).
+too-many-lines-threshold = 80
+too-many-arguments-threshold = 7
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

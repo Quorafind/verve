@@ -11,6 +11,7 @@
 请按顺序阅读：
 1. `docs/electron/README.md`（总体方案、原则、架构、里程碑）
 2. `docs/electron/conventions.md`（分支、代码、测试、commit 约定——必须遵守）
+   和 `docs/electron/style.md`（代码风格：一个工具箱、命名、文件结构、注释、规模上限——必须遵守）
 3. `docs/electron/packages/P02-skeleton-and-contracts.md`（线程与消息契约）
 4. `docs/electron/packages/<PXX-文件名>.md`（你的任务书）
 5. 任务书「背景（先读）」里列出的每个源文件
@@ -21,7 +22,8 @@
 - 只改任务书「修改」一栏允许的范围。
 - 完成「验收」里的每一条，贴出命令和输出；贴 `scripts/size-report` 的体积增量（P01 合并后）。
 - 在任务书末尾「状态」一节写：完成了什么、没完成什么、已知问题、给其他包的备注。
-- 代码必须精炼：遵守 `conventions.md` 的「精炼」一节（不重复、函数短、无死代码、PR 小），评审会按它退回。
+- 代码必须精炼且与全仓库风格一致：遵守 `style.md` 与 `conventions.md`「精炼」；只用 `verve::native` 这一套工具，缺的加进去，不写副本。
+- 结束前自查：`cargo fmt --all --check`、`bash scripts/style-check.sh`、`cargo clippy -p <crate> --all-targets -- -D warnings` 全部通过。合并前总控按 `review.md` 审查，不过的会退回。
 - 不确定 Electron 的真实行为时，以 Electron 39 官方文档为准，并在 PR 里注明依据；拿不准就把问题列出来，不要猜着实现。
 
 ---
