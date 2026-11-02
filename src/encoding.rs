@@ -83,7 +83,7 @@ pub fn unbase64(text: &str) -> Option<Vec<u8>> {
 }
 
 /// The bytes of an `ArrayBuffer`, a typed array or a `DataView`.
-pub(crate) fn bytes_of(value: &JsValue, context: &mut Context) -> JsResult<Option<Vec<u8>>> {
+pub fn bytes_of(value: &JsValue, context: &mut Context) -> JsResult<Option<Vec<u8>>> {
     let Some(object) = value.as_object() else {
         return Ok(None);
     };

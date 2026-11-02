@@ -490,12 +490,28 @@ fn clone_error_object(
 // ─── Blob and File ──────────────────────────────────────────────────────────────────────────
 
 /// A blob's bytes are kept as a `Uint8Array` in a property of its own.
-pub(crate) fn blob_bytes(blob: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
+pub fn blob_bytes(blob: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
     let data = match blob.as_object() {
         Some(b) => b.get(js_string!("__bytes"), context)?,
         None => JsValue::undefined(),
     };
     Ok(crate::encoding::bytes_of(&data, context)?.unwrap_or_default())
+}
+
+/// Whether `value` is a `Blob` (or a `File`) this runtime made.
+pub fn is_blob(value: &JsValue, context: &mut Context) -> bool {
+    value.as_object().is_some_and(|o| {
+        o.has_own_property(js_string!("__bytes"), context)
+            .unwrap_or(false)
+    })
+}
+
+/// A new `Blob` of `bytes` and MIME type `kind`, as `new Blob([bytes], { type })` makes it.
+pub fn new_blob(bytes: Vec<u8>, kind: &str, context: &mut Context) -> JsResult<JsValue> {
+    let class = crate::native::global(context, "Blob")?;
+    let blob = made_by(&class, context)?;
+    dress_blob(&blob, bytes, kind, context)?;
+    Ok(blob.into())
 }
 
 fn dress_blob(blob: &JsObject, bytes: Vec<u8>, kind: &str, context: &mut Context) -> JsResult<()> {
