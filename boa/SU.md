@@ -246,6 +246,32 @@ always agree with one another.
   `get_index` answered `None`, so the first tombstone spun forever. `OrderedSet::is_empty` asks
   `len()`, as `OrderedMap::is_empty` does, rather than counting tombstones as elements.
 
+- `boa_string`, `lib.rs`: `JsString::ptr_eq` says whether two strings are one allocation rather
+  than merely equal, which the regexp widening below uses: a string's contents never change, so the
+  units derived from one allocation stay right for the next call on it.
+
+- `boa_engine`, `builtins/regexp/mod.rs`: a Latin-1 subject reaches `regress` as its UTF-16 code
+  units, widened once per scan instead of once per match. Widening the whole subject in every
+  `exec` made a global `exec`, `matchAll`, `replace` or `split` quadratic in its length: 8k lines
+  took 724 ms where 2k took 54 ms. The units of one allocation stay right for every later match on
+  it, so `WIDENED` keeps the last subject and its units for the next `exec`, matched by
+  `JsString::ptr_eq`. What a script can observe does not change: `lastIndex` is still read and
+  written once per match, and an overridden `exec` is still called.
+
+  The entry holds the subject — a slice of it pins the whole string it was cut from — and its copy
+  at two bytes a unit, about three times the size of the last subject, so it is released when the
+  scan that needed it ends. `ReleaseWidened` is a guard dropped on every way out of `exec`,
+  `@@search` and `@@split`, `?` errors included, so each of these ends with nothing kept:
+
+  - the failed match that ends a global scan, and the out-of-range `lastIndex` that ends one;
+  - the one match of a search that is neither global nor sticky;
+  - every `@@search` and `@@split`, whose result no next `exec` will want.
+
+  Two cases still keep it until the next Latin-1 `exec`: a `test`, `exec` or `search` on a global
+  or sticky pattern that matched — the scan has not ended, its next step is one `exec` away — and a
+  `matchAll` iterator abandoned half-way, which has no point to release at. A sticky match that
+  fails also keeps it: `@@split` runs the sticky splitter once per position of the subject.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

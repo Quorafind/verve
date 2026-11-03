@@ -612,3 +612,24 @@ fn index_of_compares_utf16_and_latin1_by_code_unit() {
     assert_eq!(emoji.index_of(pair, 1), Some(2));
     assert_eq!(emoji.index_of(JsStr::latin1(b"x"), 0), Some(4));
 }
+
+/// Two strings with the same text are not the same allocation, which is what `ptr_eq` says.
+#[test]
+fn equal_strings_from_different_allocations_are_not_one_string() {
+    let first = JsString::from("µµµx");
+    let second = JsString::from("µµµx");
+
+    assert_eq!(first, second);
+    assert!(!first.ptr_eq(&second));
+    assert!(first.ptr_eq(&first.clone()));
+}
+
+#[test]
+fn ptr_eq_tells_one_allocation_from_an_equal_string() {
+    let x = JsString::from("Hello");
+    let clone = x.clone();
+    let equal = JsString::from("Hello");
+
+    assert!(x.ptr_eq(&clone));
+    assert!(!x.ptr_eq(&equal));
+}

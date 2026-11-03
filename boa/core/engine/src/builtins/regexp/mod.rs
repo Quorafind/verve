@@ -28,6 +28,7 @@ use boa_parser::lexer::regex::RegExpFlags;
 use regress::{Flags, Range, Regex};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::str::FromStr;
 
 /// How many compiled patterns a thread keeps; past it the cache starts over.
@@ -41,6 +42,10 @@ thread_local! {
     /// document compiled the same pattern once a line. A compiled pattern is immutable; the
     /// object's `lastIndex` and the rest of its state are not in it.
     static COMPILED: RefCell<HashMap<(JsString, u8), Regex>> = RefCell::new(HashMap::new());
+
+    /// The last Latin-1 string given to `regress` as UTF-16 code units, with the string it was
+    /// widened from. Kept for the matches of one scan; [`ReleaseWidened`] drops it at the end.
+    static WIDENED: RefCell<Option<(JsString, Rc<[u16]>)>> = const { RefCell::new(None) };
 }
 
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
@@ -1178,6 +1183,10 @@ impl RegExp {
 
         // 13.a. If lastIndex > length, then
         if last_index > length {
+            // A sticky search that fails here is one probe of `@@split`, which tries the next
+            // position, so it keeps the widening; every other scan ends here.
+            let _widened = ReleaseWidened::unless(sticky);
+
             // i. If global is true or sticky is true, then
             if global || sticky {
                 // 1. Perform ? Set(R, "lastIndex", +0𝔽, true).
@@ -1191,12 +1200,15 @@ impl RegExp {
         // 13.b. Let inputIndex be the index into input of the character that was obtained from element lastIndex of S.
         // 13.c. Let r be matcher(input, inputIndex).
         let r: Option<regress::Match> = match (full_unicode, input.as_str().variant()) {
+            // NOTE: We can use the faster ucs2 variant since there will never be two byte unicode.
             (true | false, JsStrVariant::Latin1(_)) => {
-                // TODO: Currently regress does not support latin1 encoding.
-                let input = input.to_vec();
-
-                // NOTE: We can use the faster ucs2 variant since there will never be two byte unicode.
-                matcher.find_from_ucs2(&input, last_index as usize).next()
+                // regress does not read Latin-1; a Latin-1 string reaches it as its UTF-16 code
+                // units, widened once and kept for the next `exec` on the same string. Widening
+                // per match made a global `exec`, `matchAll` or `replace` quadratic in the length
+                // of the subject.
+                utf16_units(input, |units| {
+                    matcher.find_from_ucs2(units, last_index as usize).next()
+                })
             }
             (true, JsStrVariant::Utf16(input)) => {
                 matcher.find_from_utf16(input, last_index as usize).next()
@@ -1212,6 +1224,12 @@ impl RegExp {
             // NOTE: Merged the following steps (since we no longer have a loop):
             //       13.d.i. If sticky is true, then
             //       13.a.i. If global is true or sticky is true, then
+            //
+            // A global search that is not sticky has reached the end of its scan; until now the
+            // widened subject served its next match. A sticky search that fails here is one probe
+            // of `@@split`, which tries the next position, so it keeps the widening.
+            let _widened = ReleaseWidened::unless(sticky);
+
             if global || sticky {
                 // 1. Perform ? Set(R, "lastIndex", +0𝔽, true).
                 this.set(js_string!("lastIndex"), 0, true, context)?;
@@ -1236,12 +1254,19 @@ impl RegExp {
             this.set(js_string!("lastIndex"), 0, true, context)?;
 
             // 2. Return null.
+            //
+            // `@@split` runs the sticky splitter once per position of the subject, so this is not
+            // the end of a scan; the widening stays for the next position.
             return Ok(None);
         }
 
         // 13.d.ii. Set lastIndex to AdvanceStringIndex(S, lastIndex, fullUnicode).
         // NOTE: Calculation of last_index is done in regress.
         last_index = match_value.start() as u64;
+
+        // A search that is neither global nor sticky stops at its one match, so no next `exec`
+        // will want the widened subject.
+        let _widened = ReleaseWidened::unless(global || sticky);
 
         // 14. Let e be r's endIndex value.
         // 15. If fullUnicode is true, set e to GetStringIndex(S, e).
@@ -1877,6 +1902,9 @@ impl RegExp {
         // 3. Let S be ? ToString(string).
         let arg_str = args.get_or_undefined(0).to_string(context)?;
 
+        // A search has one match or none, so nothing reads the widening after it returns.
+        let _widened = ReleaseWidened;
+
         // 4. Let previousLastIndex be ? Get(rx, "lastIndex").
         let previous_last_index = rx.get(js_string!("lastIndex"), context)?;
 
@@ -1930,6 +1958,10 @@ impl RegExp {
 
         // 3. Let S be ? ToString(string).
         let arg_str = args.get_or_undefined(0).to_string(context)?;
+
+        // The splitter probes the subject position by position, and each probe keeps the widening
+        // for the next one; nothing reads it once the split has returned.
+        let _widened = ReleaseWidened;
 
         // 4. Let C be ? SpeciesConstructor(rx, %RegExp%).
         let constructor = rx.species_constructor(StandardConstructors::regexp, context)?;
@@ -2167,4 +2199,48 @@ fn advance_string_index(s: &JsString, index: u64, unicode: bool) -> u64 {
     let code_point = s.code_point_at(index as usize);
 
     index + code_point.code_unit_count() as u64
+}
+
+/// Runs `f` on the UTF-16 code units of `input`, widening a Latin-1 string once and keeping the
+/// result for the next call.
+///
+/// `regress` reads UCS-2 or UTF-16 only, so a Latin-1 subject has to be widened for it. A global
+/// `exec`, `matchAll`, `replace` or `split` widens once per match, and widening the whole subject
+/// each time made those quadratic in its length. A string's contents never change, so the units of
+/// one allocation stay right for every later match on it; one entry is kept because a global scan
+/// works through one subject at a time.
+fn utf16_units<R>(input: &JsString, f: impl FnOnce(&[u16]) -> R) -> R {
+    WIDENED.with_borrow_mut(|cached| {
+        let units = match cached {
+            Some((widened_from, units)) if widened_from.ptr_eq(input) => Rc::clone(units),
+            _ => {
+                let units: Rc<[u16]> = input.to_vec().into();
+                *cached = Some((input.clone(), Rc::clone(&units)));
+                units
+            }
+        };
+        f(&units)
+    })
+}
+
+/// Drops the widened subject when the scan that needed it ends.
+///
+/// The entry holds the Latin-1 string — a slice of it pins the whole string it was cut from — and
+/// its copy at two bytes a unit, so keeping it past the scan that used it left about three times
+/// the size of the last subject resident. A guard rather than a call at each exit, so an error on
+/// the way out releases it too.
+struct ReleaseWidened;
+
+impl ReleaseWidened {
+    /// Releases at the end of the block, or keeps the widening for the next `exec` when `keep`
+    /// is set — a sticky scan is one probe of `@@split`, which tries the next position.
+    fn unless(keep: bool) -> Option<Self> {
+        if keep { None } else { Some(Self) }
+    }
+}
+
+impl Drop for ReleaseWidened {
+    fn drop(&mut self) {
+        WIDENED.with_borrow_mut(Option::take);
+    }
 }
