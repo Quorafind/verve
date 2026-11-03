@@ -66,6 +66,8 @@
 - 不跑 release 构建、不跑全量 `cargo test --workspace`；测试在 check 通过后用 `-p <crate> --test <name>` 缩小范围跑。
 - 全量测试与 release 体积测量由总控在合并前统一跑；「状态」里写明哪些验收是 check 过的、哪些测试实际跑过。
 - `CARGO_BUILD_JOBS` 由总控设置，不要自行调大。
+- **性能线例外**（P60–P66，以及 P42）：测量需要 release 构建，允许 `cargo build --release --bin verve`（或任务书写明的 bin）与 `--profile profiling`。
+  一轮改动写完再构建一次、测完再改，不要每改一处就 release 构建；测量时机器上不要有自己的其他构建在跑，报告里写明测量时的负载。
 - 含平台分支（`cfg(unix)`/`cfg(windows)`）的包，报告完成前跑 `bash scripts/linux-check.sh`（需要 `rustup target add x86_64-unknown-linux-gnu` 与 Zig ≥0.15）。
 
 ## 测试

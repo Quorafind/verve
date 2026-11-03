@@ -1,6 +1,6 @@
 # P42 性能与启动
 
-**依赖**：M1–M3（P10、P11、P20、P34 至少已合并）；P01 的体积实测  **规模**：M  **修改**：`crates/verve-electron/`（启动流程、预热池、性能追踪）、`crates/verve-gpui/`（帧时间戳）、`src/code_cache.rs` 与 `src/modules.rs`（**允许**：CommonJS 包装函数入缓存）、`boa/core/gc`（**允许，需记 `boa/SU.md`**：GC 阈值可配置）、新建 `scripts/electron-bench/` 与 `docs/electron/perf.md`
+**依赖**：M1–M3（P10、P11、P20、P34 至少已合并）；P01 的体积实测；P62（CJS 进缓存）、P63（`jit` feature）  **规模**：M  **修改**：`crates/verve-electron/`（启动流程、预热池、性能追踪）、`crates/verve-gpui/`（帧时间戳）、`src/code_cache.rs`（**允许**：只为并发 flush 的修复）、`boa/core/gc`（**允许，需记 `boa/SU.md`**：GC 阈值可配置）、新建 `scripts/electron-bench/` 与 `docs/electron/perf.md`
 
 ## 目标
 
@@ -15,6 +15,8 @@
 
 ## 背景（先读）
 
+- [`perf-baseline.md`](../perf-baseline.md)：2026-11-03 的运行时基线（启动、内存、体积、JS 吞吐、模块加载），本包的对比起点。
+  JS 吞吐本身由性能线 P60–P66 负责（README「性能线」），本包只管应用级指标。
 - `docs/startup.md`：lazy compile 与代码缓存的设计、测量方法与结果（暖缓存使 Rebon 的组合从 167 ms 降到 105 ms）。
   特别注意「What is left」：**CommonJS 脚本目前不进缓存**，而 Electron 应用的主进程产物大多是 CJS。
 - `src/code_cache.rs`：缓存的格式（每个构建一个 `<dir>/<build>.pack`）、信任模型（HMAC 密钥不在缓存目录里）、
@@ -47,12 +49,10 @@
   需验证两个 isolate 同时 flush 不会损坏、最多丢失一次运行的新增条目，并写测试）。
 - 关闭窗口销毁渲染器前、`app.quit` 退出前调用 `flush_code_cache()`。
 
-### 2. CommonJS 入缓存（修改 `src/modules.rs`、`src/code_cache.rs`）
+### 2. CommonJS 入缓存
 
-- 对 CJS 包装脚本走与 ES 模块相同的缓存路径：键 = 构建指纹 + 全局作用域 + **包装后的完整源码**；读回后经 Boa 的校验再运行。
-- 前提检查：包装脚本的全局声明集合必须为空（实现里断言；不为空时不缓存并计数），这与 `docs/startup.md` 拒绝缓存经典脚本的理由一致。
-- `CodeCacheStats` 增加 `cjs_hits`/`cjs_misses`（或按类型分组），`docs/startup.md` 更新相应段落。
-- 经典 `<script>`（渲染器）不在本包范围内缓存；若测量显示它是首帧的主要成本，写出分析交给后续（需要回放全局声明实例化）。
+已移到 [P62](P62-cjs-code-cache.md)（性能线）。本包只需确认第 1 节接入后主进程的 CJS 命中（见验收）。
+经典 `<script>`（渲染器）不缓存；若测量显示它是首帧的主要成本，写出分析交给后续（需要回放全局声明实例化）。
 
 ### 3. 渲染器预热
 
@@ -73,7 +73,7 @@
 
 ### 5. JIT 默认策略
 
-- 由 P01 给出 `jit` feature 的 release 体积增量。规则：增量使 `electron.exe` 超过 24 MB 硬上限 → 默认构建不带 JIT，另发一个
+- `electron` 二进制的 `jit` feature 由 P63 提供，体积增量记在 `size.md`。规则：增量使 `electron.exe` 超过 24 MB 硬上限 → 默认构建不带 JIT，另发一个
   `-jit` 变体（P40 的平台包加一个可选变体）；在上限内 → 默认带 JIT。
 - 带 JIT 时：主进程与渲染器都开，阈值用默认；`VERVE_JIT=0` 可关。用 P41 的 L2/L3 应用测量开与关的首帧时间和交互耗时，结果写报告。
 - macOS 签名授权见 P40 第 10 节。
@@ -107,7 +107,7 @@
 ## 步骤
 
 1. 追踪点与 `bench.rs`；先测出现状基线（Verve 与 Electron），写 `perf.md` 第一版，标出关键路径。
-2. 代码缓存接入 + generation 淘汰；CJS 入缓存（含测试：改动源码、损坏 pack、两个 isolate 并发 flush）。
+2. 代码缓存接入 + generation 淘汰（含测试：两个 isolate 并发 flush）。
 3. 渲染器预热与启动并行化，逐项测量收益，无收益的默认关闭。
 4. GC 可配置、空闲回收、内存分解测量。
 5. 按 P01 的结果定 JIT 默认策略。
@@ -115,7 +115,7 @@
 
 ## 验收
 
-- `cargo test -p verve-electron` 与 `cargo test --test code_cache` 通过（新增的 CJS 缓存与并发 flush 测试在内）。
+- `cargo test -p verve-electron` 与 `cargo test --test code_cache` 通过（新增的并发 flush 测试在内）。
 - 第二次启动 electron-quick-start 时 `code_cache_stats()` 显示主进程 CJS 与渲染器 ESM 均命中（日志可见）。
 - `perf.md` 有一份按上述格式的完整报告，包含与 Electron 39.2.0 的对比；README 第 1 节的四项目标逐项给出"达标/差距"。
 - 关闭追踪时，`bench.rs` 测得的首帧时间与打开追踪时差异在噪声内。

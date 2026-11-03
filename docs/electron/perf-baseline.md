@@ -155,6 +155,8 @@ Verve is very far behind on raw JS throughput. Typical ratios are 30x to 300x sl
 
 The most actionable items are the super-linear `split`, `Map`/`Set` delete and regex scans, getting CJS modules into the code cache, and a way to turn the JIT on in the `electron` binary.
 
+These are now work packages on the performance line (README, section 5): P60 brings this suite into the repository, P61 fixes the super-linear built-ins, P62 caches CommonJS, P63 lets `electron` carry the JIT, and P64-P66 go after the constant factor.
+
 ## Caveats
 
 - No layout or paint exist yet. The window figures measure window creation plus text drawing, and Verve's "ready" is not equivalent to Electron's `did-finish-load`. Compare wall time to exit, and treat even that cautiously.

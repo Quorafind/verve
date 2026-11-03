@@ -89,7 +89,7 @@ crates/
   verve-layout/       新：布局引擎（taffy + 行内排版 + 层叠上下文 → DisplayList），不依赖 GPUI（P30/P31）
   verve-gpui/         新：`electron` 二进制（src/bin/electron.rs）、GPUI Shell、DomView（回放 DisplayList）、TextMeasurer 的 GPUI 实现、输入桥接、菜单托盘
   verve-electron-npm/ 新：npm 包模板与平台包脚本（P40，非 Rust）
-src/                  Verve 内核：只允许 P03、P11、P17、P42 修改（P42 还可改 boa/core/gc，需记入 boa/SU.md）
+src/                  Verve 内核：只允许 P03、P11、P17、P42、P62 修改（P42 还可改 boa/core/gc；性能线 P61、P64–P66 可改 boa/core 的 engine 与 string；都需记入 boa/SU.md）
 docs/electron/        本方案
 tests/electron/       夹具应用与无头验收（P00）
 ```
@@ -114,6 +114,11 @@ M3 布局/GPUI P34 Shell 窗口 ─ P30 盒模型布局与绘制 ─ P31 行内�
                │
 M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P42 性能与启动   P43 调试替代
 后续         P50 N-API 原生模块
+
+性能线（与批次 2 起并行，见下文「性能线」）
+             P60 JS 基准与剖析 ─ P61 超线性内建   P62 CJS 代码缓存   P63 electron 可带 JIT
+               │
+             P64 字符串/正则/JSON   P65 对象/集合/类型化数组   P66 JIT 覆盖扩展 ─ RP 性能复盘
 ```
 
 | 包 | 名称 | 依赖 | 可并行 | 规模 |
@@ -147,6 +152,13 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 | [P42](packages/P42-perf-startup.md) | 性能与启动 | M1–M3 | | M |
 | [P43](packages/P43-devtools.md) | 调试替代 | P13 | ✓ | S |
 | [P50](packages/P50-napi.md) | N-API 原生模块（v2） | M4 | | XL |
+| [P60](packages/P60-js-bench.md) | JS 基准与剖析方法 | — | ✓ | S |
+| [P61](packages/P61-superlinear-builtins.md) | 超线性内建修复（`split`、`Map`/`Set` 删除、正则扫描） | — | ✓ | S |
+| [P62](packages/P62-cjs-code-cache.md) | CommonJS 进代码缓存 | — | ✓ | M |
+| [P63](packages/P63-electron-jit.md) | `electron` 二进制可带 JIT | P02 | ✓ | S |
+| [P64](packages/P64-strings-regex-json.md) | 字符串、正则与 JSON 热路径 | P60 P61 | ✓ | L |
+| [P65](packages/P65-objects-typed-arrays.md) | 对象、集合与类型化数组热路径（解释器） | P60 P61 | ✓ | L |
+| [P66](packages/P66-jit-coverage.md) | JIT 覆盖扩展 | P60 P63 | | L |
 
 ### 重构关卡
 
@@ -160,6 +172,24 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 | R4 | M4 前 | 全仓库：死代码、未用的 feature 与公开 API、依赖与体积复查；拆分根 crate 的超长文件，`verve` 接入 `[lints] workspace = true` |
 
 此外每合并约 3 个功能 PR，插一个同区域的小重构 PR（见 `DISPATCH.md`）。
+
+### 性能线
+
+[`perf-baseline.md`](perf-baseline.md)（2026-11-03）测得：启动、内存、体积都远好于 Electron，但**纯 JS 吞吐比 V8 慢 15–850 倍**（典型 30–300 倍），
+JIT 在这组测试上几乎没有收益，三个内建是平方级的，大 CJS 包不走代码缓存（`require('typescript')` 是 Node 的 17 倍时间、3.9 倍内存）。
+对 React 式 UI 与编辑器类应用，这是本方案最大的风险。所以性能不等到 M4，单开一条线与功能包并行：
+
+1. **立即可做（与批次 2 并行）**：P60 把基准搬进仓库并给出剖析方法；P61 修三个超线性内建并扫一遍同类问题；
+   P62 让 CJS 进代码缓存（原 P42 第 2 节）；P63 让 `electron` 二进制能带 JIT（默认开不开仍由 P42 第 5 节定）。
+2. **剖析驱动（P60、P61 合并后，与批次 3 并行）**：P64 字符串/正则/JSON，P65 对象/集合/类型化数组（解释器），P66 JIT 覆盖。
+   这三个包的目标先写成「参考目标」，第一次剖析后由实现者提出、总控确认，才开始大改。
+3. **RP 性能复盘**：P41 能跑起 L2 应用（Vite/React）后、P64–P66 合并后，用真实应用（React 1000 行表格渲染、L3 编辑器的输入延迟、
+   主进程大 CJS 包启动）测 Verve 与 Electron 39，按剖析决定下一步：继续调内建与解释器，做 JIT 第 3 阶段（类型反馈），
+   还是把差距作为已知限制写进兼容矩阵。
+
+预期：这条线能把差距缩小几倍到几十倍，**达不到 V8 的水平**；它的价值是先把"慢到不能用"的地方（超线性、无缓存、JIT 不生效）清掉，
+再让复盘基于真实应用而不是微基准。性能线的包可以改 `boa/core` 的 engine 与 string（单独 commit，记 `boa/SU.md`）；
+做测量的包允许 release 构建，见 `conventions.md`「构建纪律」。
 
 规模：S ≈ 1–2 天，M ≈ 3–5 天，L ≈ 1–2 周，XL ≈ 1 月以上（以一个实现者计）。
 
