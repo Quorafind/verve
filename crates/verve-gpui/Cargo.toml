@@ -25,5 +25,10 @@ verve-dom = { path = "../verve-dom" }
 # The drawing tests build a document in a realm of their own.
 verve = { path = "../..", default-features = false }
 
+[features]
+# The `electron` binary with Boa's JIT in its isolates (`crates/verve-electron`'s `jit`); see
+# `docs/jit.md`. Off by default.
+jit = ["verve-electron/jit"]
+
 [lints]
 workspace = true

@@ -17,5 +17,9 @@ boa_engine = { version = "=0.22.0", default-features = false, features = ["annex
 # The address `loadURL` is given, read as the kernel's `data:` processor reads it.
 url = "2.5"
 
+[features]
+# Boa's JIT in every isolate (see `docs/jit.md`); `VERVE_JIT=0` switches it off at run time.
+jit = ["verve/jit"]
+
 [lints]
 workspace = true

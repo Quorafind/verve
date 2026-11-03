@@ -56,7 +56,7 @@ pub(crate) mod shadow_stack;
 #[cfg(feature = "jit")]
 pub(crate) mod jit;
 #[cfg(feature = "jit")]
-pub use jit::{JitOptions, JitStats, JitUnavailable, jit_unavailable};
+pub use jit::{JitOptions, JitStats, JitUnavailable, jit_unavailable, object_layout_checked};
 pub(crate) mod source_info;
 
 #[cfg(feature = "flowgraph")]

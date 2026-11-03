@@ -74,6 +74,37 @@ Other profile settings: `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`;
 The JIT is 5.9 MB for 8x on hot numeric loops. The user decided on 2026-11-02 that `electron` ships with it,
 under a 34 MB cap (README, "目标").
 
+### `electron.exe` (`P63`, measured 2026-11-03)
+
+`cargo build --release -p verve-gpui --bin electron`, Windows x64, stripped, Rust 1.95,
+`CARGO_BUILD_JOBS=6`. `scripts/size-report.sh` builds only the root `verve` package and has no
+`-p`, so the two binaries were built directly and measured with `wc -c`.
+
+| build | bytes | MiB |
+|---|---|---|
+| `electron.exe`, no `jit` | 27,602,944 | 26.32 |
+| `electron.exe`, `--features jit` | 32,971,264 | 31.44 |
+| difference | +5,368,320 | **+5.12** |
+
+The `jit` feature adds 5,368,320 bytes here — 5.12 MiB, which is 5.37 MB in the other unit —
+against the 5.9 MB it added to the core table above. In the same unit the two are close (5.37 MB
+against 5.9 MB) but not equal, and why they differ was not measured. Cranelift is in the JIT
+build only: 81 `cranelift` and 21 `regalloc2` occurrences in the image, and none in the other.
+
+The environment variables are built with the feature too, so they say which build is which:
+`VERVE_JIT_THRESHOLD` and `BOA_JIT_THRESHOLD` once each, and `VERVE_JIT` and `BOA_JIT` once each
+as a whole literal (a search finds each of those twice, the second hit being the prefix inside the
+`_THRESHOLD` name). The build without the feature has none of the four: the only reader,
+`jit_from_env`, is `#[cfg(feature = "jit")]`.
+
+The build without the feature is the binary it was before this package: 27,602,944 bytes, the
+same length as the build taken before the change, and the two images differ in 12 bytes only —
+the PE `TimeDateStamp` at 128 (and the copy of it in the debug directory at 23,319,824), and the
+first 8 bytes of the `RSDS` CodeView GUID at 23,319,852. That is the linker's own stamping, not a
+code change: building the same unchanged tree twice in a row gives a pair of images that differ in
+exactly those 12 bytes and nowhere else. Everything else is byte for byte identical, so the
+feature costs nothing when it is off.
+
 ## Summary
 
 | step | verve.exe |
