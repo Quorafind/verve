@@ -196,7 +196,12 @@ always agree with one another.
   `push_frame`/`pop_frame`/`handle_exception_at`/`IncrementLoopIteration` and polled by
   `run_loop`, and `JsValue::raw_bits`/`from_raw_bits` (with `JsValue` and the NaN-boxed inner
   value `repr(transparent)` on 64-bit). `Context::jit_options_mut`, `Context::jit_stats`,
-  `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>`. Design and results: Verve's `docs/jit.md`.
+  `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>`. `vm::object_layout_checked()` answers whether property
+  and element accesses compile inline on this thread — the layout they read is checked once per
+  thread against a real object, at that thread's first compile or the first call here, whichever
+  comes first, and the answer is kept — so an embedder can tell a JIT that runs its hot loops as
+  compiled code with only helper property accesses from a fully inline one; without it the check
+  is visible only inside this crate's own tests. Design and results: Verve's `docs/jit.md`.
 
 - `boa_engine`, `object/jsobject.rs`: `JsObject::downgrade` and `WeakJsObject`, a reference to
   an object that does not keep it alive and is read without a call into JavaScript (unlike a

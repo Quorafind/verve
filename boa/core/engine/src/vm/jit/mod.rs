@@ -149,6 +149,15 @@ pub fn jit_unavailable() -> Option<JitUnavailable> {
     }
 }
 
+/// Whether property and element accesses compile inline on this thread. The layout they read is
+/// checked once per thread against a real object — at that thread's first compile, or at the
+/// first call here, whichever comes first — and the answer is kept. When it is not, compiled
+/// code still runs, and every property access is a call to a fast helper instead.
+#[must_use]
+pub fn object_layout_checked() -> bool {
+    layout::object_layout().is_some()
+}
+
 /// The process-wide switch behind [`jit_unavailable`]. Tests keep it per thread, so a test that
 /// trips it does not switch the JIT off for the tests running beside it.
 mod latch {
