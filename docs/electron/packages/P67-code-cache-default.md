@@ -1,7 +1,9 @@
 # P67 `verve run` 默认开代码缓存
 
-**依赖**：P62  **规模**：M  **修改**：`src/code_cache.rs`、`src/code_cache_load.rs`（P62 新建）、`src/cli.rs`、`src/lib.rs`（只限缓存的公开 API 与 `CodeCacheStats`）、
-`tests/code_cache.rs`、`docs/startup.md`；为降低首次运行成本而必须改 Boa 时，`boa/core/engine/src/code_cache.rs` 与 `boa/SU.md`
+**依赖**：P62  **规模**：M  **修改**：`src/code_cache.rs`、`src/code_cache_load.rs`（P62 新建）、`src/code_cache_pack.rs`（新建，见「状态」）、
+`src/cli.rs`、`src/lib.rs`（只限缓存的公开 API 与 `CodeCacheStats`）、`tests/code_cache.rs`、`tests/common/mod.rs`（只限测试的隔离）、
+为默认开而必须改测试夹具时 `tests/embedder_hooks.rs`、`tests/jit.rs`、`tests/proxy.rs`、`tests/rebon.rs`、`tests/run_as_node.rs`（只限注入临时环境），
+`scripts/js-bench/run.sh`（固定缓存设置）、`docs/startup.md`；为降低首次运行成本而必须改 Boa 时，`boa/core/engine/src/code_cache.rs` 与 `boa/SU.md`
 
 ## 目标
 
