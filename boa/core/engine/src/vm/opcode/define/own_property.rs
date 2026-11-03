@@ -1,9 +1,36 @@
 use crate::{
-    Context, JsNativeError, JsResult,
+    Context, JsNativeError, JsObject, JsResult, JsValue,
     object::internal_methods::InternalMethodPropertyContext,
-    property::PropertyDescriptor,
+    property::{PropertyDescriptor, PropertyKey},
     vm::opcode::{IndexOperand, Operation, RegisterOperand},
 };
+
+/// Defines the own data property `key` of `object` when the receiver cannot observe the creation.
+///
+/// `ValidateAndApplyPropertyDescriptor` on an ordinary extensible object that lacks the key inserts
+/// it unchanged, so the answer is `true` and no user code runs. An array, an arguments object, a
+/// module namespace, a proxy or a typed array has its own `[[DefineOwnProperty]]` or shape rules,
+/// and a non-extensible object or an existing key has to compare against the current descriptor, so
+/// those return `false` and the caller takes the full path.
+fn define_new_own_property(object: &JsObject, key: &PropertyKey, value: JsValue) -> bool {
+    if !object.is_ordinary() {
+        return false;
+    }
+    let mut borrowed = object.borrow_mut();
+    if !borrowed.extensible || borrowed.properties().get(key).is_some() {
+        return false;
+    }
+    borrowed.properties.insert(
+        key,
+        PropertyDescriptor::builder()
+            .value(value)
+            .writable(true)
+            .enumerable(true)
+            .configurable(true)
+            .build(),
+    );
+    true
+}
 
 /// `DefineOwnPropertyByName` implements the Opcode Operation for `Opcode::DefineOwnPropertyByName`
 ///
@@ -26,8 +53,12 @@ impl DefineOwnPropertyByName {
             .code_block()
             .constant_string(index.into());
         let object = object.to_object(context)?;
+        let key = PropertyKey::from(name);
+        if define_new_own_property(&object, &key, value.clone()) {
+            return Ok(());
+        }
         object.__define_own_property__(
-            &name.into(),
+            &key,
             PropertyDescriptor::builder()
                 .value(value.clone())
                 .writable(true)

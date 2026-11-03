@@ -371,6 +371,19 @@ always agree with one another.
   read 1M times 53.7 → 39.8 ms compiled (load 38–48%), 80.5 → 65.6 ms interpreted (load 13–18%);
   the suite's `typed` 1359.1 → 1060.2 ms compiled, 1559.8 → 1309.5 ms interpreted.
 
+- `boa_engine`, `vm/opcode/define/own_property.rs`: defining a named property of an object literal
+  inserts it directly. `DefineOwnPropertyByName`, which `{ i, s: 'k' + i }` emits once per property,
+  built a four-field descriptor and called `[[DefineOwnProperty]]`, which fetched the current
+  descriptor, asked for extensibility, then inserted. For an ordinary extensible object that lacks
+  the key, `ValidateAndApplyPropertyDescriptor` inserts the descriptor unchanged and returns `true`
+  without running any user code, so the descriptor and the two lookups can be skipped. The shortcut
+  applies only to an ordinary object whose shape lacks the key; an array, an arguments object, a
+  module namespace, a proxy and a typed array have their own `[[DefineOwnProperty]]`, and a
+  non-extensible object or an existing key still needs the full comparison. Measured on the same
+  round (median of five interleaved processes): the suite's `alloc` 295.0 → 278.9 ms compiled and
+  344.5 → 335.0 ms interpreted (load 22–46%); `vdom` 82.2 → 79.6 ms compiled, 97.8 → 88.7 ms
+  interpreted; `oo` does not touch this path, and its spread stayed inside the round's noise.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
