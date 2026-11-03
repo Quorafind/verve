@@ -20,8 +20,8 @@
 use std::path::{Path, PathBuf};
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Source, js_string,
-    object::builtins::JsArray,
+    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Module, Source,
+    js_string, object::builtins::JsArray, script::Script,
 };
 
 use crate::fs::sys;
@@ -357,12 +357,59 @@ pub(crate) fn load_file(
     if matches!(
         path.extension().and_then(|ext| ext.to_str()),
         Some("mjs" | "js") | None
-    ) && crate::esm::is_esm(path, text, context)?
-    {
-        let loader = crate::shared(context).esm.clone();
-        return loader.require(path, context);
+    ) {
+        match format(path, text, context)? {
+            Format::Module => {
+                let loader = crate::shared(context).esm.clone();
+                return loader.require(path, context);
+            }
+            Format::CommonJs(script) => {
+                return run_module_with(context, path, text, parent, script);
+            }
+        }
     }
     run_module(context, path, text, parent)
+}
+
+/// What a file is: a CommonJS module — its wrapper compiled, when the source is what decided
+/// it — or a module.
+pub(crate) enum Format {
+    CommonJs(Option<Script>),
+    Module,
+}
+
+/// What the file at `path`, whose source is `source`, is: the one its extension or its
+/// package's `type` names, or, when neither names one, Node's CommonJS wrapper when the source
+/// parses as one and a module otherwise. That parse is the one the module runs from, so nothing
+/// parses the source twice.
+///
+/// A source that is neither answers CommonJS, as it always has, without its wrapper: refusing it
+/// here would fail the load, and so a whole graph, before the code before it runs. Run as a
+/// CommonJS module, it is parsed again and fails where Node fails it — at the run.
+pub(crate) fn format(path: &Path, source: &str, context: &mut Context) -> JsResult<Format> {
+    let loader = crate::shared(context).esm.clone();
+    if let Some(script) = loader.take_cjs_wrapper(path, source) {
+        return Ok(Format::CommonJs(Some(script)));
+    }
+    match crate::esm::named_format(path, context)? {
+        Some(true) => return Ok(Format::Module),
+        Some(false) => return Ok(Format::CommonJs(None)),
+        None => {}
+    }
+    match crate::code_cache_load::script(&wrapper(source), &source_path_of(&clean(path)), context) {
+        Ok(script) => Ok(Format::CommonJs(Some(script))),
+        Err(_) if Module::parse(Source::from_bytes(source), None, context).is_ok() => {
+            Ok(Format::Module)
+        }
+        Err(_) => Ok(Format::CommonJs(None)),
+    }
+}
+
+/// The path a module's code is compiled against: its URL, as Node names it.
+fn source_path_of(path: &Path) -> PathBuf {
+    crate::esm_resolve::file_url(path)
+        .map(|url| PathBuf::from(url.as_str()))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The CJS side of a synchronous CJS -> ESM -> CJS cycle cannot expose partial exports.
@@ -446,6 +493,17 @@ pub(crate) fn run_module(
     source: &str,
     parent: Option<&JsObject>,
 ) -> JsResult<JsValue> {
+    run_module_with(context, filename, source, parent, None)
+}
+
+/// As [`run_module`], with the module's wrapper compiled already, when the loader has it.
+pub(crate) fn run_module_with(
+    context: &mut Context,
+    filename: &Path,
+    source: &str,
+    parent: Option<&JsObject>,
+    script: Option<Script>,
+) -> JsResult<JsValue> {
     let filename = &clean(filename);
     let key = JsString::from(filename.to_string_lossy().as_ref());
     let cached = cache(context).get(key.clone(), context)?;
@@ -453,21 +511,13 @@ pub(crate) fn run_module(
         return get(&cached, "exports", context);
     }
     let folder = filename.parent().unwrap_or(Path::new("")).to_path_buf();
-    // A `#!` line, which Node reads as a comment.
-    let source = if source.starts_with("#!") {
-        source.find('\n').map_or("", |at| &source[at..])
-    } else {
-        source
+    let wrapper = match script {
+        Some(script) => script.evaluate(context)?,
+        None => {
+            crate::code_cache_load::script(&wrapper(source), &source_path_of(filename), context)?
+                .evaluate(context)?
+        }
     };
-    // Node's own wrapper, word for word, kept on the module's first line so a line number in an
-    // error is the line in the file.
-    let wrapped =
-        format!("(function (exports, require, module, __filename, __dirname) {{ {source}\n}})");
-    let source_path = crate::esm_resolve::file_url(filename)
-        .map(|url| PathBuf::from(url.as_str()))
-        .unwrap_or_else(|_| filename.to_path_buf());
-    let wrapper = context.eval(Source::from_bytes(&wrapped).with_path(&source_path))?;
-
     let module = module_object(context, filename, parent)?;
     let exports = module.get(js_string!("exports"), context)?;
     let require = module.get(js_string!("require"), context)?;
@@ -513,6 +563,19 @@ pub(crate) fn forget(context: &mut Context, filename: &Path) {
 /// need it.
 fn folder_of(captured: &JsValue) -> PathBuf {
     PathBuf::from(crate::print(captured))
+}
+
+/// Node's own module wrapper, word for word, around `source`: the script a CommonJS module is.
+/// Its first line stays the file's, so a line number in an error is the line in the file. A byte
+/// order mark and a `#!` line, which Node reads as nothing, are left out.
+pub(crate) fn wrapper(source: &str) -> String {
+    let source = source.trim_start_matches('\u{feff}');
+    let source = if source.starts_with("#!") {
+        source.find('\n').map_or("", |at| &source[at..])
+    } else {
+        source
+    };
+    format!("(function (exports, require, module, __filename, __dirname) {{ {source}\n}})")
 }
 
 /// A module's own `require`, resolving relative names against `folder`, with `resolve`

@@ -592,23 +592,26 @@ fn start(context: &mut Context, entry: &Path) -> JsResult<Option<(JsPromise, Str
         }
         error
     })?;
-    if crate::esm::is_esm(entry, &source, context)? {
-        let loader = crate::shared(context).esm.clone();
-        let url = loader.insert_source(entry, &source, context)?;
-        let promise = loader.start(&url, context)?;
-        // The entry's own failure is an uncaught exception, not an unhandled rejection.
-        let failed = function(context, "", 1, |_, args, cx| {
-            let error = JsError::from_opaque(crate::native::arg(args, 0));
-            crate::process::uncaught(cx, &error);
-            Ok(JsValue::undefined())
-        });
-        let watched = promise.then(None, JsFunction::from_object(failed), context)?;
-        let _ = watched;
-        Ok(Some((promise, url.to_string())))
-    } else {
-        crate::process::set_main(context, entry.to_path_buf());
-        crate::modules::run_module(context, entry, &source, None)?;
-        Ok(None)
+    match crate::modules::format(entry, &source, context)? {
+        crate::modules::Format::Module => {
+            let loader = crate::shared(context).esm.clone();
+            let url = loader.insert_source(entry, &source, context)?;
+            let promise = loader.start(&url, context)?;
+            // The entry's own failure is an uncaught exception, not an unhandled rejection.
+            let failed = function(context, "", 1, |_, args, cx| {
+                let error = JsError::from_opaque(crate::native::arg(args, 0));
+                crate::process::uncaught(cx, &error);
+                Ok(JsValue::undefined())
+            });
+            let watched = promise.then(None, JsFunction::from_object(failed), context)?;
+            let _ = watched;
+            Ok(Some((promise, url.to_string())))
+        }
+        crate::modules::Format::CommonJs(script) => {
+            crate::process::set_main(context, entry.to_path_buf());
+            crate::modules::run_module_with(context, entry, &source, None, script)?;
+            Ok(None)
+        }
     }
 }
 

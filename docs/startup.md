@@ -125,6 +125,20 @@ keeps them on disk must authenticate them.
 `BOA_CODE_CACHE_ROUNDTRIP=1` sends every parsed module through the cache before it is used: a whole
 suite then runs code read back from it.
 
+### Boa: writing a script down and reading it back
+
+`Script::code_cache(context)` and `Script::from_code_cache(bytes, source, path, realm, context)` do
+the same for a classic script, which is what Node's CommonJS wrapper is: the scopes its code finds
+as constants, its code blocks, its own made now and the rest when their functions are first called.
+Format 3 of the bytes says which of the two they hold, so a module's are not read as a script's.
+
+A script is written down only if it declares nothing in the global scope
+(`CodeBlock::global_lexs`, `global_fns` and `global_vars` all empty). Parsing a script is what
+makes its global declarations — that is why classic scripts were not cached at all — and code read
+back in another run would have to make them again. Node's wrapper declares nothing, so a CommonJS
+module is written down; a source that closes the wrapper early (`});`) and declares after it is
+not, and is compiled every run.
+
 ### Verve: the pack on disk
 
 `Runtime::set_code_cache_dir_with_secret(dir, secret)` keeps the compiled code of the ES modules a
@@ -205,15 +219,60 @@ lazy load is still about two and a half times Node's: parsing (about 40 ms) is m
 The warm cache brings loading to Node's level, and the whole process (Verve starts in about 47 ms,
 Node in about 106) well under it, at less memory than eager compilation.
 
+### A CommonJS package: TypeScript 5.9.3
+
+`typescript.js` (9.1 MB) loaded as a CommonJS `require`, its time inside the script with
+`performance.now()` around the call, and the process's peak working set polled every 5 ms from
+PowerShell (`Process.PeakWorkingSet64`); median of 5 runs, release `verve` on Windows 10, x86-64,
+Node 22, the machine shared with other builds (`Get-Counter '\Processor(_Total)\% Processor Time'`
+read 5–18% over the runs). "Process" is the whole run for the rows where no in-script time is
+given, since that is the number a launch is judged by:
+
+| Configuration | Time (median) | Peak memory |
+|---|---|---|
+| Node 22, CommonJS `require` | 138.3 ms | 67.7 MB |
+| Verve, no cache | 1,018.4 ms | 140.7 MB |
+| Verve, `--code-cache` warm | **164.9 ms** | **85.7 MB** |
+| Verve warm, the same file as `verve run`'s entry | **219.7 ms** process | **85.5 MB** |
+| Node 22, the same entry | 183.2 ms process | 67.4 MB |
+| Verve warm, `import` of it from a `.mjs`, no `package.json` naming a format | 268.4 ms | 178.4 MB |
+| Verve warm, `import` of it under `{"type":"commonjs"}` | 272.6 ms | 137.2 MB |
+
+The acceptance line was 236 ms and 100 MB: met, at 164.9 ms (1.19 times Node) and 85.7 MB. A
+second set of rounds under a heavier load (37–52% processor time) read 179.2–200.1 ms for the
+warm `require` and 253.4–392.2 ms for the entry; the rows above are the ones to compare.
+
+The last two rows are the same file and the same code; only how its format is decided differs,
+and they are 4 ms apart. The decision keeps the wrapper it parsed, in a slot on the loader keyed
+by the path and the digest of the source, so the load that follows neither reads the entry again
+nor parses the source again. The counts agree: a warm `import` of an unnamed `.js` is one
+`cjs_hits` and one module hit, as under `{"type":"commonjs"}`.
+
+The same file as `verve run`'s entry — a CommonJS main process, no `package.json` naming a format —
+takes 219.7 ms warm in all, about 40 ms of that starting the process. It is on the same fast path
+as `require`: the entry's format is decided by `modules::format`, from the wrapper it keeps, so a
+warm run of a 9 MB CommonJS entry parses nothing.
+
+Before the cache covered CommonJS, `require` was slow twice over: the 9 MB wrapped source was
+parsed whole just to decide the file's format (`esm::is_esm`, throwing that parse away), and then
+parsed again to run. The format decision now parses the wrapper once, keeps it in the cache, and
+runs the module from it — for an entry and for an imported file too, not only for `require` — so
+the warm path parses nothing: it reads the entry back (17 MB of code, checked whole) and runs it.
+The 141 MB without a cache is the wrapper parse kept alive beside the compiled code; reading it
+back, one `CodeBlock` is made for the module and the rest as their functions are first called.
+The extra 41 MB an `import` of an unnamed `.js` costs over the same file under `{"type":"commonjs"}`
+is the source text alive in the decision's caller beside the wrapper it parsed, which the slot
+does not share.
+
 ## Tests
 
-All on the final tree, rebased on `main` at 65fdd840 (JIT phase 2 and the inline-cache fix):
+All on the final tree, rebased on `docs/electron-plan` at 471082de (JIT phase 2, the inline-cache fix, and P61):
 
 | Suite | Modes | Result |
 |---|---|---|
-| Boa (`boa_engine`, `boa_parser`, `boa_ast`, `boa_interner`, insta bytecode) | eager, lazy, lazy with every module through the cache (`BOA_CODE_CACHE_ROUNDTRIP=1`); the same three with the JIT forced (`BOA_JIT_THRESHOLD=0`); `annex-b` eager and lazy | all pass (1,739 tests; 1,776 with the JIT; 1,740 with `annex-b`) |
-| Verve (all 328 tests) | lazy, eager, cache cold, cache warm (`code-cache-env`, `VERVE_CODE_CACHE`), JIT forced lazy and eager (`VERVE_JIT_THRESHOLD=0 BOA_JIT_THRESHOLD=0`) | all pass |
-| test262 (`language`, `built-ins`, `annexB`, `intl402`, `harness`; 52,095 results) | eager, lazy, lazy through the cache, JIT forced eager, JIT forced lazy through the cache, compared test by test with eager | 0 differences but `Atomics.notify` (`notify-two`, `notify-all-on-loc`, bigint `notify-all-on-loc`), which flip both ways between runs of the same configuration under load and pass in every mode run alone |
+| Boa (`boa_engine`, `boa_parser`, `boa_ast`, `boa_interner`, insta bytecode) | eager, lazy, lazy with every module through the cache (`BOA_CODE_CACHE_ROUNDTRIP=1`); the same three with the JIT forced (`BOA_JIT_THRESHOLD=0`); `annex-b` eager and lazy | all pass (1,774 tests; 1,811 with the JIT; 1,775 with `annex-b`) |
+| Verve (all 433 tests) | lazy, eager, cache cold, cache warm (`code-cache-env`, `VERVE_CODE_CACHE`), JIT forced lazy and eager (`VERVE_JIT_THRESHOLD=0 BOA_JIT_THRESHOLD=0`) | all pass |
+| test262 (`language`, `built-ins`, `annexB`, `intl402`, `harness`; 52,095 results), carried over from the run at 65fdd840: the suite is not in this checkout | eager, lazy, lazy through the cache, JIT forced eager, JIT forced lazy through the cache, compared test by test with eager | 0 differences but `Atomics.notify` (`notify-two`, `notify-all-on-loc`, bigint `notify-all-on-loc`), which flip both ways between runs of the same configuration under load and pass in every mode run alone |
 
 Focused tests: `boa/core/engine/src/tests/lazy.rs` (early errors in uncalled functions,
 `toString`/`name`/`length`/`prototype`, closures and TDZ, default parameters and `arguments`,
@@ -223,8 +282,13 @@ objects and regexps, closures made before the first call, recursion, `this`, a f
 another context, the JIT); `boa/core/engine/src/tests/code_cache.rs` (round trips eager and lazy
 with imports, private fields and stack traces; refusal for another source and another global
 scope; every byte flipped three ways and every truncation, never a panic; direct `eval`; bodies
-read back when first called); `tests/code_cache.rs` (round trips, a changed source, damaged and
-cut packs, another secret, a forged entry, `verve run --code-cache` and `VERVE_CODE_CACHE`).
+read back when first called; a script that declares anything in the global scope, a block-level
+function in a non-strict one included, is not written down; a CommonJS wrapper read back runs as
+parsed); `tests/code_cache.rs` (round trips, a changed source, damaged and
+cut packs, another secret, a forged entry, an unnamed `.js` required as CommonJS and as a module,
+one source kept as both, a byte order mark and a `#!` line, an `import` of an unnamed
+CommonJS `.js` parsed once, an unnamed `.js` entry run from the wrapper it was decided with, a
+`.js` that becomes a module between runs, `verve run --code-cache` and `VERVE_CODE_CACHE`).
 
 ## Using it from Rebon
 
@@ -255,7 +319,9 @@ cut packs, another secret, a forged entry, `verve run --code-cache` and `VERVE_C
 ## What is left
 
 - **Lazy parsing**, as above: the largest cost of a cold start, and a parser rewrite.
-- **CommonJS scripts** are not cached: a script's global declarations are made when it is
-  compiled, which a cached one would have to replay.
+- **Scripts that declare globals** are not cached: a script's global declarations are made when it
+  is compiled, which a cached one would have to replay; a block-level function declaration in a
+  non-strict script makes one the same way (Annex B.3.2.2). CommonJS wrappers declare nothing and
+  are cached (see above); a classic `<script>` of a renderer is not in the cache's scope yet.
 - **Faster reading back**: checking every record still takes about 2 ms of the 4 ms reading
   the composition back costs; scopes could be made on demand too.

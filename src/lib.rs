@@ -33,6 +33,7 @@ mod cjs_exports;
 pub mod cli;
 pub mod clone;
 mod code_cache;
+mod code_cache_load;
 mod crypto;
 pub mod dom_events;
 mod embed;
@@ -731,13 +732,14 @@ impl Runtime {
     /// A module's own `require` resolves relative names against the folder it is in.
     pub fn load_module(&mut self, filename: &Path, source: &str) -> Result<JsValue, String> {
         let path = esm::absolute(filename, &self.context);
-        let result = (|| {
-            if esm::is_esm(&path, source, &mut self.context)? {
+        let result = (|| match modules::format(&path, source, &mut self.context)? {
+            modules::Format::Module => {
                 let loader = shared(&self.context).esm.clone();
                 loader.insert_source(&path, source, &mut self.context)?;
                 loader.require(&path, &mut self.context)
-            } else {
-                modules::run_module(&mut self.context, &path, source, None)
+            }
+            modules::Format::CommonJs(script) => {
+                modules::run_module_with(&mut self.context, &path, source, None, script)
             }
         })();
         self.run_microtasks();

@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Module, Source,
-    js_string,
+    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Module, js_string,
     module::{ModuleLoader, ModuleRequest, Referrer, SyntheticModuleInitializer},
     object::builtins::{JsFunction, JsPromise},
     property::PropertyKey,
@@ -58,15 +57,54 @@ pub(crate) struct Loader {
     /// engine asks once while `import()` runs and again to load, and a referrer must get the same
     /// module for the same specifier every time, whatever a hook would answer now.
     hooked: RefCell<HashMap<(String, String), Url>>,
+    /// The wrapper a format decision parsed for a CommonJS module no extension or package named,
+    /// by the module's path and the digest of the source it was parsed from: the load that
+    /// follows runs it from here, so the source is parsed and compiled once rather than once to
+    /// decide and once to run. The digest is there because that load may not come — a module
+    /// graph that fails to link leaves the wrapper behind — and a file written since must not
+    /// run from it.
+    cjs_wrappers: RefCell<HashMap<PathBuf, (u64, Script)>>,
 }
 
 fn resolve_error(context: &mut Context, error: resolve::ResolveError) -> JsError {
     coded_error(context, &error.message, error.code)
 }
 
+/// A digest of `source`, to tell a wrapper kept for one text from another: it decides nothing
+/// about trust, and the cache's own key is what authenticates an entry. A byte order mark is
+/// left out, as the wrapper leaves it out: the load that asks for the wrapper passes the text
+/// with it already stripped.
+fn source_digest(source: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source
+        .strip_prefix('\u{feff}')
+        .unwrap_or(source)
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
 impl Loader {
     pub(crate) fn is_requiring(&self) -> bool {
         !self.requiring.borrow().is_empty()
+    }
+
+    /// Keeps the wrapper parsed for the file at `path`, whose source is `source`, for the load
+    /// that follows the format decision: the same decision, asked again.
+    pub(crate) fn stash_cjs_wrapper(&self, path: &Path, source: &str, script: Script) {
+        self.cjs_wrappers
+            .borrow_mut()
+            .insert(crate::modules::clean(path), (source_digest(source), script));
+    }
+
+    /// The wrapper kept for `path`, when it was parsed from `source`: a file written since the
+    /// decision is parsed again rather than run from the code the decision made.
+    pub(crate) fn take_cjs_wrapper(&self, path: &Path, source: &str) -> Option<Script> {
+        let (digest, script) = self
+            .cjs_wrappers
+            .borrow_mut()
+            .remove(&crate::modules::clean(path))?;
+        (digest == source_digest(source)).then_some(script)
     }
 
     pub(crate) fn conditions(&self, conditions: Vec<String>) {
@@ -399,7 +437,11 @@ impl Loader {
             }
             "module" => {
                 let path = PathBuf::from(url.as_str());
-                crate::code_cache::module(source.trim_start_matches('\u{feff}'), &path, context)?
+                crate::code_cache_load::module(
+                    source.trim_start_matches('\u{feff}'),
+                    &path,
+                    context,
+                )?
             }
             format => {
                 return Err(coded_error(
@@ -434,15 +476,17 @@ impl Loader {
         let format = match format {
             Some(format) => format,
             None if json => "json".to_owned(),
-            None if url.scheme() == "file"
-                && !self.sources.borrow().contains_key(url.as_str())
-                && !is_esm(
-                    &resolve::file_path(url).map_err(|e| resolve_error(context, e))?,
-                    &source,
-                    context,
-                )? =>
-            {
-                "commonjs".to_owned()
+            None if url.scheme() == "file" && !self.sources.borrow().contains_key(url.as_str()) => {
+                let path = resolve::file_path(url).map_err(|e| resolve_error(context, e))?;
+                match crate::modules::format(&path, &source, context)? {
+                    crate::modules::Format::Module => "module".to_owned(),
+                    crate::modules::Format::CommonJs(script) => {
+                        if let Some(script) = script {
+                            self.stash_cjs_wrapper(&path, &source, script);
+                        }
+                        "commonjs".to_owned()
+                    }
+                }
             }
             None => "module".to_owned(),
         };
@@ -678,10 +722,13 @@ pub(crate) fn absolute(path: &Path, context: &Context) -> PathBuf {
     }
 }
 
-pub(crate) fn is_esm(path: &Path, source: &str, context: &mut Context) -> JsResult<bool> {
+/// Whether `path` names the format of what it holds — an ES module, or a CommonJS one — by its
+/// extension or by the `type` of the package it is in; `None` when neither says, so the source
+/// itself decides (see [`crate::modules::format`]).
+pub(crate) fn named_format(path: &Path, context: &mut Context) -> JsResult<Option<bool>> {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("mjs") => return Ok(true),
-        Some("cjs" | "json" | "node") => return Ok(false),
+        Some("mjs") => return Ok(Some(true)),
+        Some("cjs" | "json" | "node") => return Ok(Some(false)),
         Some("js") | None => {}
         _ => {
             return Err(coded_error(
@@ -695,25 +742,14 @@ pub(crate) fn is_esm(path: &Path, source: &str, context: &mut Context) -> JsResu
         let _resolving = crate::permission::Resolving::enter(context);
         resolve::scope(&View::of(context), path)
     };
-    if let Some((_, json)) = scope.map_err(|e| resolve_error(context, e))? {
-        match json.get("type").and_then(resolve::Value::as_str) {
-            Some("module") => return Ok(true),
-            Some("commonjs") => return Ok(false),
-            _ => {}
-        }
-    }
-    let source = source.trim_start_matches('\u{feff}');
-    let source = if source.starts_with("#!") {
-        source.find('\n').map_or("", |n| &source[n..])
-    } else {
-        source
+    let Some((_, json)) = scope.map_err(|e| resolve_error(context, e))? else {
+        return Ok(None);
     };
-    // Parsing the real CJS wrapper also detects lexical redeclarations of its parameters.
-    let wrapper = format!("(function(exports,require,module,__filename,__dirname){{{source}\n}})");
-    if Script::parse(Source::from_bytes(&wrapper), None, context).is_ok() {
-        return Ok(false);
-    }
-    Ok(Module::parse(Source::from_bytes(source), None, context).is_ok())
+    Ok(match json.get("type").and_then(resolve::Value::as_str) {
+        Some("module") => Some(true),
+        Some("commonjs") => Some(false),
+        _ => None,
+    })
 }
 
 fn attributes(request: Option<&ModuleRequest>, json: bool, context: &mut Context) -> JsResult<()> {

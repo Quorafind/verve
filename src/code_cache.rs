@@ -38,10 +38,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use boa_engine::{Context, JsResult, Module, Source};
+use boa_engine::Context;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
+use crate::code_cache_load::Kind;
 use crate::encoding::hex;
 
 const MAGIC: &[u8; 8] = b"VERVEPK\x02";
@@ -115,6 +116,19 @@ pub struct CodeCacheStats {
     pub refused: u64,
     /// Modules compiled and kept for later runs.
     pub stored: u64,
+    /// CommonJS modules read back from the cache instead of parsed.
+    pub cjs_hits: u64,
+    /// CommonJS modules with no entry, parsed and compiled.
+    pub cjs_misses: u64,
+    /// CommonJS modules whose entry was there but not read, as [`CodeCacheStats::refused`].
+    pub cjs_refused: u64,
+    /// CommonJS modules compiled and kept for later runs.
+    pub cjs_stored: u64,
+    /// CommonJS modules never kept: their wrapper compiles to code that cannot be written down
+    /// — it declares something in the global scope, which parsing makes and code read back
+    /// cannot, or it holds a function not compiled yet, code shared between two places, or a
+    /// scope outside the realm's.
+    pub cjs_skipped: u64,
 }
 
 /// The pack as this run knows it.
@@ -182,10 +196,12 @@ impl CodeCache {
         self.protection.clone()
     }
 
-    /// The key of the entry for `source`, compiled against a global scope of digest `global`.
-    fn key(&self, source: &str, global: u64) -> Key {
+    /// The key of the entry for `source`, compiled against a global scope of digest `global`,
+    /// when the code is `kind`.
+    fn key(&self, kind: Kind, source: &str, global: u64) -> Key {
         let mut hash = Sha256::new();
-        hash.update(b"verve code cache key v2\0module\0");
+        hash.update(b"verve code cache key v2\0");
+        hash.update(kind.domain());
         hash.update(self.fingerprint);
         hash.update(global.to_le_bytes());
         hash.update((source.len() as u64).to_le_bytes());
@@ -203,7 +219,8 @@ impl CodeCache {
         mac
     }
 
-    fn count(&self, update: impl FnOnce(&mut CodeCacheStats)) {
+    /// Adds to what the cache has done: what `update` changes in the counts is kept.
+    pub(crate) fn count(&self, update: impl FnOnce(&mut CodeCacheStats)) {
         let mut stats = self.stats.get();
         update(&mut stats);
         self.stats.set(stats);
@@ -216,8 +233,13 @@ impl CodeCache {
 
     /// The compiled code kept for `source`, if there is an authentic entry for it; `Err` if
     /// there is an entry that is not.
-    pub(crate) fn load(&self, source: &str, global: u64) -> Result<Option<Vec<u8>>, ()> {
-        let key = self.key(source, global);
+    pub(crate) fn load(
+        &self,
+        kind: Kind,
+        source: &str,
+        global: u64,
+    ) -> Result<Option<Vec<u8>>, ()> {
+        let key = self.key(kind, source, global);
         let mut state = self.state.borrow_mut();
         if !state.opened {
             state.opened = true;
@@ -244,8 +266,8 @@ impl CodeCache {
     }
 
     /// Keeps `payload`, compiled from `source`, for the next run.
-    pub(crate) fn store(&self, source: &str, global: u64, payload: Vec<u8>) {
-        let key = self.key(source, global);
+    pub(crate) fn store(&self, kind: Kind, source: &str, global: u64, payload: Vec<u8>) {
+        let key = self.key(kind, source, global);
         let tag = self.mac(&key, &payload).finalize().into_bytes().into();
         let mut state = self.state.borrow_mut();
         state.pending.push((key, payload, tag));
@@ -985,34 +1007,6 @@ fn build_fingerprint() -> [u8; 32] {
         }
     }
     hash.finalize().into()
-}
-
-/// The module `source` (at `path`) is: read back from the runtime's code cache if it keeps
-/// one with an entry for it, parsed otherwise, and then kept in the cache.
-pub(crate) fn module(source: &str, path: &Path, context: &mut Context) -> JsResult<Module> {
-    let cache = crate::shared(context).code_cache.borrow().clone();
-    let Some(cache) = cache else {
-        return Module::parse(Source::from_bytes(source).with_path(path), None, context);
-    };
-    let global = boa_engine::code_cache::global_scope_fingerprint(context);
-    match cache.load(source, global) {
-        Ok(Some(bytes)) => {
-            if let Ok(module) = Module::from_code_cache(&bytes, source, Some(path), None, context) {
-                cache.count(|stats| stats.hits += 1);
-                return Ok(module);
-            }
-            cache.count(|stats| stats.refused += 1);
-        }
-        Ok(None) => cache.count(|stats| stats.misses += 1),
-        Err(()) => cache.count(|stats| stats.refused += 1),
-    }
-    let module = Module::parse(Source::from_bytes(source).with_path(path), None, context)?;
-    // A module that fails to compile fails when it is linked, as without the cache.
-    if let Ok(Some(bytes)) = module.code_cache(context) {
-        cache.store(source, global, bytes);
-        cache.count(|stats| stats.stored += 1);
-    }
-    Ok(module)
 }
 
 /// 判断路径是否受保护；移动或删除目录树时，也保护其祖先路径。
