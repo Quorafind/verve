@@ -5,7 +5,10 @@
 //! of loops), and the results must be identical — values shown so that `-0`, `NaN`, types and
 //! exceptions all count.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    fmt::Write,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use boa_parser::Source;
 
@@ -172,11 +175,13 @@ fn same_after_jobs(source: &str, result: &str) -> String {
             Err(error) => format!("uncaught {error}; "),
         };
         if let Err(error) = context.run_jobs() {
-            out.push_str(&format!("job error {error}; "));
+            let _ = write!(out, "job error {error}; ");
         }
         match context.eval(Source::from_bytes(result)) {
             Ok(value) => out.push_str(&value.display().to_string()),
-            Err(error) => out.push_str(&format!("uncaught {error}")),
+            Err(error) => {
+                let _ = write!(out, "uncaught {error}");
+            }
         }
         (out, context.jit_stats())
     };
@@ -536,7 +541,7 @@ impl Generator {
             "!=", "===", "!==", "&&", "||", "??",
         ];
         const UNARY: &[&str] = &["-", "!", "~", "+", "typeof "];
-        if depth == 0 || self.next() % 4 == 0 {
+        if depth == 0 || self.next().is_multiple_of(4) {
             return self.pick(LEAVES).to_owned();
         }
         match self.next() % 6 {

@@ -41,9 +41,11 @@ use std::{
     ops::ControlFlow,
     panic::{AssertUnwindSafe, catch_unwind},
     rc::Rc,
-    sync::atomic::{AtomicU8, Ordering},
     time::Duration,
 };
+
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::{
     Context,

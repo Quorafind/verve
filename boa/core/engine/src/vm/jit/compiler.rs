@@ -165,9 +165,10 @@ pub(super) fn compile(
             .as_ref()
             .map_err(|reason| CompileError::Unavailable(reason.clone()))?;
         #[cfg(test)]
-        if PANIC_IN_CODEGEN.with(std::cell::Cell::get) {
-            panic!("code generator panic (test)");
-        }
+        assert!(
+            !PANIC_IN_CODEGEN.with(std::cell::Cell::get),
+            "code generator panic (test)"
+        );
         let (function, sites) = translate(code_block, &block_pcs, isa);
         let mut context = ClifContext::for_function(function);
         let compiled = context
