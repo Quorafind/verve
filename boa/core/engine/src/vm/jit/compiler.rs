@@ -45,6 +45,8 @@ use crate::{
     },
 };
 
+mod arith;
+
 use super::{
     JitCode, JitOptions,
     helpers::{self, HelperFn, SiteHelperFn},
@@ -233,6 +235,7 @@ fn kind(instruction: &Instruction) -> Kind {
         | Instruction::Sub { .. }
         | Instruction::Mul { .. }
         | Instruction::Mod { .. }
+        | Instruction::Div { .. }
         | Instruction::BitAnd { .. }
         | Instruction::BitOr { .. }
         | Instruction::BitXor { .. }
@@ -326,6 +329,7 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
         | Instruction::Sub { dst, lhs, rhs }
         | Instruction::Mul { dst, lhs, rhs }
         | Instruction::Mod { dst, lhs, rhs }
+        | Instruction::Div { dst, lhs, rhs }
         | Instruction::BitAnd { dst, lhs, rhs }
         | Instruction::BitOr { dst, lhs, rhs }
         | Instruction::BitXor { dst, lhs, rhs }
@@ -1170,6 +1174,9 @@ impl Translator<'_> {
             }
             Instruction::Mod { dst, lhs, rhs } => {
                 self.remainder(dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::Div { dst, lhs, rhs } => {
+                self.divide(dst.into(), lhs.into(), rhs.into(), pc, next);
             }
             Instruction::BitAnd { dst, lhs, rhs } => {
                 self.bitwise(Bitwise::And, dst.into(), lhs.into(), rhs.into(), pc, next);

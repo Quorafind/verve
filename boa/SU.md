@@ -424,6 +424,11 @@ always agree with one another.
   and grows `length` to cover it, as `[[Set]]` and `Array`'s `[[DefineOwnProperty]]` do there.
   Any other array, index or `length` takes the interpreter's `[[Set]]`.
 
+- `boa_engine`, `vm/jit/compiler/arith.rs` (feature `jit`): `/` is compiled inline as `div_fast`
+  computes it: an exact `int32` quotient is an `int32`, every other quotient of numbers an `f64`.
+  A dividend of `0` takes the interpreter's handler, whose `0 / -5` is `0` where JavaScript's is
+  `-0`.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

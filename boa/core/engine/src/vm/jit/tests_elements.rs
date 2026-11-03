@@ -48,3 +48,26 @@ fn appending_stores_match_the_interpreter() {
         r#"[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39] [0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5] [1.5,"text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text","text"] [[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78],40] [50,[0,1,2],true,false] [[0,1,2,3,4,5,6,7,8,9],10] [[0,1,2,3,4,5,6,7,8,9,,,,,,10,11,12,13,14,15,16,17,18,19],25] [1,9,9,9] [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19] [1,2] TypeError [[1,2],2] [[1,2],2] [[1,2],2] TypeError [[0,1,2,3,4,,6,7,8,9],"set 5"] [0,1,2,3,4,5,6,,8,9] [0,1,2,3,4,5] own setter 2 TypeError [20,true] [[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19],1] [20] 0 [21,true] [4294967295] [0,1,2,3,4,-5,-6,-7,-8,-9,-10,-11] [[0,1,2,3,4,5,6,7,8,9,10],11]"#
     );
 }
+
+/// `/`: the quotients of `int32`s that are whole numbers are `int32`s, the others `f64`s;
+/// zero divisors, `-0`, `NaN`, the infinities and `i32::MIN / -1` give what the interpreter does.
+#[test]
+fn division_matches_the_interpreter() {
+    let out = same(
+        "const vals = [0, -0, 1, -1, 2, -2, 3, 6, -6, 7, 0.5, -0.5, 2147483647, -2147483648, 2147483648,
+                       4294967295, 1e308, 5e-324, NaN, Infinity, -Infinity, '6', true, null, undefined, 3n];
+         const out = [];
+         function div(a, b) { return a / b; }
+         for (const a of vals) for (const b of vals) {
+           try { out.push(show(div(a, b))); } catch (e) { out.push(e.name); }
+         }
+         let s = 0;
+         for (let i = 1; i < 300; i++) s += div(i * 7, i) + div(i, 3) + div(-i, 4) + div(0, i) + div(0, -i);
+         out.push(show(s), show(div(0, -5)), show(div(-0, 5)), show(div(1, 0)), show(div(-1, 0)), show(div(0, 0)));
+         out.join(' ')",
+    );
+    // The last results, as Node 22 has them: `-0 / 5` (`-0`), `1 / 0`, `-1 / 0` and `0 / 0`. The
+    // interpreter's `0 / -5` is `0` where Node's is `-0` (see the risks in `docs/jit.md`); compiled
+    // code leaves that to it, and the three modes above agree.
+    assert!(out.ends_with("-0 Infinity -Infinity NaN"), "{out}");
+}
