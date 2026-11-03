@@ -108,4 +108,68 @@ console.log(JSON.stringify(out));
 
 ## 状态
 
-（实现者完成后填写）
+完成（2026-11-03，分支 `electron/p60-js-bench`）。数字是在 `docs/electron-plan` 的 `cde79ef3` 上测的；
+分支现在位于 `471082de`（已含 P61、P63 的合并），本包的文件在其上没有变化。
+
+### 做了什么
+
+- `scripts/js-bench/bench.js`：基线那 10 项，名字与规模逐字不变；另加 `vdom`（2,000 节点、每轮改 1/10、5 轮 diff）、
+  `tokenize`（sticky 正则扫 200 KB 生成源码）、`template`（1,000 行 HTML 表格）、`closure`（100 万元素 map/filter/reduce）。
+  一行 JSON 输出，`--list` 给名字数组，单项测试可单独跑。
+- `scripts/js-bench/scaling.js`：44 个探针（字符串 26 个含 Latin-1 / 非 Latin-1 两遍、数组 5 个、Map/Set 7 个、字典对象 2 个、JSON 3 个、`concat` 1 个）。
+  每个探针自带 n，t(n) 校准到解释器下 10–200 ms（实测 11.6–191.4 ms）；n 与 4n 同进程各测两遍取快，报告 `t(4n)/t(n)`。
+  **n 或 4n 任一次跑超过 20 s** 记为超线性（`"superLinear": true`），并跳过 4n，不给比值；t(n) 落在
+  1,250 ms 到 20 s 之间的探针报 `"skipped"` 且不给判定（不是超线性），因为 4n 可能越过 20 s，
+  而规模选大了的线性操作不该被记成 bug。
+- `scripts/js-bench/run.sh`：`[--runs N] [--only test] [--scaling] <verve.exe> [node]`；每项每引擎一个新进程，中位与最好；
+  按二进制里有无 `VERVE_JIT_THRESHOLD` 判断是否带 JIT，带了就同时跑 JIT 与 `VERVE_JIT=0` 两列，没带只跑解释器列；
+  给 `node` 就有 Node 列与比值列；输出 Markdown 表。只用 bash + awk/sed，不依赖 Node。
+- 根 `Cargo.toml` 加 `[profile.profiling]`（`inherits = "release"`、`strip = "none"`、`debug = "line-tables-only"`）。
+- `docs/electron/perf-js.md`：14 项吞吐表、44 项规模表、发现（交给 P61/P64/P65）、剖析配方（samply 与 WPR/xperf 两条路）。
+  规模表是 P61 之前的基线，文中已注明 P61 修好了 `split`、`Map`/`Set` 删除与正则扫描，它的数字走「After each package」。
+
+### 验收
+
+- **14 项吞吐表：跑过**（`bash scripts/js-bench/run.sh <release verve.exe> node`，`--runs 5`）。
+  原 10 项的解释器中位数与 `perf-baseline.md` 第 3 节相差最大 13%（`splitjoin` +13%、`alloc` +10%、`fib` +6%，其余 ≤8%），**都在 ±15% 内**。
+  `alloc` 第一遍 5 次读数偏高 24%，用 `--runs 11` 单独复测到 +10%，报告里用的是复测值并写明了这一点。
+- **规模探针：跑过**（`run.sh --scaling`）。`split`（4 个变体 16–17×）、`Map`/`Set` 的 `delete`（25–29×）、
+  正则扫描（`matchAll` 13×、`exec` 循环 17×、`replace` 正则 17×）都标为 **super-linear**，验收这一条达成。
+  另外还发现 `replaceAll`（字符串模式）、`delete obj[k]` 后的字典对象、字符串 `+=` 也是超线性，一并写进报告。
+  两轮测量都没有探针触发超时，也没有探针落到 `skipped`。
+- **`cargo build --profile profiling --bin verve --no-default-features --features wasm,jit`：成功**
+  （退出码 0，`profiling/verve.exe` 23,580,160 字节，旁边 `verve.pdb` 68,198,400 字节）。带默认 feature 的同名构建也能过，
+  但那样剖析的不是被测量的程序（无 `jit`、带 npm/typescript），配方与状态里用的都是上面这条。
+- **release 体积不变**：`cargo build --release --bin verve --no-default-features --features wasm,jit` 产物 23,577,600 字节，
+  与 `perf-baseline.md` 记的完全相同（`size.md` 的 `size-baseline` 是 35,812,352，那是另一套 feature，未动）。
+- **剖析示例：未完成，留给总控。** 配方写成了实际可用的命令，但「`typed` 与 `regex` 前 10 个自耗时函数」两表没有数据：
+  早先跑 samply 时它在用户桌面上弹了提权与浏览器窗口，被总控叫停，此后不再运行任何会弹窗的工具。这一节在 `perf-js.md` 里
+  标着「待总控实测」，没有编造函数名。
+
+### 已知问题
+
+- 机器是共享的：测量期间另有两个实现者在做 release 构建，有整段时间负载 100%（此时全表比空闲时慢 1.6–2.0×）。
+  报告里每张表都写了测量前后的负载读数，数字取自负载较低的那几轮（§1：17.2–35.0% → 8.4–21.5%；§2：4.1–11.9% → 2.5–7.1%）。
+  引用绝对值前建议重测；比值稳健得多。`regex` 与 `array-shift` 各单独重测 5 次：`regex` 负载
+  12.8% → 12.3%，`array-shift` 32–70% → 25–34%（本文件里负载最高的一轮，报告里也写了）。
+- `template` 的 Node 侧只有 0.2 ms，比值被调度噪声放大（±0.1 ms 就是 ±50%），只能当「够快」看。
+- `array-shift` **不是**超线性，先前那条 29× 是缓存断崖：Boa 稠密数组的 `shift` 是 `Vec::remove(0)`（一次 memmove），
+  单次 O(n)，数据在缓存内时比值就是 4。探针改到 n=50,000（i32 下 200 KB，4n 800 KB，都在 1 MB L2 内）后比值 4.2×；
+  n=100,000 时 4n 的 1.6 MB 出了 L2，比值跳到 12.5× 而算法没变。交给 P65 的是「单次 memmove 的成本」，不是规模缺陷。
+- 探针里刻意不用 `slice()` 复制数组：Verve 下 `slice` 20 万元素本身就是几十毫秒，会把要测的 `shift` 淹掉；
+  代价是同探针的两次计时共享被改动的数组，固定调用次数下影响 ≤2%（unshift/splice 是 100/5,000），已在代码注释里写明。
+- 探针没有按尺寸单独预热：`fastest` 把同一次计时做两遍取较快的一遍，第一遍兼作预热，这一点写在 `perf-js.md` 的条件里。
+- `regex` 的第一版套件把基线的 `/\d{4}-\d\d-\d+/g` 写成了 `/\d{4}-\d\d-\d\d/g`，只匹配 5,000 个日期里的 3,389 个。
+  任务书要求逐字不变，已恢复 `\d+` 并单独跑 5 次（Node 1.7、解释器 475.7 ms），与基线那一行相差 +3%。
+
+### 给其他包的备注（P64–P66）
+
+- **测量工具用法**：`bash scripts/js-bench/run.sh [--runs N] [--only test] [--scaling] <verve.exe> [node]`。
+  吞吐项名：`fib alloc concat splitjoin regex json sort mapset oo typed vdom tokenize template closure`；
+  探针名见 `scaling.js --list`。两边都支持 `--only` 单跑。
+- 新增探针或测试：在 `scaling.js`/`bench.js` 里按现有 `probe(...)`/`stringProbe(...)`/`tests` 的写法加一条即可，
+  `run.sh` 通过 `--list` 自动发现，不用改驱动。
+- **数字写进 `docs/electron/perf-js.md`**：按文末「After each package」的两张模板表追加行，格式（`median (best)`、列名）与 §1/§2 一致，不要另开文件。
+- 最值得先看的两个方向（报告里有数据）：正则扫描在 Latin-1 与非 Latin-1 编码下行为不同（P64 的重点线索）；
+  `array-shift` 的单次 memmove 成本（P65，属常数而非规模）。报告里 `split`、`Map`/`Set` 删除与正则扫描那几行
+  是 P61 之前的基线，P61 已把它们改成线性，数字见 `P61-superlinear-builtins.md`「状态」。

@@ -257,3 +257,10 @@ opt-level = 3
 # can build the shipping profile without changing the release one.
 [profile.dist]
 inherits = "release"
+
+# Release code with symbols and line tables, for a sampling profiler: the recipe is in
+# docs/electron/perf-js.md. The release and dist binaries are unchanged by it.
+[profile.profiling]
+inherits = "release"
+strip = "none"
+debug = "line-tables-only"
