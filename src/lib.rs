@@ -36,6 +36,7 @@ mod code_cache;
 mod code_cache_load;
 mod code_cache_mark;
 mod code_cache_pack;
+mod code_cache_sweep;
 mod crypto;
 pub mod dom_events;
 mod embed;

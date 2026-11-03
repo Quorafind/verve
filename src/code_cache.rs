@@ -35,7 +35,7 @@ use std::{
     io::{self, Write as _},
     path::{Path, PathBuf},
     rc::Rc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use boa_engine::Context;
@@ -43,6 +43,7 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 use crate::code_cache_load::Kind;
+use crate::code_cache_sweep;
 use crate::encoding::hex;
 
 /// What an entry's tag covers besides its key: a domain of its own, so one kind of
@@ -77,6 +78,9 @@ struct Pack {
 
 /// A directory of compiled modules, and the secret its entries are signed with.
 pub(crate) struct CodeCache {
+    /// The cache directory itself: checked private to the user before a pack is written, and swept
+    /// of old packs.
+    dir: PathBuf,
     pack: PathBuf,
     /// 已解析的受保护路径；无论当前执行环境是否启用缓存，都禁止 JavaScript 访问。
     protection: Protection,
@@ -84,6 +88,8 @@ pub(crate) struct CodeCache {
     fingerprint: [u8; 32],
     state: RefCell<Pack>,
     stats: std::cell::Cell<CodeCacheStats>,
+    /// Whether this run has already swept the old packs.
+    swept: std::cell::Cell<bool>,
 }
 
 /// 跨 Worker 边界只传递禁止访问的路径，不传递密钥、缓存包句柄或缓存状态。
@@ -172,6 +178,7 @@ impl CodeCache {
         let dir = crate::permission::real(dir, true);
         Ok(Self {
             pack: pack_in(&dir, &fingerprint),
+            dir: dir.clone(),
             protection: Protection {
                 roots: std::iter::once(dir)
                     .chain(
@@ -185,6 +192,7 @@ impl CodeCache {
             fingerprint,
             state: RefCell::default(),
             stats: std::cell::Cell::default(),
+            swept: std::cell::Cell::default(),
         })
     }
 
@@ -243,6 +251,9 @@ impl CodeCache {
             if let Ok(mut file) = open_no_follow(&self.pack)
                 && let Some((index, code_start)) = read_index(&mut file)
             {
+                // Eviction judges recent use by this time; if it cannot be set, this run just does
+                // not count as a use.
+                let _ = file.set_modified(std::time::SystemTime::now());
                 state.index = index;
                 state.code_start = code_start;
                 state.file = Some(file);
@@ -336,6 +347,12 @@ impl CodeCache {
             used: state.used.clone(),
             ..Pack::default()
         };
+        drop(state);
+        // The script has run: reading the directory and deleting old packs now costs the next
+        // run nothing. Once a run, and `sweep` itself is once a day.
+        if settled && !self.swept.replace(true) {
+            sweep(&self.dir, &self.pack, SystemTime::now());
+        }
     }
 }
 
@@ -343,6 +360,13 @@ impl Drop for CodeCache {
     fn drop(&mut self) {
         self.write(true);
     }
+}
+
+/// Deletes other builds' packs and marks in `dir` that `docs/startup.md` says are stale, keeping
+/// `current`'s, as of `now`: once a day at most, and never on the startup path. Failing to is no
+/// error.
+pub(crate) fn sweep(dir: &Path, current: &Path, now: SystemTime) {
+    code_cache_sweep::sweep(dir, current, now);
 }
 
 /// The pack of the build `fingerprint` is, in `dir`.
