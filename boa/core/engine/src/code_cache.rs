@@ -1,4 +1,5 @@
-//! A module's compiled code, written down and read back: Boa's half of a code cache.
+//! A module's or a script's compiled code, written down and read back: Boa's half of a code
+//! cache.
 //!
 //! [`Module::code_cache`](crate::Module::code_cache) compiles a module with every function it
 //! declares and writes down what linking it needs: its import and export entries, its scopes
@@ -7,6 +8,10 @@
 //! It checks every code block at once but makes only the module's own: a function's code block
 //! is made from its bytes when the function is first called, as a lazily compiled function's is
 //! compiled then.
+//!
+//! [`Script::code_cache`](crate::Script::code_cache) and
+//! [`Script::from_code_cache`](crate::Script::from_code_cache) do the same for a script that
+//! declares nothing in the global scope — Node's `CommonJS` wrapper — with nothing to link.
 //!
 //! # What is checked, and what is trusted
 //!
@@ -61,7 +66,7 @@ use crate::{
 
 const MAGIC: [u8; 4] = *b"BOAC";
 /// The layout of what is written down; changed whenever it changes.
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 /// More registers than a frame of real code has, so a count beyond it is refused.
 const MAX_REGISTERS: u32 = 1 << 20;
 
@@ -189,6 +194,14 @@ fn source_digest(units: &[u16]) -> u64 {
 
 // ---- Writing ----
 
+/// What written-down code is: a module's, with what links it, or a script's, which links
+/// nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Module,
+    Script,
+}
+
 /// Writes down a compiled module, or answers `None` if something in it cannot be: a function
 /// not compiled yet, code shared between two places, or a scope outside the realm's.
 pub(crate) fn write_module(
@@ -198,67 +211,39 @@ pub(crate) fn write_module(
     realm: &Realm,
     interner: &Interner,
 ) -> Option<Vec<u8>> {
-    let global = realm.scope().clone();
-    let mut writer = Writer {
-        out: Vec::with_capacity(source_text.len() * 2),
-        interner,
-        global: global.clone(),
-        scope_ids: FxHashMap::default(),
-        scopes: Vec::new(),
-        code_ids: FxHashMap::default(),
-        codes: Vec::new(),
-    };
+    let mut writer = Writer::new(realm, interner, source_text, Kind::Module);
     writer.collect_code(&compiled.codeblock)?;
-    let module_scope = writer.scope_ref(&compiled.scope)?;
-    for index in 0..writer.codes.len() {
-        let code = writer.codes[index].clone();
-        for constant in &code.constants {
-            if let Constant::Scope(scope) = constant {
-                writer.scope_ref(scope)?;
-            }
-        }
-    }
-
-    writer.out.extend_from_slice(&MAGIC);
-    writer.u32(FORMAT);
-    writer.u64(fingerprint());
-    writer.u64(source_text.len() as u64);
-    writer.u64(source_digest(source_text));
-    writer.u64(global_digest(&global));
-
+    let root = writer.scope_ref(&compiled.scope)?;
+    writer.collect_scopes()?;
     writer.module_code(code);
+    writer.write_scopes()?;
+    writer.u32(root);
+    writer.write_codes()?;
+    writer.write_functions(&compiled.functions);
+    Some(writer.out)
+}
 
-    writer.u32(writer.scopes.len() as u32);
-    for index in 0..writer.scopes.len() {
-        let scope = writer.scopes[index].clone();
-        let outer = scope.outer()?;
-        let outer = writer.scope_ref(outer)?;
-        writer.u32(outer);
-        let parts = scope.parts();
-        writer.u32(parts.index);
-        writer.u8(u8::from(parts.function)
-            | (u8::from(parts.arrow) << 1)
-            | (u8::from(parts.this_escaped) << 2));
-        writer.u32(parts.bindings.len() as u32);
-        for binding in &parts.bindings {
-            writer.string(&binding.name);
-            writer.u32(binding.index);
-            writer.u8(binding.flags);
-        }
+/// Writes down a compiled script, or answers `None` if something in it cannot be: a function
+/// not compiled yet, a scope outside the realm's, or a declaration in the global scope.
+///
+/// Parsing a script is what makes its global declarations, so code read back in another run
+/// would have to make them again; a script that declares anything is therefore not written
+/// down. Node's `CommonJS` wrapper declares nothing, and is written down.
+pub(crate) fn write_script(
+    codeblock: &Gc<CodeBlock>,
+    source_text: &[u16],
+    realm: &Realm,
+    interner: &Interner,
+) -> Option<Vec<u8>> {
+    let code = CodeBlock::read_back(codeblock)?;
+    if !code.global_lexs.is_empty() || !code.global_fns.is_empty() || !code.global_vars.is_empty() {
+        return None;
     }
-    writer.u32(module_scope);
-
-    writer.u32(writer.codes.len() as u32);
-    for index in 0..writer.codes.len() {
-        let code = writer.codes[index].clone();
-        writer.code(&code)?;
-    }
-
-    writer.u32(compiled.functions.len() as u32);
-    for (index, locator) in &compiled.functions {
-        writer.u32(*index);
-        writer.locator(locator);
-    }
+    let mut writer = Writer::new(realm, interner, source_text, Kind::Script);
+    writer.collect_code(codeblock)?;
+    writer.collect_scopes()?;
+    writer.write_scopes()?;
+    writer.write_codes()?;
     Some(writer.out)
 }
 
@@ -272,7 +257,30 @@ struct Writer<'a> {
     codes: Vec<Gc<CodeBlock>>,
 }
 
-impl Writer<'_> {
+impl<'a> Writer<'a> {
+    /// A writer whose output starts with the header of code compiled from `source_text` against
+    /// `realm`'s global scope, of kind `kind`.
+    fn new(realm: &Realm, interner: &'a Interner, source_text: &[u16], kind: Kind) -> Self {
+        let global = realm.scope().clone();
+        let mut writer = Self {
+            out: Vec::with_capacity(source_text.len() * 2),
+            interner,
+            global: global.clone(),
+            scope_ids: FxHashMap::default(),
+            scopes: Vec::new(),
+            code_ids: FxHashMap::default(),
+            codes: Vec::new(),
+        };
+        writer.out.extend_from_slice(&MAGIC);
+        writer.u32(FORMAT);
+        writer.u64(fingerprint());
+        writer.u64(source_text.len() as u64);
+        writer.u64(source_digest(source_text));
+        writer.u64(global_digest(&global));
+        writer.u8(u8::from(kind == Kind::Script));
+        writer
+    }
+
     fn u8(&mut self, value: u8) {
         self.out.push(value);
     }
@@ -426,6 +434,68 @@ impl Writer<'_> {
         let id = self.scopes.len() as u32;
         self.scope_ids.insert(scope.addr(), id);
         Some(id)
+    }
+
+    /// Numbers the scopes code blocks find as constants: those other than their own and the
+    /// scopes outside them.
+    fn collect_scopes(&mut self) -> Option<()> {
+        for index in 0..self.codes.len() {
+            let code = self.codes[index].clone();
+            for constant in &code.constants {
+                if let Constant::Scope(scope) = constant {
+                    self.scope_ref(scope)?;
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// Writes down the scopes [`Writer::scope_ref`] numbered, each with its outer scope's: 0 for
+    /// the realm's global scope.
+    fn write_scopes(&mut self) -> Option<()> {
+        self.u32(self.scopes.len() as u32);
+        for index in 0..self.scopes.len() {
+            let scope = self.scopes[index].clone();
+            let outer = match scope.outer() {
+                None => 0,
+                Some(outer) if outer.ptr_eq(&self.global) => 0,
+                // Every outer scope was numbered before the scopes inside it.
+                Some(outer) => *self.scope_ids.get(&outer.addr())?,
+            };
+            self.u32(outer);
+            let parts = scope.parts();
+            self.u32(parts.index);
+            self.u8(u8::from(parts.function)
+                | (u8::from(parts.arrow) << 1)
+                | (u8::from(parts.this_escaped) << 2));
+            self.u32(parts.bindings.len() as u32);
+            for binding in &parts.bindings {
+                self.string(&binding.name);
+                self.u32(binding.index);
+                self.u8(binding.flags);
+            }
+        }
+        Some(())
+    }
+
+    /// Writes down the code blocks [`Writer::collect_code`] numbered, parents first.
+    fn write_codes(&mut self) -> Option<()> {
+        self.u32(self.codes.len() as u32);
+        for index in 0..self.codes.len() {
+            let code = self.codes[index].clone();
+            self.code(&code)?;
+        }
+        Some(())
+    }
+
+    /// Writes down the functions a module declares: where each is among its code's constants,
+    /// and the binding linking puts it in.
+    fn write_functions(&mut self, functions: &[(u32, BindingLocator)]) {
+        self.u32(functions.len() as u32);
+        for (index, locator) in functions {
+            self.u32(*index);
+            self.locator(locator);
+        }
     }
 
     fn code(&mut self, code: &CodeBlock) -> Option<()> {
@@ -783,8 +853,9 @@ enum RawConstant {
     Scope(Scope),
 }
 
-/// A module's code as read back: the bytes of its code blocks, checked whole when they were read
-/// and each made into a code block when its function is first called (see `LazyCode`).
+/// Code read back — a module's, or a script's: the bytes of its code blocks, checked whole when
+/// they were read and each made into a code block when its function is first called (see
+/// `LazyCode`).
 pub(crate) struct CachedModule {
     bytes: Box<[u8]>,
     /// Each code block: where its record is in `bytes`, and what its stub is made with.
@@ -890,17 +961,14 @@ impl CachedModule {
     }
 }
 
-/// Reads back a module [`write_module`] wrote down from `source_text`, into `realm`. Every code
-/// block is checked now; only the module's own is made now, and the rest when their functions
-/// are first called.
-pub(crate) fn read_module(
-    bytes: &[u8],
+/// Reads the header [`Writer::new`] wrote: what code is, this format's and this build's,
+/// compiled from `source_text` against `realm`'s global scope. Answers that scope, and whether
+/// the code is a module's or a script's.
+fn read_header(
+    reader: &mut Reader<'_>,
     source_text: &SourceText,
-    path: Option<&Path>,
     realm: &Realm,
-    interner: &mut Interner,
-) -> Read<(ModuleCode, CompiledModule)> {
-    let mut reader = Reader { bytes, pos: 0 };
+) -> Read<(Scope, Kind)> {
     if reader.take(4)? != MAGIC {
         return Err("not written-down code");
     }
@@ -918,9 +986,17 @@ pub(crate) fn read_module(
     if reader.u64()? != global_digest(&global) {
         return Err("compiled against another global scope");
     }
+    let kind = match reader.u8()? {
+        0 => Kind::Module,
+        1 => Kind::Script,
+        _ => return Err("unknown kind of code"),
+    };
+    Ok((global, kind))
+}
 
-    let code = reader.module_code(path, interner)?;
-
+/// Reads the scopes [`Writer::write_scopes`] wrote, each with the outer scope it was compiled
+/// in: 0 is `global`.
+fn read_scopes(reader: &mut Reader<'_>, global: &Scope) -> Read<Vec<Scope>> {
     let count = reader.count(4)?;
     let mut scopes = Vec::with_capacity(count);
     for _ in 0..count {
@@ -954,11 +1030,19 @@ pub(crate) fn read_module(
         };
         scopes.push(Scope::from_parts(outer, parts)?);
     }
-    let module_scope = match reader.u32()? as usize {
-        0 => return Err("a module scope must be the module's own"),
-        n => scopes.get(n - 1).cloned().ok_or("no such scope")?,
-    };
+    Ok(scopes)
+}
 
+/// Checks every code block [`Writer::write_codes`] wrote, and answers where each record is and
+/// the bytes they are in. A code block is nested in the one before it, once.
+fn read_codes<'b>(
+    reader: &mut Reader<'_>,
+    bytes: &'b [u8],
+    scopes: usize,
+    global: &Scope,
+    source_len: usize,
+    declare_nothing: bool,
+) -> Read<(Vec<CodeMeta>, &'b [u8])> {
     let count = reader.count(16)?;
     if count == 0 {
         return Err("no code");
@@ -966,24 +1050,21 @@ pub(crate) fn read_module(
     let base = reader.pos;
     let mut codes = Vec::with_capacity(count);
     let mut nested_in = vec![false; count];
-    let mut root_functions = Vec::new();
     for index in 0..count {
         let (meta, functions) = skim_code(
-            &mut reader,
+            reader,
             index,
             count,
-            scopes.len(),
-            &global,
-            units.len(),
+            scopes,
+            global,
+            source_len,
+            declare_nothing && index == 0,
         )?;
         // Every code block but the first is nested in exactly one other, which comes before it.
         for function in &functions {
             if std::mem::replace(&mut nested_in[*function], true) {
                 return Err("code nested in two places");
             }
-        }
-        if index == 0 {
-            root_functions = functions;
         }
         codes.push(CodeMeta {
             start: meta.start - base,
@@ -995,6 +1076,57 @@ pub(crate) fn read_module(
         return Err("code nested nowhere");
     }
     let code_bytes = bytes.get(base..reader.pos).ok_or("truncated")?;
+    Ok((codes, code_bytes))
+}
+
+fn cached(
+    code_bytes: &[u8],
+    codes: Vec<CodeMeta>,
+    scopes: Vec<Scope>,
+    global: Scope,
+    source_text: &SourceText,
+    path: Option<&Path>,
+) -> Rc<CachedModule> {
+    Rc::new(CachedModule {
+        bytes: code_bytes.into(),
+        codes: codes.into_boxed_slice(),
+        scopes: scopes.into_boxed_slice(),
+        global,
+        source_text: source_text.clone(),
+        path: path.map(Path::to_path_buf).into(),
+    })
+}
+
+/// Reads back a module [`write_module`] wrote down from `source_text`, into `realm`. Every code
+/// block is checked now; only the module's own is made now, and the rest when their functions
+/// are first called.
+pub(crate) fn read_module(
+    bytes: &[u8],
+    source_text: &SourceText,
+    path: Option<&Path>,
+    realm: &Realm,
+    interner: &mut Interner,
+) -> Read<(ModuleCode, CompiledModule)> {
+    let mut reader = Reader { bytes, pos: 0 };
+    let (global, kind) = read_header(&mut reader, source_text, realm)?;
+    if kind != Kind::Module {
+        return Err("not a module's code");
+    }
+    let units = source_text.code_points().unwrap_or(&[]);
+    let code = reader.module_code(path, interner)?;
+    let scopes = read_scopes(&mut reader, &global)?;
+    let module_scope = match reader.u32()? as usize {
+        0 => return Err("a module scope must be the module's own"),
+        n => scopes.get(n - 1).cloned().ok_or("no such scope")?,
+    };
+    let (codes, code_bytes) = read_codes(
+        &mut reader,
+        bytes,
+        scopes.len(),
+        &global,
+        units.len(),
+        false,
+    )?;
 
     let count_functions = reader.count(4)?;
     let mut functions = Vec::with_capacity(count_functions);
@@ -1008,14 +1140,7 @@ pub(crate) fn read_module(
         return Err("bytes after the end");
     }
 
-    let module = Rc::new(CachedModule {
-        bytes: code_bytes.into(),
-        codes: codes.into_boxed_slice(),
-        scopes: scopes.into_boxed_slice(),
-        global,
-        source_text: source_text.clone(),
-        path: path.map(Path::to_path_buf).into(),
-    });
+    let module = cached(code_bytes, codes, scopes, global, source_text, path);
     let codeblock = Gc::new(module.code(0)?);
     for (index, _) in &functions {
         match codeblock.constants.get(*index as usize) {
@@ -1023,11 +1148,6 @@ pub(crate) fn read_module(
             _ => return Err("a declared function that is not a function constant"),
         }
     }
-    debug_assert!(
-        root_functions
-            .iter()
-            .all(|index| *index < module.codes.len())
-    );
 
     Ok((
         code,
@@ -1038,6 +1158,31 @@ pub(crate) fn read_module(
             eager: true,
         },
     ))
+}
+
+/// Reads back a script [`write_script`] wrote down from `source_text`, into `realm`, as the code
+/// block evaluating the parsed script would run: its own made now, and the code of the
+/// functions it declares made when they are first called.
+pub(crate) fn read_script(
+    bytes: &[u8],
+    source_text: &SourceText,
+    path: Option<&Path>,
+    realm: &Realm,
+) -> Read<Gc<CodeBlock>> {
+    let mut reader = Reader { bytes, pos: 0 };
+    let (global, kind) = read_header(&mut reader, source_text, realm)?;
+    if kind != Kind::Script {
+        return Err("not a script's code");
+    }
+    let units = source_text.code_points().unwrap_or(&[]);
+    let scopes = read_scopes(&mut reader, &global)?;
+    let (codes, code_bytes) =
+        read_codes(&mut reader, bytes, scopes.len(), &global, units.len(), true)?;
+    if reader.remaining() != 0 {
+        return Err("bytes after the end");
+    }
+    let script = cached(code_bytes, codes, scopes, global, source_text, path);
+    Ok(Gc::new(script.code(0)?))
 }
 
 /// A string as written down, not made into a `JsString` unless it is needed.
@@ -1087,6 +1232,7 @@ fn skim_code(
     scopes: usize,
     global: &Scope,
     source_len: usize,
+    declare_nothing: bool,
 ) -> Read<(CodeMeta, Vec<usize>)> {
     let start = reader.pos;
     let flags = u16::try_from(reader.u32()?).map_err(|_| "unknown code flags")?;
@@ -1202,22 +1348,30 @@ fn skim_code(
         None
     };
     let kind = |index: u32| kinds.get(index as usize).copied();
-    for _ in 0..reader.count(1)? {
+    let lexs = reader.count(1)?;
+    for _ in 0..lexs {
         if kind(reader.u32()?) != Some(0) {
             return Err("a global name that is not a string constant");
         }
     }
-    for _ in 0..reader.count(2)? {
+    let fns = reader.count(2)?;
+    for _ in 0..fns {
         let name = reader.u32()?;
         let function = reader.u32()?;
         if kind(name) != Some(0) || kind(function) != Some(1) {
             return Err("a global function that is not a function constant");
         }
     }
-    for _ in 0..reader.count(1)? {
+    let vars = reader.count(1)?;
+    for _ in 0..vars {
         if kind(reader.u32()?) != Some(0) {
             return Err("a global name that is not a string constant");
         }
+    }
+    // A script is only written down when it declares nothing in the global scope: parsing it is
+    // what makes those bindings, and a script read back has nothing to make them again.
+    if declare_nothing && (lexs != 0 || fns != 0 || vars != 0) {
+        return Err("a script that declares in the global scope");
     }
     Ok((
         CodeMeta {

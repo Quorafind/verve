@@ -272,6 +272,22 @@ always agree with one another.
   `matchAll` iterator abandoned half-way, which has no point to release at. A sticky match that
   fails also keeps it: `@@split` runs the sticky splitter once per position of the subject.
 
+- `boa_engine`, `code_cache.rs`, `script.rs`: a classic script can be written down and read back, as
+  a module could already be. `Script::code_cache` compiles the script with every function it
+  declares and answers its bytes; `Script::from_code_cache` reads them into a script that runs as
+  the parsed one, its own code block made now and the rest when their functions are first called.
+  The bytes say which of the two they hold (format 3), so a module's are not read as a script's.
+  A script is written down only if it declares nothing in the global scope: parsing a script is
+  what makes its global declarations, and code read back in another run would have to make them
+  again. A block-level function declaration in a non-strict script makes an unconfigurable global
+  var binding the same way, while the script compiles (Annex B.3.2.2), so such a script is not
+  written down either — `Script::code_cache` answers `None` for it. Node's CommonJS wrapper
+  declares nothing, so a CommonJS module is written down, which is what Verve does with it.
+  Reading checks the same things as for a module (`read_header`, `read_scopes`, `read_codes` are
+  shared), and `BOA_CODE_CACHE_ROUNDTRIP=1` sends scripts parsed from a file through it too: one
+  evaluated from a string, which no cache keeps, is used as parsed — writing it would compile it,
+  and every function it declares, at the parse rather than at the first call.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
