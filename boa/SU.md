@@ -294,6 +294,20 @@ always agree with one another.
   A `d`-flagged pattern, which still builds `indices`, reads 229 ms either way — the saving is
   the array that no longer exists, not the matcher.
 
+- `boa_engine`, `builtins/json/mod.rs`: `JSON.stringify` copies each member once. `SerializeJSONObject`
+  and `SerializeJSONArray` collect their members as a `Vec<u16>` each — every quoted key, colon,
+  separator and serialized value flattened into its own buffer — and then flatten all of them
+  again into the result. A member's bytes therefore moved twice, and the first buffer was
+  reallocated as it grew. `partial` now holds the pieces as `JsString`s and `concat_members`
+  copies them, with the opening and closing text, into one allocation at the end; the separator
+  is made once per container instead of once per member, and a member the serializer skips no
+  longer has a comma reserved for it.
+
+  `stringify` of 70,000 records (7,032,596 code units): 707–746 ms to 408–470 ms, five interleaved
+  runs each, load 22–32%. `JSON.parse` of the same text, which this does not touch, read
+  1865–2033 ms before and 1960–2034 ms after. The suite's `json` test, which parses as well as
+  stringifies, went from 3444–3591 ms to 2849–3019 ms (JIT column, 5 runs, load 21–36%).
+
 - `boa_engine`, `code_cache.rs`, `script.rs`: a classic script can be written down and read back, as
   a module could already be. `Script::code_cache` compiles the script with every function it
   declares and answers its bytes; `Script::from_code_cache` reads them into a script that runs as

@@ -13,14 +13,11 @@
 //! [json]: https://www.json.org/json-en.html
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON
 
-use std::{borrow::Cow, iter::once};
-
 use rustc_hash::FxHashSet;
 
 use boa_ast::scope::Scope;
 use boa_gc::{Finalize, Gc, Trace};
-use boa_macros::utf16;
-use itertools::Itertools;
+use boa_macros::{js_str, utf16};
 
 use crate::JsExpect;
 use crate::{
@@ -951,6 +948,19 @@ impl Json {
         js_string!(&product[..])
     }
 
+    /// The concatenation of `opening`, every piece of `members`, and `closing`, in one
+    /// allocation.
+    ///
+    /// `SerializeJSONObject` and `SerializeJSONArray` collect their members as a list of pieces
+    /// and then ask for one string of them; copying each piece into a `Vec<u16>` first, and that
+    /// `Vec` again into the result, doubled the bytes moved per member.
+    fn concat_members(opening: &JsString, members: &[JsString], closing: &JsString) -> JsString {
+        let mut segments = Vec::with_capacity(members.len() + 2);
+        segments.push(opening.as_str());
+        segments.extend(members.iter().map(JsString::as_str));
+        segments.push(closing.as_str());
+        JsString::concat_array(&segments)
+    }
     /// `25.5.2.4 SerializeJSONObject ( state, value )`
     ///
     /// More information:
@@ -1011,7 +1021,21 @@ impl Json {
         };
 
         // 7. Let partial be a new empty List.
-        let mut partial = Vec::with_capacity(k.len());
+        //
+        // A member is kept as its pieces — the quoted key, the colon, the value — instead of
+        // being copied into a `Vec<u16>` first and into the result after that. One allocation at
+        // the end copies each piece once.
+        let separator = if state.gap.is_empty() {
+            js_string!(",")
+        } else {
+            js_string!(js_str!(",\n"), &state.indent)
+        };
+        let colon = if state.gap.is_empty() {
+            js_string!(":")
+        } else {
+            js_string!(": ")
+        };
+        let mut partial: Vec<JsString> = Vec::with_capacity(k.len() * 3);
 
         // 8. For each element P of K, do
         for p in &k {
@@ -1029,22 +1053,13 @@ impl Json {
             // b. If strP is not undefined, then
             if let Some(str_p) = str_p {
                 // i. Let member be QuoteJSONString(P).
-                let mut member = Self::quote_json_string(p).iter().collect::<Vec<_>>();
-
-                // ii. Set member to the string-concatenation of member and ":".
-                member.push(':' as u16);
-
-                // iii. If state.[[Gap]] is not the empty String, then
-                if !state.gap.is_empty() {
-                    // 1. Set member to the string-concatenation of member and the code unit 0x0020 (SPACE).
-                    member.push(' ' as u16);
+                // ii–iv. … and ":", the space a gap puts after it, and strP.
+                if !partial.is_empty() {
+                    partial.push(separator.clone());
                 }
-
-                // iv. Set member to the string-concatenation of member and strP.
-                member.extend(str_p.iter());
-
-                // v. Append member to partial.
-                partial.push(member);
+                partial.push(Self::quote_json_string(p));
+                partial.push(colon.clone());
+                partial.push(str_p);
             }
         }
 
@@ -1053,50 +1068,17 @@ impl Json {
             // a. Let final be "{}".
             js_string!("{}")
         // 10. Else,
+        } else if state.gap.is_empty() {
+            // a. i–ii. Let final be the string-concatenation of "{", the members separated by
+            // commas, and "}", in one allocation.
+            Self::concat_members(&js_string!("{"), &partial, &js_string!("}"))
         } else {
-            // a. If state.[[Gap]] is the empty String, then
-            if state.gap.is_empty() {
-                // i. Let properties be the String value formed by concatenating all the element Strings of partial
-                //    with each adjacent pair of Strings separated with the code unit 0x002C (COMMA).
-                //    A comma is not inserted either before the first String or after the last String.
-                // ii. Let final be the string-concatenation of "{", properties, and "}".
-                let separator = utf16!(",");
-                let result = once(utf16!("{"))
-                    .chain(Itertools::intersperse(
-                        partial.iter().map(Vec::as_slice),
-                        separator,
-                    ))
-                    .chain(once(utf16!("}")))
-                    .flatten()
-                    .copied()
-                    .collect::<Vec<_>>();
-                js_string!(&result[..])
-            // b. Else,
-            } else {
-                // i. Let separator be the string-concatenation of the code unit 0x002C (COMMA),
-                //    the code unit 0x000A (LINE FEED), and state.[[Indent]].
-                let mut separator = utf16!(",\n").to_vec();
-                separator.extend(state.indent.iter());
-                // ii. Let properties be the String value formed by concatenating all the element Strings of partial
-                //     with each adjacent pair of Strings separated with separator.
-                //     The separator String is not inserted either before the first String or after the last String.
-                // iii. Let final be the string-concatenation of "{", the code
-                //      unit 0x000A (LINE FEED), state.[[Indent]], properties,
-                //      the code unit 0x000A (LINE FEED), stepback, and "}".
-                let indent_vec = state.indent.to_vec();
-                let stepback_vec = stepback.to_vec();
-                let result = [utf16!("{\n"), &indent_vec[..]]
-                    .into_iter()
-                    .chain(Itertools::intersperse(
-                        partial.iter().map(Vec::as_slice),
-                        &separator,
-                    ))
-                    .chain([utf16!("\n"), &stepback_vec[..], utf16!("}")])
-                    .flatten()
-                    .copied()
-                    .collect::<Vec<_>>();
-                js_string!(&result[..])
-            }
+            // b. i. Set separator to the comma, the line feed and state.[[Indent]] (above).
+            // ii–iii. … and final to "{", a line feed, the indent, the members, a line feed,
+            // stepback and "}".
+            let opening = js_string!(js_str!("{\n"), &state.indent);
+            let closing = js_string!(js_str!("\n"), &stepback, js_str!("}"));
+            Self::concat_members(&opening, &partial, &closing)
         };
 
         // 12. Set state.[[Indent]] to stepback.
@@ -1145,7 +1127,12 @@ impl Json {
         };
 
         // 5. Let partial be a new empty List.
-        let mut partial = Vec::with_capacity(len as usize);
+        let separator = if state.gap.is_empty() {
+            js_string!(",")
+        } else {
+            js_string!(js_str!(",\n"), &state.indent)
+        };
+        let mut partial: Vec<JsString> = Vec::with_capacity(len as usize * 2);
 
         // 7. Let index be 0.
         let mut index = 0;
@@ -1166,11 +1153,17 @@ impl Json {
             // b. If strP is undefined, then
             if let Some(str_p) = str_p {
                 // i. Append strP to partial.
-                partial.push(Cow::Owned(str_p.iter().collect::<_>()));
+                if !partial.is_empty() {
+                    partial.push(separator.clone());
+                }
+                partial.push(str_p);
             // c. Else,
             } else {
                 // i. Append "null" to partial.
-                partial.push(Cow::Borrowed(utf16!("null")));
+                if !partial.is_empty() {
+                    partial.push(separator.clone());
+                }
+                partial.push(js_string!("null"));
             }
 
             // d. Set index to index + 1.
@@ -1182,48 +1175,17 @@ impl Json {
             // a. Let final be "[]".
             js_string!("[]")
         // 10. Else,
+        } else if state.gap.is_empty() {
+            // a. i–ii. Let final be the string-concatenation of "[", the elements separated by
+            // commas, and "]", in one allocation.
+            Self::concat_members(&js_string!("["), &partial, &js_string!("]"))
         } else {
-            // a. If state.[[Gap]] is the empty String, then
-            if state.gap.is_empty() {
-                // i. Let properties be the String value formed by concatenating all the element Strings of partial
-                //    with each adjacent pair of Strings separated with the code unit 0x002C (COMMA).
-                //    A comma is not inserted either before the first String or after the last String.
-                // ii. Let final be the string-concatenation of "[", properties, and "]".
-                let separator = utf16!(",");
-                let result = once(utf16!("["))
-                    .chain(Itertools::intersperse(
-                        partial.iter().map(Cow::as_ref),
-                        separator,
-                    ))
-                    .chain(once(utf16!("]")))
-                    .flatten()
-                    .copied()
-                    .collect::<Vec<_>>();
-                js_string!(&result[..])
-            // b. Else,
-            } else {
-                // i. Let separator be the string-concatenation of the code unit 0x002C (COMMA),
-                //    the code unit 0x000A (LINE FEED), and state.[[Indent]].
-                let mut separator = utf16!(",\n").to_vec();
-                separator.extend(state.indent.iter());
-                // ii. Let properties be the String value formed by concatenating all the element Strings of partial
-                //     with each adjacent pair of Strings separated with separator.
-                //     The separator String is not inserted either before the first String or after the last String.
-                // iii. Let final be the string-concatenation of "[", the code unit 0x000A (LINE FEED), state.[[Indent]], properties, the code unit 0x000A (LINE FEED), stepback, and "]".
-                let indent_vec = state.indent.to_vec();
-                let stepback_vec = stepback.to_vec();
-                let result = [utf16!("[\n"), &indent_vec[..]]
-                    .into_iter()
-                    .chain(Itertools::intersperse(
-                        partial.iter().map(Cow::as_ref),
-                        &separator,
-                    ))
-                    .chain([utf16!("\n"), &stepback_vec[..], utf16!("]")])
-                    .flatten()
-                    .copied()
-                    .collect::<Vec<_>>();
-                js_string!(&result[..])
-            }
+            // b. i. Set separator to the comma, the line feed and state.[[Indent]] (above).
+            // ii–iii. … and final to "[", a line feed, the indent, the elements, a line feed,
+            // stepback and "]".
+            let opening = js_string!(js_str!("[\n"), &state.indent);
+            let closing = js_string!(js_str!("\n"), &stepback, js_str!("]"));
+            Self::concat_members(&opening, &partial, &closing)
         };
 
         // 12. Set state.[[Indent]] to stepback.

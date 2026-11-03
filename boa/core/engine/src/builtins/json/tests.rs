@@ -342,3 +342,46 @@ fn json_stringify_cyclic_nested_object_throws_type_error() {
         "cyclic object value",
     )]);
 }
+
+#[test]
+fn json_stringify_builds_the_same_text_the_spec_path_did() {
+    // Expected values are Node 22.21.1's own output, frozen here. Every case is one the
+    // serializer has to fall back for, or one whose text the single-allocation assembly must
+    // keep exactly.
+    run_test_actions([
+        // Gaps: the separator, the indent and the closing line feed are assembled separately.
+        TestAction::assert(
+            r#"JSON.stringify({a:1,b:[1,2]}, null, 2) === '{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ]\n}'"#,
+        ),
+        TestAction::assert(
+            r#"JSON.stringify({a:{b:{c:1}}}, null, 1) === '{\n "a": {\n  "b": {\n   "c": 1\n  }\n }\n}'"#,
+        ),
+        TestAction::assert(r#"JSON.stringify({a:1}, null, '\t') === '{\n\t"a": 1\n}'"#),
+        // A `toJSON` method, an accessor and a proxy all go through the ordinary path.
+        TestAction::assert(r#"JSON.stringify({a:{toJSON(){return 'T';}}}) === '{"a":"T"}'"#),
+        TestAction::assert(r#"JSON.stringify({get a(){return 1;}}) === '{"a":1}'"#),
+        TestAction::assert(
+            r#"JSON.stringify(new Proxy({a:1},{ownKeys(){return ['a'];},getOwnPropertyDescriptor(){return {value:1,enumerable:true,configurable:true};},get(t,k){return k==='a'?1:undefined;}})) === '{"a":1}'"#,
+        ),
+        // A replacer function and a replacer array.
+        TestAction::assert(
+            r#"JSON.stringify({a:1,b:2}, (k,v) => typeof v === 'number' ? v*2 : v) === '{"a":2,"b":4}'"#,
+        ),
+        TestAction::assert(r#"JSON.stringify({a:1,b:2,c:3}, ['a','c']) === '{"a":1,"c":3}'"#),
+        // A skipped member must not leave its separator behind.
+        TestAction::assert(r#"JSON.stringify({a:undefined,b:1}) === '{"b":1}'"#),
+        TestAction::assert(r#"JSON.stringify({a:function(){},b:1}) === '{"b":1}'"#),
+        TestAction::assert(
+            r#"JSON.stringify(Object.defineProperty({a:1},'b',{value:2,enumerable:false})) === '{"a":1}'"#,
+        ),
+        TestAction::assert(r#"JSON.stringify([1,,3]) === '[1,null,3]'"#),
+        TestAction::assert(r#"JSON.stringify({}) === '{}'"#),
+        TestAction::assert(r#"JSON.stringify([]) === '[]'"#),
+        TestAction::assert(r#"JSON.stringify(Object.create(null)) === '{}'"#),
+        // The three branches of QuoteJSONString: a control character, a quote and a backslash,
+        // and a character outside Latin-1.
+        TestAction::assert(r#"JSON.stringify('a\u0001b') === '"a\\u0001b"'"#),
+        TestAction::assert(r#"JSON.stringify('a"b\\c') === '"a\\"b\\\\c"'"#),
+        TestAction::assert(r#"JSON.stringify('日') === '"日"'"#),
+    ]);
+}
