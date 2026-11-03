@@ -1318,6 +1318,23 @@ fn clear_timer_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     Ok(JsValue::undefined())
 }
 
+/// `VERVE_JIT=0` (also `off`, `false`, `no`) switches the JIT off, and `VERVE_JIT_THRESHOLD=<n>`
+/// sets how hot a function gets before it is compiled (0: before it first runs). Boa's own
+/// `BOA_JIT` and `BOA_JIT_THRESHOLD` apply first.
+#[cfg(feature = "jit")]
+fn jit_from_env(context: &mut Context) {
+    let options = context.jit_options_mut();
+    if let Ok(value) = std::env::var("VERVE_JIT") {
+        options.enabled = !matches!(value.trim(), "0" | "off" | "false" | "no");
+    }
+    if let Some(threshold) = std::env::var("VERVE_JIT_THRESHOLD")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+    {
+        options.threshold = threshold;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1407,22 +1424,5 @@ mod tests {
         assert_eq!(rt.run_due(), 2);
         assert_eq!(print(&rt.eval("n").unwrap()), "1");
         assert!(rt.take_console()[0].text.contains("TypeError: x"));
-    }
-}
-
-/// `VERVE_JIT=0` (also `off`, `false`, `no`) switches the JIT off, and `VERVE_JIT_THRESHOLD=<n>`
-/// sets how hot a function gets before it is compiled (0: before it first runs). Boa's own
-/// `BOA_JIT` and `BOA_JIT_THRESHOLD` apply first.
-#[cfg(feature = "jit")]
-fn jit_from_env(context: &mut Context) {
-    let options = context.jit_options_mut();
-    if let Ok(value) = std::env::var("VERVE_JIT") {
-        options.enabled = !matches!(value.trim(), "0" | "off" | "false" | "no");
-    }
-    if let Some(threshold) = std::env::var("VERVE_JIT_THRESHOLD")
-        .ok()
-        .and_then(|value| value.trim().parse().ok())
-    {
-        options.threshold = threshold;
     }
 }
