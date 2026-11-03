@@ -272,6 +272,42 @@ always agree with one another.
   `matchAll` iterator abandoned half-way, which has no point to release at. A sticky match that
   fails also keeps it: `@@split` runs the sticky splitter once per position of the subject.
 
+- `boa_engine`, `builtins/regexp/mod.rs`: a match result's `indices` array is built only for a
+  `d`-flagged pattern. `RegExpBuiltinExec` made it unconditionally — the array, its whole-match
+  pair and that pair's own array — and dropped all three unless step 34 read them, so every match
+  of every other pattern paid for a result nobody could observe. `MakeMatchIndicesIndexPairArray`
+  is now step 34's own work (`make_match_indices`), and step 25's "List" stays a list of nothing.
+
+  The result array is also made in one allocation: the whole match at 0 and the captures at
+  `1..n` are a single `Array::create_array_from_list`, where `ArrayCreate` plus one
+  `CreateDataPropertyOrThrow` per element made the same array in `n + 2` steps. Elements still
+  sort before `index`, `input` and `groups` in `Reflect.ownKeys`, and `length` still comes from
+  the number of elements, so what a script observes is unchanged; `groups` and `indices` keep
+  being defined afterwards, in the order steps 32 and 34 name. `groups` is `undefined` when the
+  pattern has no named group, and the `groupNames` object that only `indices` reads is no longer
+  built for a match that has no `indices` — nor is `named_groups` collected into a `Vec` just to
+  ask whether it is empty.
+
+  `tokenize` 200 KB of source with a sticky tokenizer: 262 ms to 190 ms (median, 5 runs, a shared
+  machine). A bare `exec` loop over one 8-code-unit subject, 100k times: 221–228 ms to
+  142–145 ms; the same loop over `/(a)(b)/g`, which has two captures: 257–265 ms to 162–175 ms.
+  A `d`-flagged pattern, which still builds `indices`, reads 229 ms either way — the saving is
+  the array that no longer exists, not the matcher.
+
+- `boa_engine`, `builtins/json/mod.rs`: `JSON.stringify` copies each member once. `SerializeJSONObject`
+  and `SerializeJSONArray` collect their members as a `Vec<u16>` each — every quoted key, colon,
+  separator and serialized value flattened into its own buffer — and then flatten all of them
+  again into the result. A member's bytes therefore moved twice, and the first buffer was
+  reallocated as it grew. `partial` now holds the pieces as `JsString`s and `concat_members`
+  copies them, with the opening and closing text, into one allocation at the end; the separator
+  is made once per container instead of once per member, and a member the serializer skips no
+  longer has a comma reserved for it.
+
+  `stringify` of 70,000 records (7,032,596 code units): 707–746 ms to 408–470 ms, five interleaved
+  runs each, load 22–32%. `JSON.parse` of the same text, which this does not touch, read
+  1865–2033 ms before and 1960–2034 ms after. The suite's `json` test, which parses as well as
+  stringifies, went from 3444–3591 ms to 2849–3019 ms (JIT column, 5 runs, load 21–36%).
+
 - `boa_engine`, `code_cache.rs`, `script.rs`: a classic script can be written down and read back, as
   a module could already be. `Script::code_cache` compiles the script with every function it
   declares and answers its bytes; `Script::from_code_cache` reads them into a script that runs as
@@ -291,3 +327,27 @@ always agree with one another.
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
+
+- `boa_engine`, `builtins/json/mod.rs`, `builtins/json/parse.rs`: `JSON.parse` reads its text once. It
+  used to be validated by `serde_json`, then parsed again as a script by `boa_parser`, compiled to
+  bytecode and run on the VM — three readings of the same bytes, and a `String` copy of them, to
+  build the values the text already spells out. Without a reviver the reader in `parse.rs` now
+  builds them directly from the code units: an object is an `JsObject` with each member created as
+  it is read, an array is one `Array::create_array_from_list`, and a string without an escape is a
+  slice of the text rather than a fresh buffer. Containers are kept on an explicit `Vec`, so a
+  deeply nested text costs heap instead of Rust stack — the script parser gave up at 128 levels,
+  where Node answers as deep as memory allows. A reviver still builds its values through the script parser, since `context.source`
+  needs the text each primitive came from, but the text is validated by the same reader first, so
+  both paths throw the same messages.
+
+  Because the reader is now the one validating, its `SyntaxError` messages are V8's, with the
+  position and the line and column V8 names: `Unexpected token '}', "[1,]" is not valid JSON`,
+  `Expected ',' or ']' after array element in JSON at position 4 (line 1 column 5)`,
+  `Unexpected end of JSON input`, and a text that is only `undefined`, `NaN` or `Infinity` is quoted
+  by itself. A whole number that fits an `i32` is an integer value, as a script's number literal
+  is, and `-0` stays a float. Lone surrogates, both escaped and raw, are code units like any other
+  rather than an error — `String::from_utf16` rejected them before.
+
+  `JSON.parse` of 70,000 records (7,032,596 code units): 1536–2034 ms to 453–530 ms, five interleaved
+  runs each, load 19–70%. The suite's `json` test, whose parse phase that is, went from 2926–3519 ms
+  to 1315–1428 ms (JIT column, 5 runs, load 23–41%), which is 8.0× Node rather than 21×.
