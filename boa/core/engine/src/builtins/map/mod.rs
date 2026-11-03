@@ -544,6 +544,8 @@ impl Map {
                 }
 
                 let Some((k, v)) = map.get_index(index) else {
+                    // A tombstone left by a `delete`: step over it.
+                    index += 1;
                     continue;
                 };
 

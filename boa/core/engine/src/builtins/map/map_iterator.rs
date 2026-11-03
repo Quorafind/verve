@@ -22,18 +22,29 @@ use crate::{
 use boa_gc::{Finalize, Trace};
 
 #[derive(Debug, Trace)]
-struct MapIteratorLock(JsObject<OrderedMap<JsValue>>);
+struct MapIteratorLock(Option<JsObject<OrderedMap<JsValue>>>);
 
 impl MapIteratorLock {
     fn new(js_object: JsObject<OrderedMap<JsValue>>) -> Self {
         js_object.borrow_mut().data_mut().lock();
-        Self(js_object)
+        Self(Some(js_object))
+    }
+
+    /// The lock is taken out of the iterator at the end of the map, so dropping it as a plain value
+    /// cannot reach `Finalize`; releasing it here keeps the count right. An iterator that is
+    /// abandoned half-way is finalized instead.
+    fn release(mut self) {
+        if let Some(js_object) = self.0.take() {
+            js_object.borrow_mut().data_mut().unlock();
+        }
     }
 }
 
 impl Finalize for MapIteratorLock {
     fn finalize(&self) {
-        self.0.borrow_mut().data_mut().unlock();
+        if let Some(js_object) = &self.0 {
+            js_object.borrow_mut().data_mut().unlock();
+        }
     }
 }
 
@@ -115,7 +126,8 @@ impl MapIterator {
 
         if let Some(obj) = map_iterator.iterated_map.take() {
             let e = {
-                let mut entries = obj.0.borrow_mut();
+                let entries = obj.0.as_ref().expect("a taken lock is still held here");
+                let mut entries = entries.borrow_mut();
                 let entries = entries.data_mut();
                 let len = entries.full_len();
                 loop {
@@ -140,6 +152,8 @@ impl MapIterator {
                 map_iterator.iterated_map = Some(obj);
                 return item;
             }
+            // The end of the map: give the lock back rather than dropping it while it is taken.
+            obj.release();
         }
 
         Ok(create_iter_result_object(

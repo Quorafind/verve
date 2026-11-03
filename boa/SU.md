@@ -217,6 +217,35 @@ always agree with one another.
   compare code unit by code unit. `split`, `indexOf`, `includes`, `replaceAll` and string-pattern
   `replace` are linear in the string now.
 
+- `boa_engine`, `builtins/map/ordered_map.rs`, `builtins/set/ordered_set.rs`: `Map.prototype.delete`
+  and `Set.prototype.delete` leave a tombstone instead of calling `shift_remove`, which moved
+  every entry after the deleted one: deleting half the keys of 40k took 878 ms, and 300k did not
+  finish. A tombstone is O(1) and the iterators skip it, so the order they see is unchanged; once
+  the tombstones outnumber the entries that are left and no iterator holds the lock, they are
+  dropped in one O(n) pass, amortized O(1) per deletion. `Set::delete_in_place` leaves the
+  tombstone without compacting, for `Set.prototype.difference`, which walks the set by index as
+  the specification writes it and would otherwise see the entries move underneath it.
+
+  The set operations that walk `this` by index while they call the other set's `has` — the set-like
+  `has` may delete from `this` — hold the same lock, otherwise a compaction in the middle of the
+  walk skipped the value at the next index. `Set.prototype.isDisjointFrom`, `isSubsetOf` and
+  `intersection` take it with `SetLock::new`, as `Set.prototype.forEach` does.
+
+  The lock is what holds compaction back, so an iterator has to give it back. `next` took the lock
+  out of the iterator at the end of its walk and dropped it as a plain value, which never
+  finalizes, so every map or set that had been through a `for…of`, a spread, an `Array.from` or
+  `entries()` stayed locked and never compacted; a pattern like `delete` then `set` with an
+  occasional iteration grew `full_len` without bound. Both iterators now unlock where the walk
+  ends, `Finalize` stays for one abandoned half-way, and a clone starts unlocked — the set
+  operations copy a set that may be being iterated, and the copies carried its lock over.
+
+- `boa_engine`, `builtins/map/mod.rs`, `builtins/set/mod.rs`: `Map::for_each_native` and
+  `Set::for_each_native` — the Rust-side walks behind `JsMap`/`JsSet` and the `TryFromJs`
+  conversions of `HashMap`/`BTreeMap` — step over a tombstone. Before the tombstones above they
+  could not see one after the lock was released, and their index loops did not advance when
+  `get_index` answered `None`, so the first tombstone spun forever. `OrderedSet::is_empty` asks
+  `len()`, as `OrderedMap::is_empty` does, rather than counting tombstones as elements.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
