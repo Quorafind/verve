@@ -1,6 +1,8 @@
 # P67 `verve run` 默认开代码缓存
 
 **依赖**：P62  **规模**：M  **修改**：`src/code_cache.rs`、`src/code_cache_load.rs`（P62 新建）、`src/code_cache_pack.rs`（新建，见「状态」）、
+`src/code_cache_mark.rs` 与 `src/code_cache_sweep.rs`（新建，见「状态」：前者装「见过」标记的读写与上限，后者装第 3 节的淘汰，
+`src/code_cache.rs` 已在 `ci/style/large-files.txt` 的 1666 行额度内放不下这两件事）、
 `src/cli.rs`、`src/lib.rs`（只限缓存的公开 API 与 `CodeCacheStats`）、`tests/code_cache.rs`、`tests/common/mod.rs`（只限测试的隔离）、
 为默认开而必须改测试夹具时 `tests/embedder_hooks.rs`、`tests/jit.rs`、`tests/proxy.rs`、`tests/rebon.rs`、`tests/run_as_node.rs`（只限注入临时环境），
 `scripts/js-bench/run.sh`（固定缓存设置）、`docs/startup.md`；为降低首次运行成本而必须改 Boa 时，`boa/core/engine/src/code_cache.rs` 与 `boa/SU.md`
@@ -295,6 +297,11 @@ A 的四个细节，都由测量决定：
 
 按选定的方案实现「验收」的每一条：默认目录与开关（含静默）、第二次才写、写盘固定成本、淘汰、并发写与测试；
 再按表 A 的格式重测三种负载写进 `docs/startup.md`。
+
+**修改栏的两处增补**（实现前先单独提交，只改 `docs/electron/`）：`src/code_cache.rs` 现 1,492 行、在
+`ci/style/large-files.txt` 的 1,666 行额度内，把「见过」标记的读写（含上限）与第 3 节的淘汰放进去会超；
+两者都与 `CodeCache` 无关、各自只需几个纯函数，所以分成 `src/code_cache_mark.rs` 与 `src/code_cache_sweep.rs`。
+`sweep` 还要给 P42 复用，单独成文件也便于它直接读。
 
 没做（本轮有意）：任何代码改动；`docs/startup.md` 的改写；并发测试。
 
