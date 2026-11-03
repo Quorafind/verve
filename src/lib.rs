@@ -34,6 +34,7 @@ pub mod cli;
 pub mod clone;
 mod code_cache;
 mod code_cache_load;
+mod code_cache_pack;
 mod crypto;
 pub mod dom_events;
 mod embed;
