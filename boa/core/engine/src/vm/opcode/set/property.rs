@@ -4,7 +4,9 @@ use crate::value::JsVariant;
 use crate::vm::opcode::{IndexOperand, RegisterOperand, nullish_base_error};
 use crate::{
     Context, JsNativeError, JsResult,
-    builtins::function::set_function_name,
+    builtins::{
+        function::set_function_name, typed_array::object::typed_array_element_set_shortcut,
+    },
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::{PropertyDescriptor, PropertyKey},
     vm::opcode::Operation,
@@ -194,6 +196,19 @@ impl SetPropertyByValue {
                 {
                     return Ok(());
                 }
+            }
+
+            // `[[Set]]` of an integer index is `TypedArraySetElement` only when the receiver is the
+            // typed array itself; any other receiver gets `OrdinarySet`, which defines on the
+            // receiver. The shortcut also refuses a conversion that could run user code.
+            if let PropertyKey::Index(index) = &key
+                && receiver
+                    .as_object()
+                    .is_some_and(|receiver| JsObject::equals(&object, &receiver))
+                && let Some(result) =
+                    typed_array_element_set_shortcut(&object, index.get(), &value, context)
+            {
+                return result;
             }
         }
 

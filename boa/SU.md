@@ -354,6 +354,23 @@ always agree with one another.
   (175.3 → 72.0 best) and 238.6 → 102.8 ms in the interpreter (205.5 → 95.0 best); the suite's
   `typed` 2131.8 → 1391.2 ms compiled, 2907.7 → 1845.1 ms interpreted.
 
+- `boa_engine`, `vm/opcode/{get,set}/property.rs`: reading and writing a typed array element goes
+  to the buffer. `GetPropertyByValue`/`SetPropertyByValue` had a dense-element fast path for arrays
+  only, so `f[i]` built a `PropertyKey`, ran the integer-indexed exotic `[[Get]]`/`[[Set]]` with its
+  `CanonicalNumericIndexString` check, and went through `validate_index` per element. A key that
+  already parsed as an index needs no canonicalisation, and no receiver can observe an
+  integer-indexed read, so the read takes the element straight from the buffer; the write does the
+  same only when the receiver is the array itself (any other receiver, as in `super[0] = v`, gets
+  `OrdinarySet`, which defines on the receiver) and the value is already a `Number`, or a `BigInt` for the BigInt arrays — anything
+  else runs `ToNumber`/`ToBigInt`, which can call a user `valueOf` that detaches the buffer, and the
+  spec converts before it checks, so those keep the spec path (which also throws for a `Number`
+  written into a BigInt array and the other way around). A detached buffer, an out-of-range index, a
+  detached-in-the-middle length-tracking view and a `SharedArrayBuffer` view all keep their existing
+  behaviour: the reads and writes go through the same `BufferRef` slice, so a shared view stays on
+  its atomic path. Measured on the same round (median of five interleaved processes): one element
+  read 1M times 53.7 → 39.8 ms compiled (load 38–48%), 80.5 → 65.6 ms interpreted (load 13–18%);
+  the suite's `typed` 1359.1 → 1060.2 ms compiled, 1559.8 → 1309.5 ms interpreted.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

@@ -23,7 +23,7 @@ use crate::{
 use boa_gc::{Finalize, Trace};
 use boa_macros::js_str;
 
-use super::{BuiltinTypedArray, TypedArrayKind, is_valid_integer_index};
+use super::{BuiltinTypedArray, ContentType, TypedArrayKind, is_valid_integer_index};
 
 /// A `TypedArray` object is an exotic object that performs special handling of integer
 /// index property keys.
@@ -765,6 +765,74 @@ pub(crate) fn typed_array_exotic_own_property_keys(
 
     // 6. Return keys.
     Ok(keys)
+}
+
+/// The value of element `index` of `object`, or `undefined` where the index is not valid.
+///
+/// Returns `None` when `object` is not a typed array, so that the caller takes the spec path.
+/// No receiver can observe an integer-indexed read, so there is nothing else to check.
+pub(crate) fn typed_array_element_get_shortcut(object: &JsObject, index: u32) -> Option<JsValue> {
+    let typed_array = object.downcast_ref::<TypedArray>()?;
+    let buffer = typed_array.viewed_array_buffer().as_buffer();
+    let Some(bytes) = buffer.bytes(Ordering::Relaxed) else {
+        return Some(JsValue::undefined());
+    };
+    let Some(index) = typed_array.validate_index_u64(u64::from(index), bytes.len()) else {
+        return Some(JsValue::undefined());
+    };
+    let kind = typed_array.kind();
+    let byte_index = (index * kind.element_size() + typed_array.byte_offset()) as usize;
+
+    // SAFETY: the typed array's buffer is aligned for its element type, and `validate_index_u64`
+    // keeps the index in bounds.
+    let value = unsafe {
+        bytes
+            .subslice(byte_index..)
+            .get_value(kind, Ordering::Relaxed)
+    };
+    Some(value.into())
+}
+
+/// Writes `value` to element `index` of `object` when the conversion cannot run user code.
+///
+/// Returns `None` when `object` is not a typed array, or `value` is not already of the array's
+/// content type: `ToNumber` and `ToBigInt` may call a user `valueOf` that detaches the buffer, and
+/// the spec order converts before it checks, so those go through the spec path. A `BigInt` array
+/// written with a `Number`, or the other way around, also needs the spec path, which throws.
+pub(crate) fn typed_array_element_set_shortcut(
+    object: &JsObject,
+    index: u32,
+    value: &JsValue,
+    context: &mut Context,
+) -> Option<JsResult<()>> {
+    let kind = object.downcast_ref::<TypedArray>()?.kind();
+    let same_content_type = match kind.content_type() {
+        ContentType::Number => value.is_number(),
+        ContentType::BigInt => value.as_bigint().is_some(),
+    };
+    if !same_content_type {
+        return None;
+    }
+    let element = kind.get_element(value, context).ok()?;
+
+    let typed_array = object.downcast_ref::<TypedArray>()?;
+    let mut buffer = typed_array.viewed_array_buffer().as_buffer_mut();
+    let Some(mut bytes) = buffer.bytes(Ordering::Relaxed) else {
+        return Some(Ok(()));
+    };
+    let Some(index) = typed_array.validate_index_u64(u64::from(index), bytes.len()) else {
+        return Some(Ok(()));
+    };
+    let byte_index = (index * kind.element_size() + typed_array.byte_offset()) as usize;
+
+    // SAFETY: the typed array's buffer is aligned for its element type, and `validate_index_u64`
+    // keeps the index in bounds.
+    unsafe {
+        bytes
+            .subslice_mut(byte_index..)
+            .set_value(element, Ordering::Relaxed);
+    }
+    Some(Ok(()))
 }
 
 /// Abstract operation `TypedArrayGetElement ( O, index )`.
