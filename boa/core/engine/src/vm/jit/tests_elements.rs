@@ -71,3 +71,26 @@ fn division_matches_the_interpreter() {
     // code leaves that to it, and the three modes above agree.
     assert!(out.ends_with("-0 Infinity -Infinity NaN"), "{out}");
 }
+
+/// `super[key] = value` stores on the receiver, not on the object `super` finds, whatever the
+/// object is: a store into the dense array or typed array that is the prototype would be
+/// wrong. The three modes must agree (and an interpreter that stores into the array is the
+/// interpreter's own fault, not compiled code's).
+#[test]
+fn stores_through_super_take_the_receiver() {
+    same(
+        "const out = [];
+         const run = (f) => { try { out.push(show(f())); } catch (e) { out.push(e.name); } };
+         class Base { setAt(i, v) { super[i] = v; return this; } }
+         const dense = [1, 2, 3];
+         Object.setPrototypeOf(Base.prototype, dense);
+         const typed = new Float64Array(4);
+         class Other { setAt(i, v) { super[i] = v; return this; } }
+         Object.setPrototypeOf(Other.prototype, typed);
+         for (let i = 0; i < 20; i++) {
+           run(() => { const o = new Base().setAt(i % 3, i); return [Object.keys(o).length, dense.join()]; });
+           run(() => { const o = new Other().setAt(i % 4, i + 0.5); return [Object.keys(o).length, [...typed].join()]; });
+         }
+         out.join(' ')",
+    );
+}

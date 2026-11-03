@@ -1185,9 +1185,17 @@ impl Translator<'_> {
                 self.get_element([dst.into(), key.into(), object.into()], pc, next);
             }
             Instruction::SetPropertyByValue {
-                value, key, object, ..
-            } => {
+                value,
+                key,
+                receiver,
+                object,
+            } if u32::from(receiver) == u32::from(object) => {
                 self.set_element([value.into(), key.into(), object.into()], pc, next);
+            }
+            // A receiver that is not the object (`super[key] = value`) is the interpreter's.
+            Instruction::SetPropertyByValue { .. } => {
+                self.step(pc, &[next]);
+                return true;
             }
             Instruction::Add { dst, lhs, rhs } => {
                 self.arithmetic(Arith::Add, dst.into(), lhs.into(), rhs.into(), pc, next);
