@@ -541,6 +541,126 @@ Correctness at the end of phase 2:
 | Verve (322 tests, 10 ignored) | Passes at defaults, forced (`VERVE_JIT_THRESHOLD=0`) and off, with the `jit` feature. The `fetch_network` tests time out on a heavily loaded machine in every mode, JIT or not, and pass otherwise. |
 | test262 | 52,095 results compared one by one between interpreted and JIT-forced runs: **0 differ** but for two timing-dependent `Atomics.notify` tests (different ones on each run) that time out under load and pass in both modes when rerun alone. 49,895 pass in both. |
 
+## Why the baseline barely moved
+
+`docs/electron/perf-js.md` measures the JIT at 1.0–1.25× the interpreter on the loop-shaped tests of
+the P60 suite, where the micro-benchmarks above show 3–12×. The JIT works as designed on these
+tests. What differs is where their time goes. Measured on the release `verve` with the `jit` feature
+(`6335a760`, Windows x86-64, Ryzen 9 7950X), one process per run, N=5, median (best), milliseconds;
+the machine was shared, at 15–31% load during this table's pass.
+
+| test | Node | interpreter | JIT | JIT / interpreter |
+|---|---|---|---|---|
+| `fib(30)` | 5.4 | 358.2 (352.5) | 287.6 (284.6) | 1.25× |
+| `oo` (1M `a = a.add(b)`) | 2.9 | 1274.9 (1240.3) | 1264.2 (1205.4) | 1.01× |
+| `typed` (`Float64Array`, 1M × 5) | 4.2 | 3426.0 (3362.2) | 3265.0 (3228.3) | 1.05× |
+| `alloc` (300k × 3 objects) | 11.1 | 334.3 (304.5) | 301.7 (285.2) | 1.11× |
+| `vdom` | 4.3 | 81.1 (75.3) | 70.9 (69.9) | 1.14× |
+| `closure` (1M map/filter/reduce) | 20.4 | 645.9 (643.9) | 623.7 (607.9) | 1.04× |
+
+### What is not the reason
+
+- **Tiering.** Every hot function was compiled and none rejected (`jit_stats`: `compiled` 1, 4, 1,
+  1, 3 and 4 for the six tests in the order above; `rejected` 0). The profitability rule passed
+  every one of them. `VERVE_JIT_THRESHOLD=0` changes nothing, within the spread of five runs (`fib`
+  336.8 against 353.3, `oo` 1449 against 1386, `typed` 3278 against 3286, medians of one pass).
+- **OSR.** It enters. `typed` and `alloc` run their whole hot loop in one call of an arrow
+  function, and each was entered twice (the warm-up and the timed run), at the instruction after
+  the first `IncrementLoopIteration`; `closure` the same. The inner loops of `typed` are inside
+  that one compiled body.
+- **Compile time.** 4–8 ms per test, 21 ms for the three functions of `vdom` (in the warm-up run).
+- **Nesting.** In `fib`, `oo`, `closure` and `vdom` the callees run nested in compiled code
+  (5.4M entries for `fib`'s two runs, one per call).
+
+### What the hot loops are made of
+
+Counted with temporary counters in `jit_step`, the fast helpers and the interpreter's loop (not
+committed): the instructions of each hot loop, by how they ran.
+
+| test | hot loop | inline | fast helper, hit | fast helper, miss, then `jit_step` | `jit_step` only |
+|---|---|---|---|---|---|
+| `typed` | 22 instructions per iteration | 18 | 0 | 4: `GetLengthProperty`, 2 × `GetPropertyByValue`, `SetPropertyByValue`, every time | 0 |
+| `fib` | 18.5 per call | 6.5 | 10 instructions in 10 helper calls (`PushFromRegister` ×4, `PopIntoRegister` ×2, `GetName`, `GetArgument`, `SetAccumulator`, `CheckReturn`) | 0 | 2: `Call`, `Return` |
+| `oo` | 50 per iteration, over three calls | 16 | 23 instructions in 19 helper calls | 2: `SetPropertyByName` of `this.x = x`, and `CheckReturn` of the constructor, every time | 9: 2 × `Call`, `New`, 3 × `This`, 3 × `Return` |
+| `alloc` | 25 per iteration | 11 | 4 instructions in 3 helper calls (3 pushes, 1 property read) | 0 | 10: 2 × `StoreEmptyObject`, 4 × `DefineOwnPropertyByName`, `StoreLiteral`, `Add` (string concatenation), `Call` of `push`, `Pop` |
+| `vdom` | recursive diff, `for-of` loops | most | `GetPropertyByName`, pushes | 0 | `GetIterator`, `IteratorNext`, `IteratorDone`, `IteratorValue`, `IteratorReturn`, `Add`, `DefineOwnPropertyByName`, `StoreEmptyObject`, `StoreNewArray`, `New`, `Call` |
+| `closure` | three callbacks of about 10 instructions, an initialising loop | all but `Return` | all | 1: `SetPropertyByValue` of `values[i] = i` on `new Array(n)`, every time | `Return`; the calls to `map`, `filter`, `reduce` |
+
+Each `jit_step` costs the interpreter's own handler plus about 8 ns (a stepped `Div` is 11.8 ns
+against 3.3 ns for an inline `Add`); the interpreter dispatches a cheap instruction in about 3.7
+ns (an empty loop of four instructions is 14.7 ns, against 1.7 ns compiled). So compiling saves
+about 3 ns per cheap instruction and nothing on the instructions that matter, which run the same
+handlers either way.
+
+### Where the time goes
+
+Differential micro-probes: the same process, one loop body each, ns per iteration, median of five
+processes, JIT then interpreter. The loop's own cost (1.7 and 14.7) is included.
+
+| body | JIT | interpreter |
+|---|---|---|
+| `s = id(i)` (a JavaScript call) | 93.7 | 119.5 |
+| `s = zero()` | 90.0 | 109.1 |
+| `s = b.get()` (method on the prototype) | 140.3 | 191.4 |
+| `Math.abs(i)` (a native call) | 78.3 | 152.5 |
+| `new E()` (`function E() {}`) | 261.5 | 266.3 |
+| `new F(i)` (`this.x = x`) | 579.4 | 555.2 |
+| `new C0()` (an empty class) | 609.6 | 641.4 |
+| `{}`, `{ i }`, `{ i, j: i }` | 90.4, 225.3, 338.7 | 103.7, 238.9, 343.7 |
+| `'k' + i` | 111.7 | 121.8 |
+| `a.push(i)` | 96.1 | 134.6 |
+| `a[i] = i` appending to `[]`, and on `new Array(n)` | 167.8, 210.5 | 187.2, 236.9 |
+| `arr[k]` read, dense array | 17.2 | 80.0 |
+| `f64[k]` read, `Float64Array` | 60.6 | 98.8 |
+| `f64[k] = v` | 65.9 | 97.1 |
+| `f64.length` | 347.2 | 367.2 |
+| `arr.length` | 12.5 | 49.4 |
+| read–modify–write, dense array and `Float64Array` | 48.7 and 193.6 | 196.2 and 264.0 |
+| `for (const v of arr)`, per element | 369.3 | 379.3 |
+| `for (k < arr.length) arr[k]`, per element | 26.3 | 102.7 |
+| `v.map(x => x * 3 + 1)`, per element | 227.9 | 230.6 |
+
+The rows come from two passes, at 22–34% and at 31–59% load; each is compared only within its pass.
+
+The three causes, with how each was established:
+
+1. **The instructions that cost something still run the interpreter's handlers.** *Measured.* In
+   `typed`, `f64.length` is 347 ns, a typed-array element access is 43 ns more than a dense
+   array's, and the other 18 instructions of the loop come to about 25 ns; the three stepped
+   kinds are about 95% of an iteration. Cycle counts per handler agree (`length` 61%, element
+   read 12%, element write 11% of the run, probe included). The fast helpers answer *slow* every
+   time for a typed array (12.0M, 20.0M and 12.0M helper calls, and the same numbers of steps),
+   so each access pays the helper's refusal on top of the handler. The same shape holds in
+   `alloc` (eight of the ten stepped instructions are allocation, property definition, string
+   concatenation and a native call, at 359–621 cycles each; the other two are 31), in `oo` (`New` 3,742 cycles and
+   `this.x = x` 1,090, against 259 for `Call` and 136 for `Return`) and in `vdom` (`GetIterator`
+   3,161 cycles, `IteratorNext` 1,241; a `for-of` element costs 369 ns against 26 ns by index).
+   A dense-array loop with the same body as `typed` is 4.0× faster compiled (48.7 ns against
+   196.2), so the JIT does deliver where the fast helpers apply.
+2. **A call costs the same machinery with or without the JIT.** *Measured.* A JavaScript call is
+   about 90 ns compiled and 105 interpreted (`zero()`: 90.0 and 109.1, less the loops' own 1.7
+   and 14.7). In `fib` every call is two stepped instructions, `Call` (180 cycles in the handler,
+   which pushes the frame) and `Return` (101 cycles, which pops it), plus about ten fast-helper
+   calls and `prepare`'s hotness check (33 cycles). The cycle counts include the probe's own cost,
+   about 25–30 cycles per timed region, so the two handlers are at least 150 and 75 cycles: more
+   than half of a call. `fib`'s 107 ns per call compiled against 133 interpreted is the 1.25×.
+   The three calls per iteration of `oo` and the 4.5M callbacks of `closure` pay the same. This
+   is the roadmap's item 1.
+3. **Much of what these tests do is neither dispatch nor property access.** *Measured; the split
+   of `closure` is inferred.* `new` is 262 ns for an empty function and 579 ns with one
+   `this.x = x`: the first property defined on a fresh object costs about 318 ns and a second
+   about 257 ns (`new F(i, i)`: 836 ns), which is a shape transition that neither tier caches.
+   `{}` is 90 ns and each property of a literal another 115–135 ns. A native callback into
+   JavaScript (`map`) is about 228 ns per element, and `values[i] = i` on `new Array(n)` is
+   210 ns. None of these is a Boa dispatch cost. About a third of `closure` is the initialising
+   loop (210 ns × 1M) and two thirds the native callbacks, from these probes.
+
+What P65 changes in the interpreter (typed-array named reads, first-property defines, `new`)
+reaches compiled code where compiled code runs the same handler. What is left for the JIT is the
+part it must do itself: skip the helper's refusal and the handler for typed arrays, cache shape
+transitions, enter calls without the frame machinery, and iterate arrays without the iterator
+protocol.
+
 ## Roadmap
 
 **Phase 1 (done)**: the baseline described above.
