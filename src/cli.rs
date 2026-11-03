@@ -45,7 +45,8 @@
 //! | `--stack-size=<KiB>`, `--stack_size=<KiB>` | the script thread's stack, in KiB as V8's |
 //! | `--no-warnings` | `process.emitWarning` writes nothing |
 //! | `--jitless` | hot functions stay interpreted, whatever `VERVE_JIT` says (Node's flag) |
-//! | `--code-cache=<dir>` | keep the compiled code of ES modules in `dir` between runs (also `VERVE_CODE_CACHE=<dir>`); signed with the user's own secret, see `Runtime::set_code_cache_dir_with_user_secret` |
+//! | `--code-cache=<dir>` | keep the compiled code of the modules loaded in `dir` between runs (also `VERVE_CODE_CACHE=<dir>`); signed with the user's own secret, see `Runtime::set_code_cache_dir_with_user_secret` |
+//! | `--no-code-cache` | keep no compiled code; without it, `verve run` keeps it in the user's own folder (`VERVE_CODE_CACHE=0` does the same) |
 //! | `--experimental-vm-modules`, `--no-addons` | accepted; nothing to change here |
 //! | `--max-old-space-size=<MiB>` | accepted and ignored: Boa has no heap cap; bound memory with the OS (a Job Object, `RLIMIT_AS`) |
 //!
@@ -89,7 +90,7 @@ flags: -A/--allow-all, --allow-read[=paths], --allow-fs-read=<path>, --allow-wri
        --allow-fs-write=<path>, --allow-net[=hosts], --allow-worker, --allow-child-process/--allow-run, --permission,
        --use-env-proxy,
        --disable-proto=throw|delete, --stack-size=<KiB>, --no-warnings, --jitless,
-       --code-cache=<dir>,
+       --code-cache=<dir>, --no-code-cache,
        --experimental-vm-modules, --no-addons, --max-old-space-size=<MiB>";
 
 /// What the command line asked for.
@@ -113,6 +114,8 @@ struct Options {
     no_warnings: bool,
     jitless: bool,
     code_cache: Option<PathBuf>,
+    /// `--no-code-cache`: no compiled code is kept, whatever the environment says.
+    no_code_cache: bool,
     eval: Option<String>,
     entry: Option<PathBuf>,
     args: Vec<String>,
@@ -280,6 +283,7 @@ fn parse(args: Vec<String>, node: bool) -> Result<Command, String> {
             "--code-cache" => {
                 options.code_cache = Some(PathBuf::from(needs_value("--code-cache")?))
             }
+            "--no-code-cache" => options.no_code_cache = true,
             "--experimental-vm-modules" | "--no-addons" => {}
             "--max-old-space-size" => {
                 let size = needs_value("--max-old-space-size")?;
@@ -411,6 +415,39 @@ fn permissions(options: &Options, entry: Option<&Path>) -> Permissions {
     permissions
 }
 
+/// Where `verve run` keeps compiled code, or that it keeps none.
+#[derive(Debug, PartialEq, Eq)]
+enum CodeCacheDir {
+    /// `--code-cache=<dir>` or `VERVE_CODE_CACHE=<dir>`: used as given, and a failure to open it
+    /// is written to the console.
+    Named(PathBuf),
+    /// The user's own folder: a failure to open it leaves this run without a cache, silently.
+    Default(PathBuf),
+}
+
+/// `--no-code-cache` > `--code-cache=<dir>` > `VERVE_CODE_CACHE` > the user's own folder.
+/// `VERVE_CODE_CACHE` holding `0`, `off` or `false` keeps no code either; empty is unset.
+fn code_cache(options: &Options) -> Option<CodeCacheDir> {
+    if options.no_code_cache {
+        return None;
+    }
+    if let Some(dir) = &options.code_cache {
+        return Some(CodeCacheDir::Named(dir.clone()));
+    }
+    if let Some(dir) = std::env::var_os("VERVE_CODE_CACHE")
+        && !dir.is_empty()
+    {
+        let off = dir.to_str().is_some_and(|dir| {
+            matches!(
+                dir.trim().to_ascii_lowercase().as_str(),
+                "0" | "off" | "false"
+            )
+        });
+        return (!off).then(|| CodeCacheDir::Named(PathBuf::from(dir)));
+    }
+    Some(CodeCacheDir::Default(crate::code_cache::default_dir()?))
+}
+
 /// The signal the script thread sleeps on, and everything that has work for it raises.
 #[derive(Default)]
 struct Signal {
@@ -488,15 +525,18 @@ fn script(options: Options, argv0: String, embedder: Setup) -> i32 {
     if options.jitless {
         runtime.set_jit_enabled(false);
     }
-    let code_cache = options.code_cache.clone().or_else(|| {
-        std::env::var_os("VERVE_CODE_CACHE")
-            .filter(|dir| !dir.is_empty())
-            .map(PathBuf::from)
-    });
-    if let Some(dir) = code_cache
-        && let Err(error) = runtime.set_code_cache_dir_with_user_secret(&dir)
-    {
-        eprintln!("verve: code cache {} not used: {error}", dir.display());
+    match code_cache(&options) {
+        Some(CodeCacheDir::Named(dir)) => {
+            if let Err(error) = runtime.set_code_cache_dir_with_user_secret(&dir) {
+                eprintln!("verve: code cache {} not used: {error}", dir.display());
+            }
+        }
+        // The user's own folder, opened as `--code-cache` opens one but without saying anything
+        // when it cannot be: a read-only home directory, a container, no `HOME`.
+        Some(CodeCacheDir::Default(dir)) => {
+            let _ = runtime.set_code_cache_dir_with_user_secret(&dir);
+        }
+        None => {}
     }
     runtime.set_permissions(permissions.clone());
     runtime.set_worker_permissions(permissions);

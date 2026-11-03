@@ -333,6 +333,37 @@ impl Drop for CodeCache {
     }
 }
 
+/// `verve run`'s cache directory when neither the flag nor the variable names one: under the
+/// user's cache folder, apart from their secret. `None` where there is no such folder.
+pub(crate) fn default_dir() -> Option<PathBuf> {
+    let variable = |name| std::env::var_os(name).map(PathBuf::from);
+    if cfg!(windows) {
+        default_dir_in(variable("LOCALAPPDATA"), None, None, true)
+    } else {
+        default_dir_in(None, variable("XDG_CACHE_HOME"), variable("HOME"), false)
+    }
+}
+
+/// [`default_dir`] from the variables it reads. A value that is not an absolute path is ignored, as
+/// the XDG specification says of `XDG_CACHE_HOME`, so the cache never lands in the working directory.
+fn default_dir_in(
+    local_app_data: Option<PathBuf>,
+    xdg_cache_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+    windows: bool,
+) -> Option<PathBuf> {
+    let absolute = |path: &Option<PathBuf>| path.clone().filter(|path| path.is_absolute());
+    let base = if windows {
+        absolute(&local_app_data)?.join("Verve")
+    } else {
+        match absolute(&xdg_cache_home) {
+            Some(cache) => cache.join("verve"),
+            None => absolute(&home)?.join(".cache/verve"),
+        }
+    };
+    Some(base.join("code-cache"))
+}
+
 /// Writes `bytes` to a file of its own beside `path`, then renames it to `path`, so a reader
 /// finds the old file or the new one, never part of one.
 fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -504,14 +535,19 @@ fn open_no_follow(path: &Path) -> io::Result<fs::File> {
     options.open(path)
 }
 
-/// Makes the folder `path` (and the folders it is in) if it is not there; the folder itself
+/// Makes the folder `path` (and the folders it is in) if it is not there; every folder it makes
 /// only its owner can reach: `0700`, or on Windows a protected DACL granting its owner alone.
-fn create_private_dir(path: &Path) -> io::Result<()> {
+/// A parent made by `create_dir_all` would carry the DACL of whatever holds it, and
+/// [`check_private`] refuses that the next time the cache is opened: the default directory's
+/// first run makes `%LOCALAPPDATA%\Verve` — the folder the secret lives in — this way.
+pub(crate) fn create_private_dir(path: &Path) -> io::Result<()> {
     if fs::symlink_metadata(path).is_ok() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        create_private_dir(parent)?;
     }
     let made = make_private_dir(path);
     match made {
@@ -820,7 +856,7 @@ fn with_current_user_sid<T>(
 /// What compiled code depends on besides its source: Boa's format and opcodes, Verve's
 /// version, and this executable (path, size and modification time), so any rebuild starts a
 /// cache afresh.
-fn build_fingerprint() -> [u8; 32] {
+pub(crate) fn build_fingerprint() -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(b"verve build v1\0");
     hash.update(boa_engine::code_cache::fingerprint().to_le_bytes());
@@ -880,6 +916,39 @@ pub(crate) fn stats(context: &Context) -> Option<CodeCacheStats> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_directory_ignores_relative_variables() {
+        let base = std::env::temp_dir();
+        let some = |name: &str| Some(base.join(name));
+        let relative = || Some(PathBuf::from("relative"));
+        let expected = |name: &str| Some(base.join(name).join("code-cache"));
+
+        assert_eq!(
+            default_dir_in(some("local"), None, None, true),
+            expected("local/Verve")
+        );
+        assert_eq!(default_dir_in(relative(), None, None, true), None);
+        assert_eq!(default_dir_in(Some(PathBuf::new()), None, None, true), None);
+
+        assert_eq!(
+            default_dir_in(None, some("xdg"), some("home"), false),
+            expected("xdg/verve")
+        );
+        assert_eq!(
+            default_dir_in(None, relative(), some("home"), false),
+            expected("home/.cache/verve")
+        );
+        assert_eq!(
+            default_dir_in(None, Some(PathBuf::new()), some("home"), false),
+            expected("home/.cache/verve")
+        );
+        assert_eq!(
+            default_dir_in(None, None, Some(PathBuf::new()), false),
+            None
+        );
+        assert_eq!(default_dir_in(None, None, relative(), false), None);
+    }
 
     struct Fixture(PathBuf);
 

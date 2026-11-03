@@ -3,6 +3,7 @@
 //! kept between runs as a module's code is (`docs/startup.md`).
 
 use std::path::Path;
+use std::rc::Rc;
 
 use boa_engine::{Context, JsResult, Module, Source, script::Script};
 
@@ -25,11 +26,15 @@ impl Kind {
     }
 }
 
+/// The cache this runtime keeps, if the embedder gave it one.
+fn cache_of(context: &Context) -> Option<Rc<CodeCache>> {
+    crate::shared(context).code_cache.borrow().clone()
+}
+
 /// The module `source` (at `path`) is: read back from the runtime's code cache if it keeps one
 /// with an entry for it, parsed otherwise, and then kept in the cache.
 pub(crate) fn module(source: &str, path: &Path, context: &mut Context) -> JsResult<Module> {
-    let cache = crate::shared(context).code_cache.borrow().clone();
-    let Some(cache) = cache else {
+    let Some(cache) = cache_of(context) else {
         return Module::parse(Source::from_bytes(source).with_path(path), None, context);
     };
     let global = boa_engine::code_cache::global_scope_fingerprint(context);
@@ -58,7 +63,7 @@ pub(crate) fn module(source: &str, path: &Path, context: &mut Context) -> JsResu
 /// the cache. A source that is not a script is refused as parsing it refuses it, and nothing
 /// about it is counted: the caller decides what else it is.
 pub(crate) fn script(source: &str, path: &Path, context: &mut Context) -> JsResult<Script> {
-    let Some(cache) = crate::shared(context).code_cache.borrow().clone() else {
+    let Some(cache) = cache_of(context) else {
         return Script::parse(Source::from_bytes(source).with_path(path), None, context);
     };
     let global = boa_engine::code_cache::global_scope_fingerprint(context);
