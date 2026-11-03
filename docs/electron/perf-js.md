@@ -320,6 +320,14 @@ Throughput (from `bash scripts/js-bench/run.sh <verve.exe> node`, which prints t
 
 | package | test | Node | Verve JIT | Verve interp | JIT / Node | interp / Node |
 |---|---|---|---|---|---|---|
+| P64 | `tokenize` | 2.5 (2.5) | 162.7 (154.5) | 174.6 (172.2) | 65× | 70× |
+| P64 | `regex` | 1.8 (1.8) | 32.9 (31.2) | 32.0 (31.4) | 18× | 18× |
+| P64 | `json` | 152.5 (147.1) | 1303.9 (1263.3) | 1238.4 (1225.1) | 8.6× | 8.1× |
+| P64 | `splitjoin` | 2.8 (2.7) | 12.9 (11.8) | 12.7 (12.4) | 4.6× | 4.5× |
+| P64 | `template` | 0.2 (0.2) | 1.8 (1.7) | 0.9 (0.9) | 9.0× | 4.5× |
+| P64 | `concat` | 0.6 (0.6) | 22.0 (21.8) | 78.1 (48.8) | 37× | 130× (bimodal; 66.6 (41.6) on the base binary) |
+
+P64 rows: this branch against `6335a760`, `cargo build --release -p verve --features jit`, same round, load 9-34% before and after each pass (one 61% peak at the end of the `tokenize` pass); details in `packages/P64-strings-regex-json.md`.
 
 Scaling (from `bash scripts/js-bench/run.sh --scaling <verve.exe>`, the first table it prints):
 

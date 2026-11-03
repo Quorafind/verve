@@ -368,3 +368,105 @@ Node 的同样写法是 0.4 / 0.6 / 5.0 / 26.9 ms，超线性来自 rope/cons �
 3. 第 4 项会改变 `JSON.parse` 的错误消息措辞（现在冻结的是 serde 的措辞），是否接受。
 
 
+
+### 第二阶段（2026-11-03）：结果
+
+四个 `boa/` 提交（各自单独通过 `cargo fmt --all --check`、`scripts/style-check.sh`、`boa/` 里的 `cargo fmt --all --check`）：
+`08c27c26`（结果对象）、`fb918384`（`JSON.stringify`）、最后一个（`JSON.parse` 一遍解析）；rope 方案是单独的文档提交，见
+`docs/electron/spikes/p64-rope.md`。每项在 `boa/SU.md` 各有一条。
+
+#### 测量条件
+
+`cargo build --release -p verve --features jit`，**基线是 `docs/electron-plan` 的 `6335a760`**（临时 worktree，
+独立 `CARGO_TARGET_DIR`），**改后是本分支**；同一轮里先后各跑一次，每项 `run.sh --runs 5 --only <test> <exe> node`，
+Node 22.21.1，`LOCALAPPDATA`/`XDG_*`/`HOME` 指向临时目录。负载（`\Processor(_Total)\% Processor Time`，每次 5 个样本）：
+
+| 测试 | 基线前 | 基线后 | 改后前 | 改后后 |
+|---|---|---|---|---|
+| tokenize | 10–20% | 9–14% | 10–14% | 19–61% |
+| regex | 13–31% | 13–18% | 17–29% | 19–22% |
+| json | 15–25% | 9–17% | 11–34% | 11–16% |
+| splitjoin | 10–16% | 13–23% | 9–20% | 17–27% |
+| template | 13–18% | 13–19% | 15–25% | 14–32% |
+| concat | 17–51% | 19–22% | 13–17% | 12–23% |
+
+（`tokenize` 改后运行结束时有一次外部峰值 61%，跑的当中多数样本在 20% 上下。）
+
+#### 每项前后与目标（中位（最好），ms；括号外是 Verve 解释器 `VERVE_JIT=0`，与参考目标同口径）
+
+| 测试 | Node | 基线 JIT / 解释器 | 改后 JIT / 解释器 | 基线 → 改后（解释器 / Node） | 目标 | 结论 |
+|---|---|---|---|---|---|---|
+| `tokenize` | 2.5 | 229.2 (219.1) / 244.8 (237.4) | 162.7 (154.5) / 174.6 (172.2) | 98× → **70×** | ≤ 35× | **差距**（见下） |
+| `regex` | 1.8 | 42.9 (40.2) / 41.8 (40.4) | 32.9 (31.2) / 32.0 (31.4) | 25× → **18×** | ≤ 20× | 达标 |
+| `json` | 152.5 | 2682.9 (2641.0) / 2710.2 (2629.6) | 1303.9 (1263.3) / 1238.4 (1225.1) | 16× → **8.1×**（JIT 8.6×） | ≤ 9× | 达标 |
+| `splitjoin` | 2.8 | 12.5 (11.7) / 13.6 (12.1) | 12.9 (11.8) / 12.7 (12.4) | 4.5× → 4.5× | 不改 | 不变 |
+| `template` | 0.2 | 1.8 (1.7) / 0.9 (0.9) | 1.8 (1.7) / 0.9 (0.9) | 4.5× → 4.5× | 不改 | 不变 |
+| `concat` | 0.6 | 22.7 (22.5) / 66.6 (41.6) | 22.0 (21.8) / 78.1 (48.8) | 95× → 130×（JIT 32× → 37×） | 不含 rope | 无变化，见下 |
+
+- **`tokenize` 没到 ≤ 35×**：102,228 个 token，每 token 2.39 → 1.71 µs（解释器）。结果对象的两个无用数组与逐属性写
+  去掉后，剩下的是 `exec` 每次调用本身：一次**未命中**的 `exec` 在第一阶段就量到 0.66 µs（27× Node），
+  这部分在 `abstract_builtin_exec` 之外（原生调用、`lastIndex` 通用读写、`Array` 分配、主语拓宽）。
+  要到 35× 需要另做第 2 项（见下）加上 P65 对对象/数组分配的改动；本包范围内没有再收的东西。
+- **`concat` 在两个二进制上都是双峰的**（解释器列的中位与最好差 1.4–1.6×，基线上同样），所以 66.6 对 78.1 是这个双峰的噪声，
+  不是回退；本包没动 `+=`，`+=` 的 O(n²) 等 rope（`spikes/p64-rope.md`）。`concat` 的 JIT 列 22.7 → 22.0 在噪声内。
+- 最后一次修改（`JSON.parse` 把整数读成 `i32`）之后在最终二进制上复测：`json` 156.1 → JIT 1246.9 / 解释器 1320.8（8.0× / 8.5×，负载 13–18%），
+  与上表在噪声内一致（`tokenize`、`regex` 那一轮负载升到 34–40%，读数偏高，未采用；`built-ins/JSON` 的 test262 结果仍与基线逐字节相同）。
+- 第一阶段的数字（`tokenize` 103×、`regex` 24×、`json` 17×）是另一轮低负载下的；本节基线是本次同轮重测，
+  所以与第一阶段表里的小数不完全一致。
+
+#### 第 2 项没做：未修改 `RegExp` 的快路径
+
+条件是 `Get(exec)` + `lastIndex` 的通用读写占 `tokenize` 的 10% 以上。第 1 项做完后实测：
+`exec` 142 ms，`test` 156 ms（100k 次），差 **13.4 ms，占 9.4%**，低于 10%，**按约定不做**。
+`test` 经 `abstract_exec` 的 `Get(exec)` + `Call` 比 `exec` 贵的就是这 9.4%；要拿回它得绕开用户可见的 `exec` 查找，
+需要证明 `RegExp.prototype.exec` 与 `lastIndex` 未被改动，复杂度与回报不成比例。
+
+#### 观察得到的变化
+
+- **`JSON.parse` 的错误消息改成 V8 的措辞**（原来冻结的是 `serde_json` 的）：`Unexpected token '}', "[1,]" is not valid JSON`、
+  `Expected ',' or ']' after array element in JSON at position 4 (line 1 column 5)`、`Unexpected end of JSON input`；
+  文本只是 `undefined`、`NaN`、`Infinity` 时整段被引用（`"undefined" is not valid JSON`）。
+  `json_parse_with_no_args_throws_syntax_error` 已按此更新（`"undefined" is not valid JSON`）。带 reviver 的 `JSON.parse` 仍用脚本解析器建值（`context.source` 需要原文），但先用同一个读取器校验文本，所以**两条路径的错误措辞相同**（测试 `json_parse_with_a_reviver_throws_the_same_messages`）。
+  仍走旧路径（`context.source` 需要原文），措辞因此**仍是旧路径的**（`serde_json` 与 `boa_parser`）：两条路径的错误措辞不同，这是已知的不一致。
+- **孤立代理项**（转义的与原始的）现在按码元保留，之前 `String::from_utf16` 会拒绝；与 Node 一致。
+- **嵌套深度**：脚本解析器在 128 层放弃，新的读取器用堆上的 `Vec` 记容器，深度只受内存限制；与 Node 一致。
+- 新增测试：`json_parse_reads_a_lone_surrogate_as_node_does`、`json_parse_reads_nesting_deeper_than_the_script_parser_allows`、
+  `json_parse_reports_errors_the_way_node_does`、`json_parse_answers_the_numbers_and_keys_node_does`、
+  `json_stringify_builds_the_same_text_the_spec_path_did`、`match_result_carries_groups_and_indices_as_node_does`。
+- **已知问题（留给之后的包，本包不修）**：带 reviver 时，文本里的**原始**孤立代理项仍会失败：`to_std_string()` 要求合法 UTF-16，抛 `SyntaxError`。已测：`JSON.parse('"\ud800"', (k, v) => v)`（转义写法，文本是 ASCII）也仍失败，原因是脚本解析器建字符串字面量时拒绝孤立代理项（`invalid utf-16: lone surrogate found`），不是 `to_std_string()`；无 reviver 的 `JSON.parse` 两种写法都正常。
+
+#### test262（`E:\test262`，`d86b2294`，`boa_tester`，基线 `6335a760` 对改后）
+
+| 范围 | 通过 | 忽略 | 失败 |
+|---|---|---|---|
+| `built-ins/JSON` | 165 / 165 | 0 | 0 / 0 |
+| `built-ins/RegExp` | 1865 / 1865 | 13 / 13 | 1 / 1 |
+| `built-ins/String/prototype/match` | 49 / 49 | 2 / 2 | 0 / 0 |
+| `.../matchAll` | 25 / 25 | 0 | 0 / 0 |
+| `.../replace` | 55 / 55 | 0 | 0 / 0 |
+| `.../replaceAll` | 45 / 45 | 0 | 0 / 0 |
+| `.../split` | 120 / 120 | 0 | 0 / 0 |
+| `.../search` | 43 / 43 | 0 | 0 / 0 |
+| `annexB/built-ins/RegExp` | 35 / 35 | 27 / 27 | 0 / 0 |
+| `annexB/built-ins/String` | 105 / 105 | 0 | 6 / 6 |
+
+（每格「基线 / 改后」。十个范围的 `results.json` 逐字节相同：**没有新增通过或失败**。`RegExp` 的 1 个与 `annexB/String` 的 6 个失败是基线就有的。）
+
+#### 其他检查
+
+`cargo clippy -p boa_engine -p boa_string --all-targets -- -D warnings`（在 `boa/` 里）、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo clippy -p verve --features jit --all-targets -- -D warnings` 全部通过。`boa_engine --features jit` 的 clippy 有 5 条
+**基线就有**的告警，全在没改过的 `vm/jit/{mod,compiler,tests}.rs`（未使用的导入、`format!` 追加、`is_multiple_of`），不属于本包。
+接手时对 `JSON.parse` 提交做了两处 fixup：`end_of_input(&self)` 触发 `clippy::unused_self`；整数文本（如 `123`）被读成 `f64` 而不是 `i32`，使 `tests/module.rs` 的 `test_json_module_from_str`、`test_json_module_dynamic_import` 失败（`to_json` 输出 `123.0`），现在能放进 `i32` 的整数按整数读（`-0` 与带小数点/指数的仍是浮点），并加了测试 `json_parse_reads_a_whole_number_as_an_integer_value`。
+
+#### 给其他包的备注
+
+- **给 P65（对象与分配）**：不经过 JSON，**直接用 JS 建 70,000 条记录就要 286.5 ms，Node 8.8 ms**。`json` 的 8.1× 里
+  这一块是下限（解析本身现在是 ~450–530 ms 全程，其中建对象占一半以上）。`tokenize` 的剩余 1.7 µs/token 同样是
+  对象/数组分配与一次未命中的 `exec` 调用（0.66 µs），P65 改好后 `json`、`tokenize` 都会顺带下降。
+- **给 P66（JIT 字符串路径）**：JIT 对字符串 `+` 没有内联路径，慢路径经 `jit_step` 调解释器同一个 `Add` 处理函数
+  （最终 `JsValue::add`），所以字符串 `+` 只有一份实现；`vm/jit/` 里读字符串的只有 `GetLengthProperty` 读 `len`。
+  给字符串 `+` 加内联路径应调用 Rust 帮助函数（rope 落地后是 `concat_lazy`），不要在机器码里自己拷贝；
+  不要与 rope 同时改 `JsValue::add`。`template` 的 JIT 列（1.8 ms）比解释器列（0.9 ms）慢一倍，是 P66 值得看的现象。
+- **rope 方案**：`docs/electron/spikes/p64-rope.md`，待总控确认后决定在本包还是单列一个包；约 4–5 个工作日，
+  `boa/core/string` 的核心表示改动，风险点是递归释放/展平的栈安全与 `UnsafeCell` 展平缓存。
