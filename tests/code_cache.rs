@@ -1238,3 +1238,91 @@ fn a_pack_that_is_already_there_makes_the_first_run_a_warm_one() {
         "a warm run compiles nothing, so it leaves no mark: {seen:?}"
     );
 }
+
+/// Four processes writing one pack at once: the pack stays whole, every tag in it is authentic,
+/// and each process's entry is still there for the next round.
+#[test]
+fn four_processes_writing_one_pack_lose_nothing_that_matters() {
+    let fixture = Fixture::new("concurrent");
+    let dir = fixture.root.join("cache");
+    let home = fixture.root.join("home");
+    let modules: Vec<PathBuf> = (0..4)
+        .map(|n| {
+            let path = fixture.root.join(format!("mod{n}.cjs"));
+            std::fs::write(&path, format!("exports.v = 'm{n}';\n")).unwrap();
+            path
+        })
+        .collect();
+    let ask = |path: &Path| {
+        let name = serde_json::to_string(&path.to_string_lossy().to_string()).unwrap();
+        format!("console.log(require({name}).v)")
+    };
+    let command = |path: &Path| {
+        let mut command = Command::new(VERVE);
+        command
+            .env("LOCALAPPDATA", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env_remove("VERVE_CODE_CACHE")
+            .arg("run")
+            .arg("-A")
+            .arg(format!("--code-cache={}", dir.display()))
+            .arg("-e")
+            .arg(ask(path));
+        command
+    };
+    for round in 0..4 {
+        let children: Vec<_> = modules
+            .iter()
+            .map(|path| {
+                command(path)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for (n, child) in children.into_iter().enumerate() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "round {round} process {n}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                format!("m{n}\n"),
+                "round {round} process {n}"
+            );
+        }
+    }
+    // Every process's entry survived the rounds: each module answers again, and the pack holds
+    // one entry per module, every one of them signed with the user's own secret.
+    for (n, path) in modules.iter().enumerate() {
+        let output = command(path).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("m{n}\n"));
+    }
+    let secret: [u8; 32] = std::fs::read(secret_in(&home))
+        .unwrap()
+        .try_into()
+        .expect("the secret is 32 bytes");
+    let pack = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "pack"))
+        .expect("a pack");
+    let kept = entries(&std::fs::read(&pack).unwrap());
+    assert!(kept.len() >= 4, "one entry per module: {}", kept.len());
+    for (key, code, signed) in &kept {
+        assert_eq!(
+            &tag(&secret, key, code),
+            signed,
+            "an entry is not authentic"
+        );
+    }
+}

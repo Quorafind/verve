@@ -341,12 +341,16 @@ impl CodeCache {
                 out.put(key, payload, tag);
             }
         }
-        let _ = write_atomically(&self.pack, &out.finish());
-        // The next load reads the pack just written.
-        *state = Pack {
-            used: state.used.clone(),
-            ..Pack::default()
-        };
+        // A write that fails (another process has the pack open, the disk is full, the rename is
+        // refused) is no error: the entries stay in `pending` for the next flush, and this one
+        // neither retries nor bothers the caller.
+        if write_atomically(&self.pack, &out.finish()).is_ok() {
+            // The next load reads the pack just written.
+            *state = Pack {
+                used: state.used.clone(),
+                ..Pack::default()
+            };
+        }
         drop(state);
         // The script has run: reading the directory and deleting old packs now costs the next
         // run nothing. Once a run, and `sweep` itself is once a day.
