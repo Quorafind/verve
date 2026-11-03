@@ -3,15 +3,84 @@ use crate::JsValue;
 use crate::value::JsVariant;
 use crate::vm::opcode::{IndexOperand, RegisterOperand, nullish_base_error};
 use crate::{
-    Context, JsNativeError, JsResult,
+    Context, JsNativeError, JsObject, JsResult,
     builtins::{
         function::set_function_name, typed_array::object::typed_array_element_set_shortcut,
     },
-    object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
+    object::{
+        internal_methods::{
+            InternalMethodPropertyContext, InternalObjectMethods, ORDINARY_INTERNAL_METHODS,
+        },
+        shape::slot::SlotAttributes,
+    },
     property::{PropertyDescriptor, PropertyKey},
     vm::opcode::Operation,
 };
 use boa_macros::js_str;
+
+/// Whether `vtable` runs the ordinary object's property internal methods.
+///
+/// A pointer comparison against `ORDINARY_INTERNAL_METHODS` would compare the address of a `const`
+/// that the compiler is free to materialise more than once, so the methods are compared by the
+/// function they call instead. The three property methods the shortcut replaces are checked, and so
+/// is `[[Set]]`: the object's own `[[Set]]` is what runs first, and `OrdinarySet` on a missing key
+/// calls `[[Set]]` on the prototype, so an override of it on the object or on any prototype changes
+/// the outcome.
+fn has_ordinary_property_methods(vtable: &InternalObjectMethods) -> bool {
+    std::ptr::fn_addr_eq(
+        vtable.__get_own_property__,
+        ORDINARY_INTERNAL_METHODS.__get_own_property__,
+    ) && std::ptr::fn_addr_eq(
+        vtable.__get_prototype_of__,
+        ORDINARY_INTERNAL_METHODS.__get_prototype_of__,
+    ) && std::ptr::fn_addr_eq(
+        vtable.__define_own_property__,
+        ORDINARY_INTERNAL_METHODS.__define_own_property__,
+    ) && std::ptr::fn_addr_eq(vtable.__set__, ORDINARY_INTERNAL_METHODS.__set__)
+}
+
+/// Sets `key` on `object` when no part of `[[Set]]` can be observed.
+///
+/// `OrdinarySet` on a receiver without an own property walks the prototype chain, where a setter or
+/// a non-writable data property makes the assignment fail; anything exotic can also intercept it.
+/// The answer is therefore only known up front when the object is ordinary and extensible, every
+/// prototype is ordinary and lacks the key, and the receiver is the object itself. That is exactly
+/// when `CreateDataProperty` inserts the value with the default attributes, so the walk is replaced
+/// by one insert.
+fn set_new_own_property(object: &JsObject, key: &PropertyKey, value: JsValue) -> bool {
+    if !has_ordinary_property_methods(object.vtable()) {
+        return false;
+    }
+    {
+        let borrowed = object.borrow();
+        if !borrowed.extensible || borrowed.properties().get(key).is_some() {
+            return false;
+        }
+    }
+
+    let mut current = object.prototype();
+    while let Some(prototype) = current {
+        if !has_ordinary_property_methods(prototype.vtable()) {
+            return false;
+        }
+        let borrowed = prototype.borrow();
+        if borrowed.properties().get(key).is_some() {
+            return false;
+        }
+        current = borrowed.shape().prototype();
+    }
+
+    object.borrow_mut().properties.insert(
+        key,
+        PropertyDescriptor::builder()
+            .value(value)
+            .writable(true)
+            .enumerable(true)
+            .configurable(true)
+            .build(),
+    );
+    true
+}
 
 fn set_by_name(
     value: RegisterOperand,
@@ -69,6 +138,15 @@ fn set_by_name(
     drop(object_borrowed);
 
     let name: PropertyKey = ic.name.clone().into();
+
+    // `[[Set]]` inserts on the receiver, so the shortcut only applies when the receiver is the
+    // object being written through.
+    if let Some(receiver_object) = receiver.as_object()
+        && JsObject::equals(&object, &receiver_object)
+        && set_new_own_property(&object, &name, value.clone())
+    {
+        return Ok(());
+    }
 
     let context = &mut InternalMethodPropertyContext::new(context);
     let succeeded = object.__set__(name.clone(), value.clone(), receiver.clone(), context)?;

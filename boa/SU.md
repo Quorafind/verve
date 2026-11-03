@@ -384,6 +384,22 @@ always agree with one another.
   344.5 → 335.0 ms interpreted (load 22–46%); `vdom` 82.2 → 79.6 ms compiled, 97.8 → 88.7 ms
   interpreted; `oo` does not touch this path, and its spread stayed inside the round's noise.
 
+- `boa_engine`, `vm/opcode/set/property.rs`: assigning a new property inserts it directly.
+  `this.x = x` in a constructor ran the full `OrdinarySet`: `[[GetOwnProperty]]` on the receiver,
+  then a walk up the prototype chain looking for a setter or a non-writable data property, then
+  `CreateDataProperty`. When the object is ordinary and extensible, the key is absent on the whole
+  chain, every prototype is ordinary, and the receiver is the object itself, that walk can only end
+  at `CreateDataProperty` with the default attributes, so the walk is replaced by one insert. A
+  non-writable data property or a setter on the chain still fails or calls, a proxy still
+  intercepts, a non-extensible receiver still fails, and `Reflect.set` with a separate receiver
+  still defines on the receiver. Ordinary objects are recognised by the internal methods the
+  shortcut depends on being the ordinary ones (`std::ptr::fn_addr_eq` on the four method pointers,
+  `[[Set]]` included, since an override of it on the object or a prototype changes the outcome),
+  not on the address of a `const`, which the compiler may materialise twice). Measured on the same
+  round (median of five interleaved processes, load 27–37%): 200,000 constructor calls storing three
+  fields 304.1 → 232.4 ms compiled, 320.0 → 253.6 ms interpreted; storing one field on a fresh
+  object 68.4 → 46.7 ms compiled, 73.7 → 60.3 ms interpreted.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

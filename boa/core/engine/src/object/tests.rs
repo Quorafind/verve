@@ -80,3 +80,83 @@ fn object_literal_defines_new_properties_with_default_attributes() {
         TestAction::assert("Array.isArray(arr) && arr.length === 3 && arr.extra.k === 4"),
     ]);
 }
+
+#[test]
+fn assigning_a_new_property_walks_the_prototype_chain() {
+    // `this.x = x` inserts directly only when the whole prototype chain lacks the key and every
+    // object on it is ordinary. A non-writable data property, a setter, a proxy, a frozen receiver
+    // and a receiver other than the object written through all have to keep their behaviour.
+    run_test_actions([
+        // A non-writable data property on the prototype makes a sloppy-mode assignment a no-op and
+        // a strict-mode one a TypeError.
+        TestAction::run(
+            "const lockedProto = {};
+             Object.defineProperty(lockedProto, 'x', { value: 1, writable: false, configurable: true });
+             const sloppy = Object.create(lockedProto);
+             sloppy.x = 5;",
+        ),
+        TestAction::assert("sloppy.x === 1"),
+        TestAction::assert("Object.getOwnPropertyNames(sloppy).length === 0"),
+        TestAction::assert_native_error(
+            "(function () { 'use strict'; const o = Object.create(lockedProto); o.x = 5; })()",
+            JsNativeErrorKind::Type,
+            "cannot set non-writable property: x",
+        ),
+        // A setter on the prototype runs, and nothing is created on the receiver.
+        TestAction::run(
+            "let setterSaw = 0;
+             const withSetter = { set x(v) { setterSaw = v; } };
+             const child = Object.create(withSetter);
+             child.x = 9;",
+        ),
+        TestAction::assert_eq("setterSaw", 9),
+        TestAction::assert("Object.getOwnPropertyNames(child).length === 0"),
+        // A proxy anywhere on the chain keeps the assignment observable.
+        TestAction::run(
+            "let proxySaw = null;
+             const proxied = new Proxy({}, { set(t, k, v) { proxySaw = k; return true; } });
+             const throughProxy = Object.create(proxied);
+             throughProxy.x = 3;",
+        ),
+        TestAction::assert("proxySaw === 'x'"),
+        // An ordinary assignment still creates a plain writable property.
+        TestAction::run(
+            "const fresh = {};
+             fresh.x = 1;
+             const freshDesc = Object.getOwnPropertyDescriptor(fresh, 'x');",
+        ),
+        TestAction::assert_eq("freshDesc.value", 1),
+        TestAction::assert(
+            "freshDesc.writable === true && freshDesc.enumerable === true && freshDesc.configurable === true",
+        ),
+        // A non-extensible receiver keeps its silent failure and its TypeError.
+        TestAction::run("const sealed = Object.preventExtensions({}); sealed.x = 1;"),
+        TestAction::assert("sealed.x === undefined"),
+        TestAction::assert_native_error(
+            "(function () { 'use strict'; const o = Object.preventExtensions({}); o.x = 1; })()",
+            JsNativeErrorKind::Type,
+            "cannot set non-writable property: x",
+        ),
+        // A frozen data property on the receiver itself stays non-writable.
+        TestAction::run("const frozen = Object.freeze({ x: 1 }); frozen.x = 2;"),
+        TestAction::assert_eq("frozen.x", 1),
+        // `Reflect.set` with a separate receiver defines on the receiver, not on the object the key
+        // was looked up on.
+        TestAction::run(
+            "const source = {};
+             const target = {};
+             const ok = Reflect.set(source, 'x', 7, target);",
+        ),
+        TestAction::assert("ok === true"),
+        TestAction::assert_eq("target.x", 7),
+        TestAction::assert("source.x === undefined"),
+        // An inherited `__proto__` accessor keeps intercepting an assignment of that name.
+        TestAction::run(
+            "const base = {};
+             const derived = Object.create(base);
+             derived.__proto__ = { marker: 1 };",
+        ),
+        TestAction::assert_eq("derived.marker", 1),
+        TestAction::assert("Object.getPrototypeOf(derived) !== base"),
+    ]);
+}
