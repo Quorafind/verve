@@ -1,6 +1,6 @@
 # P42 性能与启动
 
-**依赖**：M1–M3（P10、P11、P20、P34 至少已合并）；P01 的体积实测；P62（CJS 进缓存）、P63（`jit` feature）  **规模**：M  **修改**：`crates/verve-electron/`（启动流程、预热池、性能追踪）、`crates/verve-gpui/`（帧时间戳）、`src/code_cache.rs`（**允许**：只为并发 flush 的修复）、`boa/core/gc`（**允许，需记 `boa/SU.md`**：GC 阈值可配置）、新建 `scripts/electron-bench/` 与 `docs/electron/perf.md`
+**依赖**：M1–M3（P10、P11、P20、P34 至少已合并）；P01 的体积实测；P62（CJS 进缓存）、P67（缓存淘汰与并发写）、P63（`jit` feature）  **规模**：M  **修改**：`crates/verve-electron/`（启动流程、预热池、性能追踪）、`crates/verve-gpui/`（帧时间戳）、`boa/core/gc`（**允许，需记 `boa/SU.md`**：GC 阈值可配置）、新建 `scripts/electron-bench/` 与 `docs/electron/perf.md`
 
 ## 目标
 
@@ -44,9 +44,9 @@
   - `<generation>`：应用来自 `app.asar` 时取 **asar 头（P11 已解析的 JSON 头字节）SHA-256 的前 16 个十六进制字符**；
     来自 `resources/app/` 或命令行目录时取 `dev`。缓存条目本身仍按"构建指纹 + 全局作用域 + 源码全文"做键
     （`src/code_cache.rs` 现状），generation 只用来**整体淘汰旧版本应用的缓存**：启动后空闲时删除同级的其他 generation 目录。
-  - `dev` generation 设大小上限（默认 64 MiB），超过时整个清空重建。
-- 渲染器与主进程共享同一目录与 pack（`code_cache.rs` 的 pack 写入是"临时文件改名"，并发写者最后一个胜出；
-  需验证两个 isolate 同时 flush 不会损坏、最多丢失一次运行的新增条目，并写测试）。
+  - `dev` generation 设大小上限（默认 64 MiB），超过时整个清空重建。旧 generation 的删除复用 P67 的淘汰函数。
+- 渲染器与主进程共享同一目录与 pack。并发 flush 的正确性由 P67 保证（临时文件互不覆盖、改名前合并、改名失败放弃本次写入）；
+  本包补一个两个 isolate 同时 flush 的集成测试。
 - 关闭窗口销毁渲染器前、`app.quit` 退出前调用 `flush_code_cache()`。
 
 ### 2. CommonJS 入缓存
@@ -107,7 +107,7 @@
 ## 步骤
 
 1. 追踪点与 `bench.rs`；先测出现状基线（Verve 与 Electron），写 `perf.md` 第一版，标出关键路径。
-2. 代码缓存接入 + generation 淘汰（含测试：两个 isolate 并发 flush）。
+2. 代码缓存接入 + generation 淘汰（复用 P67；测试两个 isolate 并发 flush）。
 3. 渲染器预热与启动并行化，逐项测量收益，无收益的默认关闭。
 4. GC 可配置、空闲回收、内存分解测量。
 5. 按 P01 的结果定 JIT 默认策略。
@@ -115,7 +115,7 @@
 
 ## 验收
 
-- `cargo test -p verve-electron` 与 `cargo test --test code_cache` 通过（新增的并发 flush 测试在内）。
+- `cargo test -p verve-electron` 与 `cargo test --test code_cache` 通过（新增的两个 isolate 并发 flush 测试在内）。
 - 第二次启动 electron-quick-start 时 `code_cache_stats()` 显示主进程 CJS 与渲染器 ESM 均命中（日志可见）。
 - `perf.md` 有一份按上述格式的完整报告，包含与 Electron 39.2.0 的对比；README 第 1 节的四项目标逐项给出"达标/差距"。
 - 关闭追踪时，`bench.rs` 测得的首帧时间与打开追踪时差异在噪声内。

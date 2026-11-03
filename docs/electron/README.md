@@ -89,7 +89,7 @@ crates/
   verve-layout/       新：布局引擎（taffy + 行内排版 + 层叠上下文 → DisplayList），不依赖 GPUI（P30/P31）
   verve-gpui/         新：`electron` 二进制（src/bin/electron.rs）、GPUI Shell、DomView（回放 DisplayList）、TextMeasurer 的 GPUI 实现、输入桥接、菜单托盘
   verve-electron-npm/ 新：npm 包模板与平台包脚本（P40，非 Rust）
-src/                  Verve 内核：只允许 P03、P11、P17、P42、P62 修改（P42 还可改 boa/core/gc；性能线 P61、P64–P66 可改 boa/core 的 engine 与 string；都需记入 boa/SU.md）
+src/                  Verve 内核：只允许 P03、P11、P17、P42、P62、P67 修改（P42 还可改 boa/core/gc；性能线 P61、P64–P66 可改 boa/core 的 engine 与 string；都需记入 boa/SU.md）
 docs/electron/        本方案
 tests/electron/       夹具应用与无头验收（P00）
 ```
@@ -118,7 +118,7 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 性能线（与批次 2 起并行，见下文「性能线」）
              P60 JS 基准与剖析 ─ P61 超线性内建   P62 CJS 代码缓存   P63 electron 可带 JIT
                │
-             P64 字符串/正则/JSON   P65 对象/集合/类型化数组   P66 JIT 覆盖扩展 ─ RP 性能复盘
+             P64 字符串/正则/JSON   P65 对象/集合/类型化数组   P66 JIT 覆盖扩展   P67 CLI 默认开缓存 ─ RP 性能复盘
 ```
 
 | 包 | 名称 | 依赖 | 可并行 | 规模 |
@@ -159,6 +159,7 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 | [P64](packages/P64-strings-regex-json.md) | 字符串、正则与 JSON 热路径 | P60 P61 | ✓ | L |
 | [P65](packages/P65-objects-typed-arrays.md) | 对象、集合与类型化数组热路径（解释器） | P60 P61 | ✓ | L |
 | [P66](packages/P66-jit-coverage.md) | JIT 覆盖扩展 | P60 P63 | | L |
+| [P67](packages/P67-code-cache-default.md) | `verve run` 默认开代码缓存 | P62 | | M |
 
 ### 重构关卡
 
@@ -181,7 +182,7 @@ JIT 在这组测试上几乎没有收益，三个内建是平方级的，大 CJS
 
 1. **立即可做（与批次 2 并行）**：P60 把基准搬进仓库并给出剖析方法；P61 修三个超线性内建并扫一遍同类问题；
    P62 让 CJS 进代码缓存（原 P42 第 2 节）；P63 让 `electron` 二进制能带 JIT（默认开不开仍由 P42 第 5 节定）。
-2. **剖析驱动（P60、P61 合并后，与批次 3 并行）**：P64 字符串/正则/JSON，P65 对象/集合/类型化数组（解释器），P66 JIT 覆盖。
+2. **剖析驱动（P60、P61 合并后，与批次 3 并行）**：P64 字符串/正则/JSON，P65 对象/集合/类型化数组（解释器），P66 JIT 覆盖；P67 让 `verve run` 默认开代码缓存（P62 合并后即可派发，含首次运行成本、旧缓存淘汰与并发写）。
    这三个包的目标先写成「参考目标」，第一次剖析后由实现者提出、总控确认，才开始大改。
 3. **RP 性能复盘**：P41 能跑起 L2 应用（Vite/React）后、P64–P66 合并后，用真实应用（React 1000 行表格渲染、L3 编辑器的输入延迟、
    主进程大 CJS 包启动）测 Verve 与 Electron 39，按剖析决定下一步：继续调内建与解释器，做 JIT 第 3 阶段（类型反馈），
