@@ -143,8 +143,8 @@ not, and is compiled every run.
 
 `Runtime::set_code_cache_dir_with_secret(dir, secret)` keeps the compiled code of the ES modules a
 runtime loads, signed with the embedder's secret; `set_code_cache_dir_with_user_secret(dir)` signs
-with the user's own (`verve::code_cache_user_secret`), which is what `verve run --code-cache=<dir>`
-and `VERVE_CODE_CACHE=<dir>` do. `disable_code_cache` stops. Off by default.
+with the user's own (`verve::code_cache_user_secret`). `disable_code_cache` stops. An embedder's
+runtime starts without a cache; `verve run` keeps one by default (see [`verve run`](#verve-run-the-default-folder)).
 
 - **One pack per build**, `<dir>/<build>.pack`: a header, an index (key, offset, length, tag per
   entry), then the code. A run opens it once, reads the index, and reads an entry when its module
@@ -154,12 +154,15 @@ and `VERVE_CODE_CACHE=<dir>` do. `disable_code_cache` stops. Off by default.
   the pack it opened and checked), then the rest, keeping only entries whose tags verify, capped at
   64 MB; it goes to a temporary file renamed into place, when a burst of loading settles (100 ms
   after the first new entry, at the next round of jobs), at exit, when the runtime is dropped, or
-  on `Runtime::flush_code_cache`.
+  on `Runtime::flush_code_cache`. A write that cannot be renamed into place — another process is
+  opening the pack — is no error: the entries stay pending for the next flush, nothing retries.
+  The temporary file takes its access from the directory (private to the user by then), so writing
+  a pack builds no second DACL.
 - **The key** of an entry is a SHA-256 of the build's fingerprint — Boa's fingerprint, Verve's
   version, the executable's path, size and modification time — of the realm's global scope
   (`boa_engine::code_cache::global_scope_fingerprint`), and of the whole source text the loader
-  produced (after any load hooks). Any rebuild starts a new pack; old ones are left for the
-  embedder to delete. Hosts with different global scopes keep entries of their own.
+  produced (after any load hooks). Any rebuild starts a new pack, which leaves the old one behind:
+  [`sweep`](#old-packs) removes those no build has touched for a fortnight.
 - **The tag** is an HMAC-SHA256 of the key and the code under a 32-byte secret that is never in
   the directory: the embedder's, or the user's own — 32 random bytes in
   `%LOCALAPPDATA%\Verve\code-cache-secret` (Windows) or `$XDG_CONFIG_HOME/verve/code-cache-secret`
@@ -176,6 +179,56 @@ and `VERVE_CODE_CACHE=<dir>` do. `disable_code_cache` stops. Off by default.
 - Anything missing, not authentic, or refused by Boa is parsed and compiled as without the cache,
   and its fresh entry replaces the old one. `Runtime::code_cache_stats` counts hits, misses,
   refusals and stores.
+
+### `verve run`: the default folder
+
+`verve run` keeps a cache without being asked, in the user's own folder:
+`%LOCALAPPDATA%\Verve\code-cache` on Windows, `$XDG_CACHE_HOME/verve/code-cache` elsewhere (or
+`~/.cache/verve/code-cache`). `--no-code-cache`, or `VERVE_CODE_CACHE` holding `0`, `off` or
+`false`, keeps no compiled code at all; `--code-cache=<dir>` and `VERVE_CODE_CACHE=<dir>` name a
+folder instead, and are used as given — a folder that cannot be opened there says so on standard
+error, as it always has. The default folder never does: a read-only home directory, a container and
+a machine with no `HOME` all leave the run without a cache, silently.
+
+The first run of a program does not pay for a pack. Compiling every function of a module to write
+it down is what makes a cold run 28% to 33% slower than no cache at all (table below), so the run
+that pays it is the one that has already run before:
+
+- **The first run** reads one `stat` at startup — this build's pack, `<dir>/<build>.pack` — and,
+  if it is not there, nothing else of the folder: no directory is made, no secret is read. As it
+  loads modules it adds up their source and notes their paths; before it exits, if what it loaded
+  is worth a pack ([`WORTH_CACHING`](#worth-caching)), it makes the folder and writes the **mark**:
+  this build's `<dir>/<build>.seen`, the path, size and modification time of each file it loaded.
+  A forged mark can only make the next run compile, which write access to the folder could always
+  do; it carries no code and is not signed.
+- **The second run** finds its mark, recognises the files it is about to load (same path, same size,
+  same modification time), and only then opens the cache as `--code-cache` does — folder made and
+  checked private, secret read, pack's index read — so it compiles every function once and keeps
+  the pack.
+- **Every run after that** sees the pack at startup and is a warm one. That startup path is one
+  `stat` and then what it always was.
+
+A run whose startup `stat` finds a pack leaves no mark, even if there is none: it compiles nothing
+to write down, so there is nothing to remember.
+
+<a name="worth-caching"></a>**`WORTH_CACHING` is 64 KiB** of source: below it the cache is only
+fixed cost, since a small program has no parsing worth skipping (a `console.log('hi')` script's pack
+was 402 bytes and made every run 4.7% slower). The gate is applied as the run ends, once the total
+is known, which is also why the folder and the mark are written there rather than at startup.
+
+The mark holds this build's files only, up to 4,096 entries (the oldest go first) or 256 KiB
+(entries past it are not written); a mark that cannot be read whole is treated as absent.
+
+### Old packs
+
+Every rebuild, upgrade and checkout leaves a pack behind, so the folder is swept: after the script
+has ended (never on the startup path) and at most once a day, as recorded in `<dir>/last-sweep`.
+Packs and marks that no build has touched for **14 days** go first; if the folder is still over
+**512 MB**, the least recently used go until it is under. This build's pack and mark are never
+swept. Opening a pack stamps its modification time, so a build that is still in use keeps its
+place. Every failure — no folder, no permission, a file that vanished — is a reason to skip, not an
+error. `code_cache::sweep(dir, current, now)` takes only the folder and the current pack, so P42
+can clear Electron's old generations with it.
 
 ### Trust model
 
@@ -218,6 +271,29 @@ lazy load is still about two and a half times Node's: parsing (about 40 ms) is m
 
 The warm cache brings loading to Node's level, and the whole process (Verve starts in about 47 ms,
 Node in about 106) well under it, at less memory than eager compilation.
+
+### `verve run`'s default folder, measured
+
+Release `verve` (`--features jit`), Windows 10, x86-64; process time, median/best/worst of N runs
+per configuration, the four configurations sampled in a rotating order within each round (a fixed
+order put the no-cache run right after the processor counter and raised it by 3 ms). The machine
+was shared with other builds: `Get-Counter '\Processor(_Total)\% Processor Time'` read between the
+numbers given. `LOCALAPPDATA`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME` and `HOME` pointed at a scratch
+folder throughout.
+
+| Payload | Load | No cache | First run | Second run (compiles, writes) | After that (warm) | Pack / mark |
+|---|---|---|---|---|---|---|
+| `console.log('hi')` | 5.6–8.5% (8 rounds) | **23.8** / 21.1 / 41.1 | **23.3** / 21.0 / 26.4 | **21.0** / 20.2 / 22.7 | **21.1** / 19.9 / 22.7 | none: below `WORTH_CACHING` |
+| Rebon's composition (31 entries) | 2.9–8.8% (11 rounds) | **81.6** / 78.7 / 104.7 | **87.6** / 82.3 / 142.7 | **110.2** / 99.1 / 135.6 | **45.4** / 44.9 / 51.2 | 995,939 B / 4,238 B |
+| `require('typescript')` (9.1 MB) | 2.7–88.3% (7 rounds) | **1,143.0** / 1,114.2 / 1,847.6 | **1,116.2** / 1,075.5 / 1,872.4 | **1,432.2** / 1,403.7 / 1,770.2 | **201.1** / 198.1 / 276.1 | 17,839,029 B / 306 B |
+
+The `console.log('hi')` script never touches the folder in any run, and is 0.5 ms *faster* than
+without a cache. `require('typescript')`'s first run is 97.6% of no cache, because it only writes
+a mark. The composition's first run is **107.4%** — over the 105% it was measured against, by
+about 1.9 ms: making `%LOCALAPPDATA%\Verve` and its `code-cache` folder, each with an owner-only
+DACL, costs 1.97 ms, `stat`-ing the 34 files loaded costs 0.51 ms, and the 4 KB mark 0.48 ms.
+Nothing is compiled and no secret is read on that run. The second run is the one that pays for the
+pack, and from the third run on the composition loads in 45 ms against 82 without a cache.
 
 ### A CommonJS package: TypeScript 5.9.3
 
@@ -271,7 +347,7 @@ All on the final tree, rebased on `docs/electron-plan` at 471082de (JIT phase 2,
 | Suite | Modes | Result |
 |---|---|---|
 | Boa (`boa_engine`, `boa_parser`, `boa_ast`, `boa_interner`, insta bytecode) | eager, lazy, lazy with every module through the cache (`BOA_CODE_CACHE_ROUNDTRIP=1`); the same three with the JIT forced (`BOA_JIT_THRESHOLD=0`); `annex-b` eager and lazy | all pass (1,774 tests; 1,811 with the JIT; 1,775 with `annex-b`) |
-| Verve (all 433 tests) | lazy, eager, cache cold, cache warm (`code-cache-env`, `VERVE_CODE_CACHE`), JIT forced lazy and eager (`VERVE_JIT_THRESHOLD=0 BOA_JIT_THRESHOLD=0`) | all pass |
+| Verve (all 445 tests) | lazy, eager, cache cold, cache warm (`code-cache-env`, `VERVE_CODE_CACHE`), JIT forced lazy and eager (`VERVE_JIT_THRESHOLD=0 BOA_JIT_THRESHOLD=0`) | all pass |
 | test262 (`language`, `built-ins`, `annexB`, `intl402`, `harness`; 52,095 results), carried over from the run at 65fdd840: the suite is not in this checkout | eager, lazy, lazy through the cache, JIT forced eager, JIT forced lazy through the cache, compared test by test with eager | 0 differences but `Atomics.notify` (`notify-two`, `notify-all-on-loc`, bigint `notify-all-on-loc`), which flip both ways between runs of the same configuration under load and pass in every mode run alone |
 
 Focused tests: `boa/core/engine/src/tests/lazy.rs` (early errors in uncalled functions,
@@ -288,7 +364,16 @@ parsed); `tests/code_cache.rs` (round trips, a changed source, damaged and
 cut packs, another secret, a forged entry, an unnamed `.js` required as CommonJS and as a module,
 one source kept as both, a byte order mark and a `#!` line, an `import` of an unnamed
 CommonJS `.js` parsed once, an unnamed `.js` entry run from the wrapper it was decided with, a
-`.js` that becomes a module between runs, `verve run --code-cache` and `VERVE_CODE_CACHE`).
+`.js` that becomes a module between runs, `verve run --code-cache` and `VERVE_CODE_CACHE`, the
+default folder caching from the second run with `--no-code-cache` and `VERVE_CODE_CACHE=0` leaving it
+alone, a default folder that cannot be made leaving the run silent, a pack already there making the
+first run warm, four processes writing one pack at once, and the sweep's age and size rules).
+
+Every test that starts the `verve` binary turns the cache off with `VERVE_CODE_CACHE=0` (or runs
+with `LOCALAPPDATA`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME` and `HOME` in a folder of its own), so the
+suite neither writes to the user's folder nor measures code read back from it; `scripts/js-bench/run.sh`
+passes `--no-code-cache` for the same reason. Running the suite leaves `%LOCALAPPDATA%\Verve`
+exactly as it was.
 
 ## Using it from Rebon
 

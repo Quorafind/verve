@@ -55,6 +55,8 @@ fn verve_dom_run_runs_a_script_with_a_document() {
             "-e",
             "document.body.innerHTML = '<p class=a>hi</p>'; requestAnimationFrame(() => console.log(document.querySelector('.a').textContent, typeof window, location.href))",
         ])
+        // `verve-dom run` is `verve run`, which keeps compiled code in the user's own folder.
+        .env("VERVE_CODE_CACHE", "0")
         .output()
         .expect("verve-dom runs");
     assert!(output.status.success(), "{output:?}");

@@ -1110,6 +1110,9 @@ pub(crate) fn exit_code(context: &mut Context) -> i32 {
 pub(crate) fn exiting(context: &mut Context, code: Option<i32>) -> i32 {
     // What the code cache compiled is written before the process can end.
     crate::code_cache::flush(context, true);
+    // The default directory's first run leaves the mark its second run compiles from, if what it
+    // loaded is worth a pack.
+    crate::code_cache_mark::finish(context);
     // `process.exit()` with nothing said takes the `exitCode` a script already set, as Node's.
     let code = code.unwrap_or_else(|| exit_code(context));
     // `verve run`'s `exit` listeners are told once; a host's realm has no such latch, and the
