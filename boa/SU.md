@@ -410,6 +410,14 @@ always agree with one another.
   a tombstone; an unlocked one still clears outright, which keeps `clear()` on a map nobody
   iterates O(1) and frees the capacity as before.
 
+- `boa_engine`, `builtins/typed_array/builtin.rs`: `%TypedArray%.prototype.sort` reads a comparator's
+  result by its sign, and `CompareTypedArrayElements` returned `Greater` for any positive number and
+  `Less` for everything else, `+0` and `-0` included. A comparator that says "equal" therefore said
+  "greater" on every pair, so an equal group came back reversed and a pre-sorted input was reordered:
+  `new Uint8Array([0,1,2,3]).sort(() => 0)` gave `3,2,1,0` where the specification keeps the input,
+  and test262's `builtins/TypedArray/prototype/sort/stability` failed. Both zeroes now mean
+  `Equal`; only a number above or below zero orders the pair. NaN was already `Equal`.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

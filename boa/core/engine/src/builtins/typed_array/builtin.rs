@@ -3201,11 +3201,15 @@ fn compare_typed_array_elements(
             return Ok(cmp::Ordering::Equal);
         }
 
-        // c. Return v.
-        if v.is_sign_positive() {
+        // c. Return v. The sort reads its sign, so both zeroes mean equal; only a positive or a
+        // negative number orders the pair.
+        if v > 0.0 {
             return Ok(cmp::Ordering::Greater);
         }
-        return Ok(cmp::Ordering::Less);
+        if v < 0.0 {
+            return Ok(cmp::Ordering::Less);
+        }
+        return Ok(cmp::Ordering::Equal);
     }
 
     match (x.variant(), y.variant()) {

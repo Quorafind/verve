@@ -399,3 +399,35 @@ fn typed_array_element_set_with_another_receiver_defines_on_the_receiver() {
         TestAction::assert_eq("Object.getOwnPropertyDescriptor(o, '0').value", 7),
     ]);
 }
+
+#[test]
+fn typed_array_sort_treats_a_zero_comparison_as_equal() {
+    // `CompareTypedArrayElements` returns the comparator's result, and the sort reads its sign. A
+    // comparator that returns zero (or `-0`) says "equal", so the sort must keep the input order;
+    // reading only the sign bit would turn every equal pair into a swap.
+    run_test_actions([
+        TestAction::run(
+            "const zero = () => 0;
+             const negativeZero = () => -0;
+             const ascending = new Uint8Array([3, 2, 1]);
+             const descending = new Uint8Array([3, 2, 1]);
+             const keptByZero = Array.from(ascending.sort(zero));
+             const keptByNegativeZero = Array.from(descending.sort(negativeZero));",
+        ),
+        TestAction::assert("keptByZero.join(',') === '3,2,1'"),
+        TestAction::assert("keptByNegativeZero.join(',') === '3,2,1'"),
+        // A comparator that groups values still sorts into groups, stably.
+        TestAction::run(
+            "const compare = (a, b) => (a / 4 | 0) - (b / 4 | 0);
+             const reversed = Array.from({ length: 8 }, (_, i) => 7 - i);
+             const grouped = new Uint8Array(reversed).sort(compare);",
+        ),
+        TestAction::assert("Array.from(grouped).join(',') === '3,2,1,0,7,6,5,4'"),
+        // A pre-sorted input stays as it is.
+        TestAction::run(
+            "const sorted = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]);
+             sorted.sort((a, b) => (a / 4 | 0) - (b / 4 | 0));",
+        ),
+        TestAction::assert("Array.from(sorted).join(',') === '0,1,2,3,4,5,6,7'"),
+    ]);
+}
