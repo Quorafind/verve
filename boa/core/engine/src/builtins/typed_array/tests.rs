@@ -235,3 +235,69 @@ fn canonical_numeric_index_keys_are_unchanged() {
         TestAction::assert("!('-0' in t2)"),
     ]);
 }
+
+#[test]
+fn typed_array_length_bypasses_only_an_untouched_prototype_chain() {
+    // `length` is read straight from the typed array's internal slots when nothing on the
+    // prototype chain can observe the read. Each block below makes one part of that condition
+    // false and checks that the getter is called again.
+    run_test_actions([
+        // A subclass prototype with its own `length`.
+        TestAction::run(
+            "class Sub extends Uint8Array { get length() { return 7 } }
+             const sub = new Sub(3);
+             const plain = new Uint8Array(3);",
+        ),
+        TestAction::assert_eq("sub.length", 7),
+        TestAction::assert_eq("plain.length", 3),
+        // A data property shadowing the accessor on Uint8Array.prototype.
+        TestAction::run(
+            "Object.defineProperty(Uint8Array.prototype, 'length',
+                { value: 5, writable: true, configurable: true });",
+        ),
+        TestAction::assert_eq("plain.length", 5),
+        TestAction::run("delete Uint8Array.prototype.length;"),
+        TestAction::assert_eq("plain.length", 3),
+        // An own `length` on the view itself.
+        TestAction::run(
+            "const own = new Uint8Array(3);
+             Object.defineProperty(own, 'length', { value: 9, writable: true });",
+        ),
+        TestAction::assert_eq("own.length", 9),
+        // A prototype chain that no longer reaches %TypedArray%.prototype.
+        TestAction::run("const rewired = new Uint8Array(3); Object.setPrototypeOf(rewired, {});"),
+        TestAction::assert("rewired.length === undefined"),
+        TestAction::run("Object.setPrototypeOf(rewired, Uint8Array.prototype);"),
+        TestAction::assert_eq("rewired.length", 3),
+        // A replaced accessor on %TypedArray%.prototype.
+        TestAction::run(
+            "const originalLength = Object.getOwnPropertyDescriptor(
+                Object.getPrototypeOf(Uint8Array.prototype), 'length');
+             Object.defineProperty(Object.getPrototypeOf(Uint8Array.prototype), 'length',
+                { get() { return 42 }, configurable: true });",
+        ),
+        TestAction::assert_eq("plain.length", 42),
+        TestAction::run(
+            "Object.defineProperty(Object.getPrototypeOf(Uint8Array.prototype), 'length', originalLength);",
+        ),
+        TestAction::assert_eq("plain.length", 3),
+        // A detached buffer reports zero.
+        TestAction::run(
+            "const buffer = new ArrayBuffer(8);
+             const detached = new Uint8Array(buffer);
+             buffer.transfer();",
+        ),
+        TestAction::assert_eq("detached.length", 0),
+        // A length-tracking view follows the buffer when it shrinks and grows.
+        TestAction::run(
+            "const growable = new ArrayBuffer(8, { maxByteLength: 16 });
+             const tracking = new Uint8Array(growable);
+             const trackingBefore = tracking.length;",
+        ),
+        TestAction::assert_eq("trackingBefore", 8),
+        TestAction::run("growable.resize(4);"),
+        TestAction::assert_eq("tracking.length", 4),
+        TestAction::run("growable.resize(12);"),
+        TestAction::assert_eq("tracking.length", 12),
+    ]);
+}

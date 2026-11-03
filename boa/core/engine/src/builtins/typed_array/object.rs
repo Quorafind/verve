@@ -4,7 +4,11 @@ use std::sync::atomic::Ordering;
 
 use crate::{
     Context, JsExpect, JsNativeError, JsResult, JsString, JsValue,
-    builtins::array_buffer::{BufferObject, BufferRef},
+    builtins::{
+        OrdinaryObject,
+        array_buffer::{BufferObject, BufferRef},
+    },
+    native_function::{NativeFunctionObject, NativeFunctionPointer},
     object::{
         JsData, JsObject,
         internal_methods::{
@@ -14,11 +18,12 @@ use crate::{
         },
     },
     property::{PropertyDescriptor, PropertyKey},
+    string::StaticJsStrings,
 };
 use boa_gc::{Finalize, Trace};
 use boa_macros::js_str;
 
-use super::{TypedArrayKind, is_valid_integer_index};
+use super::{BuiltinTypedArray, TypedArrayKind, is_valid_integer_index};
 
 /// A `TypedArray` object is an exotic object that performs special handling of integer
 /// index property keys.
@@ -371,6 +376,73 @@ fn canonical_numeric_index_string(argument: &JsString) -> Option<f64> {
 
     // 4. Return undefined.
     None
+}
+
+/// Whether `get` is the intrinsic getter of `%TypedArray%.prototype.length`.
+fn is_intrinsic_length_getter(get: &JsValue) -> bool {
+    let Some(function) = get.as_object() else {
+        return false;
+    };
+    let Some(native) = function.downcast_ref::<NativeFunctionObject>() else {
+        return false;
+    };
+    let Some(pointer) = native.f.as_fn_ptr() else {
+        return false;
+    };
+    let intrinsic: NativeFunctionPointer = BuiltinTypedArray::length;
+    pointer as usize == intrinsic as usize
+}
+
+/// The value of `length` for `object`, when the accessor on the prototype chain can be bypassed.
+///
+/// Returns `None` unless `object` is a typed array, it has no own `length`, everything between it
+/// and `%TypedArray%.prototype` is an ordinary object without `length`, and the accessor found at
+/// the end has the intrinsic getter. The getter itself only reads internal slots, so finding it
+/// anywhere on the chain gives the same answer as calling it. Everything else takes the spec path,
+/// which also covers a detached buffer, a resizable buffer that shrank, and a replaced or shadowed
+/// accessor.
+pub(crate) fn typed_array_length_shortcut(object: &JsObject) -> Option<JsValue> {
+    if !object.is::<TypedArray>() {
+        return None;
+    }
+
+    let key = PropertyKey::from(StaticJsStrings::LENGTH);
+
+    // An own `length` shadows the accessor.
+    if object.borrow().shape().lookup(&key).is_some() {
+        return None;
+    }
+
+    let mut current = object.prototype();
+    loop {
+        let prototype = current?;
+        if !prototype.is::<OrdinaryObject>() {
+            return None;
+        }
+        let borrowed = prototype.borrow();
+        let Some(slot) = borrowed.shape().lookup(&key) else {
+            current = borrowed.shape().prototype();
+            continue;
+        };
+        if !slot.attributes.has_get() {
+            return None;
+        }
+        let get = borrowed.properties().storage[slot.index as usize].clone();
+        if !is_intrinsic_length_getter(&get) {
+            return None;
+        }
+        break;
+    }
+
+    let typed_array = object.downcast_ref::<TypedArray>()?;
+    let buffer = typed_array.viewed_array_buffer().as_buffer();
+    let Some(bytes) = buffer.bytes(Ordering::SeqCst) else {
+        return Some(0.into());
+    };
+    if typed_array.is_out_of_bounds(bytes.len()) {
+        return Some(0.into());
+    }
+    Some(typed_array.array_length(bytes.len()).into())
 }
 
 /// `[[GetOwnProperty]]` internal method for `TypedArray` exotic objects.

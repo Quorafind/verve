@@ -305,6 +305,18 @@ impl NativeFunction {
         }
     }
 
+    /// The function pointer backing this `NativeFunction`, or `None` for a closure.
+    ///
+    /// Two builtins built from the same function item compare equal, which is how an optimized
+    /// path tells an untouched intrinsic apart from one a script replaced.
+    #[must_use]
+    pub(crate) const fn as_fn_ptr(&self) -> Option<NativeFunctionPointer> {
+        match &self.inner {
+            Inner::PointerFn(f) => Some(*f),
+            Inner::Closure(_) => None,
+        }
+    }
+
     /// Converts this `NativeFunction` into a `JsFunction` without setting its name or length.
     ///
     /// Useful to create functions that will only be used once, such as callbacks.

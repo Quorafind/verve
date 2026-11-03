@@ -337,6 +337,23 @@ always agree with one another.
   `ta.byteOffset` 374.3 → 212.7 ms, a missing string key 389.5 → 211.6 ms, and the suite's `typed`
   (six 1M loops reading `f.length` per iteration) 3589.5 → 2350.1 ms.
 
+- `boa_engine`, `vm/opcode/get/property.rs`: `GetLengthProperty` reads a typed array's `length` from
+  its internal slots, the way it already did for arrays and strings. The opcode's array fast path
+  checked `is_array()`, which a typed array is not, so `f.length` fell through to the inline cache,
+  the integer-indexed exotic `[[Get]]`, `CanonicalNumericIndexString`, the prototype walk to
+  `%TypedArray%.prototype`, and an accessor call that itself had to re-validate the receiver. The
+  shortcut is taken only when the read cannot be observed: the receiver is a typed array, it has no
+  own `length`, every prototype between it and `%TypedArray%.prototype` is an ordinary object
+  without `length`, and the accessor that remains has the intrinsic getter (compared as a function
+  pointer, `NativeFunction::as_fn_ptr`, the first use of that new accessor). The getter only reads
+  internal slots, so skipping it is unobservable; a detached buffer and a resized length-tracking
+  view are still computed from the current buffer length, exactly as the getter does. A subclass
+  getter, a shadowing data property on `Uint8Array.prototype`, an own `length`, a rewired prototype
+  and a replaced accessor all fall back to the spec path. Measured on the same round (median of five
+  interleaved processes, load 19–38%): `ta.length` over 1M iterations 178.7 → 73.7 ms compiled
+  (175.3 → 72.0 best) and 238.6 → 102.8 ms in the interpreter (205.5 → 95.0 best); the suite's
+  `typed` 2131.8 → 1391.2 ms compiled, 2907.7 → 1845.1 ms interpreted.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
