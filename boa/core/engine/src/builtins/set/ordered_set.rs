@@ -127,11 +127,24 @@ impl OrderedSet {
     }
 
     /// Removes all elements in the set, while preserving its capacity.
-    #[inline]
+    ///
+    /// See [`OrderedMap::clear`][crate::builtins::map::ordered_map::OrderedMap::clear]: a locked
+    /// set keeps its length and empties each value, which is what the specification describes, so
+    /// an iterator that is part-way through goes on to see values added after the `clear()`.
     pub fn clear(&mut self) {
-        self.inner.clear();
-        self.inner.shrink_to_fit();
-        self.empty_count = 0;
+        if self.lock == 0 {
+            self.inner.clear();
+            self.inner.shrink_to_fit();
+            self.empty_count = 0;
+            return;
+        }
+
+        let len = self.inner.len();
+        self.inner = IndexSet::with_capacity(len);
+        for index in 0..len {
+            self.inner.insert(MapKey::Empty(index));
+        }
+        self.empty_count = len;
     }
 
     /// Checks if a given value is present in the set

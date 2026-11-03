@@ -562,3 +562,47 @@ fn for_each_native_steps_over_a_deleted_entry() {
         }),
     ]);
 }
+
+#[test]
+fn clear_keeps_a_live_iterator_running() {
+    // `Map.prototype.clear` empties each entry instead of removing it, so an iterator that is
+    // part-way through keeps its position and goes on to see entries added afterwards.
+    run_test_actions([
+        TestAction::run(
+            "const m = new Map([['a', 1], ['b', 2], ['c', 3]]);
+             const seen = [];
+             const it = m.entries();
+             seen.push(it.next().value[0]);
+             m.clear();
+             m.set('z', 9);
+             const afterClear = it.next();
+             seen.push(afterClear.done ? 'done' : afterClear.value[0]);
+             for (const entry of m) seen.push(entry[0]);",
+        ),
+        TestAction::assert("seen.join() === 'a,z,z'"),
+        TestAction::assert_eq("m.size", 1),
+        // A second `clear()` on an already empty map is a no-op.
+        TestAction::run("m.clear();"),
+        TestAction::assert_eq("m.size", 0),
+        // Clearing before the iterator starts still yields only what is inserted afterwards.
+        TestAction::run(
+            "const fresh = new Map([['a', 1]]);
+             const freshIt = fresh.entries();
+             fresh.clear();
+             fresh.set('q', 7);
+             const firstAfter = freshIt.next();",
+        ),
+        TestAction::assert("firstAfter.done === false && firstAfter.value[0] === 'q'"),
+        // A `for…of` that clears the map while walking it terminates.
+        TestAction::run(
+            "const selfClearing = new Map([['a', 1], ['b', 2]]);
+             let rounds = 0;
+             for (const entry of selfClearing) {
+                 rounds++;
+                 selfClearing.clear();
+                 if (rounds > 3) break;
+             }",
+        ),
+        TestAction::assert("rounds <= 3"),
+    ]);
+}

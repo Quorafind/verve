@@ -400,6 +400,16 @@ always agree with one another.
   fields 304.1 → 232.4 ms compiled, 320.0 → 253.6 ms interpreted; storing one field on a fresh
   object 68.4 → 46.7 ms compiled, 73.7 → 60.3 ms interpreted.
 
+- `boa_engine`, `builtins/{map,set}/ordered_{map,set}.rs`: `clear()` no longer drops the entries out
+  from under a live iterator. Both `Map.prototype.clear` and `Set.prototype.clear` emptied the
+  backing store and freed its capacity, which also reset the length an iterator counts against, so
+  an iterator that was part-way through ended at once instead of going on to the entries added
+  after the call; `new Map([['a',1]])` with an iterator, `clear()`, `set('z',9)` then `next()`
+  reported `done: true` where the specification yields `['z', 9]`. The specification only empties
+  each entry's key and value, so a locked store now keeps its length and replaces every entry with
+  a tombstone; an unlocked one still clears outright, which keeps `clear()` on a map nobody
+  iterates O(1) and frees the capacity as before.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

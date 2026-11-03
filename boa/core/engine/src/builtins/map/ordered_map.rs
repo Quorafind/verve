@@ -163,10 +163,25 @@ impl<V> OrderedMap<V> {
 
     /// Removes all elements from the map and resets the counter of
     /// empty entries.
+    ///
+    /// An iterator holds the lock and reads entries by index, and the specification only empties
+    /// each entry's key and value rather than removing it, so a locked map keeps the length and
+    /// replaces every entry with a tombstone: the iterator keeps counting from where it was and
+    /// goes on to see entries inserted after the `clear()`.
     pub fn clear(&mut self) {
-        self.map.clear();
-        self.map.shrink_to_fit();
-        self.empty_count = 0;
+        if self.lock == 0 {
+            self.map.clear();
+            self.map.shrink_to_fit();
+            self.empty_count = 0;
+            return;
+        }
+
+        let len = self.map.len();
+        self.map = IndexMap::with_capacity(len);
+        for index in 0..len {
+            self.map.insert(MapKey::Empty(index), None);
+        }
+        self.empty_count = len;
     }
 
     /// Return a reference to the value stored for `key`, if it is present,
