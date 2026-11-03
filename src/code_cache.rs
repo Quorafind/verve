@@ -392,7 +392,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     temp.push(format!(".{}.{}.tmp", std::process::id(), hex(&nonce)));
     let temp = PathBuf::from(temp);
     let result = (|| {
-        let mut file = private_file(&temp)?;
+        let mut file = inheriting_file(&temp)?;
         file.write_all(bytes)?;
         drop(file);
         fs::rename(&temp, path)
@@ -401,6 +401,22 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+/// A new file beside the pack, whose access the folder it is made in decides: `CodeCache::open` has
+/// made and checked that folder private to the user by then, so the file inherits that and writing
+/// a pack builds no second DACL of its own (`docs/electron/packages/P67-code-cache-default.md`).
+#[cfg(windows)]
+fn inheriting_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn inheriting_file(path: &Path) -> io::Result<fs::File> {
+    private_file(path)
 }
 
 /// A new file only its owner can read and write, where the platform says who can.
