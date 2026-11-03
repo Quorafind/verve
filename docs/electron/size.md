@@ -71,8 +71,8 @@ Other profile settings: `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`;
 | Electron set | 17.77 MB (20.38 MB at the first draft) | ~790 ms |
 | + `jit` | 26.31 MB at the first draft | ~97 ms |
 
-The JIT is 5.9 MB for 8x on hot numeric loops. That is more than a quarter of the budget; the
-decision is P42's. It does not fit in 24 MB together with GPUI unless something else goes.
+The JIT is 5.9 MB for 8x on hot numeric loops. The user decided on 2026-11-02 that `electron` ships with it,
+under a 34 MB cap (README, "目标").
 
 ## Summary
 

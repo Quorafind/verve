@@ -6,7 +6,7 @@
 
 你在 Verve 仓库（`F:\dev\sandbox-v2\verve`，Rust，Boa 引擎上的 JS 运行时）里实现一个工作包。
 项目目标：让 Verve 能直接替换 Electron——一切 Electron/Node/Web API 都是 Rust 原生函数，DOM 由
-`crates/verve-dom` 持有，GPUI 负责布局绘制；最终二进制约 20 MB。
+`crates/verve-dom` 持有，GPUI 负责布局绘制；最终二进制约 32 MB（含 JIT，硬上限 34 MB）。
 
 请按顺序阅读：
 1. `docs/electron/README.md`（总体方案、原则、架构、里程碑）
@@ -33,7 +33,7 @@
 | 批次 | 可同时派发 |
 |---|---|
 | 1 | P02、P01、P03、P22、P23、P25 |
-| 2（P02 合并后） | P00、P10、P11、P12、P14、P17、P20、P34、P30 的 spike（渲染器线程文字度量是否可行，1 天） |
+| 2（P02 合并后） | P00、P10、P11、P12、P14、P17、P20、P34（P30 的 spike 已完成：可行） |
 | 性能 A（与批次 2 同时） | P60、P61、P62、P63 |
 | — | 小重构：批次 2 合并约 3 个后插入（如 P10+P12+P13 之后收拢 API 样板） |
 | **R1** | M0+M1 重构关卡（通过后再派发批次 3 的渲染器部分） |
