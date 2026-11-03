@@ -167,7 +167,7 @@ fn disabled_jit_compiles_nothing() {
 /// Runs `source`, then the jobs it queued, then evaluates `result`, in every mode; the results
 /// must be the same.
 #[track_caller]
-fn same_after_jobs(source: &str, result: &str) -> String {
+pub(super) fn same_after_jobs(source: &str, result: &str) -> String {
     let run = |mode: Mode| {
         let mut context = context(mode);
         let mut out = match context.eval(Source::from_bytes(&format!("{SHOW}\n{source}"))) {

@@ -26,14 +26,18 @@
 #[cfg(any(not(target_pointer_width = "64"), feature = "jsvalue-enum"))]
 compile_error!("the `jit` feature needs NaN-boxed values on a 64-bit target");
 
+mod call;
 mod compiler;
 mod helpers;
 mod layout;
 mod memory;
 mod runtime;
+mod stack_layout;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_calls;
 #[cfg(test)]
 mod tests_elements;
 
@@ -329,6 +333,11 @@ impl JitSlot {
     /// compiled, or it is and could be entered.
     pub(crate) fn wants_entry(&self) -> bool {
         self.tier.get() != Tier::Rejected
+    }
+
+    /// Whether the block's code is compiled and can be run.
+    pub(crate) fn is_compiled(&self) -> bool {
+        self.tier.get() == Tier::Compiled && self.code.get().is_some()
     }
 }
 

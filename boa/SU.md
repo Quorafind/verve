@@ -429,6 +429,21 @@ always agree with one another.
   A dividend of `0` takes the interpreter's handler, whose `0 / -5` is `0` where JavaScript's is
   `-0`.
 
+- `boa_engine`, `builtins/function/mod.rs`, `vm/mod.rs`, `vm/jit/call.rs`: `function_call` is split
+  in two, the checks and the clones of the function's parts, and `enter_ordinary_function`, which
+  pushes the frame and sets `this` and the environments; the interpreter's behaviour is
+  unchanged. `Context::check_runtime_limits` is split into the interrupt check and
+  `runtime_limits_exceeded`, which only reads. Compiled code calls a compiled ordinary function
+  through `enter_ordinary_function` directly (`jit_call`), when no limit is about to be passed and
+  no interrupt is pending; every other callee goes through `jit_step`.
+
+- `boa_engine`, `vm/jit/` (feature `jit`): `PushFromRegister`, `PopIntoRegister`, `GetArgument` and
+  `CheckReturn` are compiled inline, reading and writing the VM stack's `Vec` (pointer, length and
+  capacity found by looking at a real one, as the object layout is) and the frame's `fp`,
+  `argument_count` and `CONSTRUCT` flag; a full stack, a pointer that is not an object and a
+  constructor's frame take the fast helper or the interpreter's handler. `JitState` carries the
+  stack's address. No interpreter code changes.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
