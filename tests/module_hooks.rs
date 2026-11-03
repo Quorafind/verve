@@ -230,6 +230,58 @@ fn require_keeps_commonjs_resolution_unhooked() {
     assert_eq!(run(&dir, main).unwrap(), r#"{"value":"file","calls":0}"#);
 }
 
+#[test]
+fn a_load_hook_asking_for_the_runtime_s_own_answer_on_an_ambiguous_file() {
+    // A `.js` under no `package.json` that is neither CommonJS nor a module: the hook asks what
+    // the runtime itself would load, and answers with a module of its own reading.
+    let dir = folder("next-ambiguous", &[("jsx.js", "export default <div/>;\n")]);
+    let main = r#"
+        import { registerHooks } from 'node:module';
+        registerHooks({
+            load(url, context, next) {
+                if (!url.endsWith('jsx.js')) return next(url, context);
+                const own = next(url, context);
+                return { format: 'module', source: 'export default 1; // ' + own.format, shortCircuit: true };
+            },
+        });
+        const mod = await import('./jsx.js');
+        globalThis.result = 'value ' + mod.default;
+    "#;
+    assert_eq!(run(&dir, main).unwrap(), r#""value 1""#);
+}
+
+/// Static imports of a module that runs and of one that is neither CommonJS nor a module: the
+/// first runs before the second fails, as it does under Node.
+#[test]
+fn the_modules_before_one_that_is_neither_run_before_it_fails() {
+    let dir = folder(
+        "order",
+        &[
+            ("a.mjs", "globalThis.order = ['a ran'];\n"),
+            ("bad.js", "let x = ;\n"),
+        ],
+    );
+    let mut runtime = Runtime::new();
+    let promise = runtime
+        .load_esm(
+            &dir.join("main.mjs"),
+            "import './a.mjs';\nimport './bad.js';\n",
+        )
+        .unwrap();
+    for _ in 0..20 {
+        runtime.run_microtasks();
+    }
+    let error = match promise.state() {
+        PromiseState::Rejected(error) => verve::print(&error),
+        state => panic!("{state:?}"),
+    };
+    assert!(error.contains("SyntaxError"), "{error}");
+    assert_eq!(
+        verve::print(&runtime.eval("JSON.stringify(globalThis.order)").unwrap()),
+        r#"["a ran"]"#
+    );
+}
+
 #[cfg(feature = "typescript")]
 #[test]
 fn strip_typescript_types_erases_types_in_place() {
