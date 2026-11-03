@@ -324,6 +324,100 @@ always agree with one another.
   evaluated from a string, which no cache keeps, is used as parsed — writing it would compile it,
   and every function it declares, at the parse rather than at the first call.
 
+- `boa_engine`, `builtins/typed_array/object.rs`: `CanonicalNumericIndexString` rejects a key by its
+  first code unit before parsing it. Reading or writing any named property of a typed array —
+  `ta.length`, `ta.byteLength`, `ta.byteOffset`, `ta.buffer`, and every `ta.foo` — reached the
+  integer-indexed exotic `[[Get]]`, which ran the whole conversion for a key that could never be an
+  index: `ToNumber(key)` and then a `JsString::from(n)` allocation to compare back. A key that is
+  not a canonical numeric index string starts with `0`–`9`, `-`, `I` or `N` and with nothing else,
+  so the other keys are refused without parsing or allocating (`may_be_canonical_numeric_index`).
+  The check only widens what is let through to the parser: `-0`, `0`, `-1`, `1.5`, `1e+21`,
+  `Infinity`, `-Infinity` and `NaN` still pass and still resolve exactly as before. Measured on the
+  same round (interpreter, 1M iterations, median of five processes): `ta.length` 386.9 → 201.5 ms,
+  `ta.byteOffset` 374.3 → 212.7 ms, a missing string key 389.5 → 211.6 ms, and the suite's `typed`
+  (six 1M loops reading `f.length` per iteration) 3589.5 → 2350.1 ms.
+
+- `boa_engine`, `vm/opcode/get/property.rs`: `GetLengthProperty` reads a typed array's `length` from
+  its internal slots, the way it already did for arrays and strings. The opcode's array fast path
+  checked `is_array()`, which a typed array is not, so `f.length` fell through to the inline cache,
+  the integer-indexed exotic `[[Get]]`, `CanonicalNumericIndexString`, the prototype walk to
+  `%TypedArray%.prototype`, and an accessor call that itself had to re-validate the receiver. The
+  shortcut is taken only when the read cannot be observed: the receiver is a typed array, it has no
+  own `length`, every prototype between it and `%TypedArray%.prototype` is an ordinary object
+  without `length`, and the accessor that remains has the intrinsic getter (compared as a function
+  pointer, `NativeFunction::as_fn_ptr`, the first use of that new accessor). The getter only reads
+  internal slots, so skipping it is unobservable; a detached buffer and a resized length-tracking
+  view are still computed from the current buffer length, exactly as the getter does. A subclass
+  getter, a shadowing data property on `Uint8Array.prototype`, an own `length`, a rewired prototype
+  and a replaced accessor all fall back to the spec path. Measured on the same round (median of five
+  interleaved processes, load 19–38%): `ta.length` over 1M iterations 178.7 → 73.7 ms compiled
+  (175.3 → 72.0 best) and 238.6 → 102.8 ms in the interpreter (205.5 → 95.0 best); the suite's
+  `typed` 2131.8 → 1391.2 ms compiled, 2907.7 → 1845.1 ms interpreted.
+
+- `boa_engine`, `vm/opcode/{get,set}/property.rs`: reading and writing a typed array element goes
+  to the buffer. `GetPropertyByValue`/`SetPropertyByValue` had a dense-element fast path for arrays
+  only, so `f[i]` built a `PropertyKey`, ran the integer-indexed exotic `[[Get]]`/`[[Set]]` with its
+  `CanonicalNumericIndexString` check, and went through `validate_index` per element. A key that
+  already parsed as an index needs no canonicalisation, and no receiver can observe an
+  integer-indexed read, so the read takes the element straight from the buffer; the write does the
+  same only when the receiver is the array itself (any other receiver, as in `super[0] = v`, gets
+  `OrdinarySet`, which defines on the receiver) and the value is already a `Number`, or a `BigInt` for the BigInt arrays — anything
+  else runs `ToNumber`/`ToBigInt`, which can call a user `valueOf` that detaches the buffer, and the
+  spec converts before it checks, so those keep the spec path (which also throws for a `Number`
+  written into a BigInt array and the other way around). A detached buffer, an out-of-range index, a
+  detached-in-the-middle length-tracking view and a `SharedArrayBuffer` view all keep their existing
+  behaviour: the reads and writes go through the same `BufferRef` slice, so a shared view stays on
+  its atomic path. Measured on the same round (median of five interleaved processes): one element
+  read 1M times 53.7 → 39.8 ms compiled (load 38–48%), 80.5 → 65.6 ms interpreted (load 13–18%);
+  the suite's `typed` 1359.1 → 1060.2 ms compiled, 1559.8 → 1309.5 ms interpreted.
+
+- `boa_engine`, `vm/opcode/define/own_property.rs`: defining a named property of an object literal
+  inserts it directly. `DefineOwnPropertyByName`, which `{ i, s: 'k' + i }` emits once per property,
+  built a four-field descriptor and called `[[DefineOwnProperty]]`, which fetched the current
+  descriptor, asked for extensibility, then inserted. For an ordinary extensible object that lacks
+  the key, `ValidateAndApplyPropertyDescriptor` inserts the descriptor unchanged and returns `true`
+  without running any user code, so the descriptor and the two lookups can be skipped. The shortcut
+  applies only to an ordinary object whose shape lacks the key; an array, an arguments object, a
+  module namespace, a proxy and a typed array have their own `[[DefineOwnProperty]]`, and a
+  non-extensible object or an existing key still needs the full comparison. Measured on the same
+  round (median of five interleaved processes): the suite's `alloc` 295.0 → 278.9 ms compiled and
+  344.5 → 335.0 ms interpreted (load 22–46%); `vdom` 82.2 → 79.6 ms compiled, 97.8 → 88.7 ms
+  interpreted; `oo` does not touch this path, and its spread stayed inside the round's noise.
+
+- `boa_engine`, `vm/opcode/set/property.rs`: assigning a new property inserts it directly.
+  `this.x = x` in a constructor ran the full `OrdinarySet`: `[[GetOwnProperty]]` on the receiver,
+  then a walk up the prototype chain looking for a setter or a non-writable data property, then
+  `CreateDataProperty`. When the object is ordinary and extensible, the key is absent on the whole
+  chain, every prototype is ordinary, and the receiver is the object itself, that walk can only end
+  at `CreateDataProperty` with the default attributes, so the walk is replaced by one insert. A
+  non-writable data property or a setter on the chain still fails or calls, a proxy still
+  intercepts, a non-extensible receiver still fails, and `Reflect.set` with a separate receiver
+  still defines on the receiver. Ordinary objects are recognised by the internal methods the
+  shortcut depends on being the ordinary ones (`std::ptr::fn_addr_eq` on the four method pointers,
+  `[[Set]]` included, since an override of it on the object or a prototype changes the outcome),
+  not on the address of a `const`, which the compiler may materialise twice). Measured on the same
+  round (median of five interleaved processes, load 27–37%): 200,000 constructor calls storing three
+  fields 304.1 → 232.4 ms compiled, 320.0 → 253.6 ms interpreted; storing one field on a fresh
+  object 68.4 → 46.7 ms compiled, 73.7 → 60.3 ms interpreted.
+
+- `boa_engine`, `builtins/{map,set}/ordered_{map,set}.rs`: `clear()` no longer drops the entries out
+  from under a live iterator. Both `Map.prototype.clear` and `Set.prototype.clear` emptied the
+  backing store and freed its capacity, which also reset the length an iterator counts against, so
+  an iterator that was part-way through ended at once instead of going on to the entries added
+  after the call; `new Map([['a',1]])` with an iterator, `clear()`, `set('z',9)` then `next()`
+  reported `done: true` where the specification yields `['z', 9]`. The specification only empties
+  each entry's key and value, so a locked store now keeps its length and replaces every entry with
+  a tombstone; an unlocked one still clears outright, which keeps `clear()` on a map nobody
+  iterates O(1) and frees the capacity as before.
+
+- `boa_engine`, `builtins/typed_array/builtin.rs`: `%TypedArray%.prototype.sort` reads a comparator's
+  result by its sign, and `CompareTypedArrayElements` returned `Greater` for any positive number and
+  `Less` for everything else, `+0` and `-0` included. A comparator that says "equal" therefore said
+  "greater" on every pair, so an equal group came back reversed and a pre-sorted input was reordered:
+  `new Uint8Array([0,1,2,3]).sort(() => 0)` gave `3,2,1,0` where the specification keeps the input,
+  and test262's `builtins/TypedArray/prototype/sort/stability` failed. Both zeroes now mean
+  `Equal`; only a number above or below zero orders the pair. NaN was already `Equal`.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

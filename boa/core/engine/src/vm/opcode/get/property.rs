@@ -1,7 +1,11 @@
 use boa_string::StaticJsStrings;
 
 use crate::{
-    Context, JsResult, JsValue, js_string,
+    Context, JsResult, JsValue,
+    builtins::typed_array::object::{
+        typed_array_element_get_shortcut, typed_array_length_shortcut,
+    },
+    js_string,
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::PropertyKey,
     vm::opcode::{IndexOperand, Operation, RegisterOperand, nullish_base_error},
@@ -25,6 +29,11 @@ fn get_by_name<const LENGTH: bool>(
             context
                 .vm
                 .set_register(dst.into(), (string.len() as u32).into());
+            return Ok(());
+        } else if let Some(object) = object.as_object()
+            && let Some(value) = typed_array_length_shortcut(&object)
+        {
+            context.vm.set_register(dst.into(), value);
             return Ok(());
         }
     }
@@ -121,6 +130,12 @@ fn get_by_value<const PUSH_KEY: bool>(
                     context.vm.set_register(dst.into(), element);
                     return Ok(());
                 }
+            } else if let Some(value) = typed_array_element_get_shortcut(&object, index.get()) {
+                if PUSH_KEY {
+                    context.vm.set_register(key.into(), key_value.into());
+                }
+                context.vm.set_register(dst.into(), value);
+                return Ok(());
             } else if let Some(string) = base.as_string() {
                 let value = string
                     .code_unit_at(index.get() as usize)

@@ -326,6 +326,14 @@ Throughput (from `bash scripts/js-bench/run.sh <verve.exe> node`, which prints t
 | P64 | `splitjoin` | 2.8 (2.7) | 12.9 (11.8) | 12.7 (12.4) | 4.6× | 4.5× |
 | P64 | `template` | 0.2 (0.2) | 1.8 (1.7) | 0.9 (0.9) | 9.0× | 4.5× |
 | P64 | `concat` | 0.6 (0.6) | 22.0 (21.8) | 78.1 (48.8) | 37× | 130× (bimodal; 66.6 (41.6) on the base binary) |
+| P65 | `alloc` | 9.3 (9.1) | 253.2 (248.7) | 276.3 (264.6) | 27× | 30× |
+| P65 | `mapset` | 5.0 (4.4) | 35.9 (35.0) | 36.1 (33.4) | 7.2× | 7.2× |
+| P65 | `typed` | 4.0 (4.0) | 1046.6 (1026.5) | 1239.0 (1213.3) | 262× | 310× |
+| P65 | `oo` | 2.9 (2.8) | 1099.8 (1090.5) | 1132.6 (1095.3) | 379× | 391× |
+| P65 | `sort` | 173.4 (164.4) | 2891.3 (2710.0) | 3123.6 (2804.8) | 17× | 18× |
+| P65 | `vdom` | 4.1 (3.7) | 67.0 (66.2) | 72.1 (70.0) | 16× | 18× |
+| P65 | `closure` | 19.7 (19.5) | 593.1 (591.0) | 634.8 (621.5) | 30× | 32× |
+
 
 P64 rows: this branch against `6335a760`, `cargo build --release -p verve --features jit`, same round, load 9-34% before and after each pass (one 61% peak at the end of the `tokenize` pass); details in `packages/P64-strings-regex-json.md`.
 
@@ -333,3 +341,29 @@ Scaling (from `bash scripts/js-bench/run.sh --scaling <verve.exe>`, the first ta
 
 | package | probe | n | t(n) | t(4n) | ratio | verdict |
 |---|---|---|---|---|---|---|
+
+### P65: objects, collections, typed arrays
+
+Built and measured on `electron/p65-objects-typed-arrays` with
+`cargo build --release -p verve --features jit`, `CARGO_BUILD_JOBS=6`; the interpreter column is the
+same binary with `VERVE_JIT=0`, so there is one build. `--runs 5`, median (best), one process per
+measurement.
+
+The seven rows above are the final pass: five `Get-Counter` samples before it read 4.9, 2.2, 4.2,
+3.2 and 1.2 % (median 3.2 %), five after it 10.3, 14.4, 14.6, 11.1 and 11.6 % (median 11.6 %).
+
+Against the targets the pass meets `mapset` (7.2× against ≤8×) only. `typed` misses on the compiled
+column by 12 (262× against ≤250×) and on the interpreter column by 60 (310×); `alloc` is 27× and 30×
+against ≤25×; `vdom` (16×, 18×), `sort` (17×, 18×), `closure` (30×, 32×) and `oo` (379×, 391×) are
+further out. The gaps in `oo`, `sort` and `closure` are in the call frame and the call opcode, which
+are P66's, and phase 1 measured those floors. The `typed` interpreter column is the one the shortcuts
+help least: they remove work from an opcode handler the interpreter reaches either way, while the
+compiled column re-enters the handler only from the slow path.
+
+Two low-load passes were taken on the same code, and the earlier one (load 10.8 % before, 4.4 %
+after) read `alloc` 28×, `mapset` 7.5×, `typed` 251×, `oo` 376×, `sort` 15×, `vdom` 19×, `closure` 31×
+on the compiled column — the same ranking within noise, except `alloc`, `typed` and `vdom`, whose
+distance from their targets is 1–5× and therefore inside what the two passes differ by. `alloc` is
+the test whose absolute ratio moves most with the machine; the per-change table in
+`packages/P65-objects-typed-arrays.md` §8, which alternates the two binaries inside one round, is
+the figure to trust for it.

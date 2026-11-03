@@ -4,7 +4,11 @@ use std::sync::atomic::Ordering;
 
 use crate::{
     Context, JsExpect, JsNativeError, JsResult, JsString, JsValue,
-    builtins::array_buffer::{BufferObject, BufferRef},
+    builtins::{
+        OrdinaryObject,
+        array_buffer::{BufferObject, BufferRef},
+    },
+    native_function::{NativeFunctionObject, NativeFunctionPointer},
     object::{
         JsData, JsObject,
         internal_methods::{
@@ -14,11 +18,12 @@ use crate::{
         },
     },
     property::{PropertyDescriptor, PropertyKey},
+    string::StaticJsStrings,
 };
 use boa_gc::{Finalize, Trace};
 use boa_macros::js_str;
 
-use super::{TypedArrayKind, is_valid_integer_index};
+use super::{BuiltinTypedArray, ContentType, TypedArrayKind, is_valid_integer_index};
 
 /// A `TypedArray` object is an exotic object that performs special handling of integer
 /// index property keys.
@@ -328,6 +333,23 @@ pub(crate) fn typed_array_exotic_prevent_extensions(
     ordinary_prevent_extensions(obj, context)
 }
 
+/// Whether `key` may be a canonical numeric index string.
+///
+/// Every string `ToString` produces for a number starts with a digit, `-`, `I` (`Infinity`) or
+/// `N` (`NaN`), so a key starting with anything else can never satisfy
+/// `ToString(ToNumber(key)) == key` and does not have to be parsed. This only ever rules out keys
+/// that would have been rejected anyway: `-0`, `0`, `-1`, `1.5`, `1e+21`, `Infinity`, `-Infinity`
+/// and `NaN` all pass it.
+#[inline]
+fn may_be_canonical_numeric_index(key: &JsString) -> bool {
+    key.code_unit_at(0).is_some_and(|unit| {
+        (u16::from(b'0')..=u16::from(b'9')).contains(&unit)
+            || unit == u16::from(b'-')
+            || unit == u16::from(b'I')
+            || unit == u16::from(b'N')
+    })
+}
+
 /// `CanonicalNumericIndexString ( argument )`
 ///
 /// More information:
@@ -335,6 +357,10 @@ pub(crate) fn typed_array_exotic_prevent_extensions(
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-canonicalnumericindexstring
 fn canonical_numeric_index_string(argument: &JsString) -> Option<f64> {
+    if !may_be_canonical_numeric_index(argument) {
+        return None;
+    }
+
     // 1. If argument is "-0", return -0𝔽.
     if argument == &js_str!("-0") {
         return Some(-0.0);
@@ -350,6 +376,73 @@ fn canonical_numeric_index_string(argument: &JsString) -> Option<f64> {
 
     // 4. Return undefined.
     None
+}
+
+/// Whether `get` is the intrinsic getter of `%TypedArray%.prototype.length`.
+fn is_intrinsic_length_getter(get: &JsValue) -> bool {
+    let Some(function) = get.as_object() else {
+        return false;
+    };
+    let Some(native) = function.downcast_ref::<NativeFunctionObject>() else {
+        return false;
+    };
+    let Some(pointer) = native.f.as_fn_ptr() else {
+        return false;
+    };
+    let intrinsic: NativeFunctionPointer = BuiltinTypedArray::length;
+    pointer as usize == intrinsic as usize
+}
+
+/// The value of `length` for `object`, when the accessor on the prototype chain can be bypassed.
+///
+/// Returns `None` unless `object` is a typed array, it has no own `length`, everything between it
+/// and `%TypedArray%.prototype` is an ordinary object without `length`, and the accessor found at
+/// the end has the intrinsic getter. The getter itself only reads internal slots, so finding it
+/// anywhere on the chain gives the same answer as calling it. Everything else takes the spec path,
+/// which also covers a detached buffer, a resizable buffer that shrank, and a replaced or shadowed
+/// accessor.
+pub(crate) fn typed_array_length_shortcut(object: &JsObject) -> Option<JsValue> {
+    if !object.is::<TypedArray>() {
+        return None;
+    }
+
+    let key = PropertyKey::from(StaticJsStrings::LENGTH);
+
+    // An own `length` shadows the accessor.
+    if object.borrow().shape().lookup(&key).is_some() {
+        return None;
+    }
+
+    let mut current = object.prototype();
+    loop {
+        let prototype = current?;
+        if !prototype.is::<OrdinaryObject>() {
+            return None;
+        }
+        let borrowed = prototype.borrow();
+        let Some(slot) = borrowed.shape().lookup(&key) else {
+            current = borrowed.shape().prototype();
+            continue;
+        };
+        if !slot.attributes.has_get() {
+            return None;
+        }
+        let get = borrowed.properties().storage[slot.index as usize].clone();
+        if !is_intrinsic_length_getter(&get) {
+            return None;
+        }
+        break;
+    }
+
+    let typed_array = object.downcast_ref::<TypedArray>()?;
+    let buffer = typed_array.viewed_array_buffer().as_buffer();
+    let Some(bytes) = buffer.bytes(Ordering::SeqCst) else {
+        return Some(0.into());
+    };
+    if typed_array.is_out_of_bounds(bytes.len()) {
+        return Some(0.into());
+    }
+    Some(typed_array.array_length(bytes.len()).into())
 }
 
 /// `[[GetOwnProperty]]` internal method for `TypedArray` exotic objects.
@@ -672,6 +765,74 @@ pub(crate) fn typed_array_exotic_own_property_keys(
 
     // 6. Return keys.
     Ok(keys)
+}
+
+/// The value of element `index` of `object`, or `undefined` where the index is not valid.
+///
+/// Returns `None` when `object` is not a typed array, so that the caller takes the spec path.
+/// No receiver can observe an integer-indexed read, so there is nothing else to check.
+pub(crate) fn typed_array_element_get_shortcut(object: &JsObject, index: u32) -> Option<JsValue> {
+    let typed_array = object.downcast_ref::<TypedArray>()?;
+    let buffer = typed_array.viewed_array_buffer().as_buffer();
+    let Some(bytes) = buffer.bytes(Ordering::Relaxed) else {
+        return Some(JsValue::undefined());
+    };
+    let Some(index) = typed_array.validate_index_u64(u64::from(index), bytes.len()) else {
+        return Some(JsValue::undefined());
+    };
+    let kind = typed_array.kind();
+    let byte_index = (index * kind.element_size() + typed_array.byte_offset()) as usize;
+
+    // SAFETY: the typed array's buffer is aligned for its element type, and `validate_index_u64`
+    // keeps the index in bounds.
+    let value = unsafe {
+        bytes
+            .subslice(byte_index..)
+            .get_value(kind, Ordering::Relaxed)
+    };
+    Some(value.into())
+}
+
+/// Writes `value` to element `index` of `object` when the conversion cannot run user code.
+///
+/// Returns `None` when `object` is not a typed array, or `value` is not already of the array's
+/// content type: `ToNumber` and `ToBigInt` may call a user `valueOf` that detaches the buffer, and
+/// the spec order converts before it checks, so those go through the spec path. A `BigInt` array
+/// written with a `Number`, or the other way around, also needs the spec path, which throws.
+pub(crate) fn typed_array_element_set_shortcut(
+    object: &JsObject,
+    index: u32,
+    value: &JsValue,
+    context: &mut Context,
+) -> Option<JsResult<()>> {
+    let kind = object.downcast_ref::<TypedArray>()?.kind();
+    let same_content_type = match kind.content_type() {
+        ContentType::Number => value.is_number(),
+        ContentType::BigInt => value.as_bigint().is_some(),
+    };
+    if !same_content_type {
+        return None;
+    }
+    let element = kind.get_element(value, context).ok()?;
+
+    let typed_array = object.downcast_ref::<TypedArray>()?;
+    let mut buffer = typed_array.viewed_array_buffer().as_buffer_mut();
+    let Some(mut bytes) = buffer.bytes(Ordering::Relaxed) else {
+        return Some(Ok(()));
+    };
+    let Some(index) = typed_array.validate_index_u64(u64::from(index), bytes.len()) else {
+        return Some(Ok(()));
+    };
+    let byte_index = (index * kind.element_size() + typed_array.byte_offset()) as usize;
+
+    // SAFETY: the typed array's buffer is aligned for its element type, and `validate_index_u64`
+    // keeps the index in bounds.
+    unsafe {
+        bytes
+            .subslice_mut(byte_index..)
+            .set_value(element, Ordering::Relaxed);
+    }
+    Some(Ok(()))
 }
 
 /// Abstract operation `TypedArrayGetElement ( O, index )`.
