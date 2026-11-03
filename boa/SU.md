@@ -327,3 +327,27 @@ always agree with one another.
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
+
+- `boa_engine`, `builtins/json/mod.rs`, `builtins/json/parse.rs`: `JSON.parse` reads its text once. It
+  used to be validated by `serde_json`, then parsed again as a script by `boa_parser`, compiled to
+  bytecode and run on the VM — three readings of the same bytes, and a `String` copy of them, to
+  build the values the text already spells out. Without a reviver the reader in `parse.rs` now
+  builds them directly from the code units: an object is an `JsObject` with each member created as
+  it is read, an array is one `Array::create_array_from_list`, and a string without an escape is a
+  slice of the text rather than a fresh buffer. Containers are kept on an explicit `Vec`, so a
+  deeply nested text costs heap instead of Rust stack — the script parser gave up at 128 levels,
+  where Node answers as deep as memory allows. A reviver still builds its values through the script parser, since `context.source`
+  needs the text each primitive came from, but the text is validated by the same reader first, so
+  both paths throw the same messages.
+
+  Because the reader is now the one validating, its `SyntaxError` messages are V8's, with the
+  position and the line and column V8 names: `Unexpected token '}', "[1,]" is not valid JSON`,
+  `Expected ',' or ']' after array element in JSON at position 4 (line 1 column 5)`,
+  `Unexpected end of JSON input`, and a text that is only `undefined`, `NaN` or `Infinity` is quoted
+  by itself. A whole number that fits an `i32` is an integer value, as a script's number literal
+  is, and `-0` stays a float. Lone surrogates, both escaped and raw, are code units like any other
+  rather than an error — `String::from_utf16` rejected them before.
+
+  `JSON.parse` of 70,000 records (7,032,596 code units): 1536–2034 ms to 453–530 ms, five interleaved
+  runs each, load 19–70%. The suite's `json` test, whose parse phase that is, went from 2926–3519 ms
+  to 1315–1428 ms (JIT column, 5 runs, load 23–41%), which is 8.0× Node rather than 21×.

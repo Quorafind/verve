@@ -47,6 +47,7 @@ const fn to_hex_digit(val: u16) -> u16 {
     }
 }
 
+mod parse;
 #[cfg(test)]
 mod tests;
 
@@ -238,18 +239,24 @@ impl Json {
             .first()
             .cloned()
             .unwrap_or_default()
-            .to_string(context)?
-            .to_std_string()
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
+            .to_string(context)?;
+
+        // 11. If IsCallable(reviver) is true, then the text every value came from is needed as
+        // well, which only the parser keeps track of. A parse without a reviver reads the text
+        // once, into the values themselves.
+        let Some(obj) = args.get_or_undefined(1).as_callable() else {
+            return parse::Reader::new(json_string.as_str()).read(context);
+        };
 
         // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
         //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(&json_string) {
-            return Err(JsNativeError::syntax().with_message(e.to_string()).into());
-        }
+        //    The reader that parses without a reviver validates here too, so both paths throw the
+        //    same messages; the values it builds are dropped.
+        parse::Reader::new(json_string.as_str()).read(context)?;
 
-        // Check if a reviver is provided, to determine if we need source text tracking
-        let has_reviver = args.get_or_undefined(1).is_callable();
+        let json_string = json_string
+            .to_std_string()
+            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
 
         // 3. Let scriptString be the string-concatenation of "(", jsonString, and ");".
         let script_string = format!("({json_string});");
@@ -263,10 +270,10 @@ impl Json {
         let (script, source_text) =
             parser.parse_script_with_source(&Scope::new_global(), context.interner_mut())?;
 
-        // Build the source tree from the AST if a reviver is present.
+        // Build the source tree from the AST.
         // This walks the parsed AST and extracts source text from LinearSpan information,
         // avoiding the need to re-parse the JSON string separately.
-        let source_tree = if has_reviver {
+        let source_tree = {
             let expr = script.statements().statements().first().and_then(|item| {
                 if let boa_ast::StatementListItem::Statement(stmt) = item
                     && let boa_ast::Statement::Expression(expr) = stmt.as_ref()
@@ -281,8 +288,6 @@ impl Json {
                 let _ = visitor.visit_expression(e);
                 visitor.finish()
             })
-        } else {
-            None
         };
 
         let code_block = {
@@ -330,7 +335,7 @@ impl Json {
         let unfiltered = record.consume()?;
 
         // 11. If IsCallable(reviver) is true, then
-        if let Some(obj) = args.get_or_undefined(1).as_callable() {
+        {
             // a. Let root be ! OrdinaryObjectCreate(%Object.prototype%).
             let root = JsObject::with_object_proto(context.intrinsics());
 
@@ -347,10 +352,6 @@ impl Json {
                 source_tree.as_ref(),
                 context,
             )
-        } else {
-            // 12. Else,
-            // a. Return unfiltered.
-            Ok(unfiltered)
         }
     }
 
