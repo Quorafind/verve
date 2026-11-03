@@ -1044,3 +1044,197 @@ fn verve_run_keeps_a_cache_with_the_flag_or_the_variable() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
     assert!(String::from_utf8_lossy(&output.stderr).contains("not used"));
 }
+
+// ─── The default folder, and the mark it leaves ─────────────────────────────────────────────
+
+/// The folder `verve run` keeps its cache in, for a home of a test's own.
+fn code_cache_in(home: &Path) -> PathBuf {
+    let base = if cfg!(windows) {
+        home.join("Verve")
+    } else {
+        home.join("verve")
+    };
+    base.join("code-cache")
+}
+
+/// The user's code cache secret, for a home of a test's own.
+fn secret_in(home: &Path) -> PathBuf {
+    let base = if cfg!(windows) {
+        home.join("Verve")
+    } else {
+        home.join("verve")
+    };
+    base.join("code-cache-secret")
+}
+
+/// The names in `dir`, sorted: nothing at all when it is not there.
+fn names(dir: &Path) -> Vec<String> {
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = listing
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// An entry, and the module it requires: together over the 64 KB that make the default folder
+/// worth a pack (`code_cache_mark::WORTH_CACHING`).
+fn a_big_script(fixture: &Fixture) -> PathBuf {
+    std::fs::write(
+        fixture.root.join("big.cjs"),
+        format!("exports.v = 'big';\n{}", "// padding\n".repeat(7_000)),
+    )
+    .unwrap();
+    let entry = fixture.root.join("entry.cjs");
+    std::fs::write(
+        &entry,
+        "const big = require('./big.cjs'); console.log('v=' + big.v);",
+    )
+    .unwrap();
+    entry
+}
+
+/// `verve run -A <script>`, with the user's own folders inside `home`, and `flag` and `env`
+/// saying what to do about the cache. Answers what it wrote, and insists it wrote nothing to
+/// standard error: a default folder that cannot be used is never a thing to hear about.
+fn run_default(script: &Path, home: &Path, flags: &[&str], env: Option<&str>) -> String {
+    let mut command = Command::new(VERVE);
+    command
+        .env("LOCALAPPDATA", home)
+        .env("XDG_CACHE_HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("HOME", home)
+        .env_remove("VERVE_CODE_CACHE")
+        .arg("run")
+        .arg("-A");
+    for flag in flags {
+        command.arg(flag);
+    }
+    if let Some(dir) = env {
+        command.env("VERVE_CODE_CACHE", dir);
+    }
+    let output = command.arg(script).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "",
+        "the default folder must never write a line"
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// The first run leaves a mark and nothing else — no pack, no secret; the second recognises it,
+/// compiles every function and keeps the pack; and the two switches keep a run from the folder
+/// altogether.
+#[test]
+fn the_default_folder_caches_from_the_second_run_and_the_switches_turn_it_off() {
+    let fixture = Fixture::new("default-dir");
+    let script = a_big_script(&fixture);
+    let home = fixture.root.join("home");
+    let cache = code_cache_in(&home);
+
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    let first = names(&cache);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].ends_with(".seen"), "{first:?}");
+    assert!(
+        !secret_in(&home).exists(),
+        "a first run reads no secret and makes none"
+    );
+
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    let packs: Vec<String> = names(&cache)
+        .into_iter()
+        .filter(|name| name.ends_with(".pack"))
+        .collect();
+    assert_eq!(packs.len(), 1, "{packs:?}");
+    assert!(
+        secret_in(&home).exists(),
+        "the run that keeps a pack signs its entries"
+    );
+
+    // The run after that reads the pack that is there, and keeps it.
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    assert!(cache.join(&packs[0]).exists());
+
+    let cache_before = names(&cache);
+    let home_before = names(&home);
+    assert_eq!(
+        run_default(&script, &home, &["--no-code-cache"], None),
+        "v=big\n"
+    );
+    assert_eq!(
+        names(&cache),
+        cache_before,
+        "--no-code-cache touched the cache"
+    );
+    assert_eq!(
+        names(&home),
+        home_before,
+        "--no-code-cache touched the home"
+    );
+    for off in ["0", "off", "false"] {
+        assert_eq!(run_default(&script, &home, &[], Some(off)), "v=big\n");
+        assert_eq!(
+            names(&cache),
+            cache_before,
+            "VERVE_CODE_CACHE={off} touched the cache"
+        );
+        assert_eq!(
+            names(&home),
+            home_before,
+            "VERVE_CODE_CACHE={off} touched the home"
+        );
+    }
+}
+
+/// A home that cannot hold a cache — here a file where the folder would go — is no reason for a
+/// run to fail, or to say anything.
+#[test]
+fn a_default_folder_that_cannot_be_made_leaves_the_run_silent() {
+    let fixture = Fixture::new("default-unusable");
+    let script = a_big_script(&fixture);
+    let home = fixture.root.join("home");
+    std::fs::write(&home, b"not a folder").unwrap();
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+}
+
+/// This build's pack being there is what makes a run warm, mark or no mark: such a run reads the
+/// pack at startup and leaves no mark at all.
+#[test]
+fn a_pack_that_is_already_there_makes_the_first_run_a_warm_one() {
+    let fixture = Fixture::new("default-warm");
+    let script = a_big_script(&fixture);
+    let home = fixture.root.join("home");
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    let cache = code_cache_in(&home);
+    let pack = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "pack"))
+        .expect("the second run keeps a pack");
+    for entry in std::fs::read_dir(&cache).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|ext| ext == "seen") {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    assert!(pack.exists());
+    let seen: Vec<String> = names(&cache)
+        .into_iter()
+        .filter(|name| name.ends_with(".seen"))
+        .collect();
+    assert!(
+        seen.is_empty(),
+        "a warm run compiles nothing, so it leaves no mark: {seen:?}"
+    );
+}

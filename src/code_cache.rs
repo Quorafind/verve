@@ -134,6 +134,9 @@ pub struct CodeCacheStats {
     /// cannot, or it holds a function not compiled yet, code shared between two places, or a
     /// scope outside the realm's.
     pub cjs_skipped: u64,
+    /// Runs on the default folder that found a loaded file in the mark, and so enabled the cache,
+    /// compiled and wrote the pack.
+    pub mark_hits: u64,
 }
 
 impl std::fmt::Debug for CodeCache {
@@ -152,14 +155,23 @@ impl CodeCache {
     ///
     /// If the directory cannot be made, or is not private to the user.
     pub(crate) fn open(dir: &Path, secret: [u8; 32], protected: Vec<PathBuf>) -> io::Result<Self> {
+        let fingerprint = build_fingerprint();
+        Self::open_with(dir, secret, protected, fingerprint)
+    }
+
+    /// [`CodeCache::open`] for a fingerprint the caller already has (the default directory's run
+    /// has it before it knows whether the cache is worth opening).
+    pub(crate) fn open_with(
+        dir: &Path,
+        secret: [u8; 32],
+        protected: Vec<PathBuf>,
+        fingerprint: [u8; 32],
+    ) -> io::Result<Self> {
         create_private_dir(dir)?;
         check_private(dir, false)?;
-        let fingerprint = build_fingerprint();
-        let mut name = hex(&fingerprint[..8]);
-        name.push_str(".pack");
         let dir = crate::permission::real(dir, true);
         Ok(Self {
-            pack: dir.join(name),
+            pack: pack_in(&dir, &fingerprint),
             protection: Protection {
                 roots: std::iter::once(dir)
                     .chain(
@@ -331,6 +343,13 @@ impl Drop for CodeCache {
     fn drop(&mut self) {
         self.write(true);
     }
+}
+
+/// The pack of the build `fingerprint` is, in `dir`.
+pub(crate) fn pack_in(dir: &Path, fingerprint: &[u8; 32]) -> PathBuf {
+    let mut name = hex(&fingerprint[..8]);
+    name.push_str(".pack");
+    dir.join(name)
 }
 
 /// `verve run`'s cache directory when neither the flag nor the variable names one: under the

@@ -34,6 +34,7 @@ pub mod cli;
 pub mod clone;
 mod code_cache;
 mod code_cache_load;
+mod code_cache_mark;
 mod code_cache_pack;
 mod crypto;
 pub mod dom_events;
@@ -254,6 +255,9 @@ struct Shared {
     code_cache: RefCell<code_cache::Shared>,
     /// 即使 Worker 自身不启用缓存，也会继承这些访问拒绝规则。
     code_cache_protection: RefCell<code_cache::Protection>,
+    /// `verve run`'s default folder before the cache has proved worth keeping: all it holds is what
+    /// this run has loaded.
+    code_cache_deferred: RefCell<Option<code_cache_mark::Deferred>>,
 }
 
 /// The microtask queue: promise reactions, `queueMicrotask`, `process.nextTick`.
@@ -543,6 +547,7 @@ impl Runtime {
             vfs: RefCell::new(vfs::Layers::default()),
             code_cache: RefCell::new(code_cache),
             code_cache_protection: RefCell::new(code_cache_protection),
+            code_cache_deferred: RefCell::default(),
         }));
         globals::install(&mut context).expect("the globals install");
         Self { context }

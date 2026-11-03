@@ -531,11 +531,10 @@ fn script(options: Options, argv0: String, embedder: Setup) -> i32 {
                 eprintln!("verve: code cache {} not used: {error}", dir.display());
             }
         }
-        // The user's own folder, opened as `--code-cache` opens one but without saying anything
-        // when it cannot be: a read-only home directory, a container, no `HOME`.
-        Some(CodeCacheDir::Default(dir)) => {
-            let _ = runtime.set_code_cache_dir_with_user_secret(&dir);
-        }
+        // The user's own folder: the first run of a program records what it loaded, the second
+        // compiles every function and keeps it, and the third reads it back. Nothing about this
+        // may fail a run or write a line — a read-only home directory, a container, no `HOME`.
+        Some(CodeCacheDir::Default(dir)) => crate::code_cache_mark::start(runtime.context(), &dir),
         None => {}
     }
     runtime.set_permissions(permissions.clone());
