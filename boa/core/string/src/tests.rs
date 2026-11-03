@@ -565,3 +565,50 @@ fn starts_with_and_ends_with_basic() {
     assert!(!basic.starts_with(end_needle));
     assert!(basic.ends_with(end_needle));
 }
+
+#[test]
+fn index_of_starts_at_from_index() {
+    let haystack = JsString::from("aXbXc");
+    let needle = JsStr::latin1(b"X");
+    assert_eq!(haystack.index_of(needle, 0), Some(1));
+    assert_eq!(haystack.index_of(needle, 2), Some(3));
+    assert_eq!(haystack.index_of(needle, 4), None);
+    assert_eq!(haystack.index_of(needle, 5), None);
+
+    // A needle longer than what is left has no candidate, whatever the index.
+    let longer = JsStr::latin1(b"XbXcX");
+    assert_eq!(haystack.index_of(longer, 0), None);
+    assert_eq!(haystack.index_of(longer, 1), None);
+
+    // An empty needle is found at the index itself, up to the length.
+    let empty = JsStr::latin1(b"");
+    assert_eq!(haystack.index_of(empty, 3), Some(3));
+    assert_eq!(haystack.index_of(empty, 5), Some(5));
+    assert_eq!(haystack.index_of(empty, 6), None);
+}
+
+#[test]
+fn index_of_compares_utf16_and_latin1_by_code_unit() {
+    // `µµµx` fits Latin-1, so both this haystack and its needle are Latin-1.
+    let latin1 = JsString::from("µµµx");
+    let narrow_needle = JsStr::latin1(b"x");
+    assert_eq!(latin1.index_of(narrow_needle, 0), Some(3));
+    assert_eq!(latin1.index_of(narrow_needle, 3), Some(3));
+    assert_eq!(latin1.index_of(narrow_needle, 4), None);
+
+    // A haystack and a needle in different encodings are compared code unit by code unit.
+    let narrow = JsString::from("abc");
+    let wide_needle = JsStr::utf16(&[0x0062, 0x0063]);
+    assert_eq!(narrow.index_of(wide_needle, 0), Some(1));
+    assert_eq!(narrow.index_of(wide_needle, 2), None);
+    let wide = JsString::from("µµµx");
+    assert_eq!(wide.index_of(narrow_needle, 0), Some(3));
+    assert_eq!(wide.index_of(narrow_needle, 4), None);
+
+    // A surrogate pair is two code units in either encoding of the needle.
+    let emoji = JsString::from("😀😀x");
+    let pair = JsStr::utf16(&[0xD83D, 0xDE00]);
+    assert_eq!(emoji.index_of(pair, 0), Some(0));
+    assert_eq!(emoji.index_of(pair, 1), Some(2));
+    assert_eq!(emoji.index_of(JsStr::latin1(b"x"), 0), Some(4));
+}

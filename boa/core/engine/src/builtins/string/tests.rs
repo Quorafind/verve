@@ -975,3 +975,64 @@ fn match_with_overridden_exec() {
         js_str!("fake"),
     )]);
 }
+
+#[test]
+fn index_of_from_index_past_the_last_candidate() {
+    run_test_actions([
+        // Node 22.21.1 prints `3`, `-1`, `-1`, `-1`, `-1` here.
+        TestAction::assert_eq("'aXbXc'.indexOf('X', 2)", 3),
+        TestAction::assert_eq("'aXbXc'.indexOf('X', 4)", -1),
+        TestAction::assert_eq("'aXbXc'.indexOf('X', 5)", -1),
+        TestAction::assert_eq("'abc'.indexOf('abcd')", -1),
+        TestAction::assert_eq("'abc'.indexOf('abc', 3)", -1),
+    ]);
+}
+
+#[test]
+fn index_of_on_utf16_and_latin1_strings() {
+    run_test_actions([
+        TestAction::assert_eq("'µµµxµµµ'.indexOf('x', 3)", 3),
+        TestAction::assert_eq("'µµµxµµµ'.indexOf('µx', 2)", 2),
+        // A surrogate pair is two code units, so `x` follows at 4.
+        TestAction::assert_eq("'😀😀x'.indexOf('x')", 4),
+        TestAction::assert_eq("'😀😀x'.indexOf('x', 3)", 4),
+        TestAction::assert_eq("'😀😀x'.indexOf('😀', 2)", 2),
+        // The haystack and the needle in different encodings compare code unit by code unit.
+        TestAction::assert_eq("'µµµ'.indexOf('\\u00b5', 1)", 1),
+        TestAction::assert_eq("('µµµ' + 'x').indexOf('µµµx', 0)", 0),
+        TestAction::assert_eq("'abc'.indexOf('c' + '\\u00b5', 0)", -1),
+    ]);
+}
+
+#[test]
+fn split_of_many_parts_keeps_the_order() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::run(indoc! {r#"
+                const parts = new Array(2000);
+                for (let i = 0; i < 2000; i++) parts[i] = String(i);
+                const joined = parts.join("|");
+                const split = joined.split("|");
+            "#}),
+        TestAction::assert_eq("split.length", 2000),
+        TestAction::assert("split.every((part, index) => part === String(index))"),
+        TestAction::assert_eq("split[1999]", js_str!("1999")),
+        TestAction::assert("arrayEquals('x1x2x'.split('x'), ['', '1', '2', ''])"),
+        TestAction::assert("arrayEquals(',,'.split(','), ['', '', ''])"),
+    ]);
+}
+
+#[test]
+fn replace_all_of_many_matches_replaces_every_one() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::run(indoc! {r#"
+                const repeated = "a".repeat(500);
+                const replaced = repeated.replaceAll("a", "b");
+                const withEmpty = "abcabc".replaceAll("", "-");
+            "#}),
+        TestAction::assert("replaced === 'b'.repeat(500)"),
+        // Node 22.21.1 prints `-a-b-c-a-b-c-`.
+        TestAction::assert_eq("withEmpty", js_str!("-a-b-c-a-b-c-")),
+    ]);
+}

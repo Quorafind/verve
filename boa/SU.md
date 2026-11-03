@@ -209,6 +209,14 @@ always agree with one another.
   native thing — `verve-dom`'s one object per DOM node — keeps its objects this way, so a node a
   script let go of is collected and then freed.
 
+- `boa_string`, `str.rs`: `JsStr::index_of` starts at `from_index` instead of skipping that many
+  windows from the front. `Windows` implements `next` only, so `skip(n)` walked n windows one at a
+  time and every search from a position cost O(position) — 40k-part `split` 2,297 ms, 200k parts
+  still running after 120 s. A Latin-1 pair now compares byte slices and a UTF-16 pair `u16`
+  slices, as subslices of the haystack; a needle and a haystack in different encodings still
+  compare code unit by code unit. `split`, `indexOf`, `includes`, `replaceAll` and string-pattern
+  `replace` are linear in the string now.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

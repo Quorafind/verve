@@ -238,10 +238,27 @@ impl<'a> JsStr<'a> {
         // a. Let candidate be the substring of string from i to i + searchLen.
         // b. If candidate is the same sequence of code units as searchValue, return i.
         // 8. Return -1.
-        self.windows(search_value.len())
-            .skip(from_index)
-            .position(|s| s == search_value)
-            .map(|i| i + from_index)
+        //
+        // The search starts at `from_index` rather than skipping that many windows from the front:
+        // a caller looking for the next separator (`split`, `replaceAll`) would otherwise walk the
+        // prefix again for every match, making the whole scan quadratic.
+        let search_len = search_value.len();
+        let last_start = len.checked_sub(search_len)?;
+        if from_index > last_start {
+            return None;
+        }
+        match (self.variant(), search_value.variant()) {
+            (JsStrVariant::Latin1(haystack), JsStrVariant::Latin1(needle)) => {
+                search_slice(&haystack[from_index..], needle).map(|i| i + from_index)
+            }
+            (JsStrVariant::Utf16(haystack), JsStrVariant::Utf16(needle)) => {
+                search_slice(&haystack[from_index..], needle).map(|i| i + from_index)
+            }
+            // A Latin-1 needle in a UTF-16 haystack, or the reverse, compares code unit by code
+            // unit; the candidates are taken as subslices, so the haystack is not copied.
+            _ => (from_index..=last_start)
+                .find(|&i| search_value == self.get_expect(i..i + search_len)),
+        }
     }
 
     /// Abstract operation `CodePointAt( string, position )`.
@@ -420,6 +437,18 @@ impl<'a> JsStr<'a> {
     pub fn display_lossy(&self) -> JsStrDisplayLossy<'a> {
         JsStrDisplayLossy::from(*self)
     }
+}
+
+/// The first index where `needle` occurs in `haystack`, the code-unit comparison of
+/// [`JsStr::index_of`] over one encoding, so a Latin-1 pair compares bytes and a UTF-16 pair
+/// compares `u16`s.
+///
+/// Candidates are subslices of `haystack`, not copies, and the scan stops at the first one: the
+/// cost follows the distance to the match, which is what makes repeated
+/// [`JsStr::index_of`] calls over one string linear in its length rather than quadratic.
+fn search_slice<T: PartialEq>(haystack: &[T], needle: &[T]) -> Option<usize> {
+    let end = haystack.len().checked_sub(needle.len())?;
+    (0..=end).find(|&i| haystack[i..i + needle.len()] == *needle)
 }
 
 impl Hash for JsStr<'_> {
