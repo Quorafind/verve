@@ -1,12 +1,14 @@
 # P63 让 `electron` 二进制能带 JIT
 
-**依赖**：P02  **规模**：S  **修改**：`crates/verve-electron/Cargo.toml`、`crates/verve-gpui/Cargo.toml`、`crates/verve-electron/tests/`、`docs/electron/size.md`
+**依赖**：P02  **规模**：S  **修改**：`crates/verve-electron/Cargo.toml`、`crates/verve-gpui/Cargo.toml`、`crates/verve-electron/tests/`、
+`docs/electron/size.md`、`boa/core/engine/src/vm/jit/mod.rs` 与 `boa/core/engine/src/vm/mod.rs`（只加一个访问器及其 re-export，见下）
 
 ## 目标
 
 基线发现 `cargo build -p verve-gpui --bin electron --features verve/jit` 构建出的 `electron.exe` **不含 JIT**：`verve-gpui` 只把 `verve`
 当 dev-dependency，`verve-electron` 以 `default-features = false, features = ["wasm"]` 引入 `verve`，于是没有任何办法在 `electron` 二进制里打开 JIT。
-本包只做**能开**：加 feature、确认每个 isolate 线程上 JIT 真的工作、量体积。**默认开不开由 P42 第 5 节按体积规则决定**，本包不改默认。
+本包只做**能开**：加 feature、确认每个 isolate 线程上 JIT 真的工作、量体积。默认已定（2026-11-02，用户：
+`electron` 默认带 JIT，硬上限 34 MB，见 [`README`](../README.md)「目标」与 `P42` 第 5 节），本包不改这条决定，只提供开关。
 
 ## 背景（先读）
 
@@ -24,6 +26,11 @@
 - 主进程与渲染器 isolate 都不额外调用 `set_jit_enabled`：带 feature 时默认开、`VERVE_JIT=0` 关，与 `verve run` 一致。
 - 测试（`crates/verve-electron/tests/jit.rs`，`#[cfg(feature = "jit")]`）：在主进程 isolate 与一个渲染器 isolate 里各跑一段热循环（含属性访问），
   断言 `jit_stats().live_functions > 0`，且对象布局检查通过（属性访问走了内联路径，用 `docs/jit.md` 现有的测试手段判断）；`VERVE_JIT=0` 时为 0。
+
+  判断布局检查的手段是 `layout::object_layout()`，但它是 `pub(crate)`：`docs/jit.md` 里现有的用法都在 `boa_engine` 自己的测试里。
+  测试在别的 crate 里，看不到它（`jit_stats()` 也不报告这件事——布局没通过时属性访问退成辅助函数，编译与进入都照常）。所以
+  `boa/core/engine/src/vm/jit/mod.rs` 加一个 `pub fn object_layout_checked() -> bool`，与 `jit_unavailable()` 同类（告诉宿主 JIT 退化到了哪一步），
+  不改变 JIT 的行为（第一次问到时会顺带在该线程做那次布局检查并缓存，与编译时做的一样）。**这是本包唯一的 `boa/` 改动，单独 commit 并记入 `boa/SU.md`。**
 - 体积：`scripts/size-report` 量带与不带 `jit` 的 `electron.exe`，写进 `size.md`。
 - 用 P60 的 `bench.js`（未合并时用其附录）在 `electron.exe` 的主进程里跑一遍（`electron <dir>`，`main.js` 里 `require` 它），JIT 开与关各 5 次，
   记录到 `perf-js.md` 或本文「状态」。
