@@ -128,6 +128,11 @@ pub fn command(args: &[&str], cwd: &Path) -> Command {
     command
         .args(args)
         .current_dir(cwd)
+        // `verve run` keeps compiled code in the user's own folder unless told not to, and a test
+        // must neither write there nor let a cache stand between it and what it measures. The
+        // variable rather than the flag: `process.execArgv` is what a test reads, and a flag there
+        // would be one more entry in it.
+        .env("VERVE_CODE_CACHE", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

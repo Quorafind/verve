@@ -69,6 +69,17 @@ fi
 jit=0
 if grep -aq VERVE_JIT_THRESHOLD "$verve" 2> /dev/null; then jit=1; fi
 
+# The code cache is off for every run, wherever the user's own folder is: a second run would
+# otherwise measure code read back from disk instead of code compiled, and the numbers would stop
+# being comparable between runs and between machines. `--no-code-cache` is Verve's flag; Node has
+# nothing to turn off.
+cache_flag=--no-code-cache
+"$verve" run "$cache_flag" -e 0 > /dev/null 2>&1 || cache_flag=
+if [ -z "$cache_flag" ]; then
+    echo "run.sh: this verve has no --no-code-cache; the code cache is whatever VERVE_CODE_CACHE says" >&2
+    export VERVE_CODE_CACHE=0
+fi
+
 script=bench.js
 [ "$scaling" = 1 ] && script=scaling.js
 
@@ -80,8 +91,8 @@ trap 'rm -f "$stderr_log"' EXIT
 run_once() {
     local engine="$1" test="$2"
     case "$engine" in
-        jit) "$timeout_cmd" "$timeout_s" env VERVE_JIT= "$verve" run "$here/$script" "$test" ;;
-        interp) "$timeout_cmd" "$timeout_s" env VERVE_JIT=0 "$verve" run "$here/$script" "$test" ;;
+        jit) "$timeout_cmd" "$timeout_s" env VERVE_JIT= "$verve" run $cache_flag "$here/$script" "$test" ;;
+        interp) "$timeout_cmd" "$timeout_s" env VERVE_JIT=0 "$verve" run $cache_flag "$here/$script" "$test" ;;
         node) "$timeout_cmd" "$timeout_s" "$node_bin" "$here/$script" "$test" ;;
     esac
 }
@@ -212,7 +223,7 @@ header() {
     printf '\n'
 }
 
-names="$("$verve" run "$here/$script" --list | sed -E 's/^\[//; s/\]$//; s/"//g; s/,/ /g')"
+names="$("$verve" run $cache_flag "$here/$script" --list | sed -E 's/^\[//; s/\]$//; s/"//g; s/,/ /g')"
 if [ -n "$only" ]; then
     case " $names " in
         *" $only "*) names="$only" ;;

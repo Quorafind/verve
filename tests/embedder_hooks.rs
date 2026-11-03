@@ -364,6 +364,8 @@ fn verve_run_still_ends_the_process_itself() {
     let ran = std::process::Command::new(env!("CARGO_BIN_EXE_verve"))
         .arg(&script)
         .current_dir(&dir.0)
+        // No test may keep compiled code in the user's own folder.
+        .env("VERVE_CODE_CACHE", "0")
         .output()
         .unwrap();
     assert_eq!(ran.status.code(), Some(3));

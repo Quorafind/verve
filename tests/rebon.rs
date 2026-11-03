@@ -145,6 +145,8 @@ fn rebons_plugin_host_without_its_grant_cannot_load() {
         .arg("run")
         .arg("--permission")
         .arg(&host)
+        // This one runs in the test's own environment, which has the user's folder in it.
+        .env("VERVE_CODE_CACHE", "0")
         .stdin(Stdio::null())
         .output()
         .unwrap();

@@ -96,6 +96,8 @@ fn verve_run_obeys_the_environment() {
         command
             .env_remove("BOA_JIT")
             .env_remove("BOA_JIT_THRESHOLD");
+        // A code cache would put compiled code between this test and the JIT it measures.
+        command.env("VERVE_CODE_CACHE", "0");
         for (name, value) in vars {
             command.env(name, value);
         }

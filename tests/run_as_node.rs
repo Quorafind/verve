@@ -23,6 +23,9 @@ fn node(args: &[&str]) -> String {
     let output = Command::new(std::env::current_exe().unwrap())
         .args(args)
         .env("ELECTRON_RUN_AS_NODE", "1")
+        // Node mode keeps compiled code in the user's own folder like `verve run` does, and a
+        // test must not write there.
+        .env("VERVE_CODE_CACHE", "0")
         .output()
         .unwrap();
     assert!(
