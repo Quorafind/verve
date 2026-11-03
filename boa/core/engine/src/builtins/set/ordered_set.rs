@@ -6,11 +6,23 @@ use indexmap::IndexSet;
 use std::fmt::Debug;
 
 /// A type wrapping `indexmap::IndexSet`
-#[derive(Default, Clone, Finalize, JsData)]
+#[derive(Default, Finalize, JsData)]
 pub struct OrderedSet {
     inner: IndexSet<MapKey>,
     lock: u32,
     empty_count: usize,
+}
+
+impl Clone for OrderedSet {
+    fn clone(&self) -> Self {
+        // See `OrderedMap::clone`: the source's iterators are not the copy's, and a copy that
+        // carried the lock over could never compact.
+        Self {
+            inner: self.inner.clone(),
+            lock: 0,
+            empty_count: self.empty_count,
+        }
+    }
 }
 
 unsafe impl Trace for OrderedSet {
@@ -67,7 +79,7 @@ impl OrderedSet {
     /// Computes in **O(1)** time.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.len() == 0
+        self.len() == 0
     }
 
     /// Insert a value pair in the set.
@@ -85,19 +97,33 @@ impl OrderedSet {
 
     /// Delete the `value` from the set and return true if successful
     ///
+    /// The value is replaced by a tombstone, so the values after it keep their place in the
+    /// order; [`full_len`][Self::full_len] counts the tombstones, [`len`][Self::len] does not.
+    ///
     /// Return `false` if `value` is not in set.
     ///
-    /// Computes in **O(n)** time (average).
+    /// Computes in **O(1)** time (amortized average).
     pub fn delete(&mut self, value: &JsValue) -> bool {
-        if self.lock == 0 {
-            self.inner.shift_remove(value)
-        } else if self.inner.contains(value) {
-            self.inner.insert(MapKey::Empty(self.empty_count));
-            self.empty_count += 1;
-            self.inner.swap_remove(value)
-        } else {
-            false
+        let deleted = self.delete_in_place(value);
+        self.compact();
+        deleted
+    }
+
+    /// Deletes `value` and leaves a tombstone, never compacting.
+    ///
+    /// [`delete`][Self::delete] may compact, which moves the values a walker has not reached yet;
+    /// a caller that walks the set by index — `difference`, as the specification writes it over a
+    /// list of slots — has to keep the positions it is between fixed.
+    pub(crate) fn delete_in_place(&mut self, value: &JsValue) -> bool {
+        if !self.inner.contains(value) {
+            return false;
         }
+
+        // See `OrderedMap::remove`: `shift_remove` moved every value after the deleted one,
+        // making the deletion of half a set quadratic.
+        self.inner.insert(MapKey::Empty(self.empty_count));
+        self.empty_count += 1;
+        self.inner.swap_remove(value)
     }
 
     /// Removes all elements in the set, while preserving its capacity.
@@ -152,9 +178,22 @@ impl OrderedSet {
     pub(crate) fn unlock(&mut self) {
         self.lock -= 1;
         if self.lock == 0 {
-            self.inner.retain(|k| matches!(k, MapKey::Key(_)));
-            self.empty_count = 0;
+            self.drop_tombstones();
         }
+    }
+
+    /// Removes the tombstones once they outnumber the values that are left, as
+    /// [`OrderedMap`][crate::builtins::map::ordered_map::OrderedMap] does; an iterator releases the
+    /// lock when it runs to its end.
+    fn compact(&mut self) {
+        if self.lock == 0 && self.empty_count * 2 > self.inner.len() {
+            self.drop_tombstones();
+        }
+    }
+
+    fn drop_tombstones(&mut self) {
+        self.inner.retain(|k| matches!(k, MapKey::Key(_)));
+        self.empty_count = 0;
     }
 }
 

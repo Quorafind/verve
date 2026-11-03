@@ -209,6 +209,69 @@ always agree with one another.
   native thing — `verve-dom`'s one object per DOM node — keeps its objects this way, so a node a
   script let go of is collected and then freed.
 
+- `boa_string`, `str.rs`: `JsStr::index_of` starts at `from_index` instead of skipping that many
+  windows from the front. `Windows` implements `next` only, so `skip(n)` walked n windows one at a
+  time and every search from a position cost O(position) — 40k-part `split` 2,297 ms, 200k parts
+  still running after 120 s. A Latin-1 pair now compares byte slices and a UTF-16 pair `u16`
+  slices, as subslices of the haystack; a needle and a haystack in different encodings still
+  compare code unit by code unit. `split`, `indexOf`, `includes`, `replaceAll` and string-pattern
+  `replace` are linear in the string now.
+
+- `boa_engine`, `builtins/map/ordered_map.rs`, `builtins/set/ordered_set.rs`: `Map.prototype.delete`
+  and `Set.prototype.delete` leave a tombstone instead of calling `shift_remove`, which moved
+  every entry after the deleted one: deleting half the keys of 40k took 878 ms, and 300k did not
+  finish. A tombstone is O(1) and the iterators skip it, so the order they see is unchanged; once
+  the tombstones outnumber the entries that are left and no iterator holds the lock, they are
+  dropped in one O(n) pass, amortized O(1) per deletion. `Set::delete_in_place` leaves the
+  tombstone without compacting, for `Set.prototype.difference`, which walks the set by index as
+  the specification writes it and would otherwise see the entries move underneath it.
+
+  The set operations that walk `this` by index while they call the other set's `has` — the set-like
+  `has` may delete from `this` — hold the same lock, otherwise a compaction in the middle of the
+  walk skipped the value at the next index. `Set.prototype.isDisjointFrom`, `isSubsetOf` and
+  `intersection` take it with `SetLock::new`, as `Set.prototype.forEach` does.
+
+  The lock is what holds compaction back, so an iterator has to give it back. `next` took the lock
+  out of the iterator at the end of its walk and dropped it as a plain value, which never
+  finalizes, so every map or set that had been through a `for…of`, a spread, an `Array.from` or
+  `entries()` stayed locked and never compacted; a pattern like `delete` then `set` with an
+  occasional iteration grew `full_len` without bound. Both iterators now unlock where the walk
+  ends, `Finalize` stays for one abandoned half-way, and a clone starts unlocked — the set
+  operations copy a set that may be being iterated, and the copies carried its lock over.
+
+- `boa_engine`, `builtins/map/mod.rs`, `builtins/set/mod.rs`: `Map::for_each_native` and
+  `Set::for_each_native` — the Rust-side walks behind `JsMap`/`JsSet` and the `TryFromJs`
+  conversions of `HashMap`/`BTreeMap` — step over a tombstone. Before the tombstones above they
+  could not see one after the lock was released, and their index loops did not advance when
+  `get_index` answered `None`, so the first tombstone spun forever. `OrderedSet::is_empty` asks
+  `len()`, as `OrderedMap::is_empty` does, rather than counting tombstones as elements.
+
+- `boa_string`, `lib.rs`: `JsString::ptr_eq` says whether two strings are one allocation rather
+  than merely equal, which the regexp widening below uses: a string's contents never change, so the
+  units derived from one allocation stay right for the next call on it.
+
+- `boa_engine`, `builtins/regexp/mod.rs`: a Latin-1 subject reaches `regress` as its UTF-16 code
+  units, widened once per scan instead of once per match. Widening the whole subject in every
+  `exec` made a global `exec`, `matchAll`, `replace` or `split` quadratic in its length: 8k lines
+  took 724 ms where 2k took 54 ms. The units of one allocation stay right for every later match on
+  it, so `WIDENED` keeps the last subject and its units for the next `exec`, matched by
+  `JsString::ptr_eq`. What a script can observe does not change: `lastIndex` is still read and
+  written once per match, and an overridden `exec` is still called.
+
+  The entry holds the subject — a slice of it pins the whole string it was cut from — and its copy
+  at two bytes a unit, about three times the size of the last subject, so it is released when the
+  scan that needed it ends. `ReleaseWidened` is a guard dropped on every way out of `exec`,
+  `@@search` and `@@split`, `?` errors included, so each of these ends with nothing kept:
+
+  - the failed match that ends a global scan, and the out-of-range `lastIndex` that ends one;
+  - the one match of a search that is neither global nor sticky;
+  - every `@@search` and `@@split`, whose result no next `exec` will want.
+
+  Two cases still keep it until the next Latin-1 `exec`: a `test`, `exec` or `search` on a global
+  or sticky pattern that matched — the scan has not ended, its next step is one `exec` away — and a
+  `matchAll` iterator abandoned half-way, which has no point to release at. A sticky match that
+  fails also keeps it: `@@split` runs the sticky splitter once per position of the subject.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

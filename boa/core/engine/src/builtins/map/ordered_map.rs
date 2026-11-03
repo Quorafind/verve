@@ -34,11 +34,25 @@ impl Equivalent<MapKey> for JsValue {
 }
 
 /// A structure wrapping `indexmap::IndexMap`.
-#[derive(Clone, Finalize, JsData)]
+#[derive(Finalize, JsData)]
 pub struct OrderedMap<V> {
     map: IndexMap<MapKey, Option<V>>,
     lock: u32,
     empty_count: usize,
+}
+
+impl<V: Clone> Clone for OrderedMap<V> {
+    fn clone(&self) -> Self {
+        // The lock counts the iterators of the map this copy was taken from; it says nothing about
+        // the copy, which nobody iterates yet. Carrying it over left the copy — `Set.prototype
+        // .difference` and its siblings copy a set that may be being iterated — locked for good,
+        // and a locked map never compacts.
+        Self {
+            map: self.map.clone(),
+            lock: 0,
+            empty_count: self.empty_count,
+        }
+    }
 }
 
 unsafe impl<V: Trace> Trace for OrderedMap<V> {
@@ -126,23 +140,25 @@ impl<V> OrderedMap<V> {
     /// Remove the key-value pair equivalent to `key` and return
     /// its value.
     ///
-    /// Like `Vec::remove`, the pair is removed by shifting all of the
-    /// elements that follow it, preserving their relative order.
-    /// **This perturbs the index of all of those elements!**
+    /// The pair is replaced by a tombstone, so the entries after it keep their place in the
+    /// order; [`full_len`][Self::full_len] counts the tombstones, [`len`][Self::len] does not.
     ///
     /// Return `None` if `key` is not in map.
     ///
-    /// Computes in **O(n)** time (average).
+    /// Computes in **O(1)** time (amortized average).
     pub fn remove(&mut self, key: &JsValue) -> Option<V> {
-        if self.lock == 0 {
-            self.map.shift_remove(key).flatten()
-        } else if self.map.contains_key(key) {
-            self.map.insert(MapKey::Empty(self.empty_count), None);
-            self.empty_count += 1;
-            self.map.swap_remove(key).flatten()
-        } else {
-            None
+        if !self.map.contains_key(key) {
+            return None;
         }
+
+        // `shift_remove` moves every entry after the removed one, which made deleting half the
+        // keys of a map quadratic. A tombstone leaves a hole instead, O(1); the iterators skip
+        // it, so the order they see is the same.
+        self.map.insert(MapKey::Empty(self.empty_count), None);
+        self.empty_count += 1;
+        let value = self.map.swap_remove(key).flatten();
+        self.compact();
+        value
     }
 
     /// Removes all elements from the map and resets the counter of
@@ -205,9 +221,26 @@ impl<V> OrderedMap<V> {
     pub(crate) fn unlock(&mut self) {
         self.lock -= 1;
         if self.lock == 0 {
-            self.map.retain(|k, _| matches!(k, MapKey::Key(_)));
-            self.empty_count = 0;
+            self.drop_tombstones();
         }
+    }
+
+    /// Removes the tombstones once they outnumber the entries that are left.
+    ///
+    /// Compaction is O(n) and halves the map, so it is paid for by the deletions that filled the
+    /// tombstones — amortized O(1) per `remove`. An iterator reads entries by index and holds the
+    /// lock, so the compaction waits for it to be released; an iterator that runs to its end
+    /// releases it in `next`, which is what lets a `for…of` or an `Array.from` be followed by
+    /// deletions that compact.
+    fn compact(&mut self) {
+        if self.lock == 0 && self.empty_count * 2 > self.map.len() {
+            self.drop_tombstones();
+        }
+    }
+
+    fn drop_tombstones(&mut self) {
+        self.map.retain(|k, _| matches!(k, MapKey::Key(_)));
+        self.empty_count = 0;
     }
 }
 

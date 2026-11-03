@@ -192,6 +192,17 @@ impl JsString {
         self.display_lossy().to_string()
     }
 
+    /// Whether two [`JsString`]s are the same allocation, and not merely equal strings.
+    ///
+    /// A caller that derives something from a string — the UTF-16 form of a Latin-1 one, say —
+    /// can keep it for the next call on the same allocation: a string's contents never change,
+    /// so the same allocation always has the same text, and a clone shares it.
+    #[inline]
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+
     /// Decodes a [`JsString`] into a [`String`], returning an error if the string contains unpaired
     /// surrogates.
     ///
