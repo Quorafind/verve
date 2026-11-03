@@ -78,7 +78,7 @@ fn run(source: &str, mode: Mode) -> (String, JitStats) {
 
 /// Runs `source` in every mode, asserts the results are the same, and returns them.
 #[track_caller]
-fn same(source: &str) -> String {
+pub(super) fn same(source: &str) -> String {
     let (interpreted, stats) = run(source, Mode::Interpreted);
     assert_eq!(stats.compiled, 0, "nothing compiles with the JIT off");
     for mode in [Mode::Eager, Mode::Hot] {

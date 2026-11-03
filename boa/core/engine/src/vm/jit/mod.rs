@@ -34,6 +34,8 @@ mod runtime;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_elements;
 
 use std::{
     cell::{Cell, OnceCell},

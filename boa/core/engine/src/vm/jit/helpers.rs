@@ -18,8 +18,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use boa_ast::scope::BindingLocatorScope;
 
 use crate::{
-    Context, JsObject, JsValue, environments::Environment, object::shape::slot::SlotAttributes,
-    vm::CodeBlock,
+    Context, JsObject, JsValue, builtins::Array, environments::Environment,
+    object::shape::slot::SlotAttributes, vm::CodeBlock,
 };
 
 use super::{
@@ -379,7 +379,8 @@ pub(crate) unsafe extern "C" fn jit_get_element(
     })
 }
 
-/// `SetPropertyByValue`: an element of a dense, extensible array, by an `int32` index.
+/// `SetPropertyByValue`: an element of a dense, extensible array, by an `int32` index, or one
+/// appended to a plain dense array.
 pub(crate) unsafe extern "C" fn jit_set_element(
     state: *mut JitState,
     value: u32,
@@ -393,14 +394,37 @@ pub(crate) unsafe extern "C" fn jit_set_element(
             if !object.is_array() {
                 return None;
             }
-            let mut borrowed = object.try_borrow_mut().ok()?;
-            if !borrowed.extensible {
-                return None;
+            {
+                let mut borrowed = object.try_borrow_mut().ok()?;
+                if !borrowed.extensible {
+                    return None;
+                }
+                if borrowed.properties_mut().set_dense_property(index, value) {
+                    return Some(());
+                }
             }
-            borrowed
-                .properties_mut()
-                .set_dense_property(index, value)
-                .then_some(())
+            append_element(context, object, index, value)
         })?
     })
+}
+
+/// `Set` of the element just past a plain dense array's elements: no element is on the
+/// prototype chain, so the element is defined there, and `length` grows to cover it if it does
+/// not already (`Array`'s `[[DefineOwnProperty]]`; the array shape has a writable `length`).
+/// Changes nothing and answers `None` for any other array, index or `length`.
+fn append_element(context: &Context, object: &JsObject, index: u32, value: &JsValue) -> Option<()> {
+    let (mut borrowed, len, elements) = Array::plain_dense_array(object, context)?;
+    // `length` is an array index, so `index + 1` is a valid one.
+    if index as usize != elements || len < elements as f64 || index == u32::MAX {
+        return None;
+    }
+    let properties = borrowed.properties_mut();
+    if !properties.indexed_properties.push_dense(value) {
+        return None;
+    }
+    if len.to_bits() == f64::from(index).to_bits() {
+        // NOTE: The "length" property is the first slot.
+        properties.storage[0] = JsValue::new(u64::from(index) + 1);
+    }
+    Some(())
 }

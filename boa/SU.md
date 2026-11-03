@@ -418,6 +418,12 @@ always agree with one another.
   and test262's `builtins/TypedArray/prototype/sort/stability` failed. Both zeroes now mean
   `Equal`; only a number above or below zero orders the pair. NaN was already `Equal`.
 
+- `boa_engine`, `builtins/array/mod.rs`, `vm/jit/helpers.rs`: `Array::plain_dense_array` is
+  `pub(crate)`, and the JIT's `SetPropertyByValue` helper uses it to append: `a[i] = x` with `i`
+  the count of a plain dense array's elements (and `length` at least that) pushes the element
+  and grows `length` to cover it, as `[[Set]]` and `Array`'s `[[DefineOwnProperty]]` do there.
+  Any other array, index or `length` takes the interpreter's `[[Set]]`.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
