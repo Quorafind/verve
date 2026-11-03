@@ -328,6 +328,23 @@ pub(crate) fn typed_array_exotic_prevent_extensions(
     ordinary_prevent_extensions(obj, context)
 }
 
+/// Whether `key` may be a canonical numeric index string.
+///
+/// Every string `ToString` produces for a number starts with a digit, `-`, `I` (`Infinity`) or
+/// `N` (`NaN`), so a key starting with anything else can never satisfy
+/// `ToString(ToNumber(key)) == key` and does not have to be parsed. This only ever rules out keys
+/// that would have been rejected anyway: `-0`, `0`, `-1`, `1.5`, `1e+21`, `Infinity`, `-Infinity`
+/// and `NaN` all pass it.
+#[inline]
+fn may_be_canonical_numeric_index(key: &JsString) -> bool {
+    key.code_unit_at(0).is_some_and(|unit| {
+        (u16::from(b'0')..=u16::from(b'9')).contains(&unit)
+            || unit == u16::from(b'-')
+            || unit == u16::from(b'I')
+            || unit == u16::from(b'N')
+    })
+}
+
 /// `CanonicalNumericIndexString ( argument )`
 ///
 /// More information:
@@ -335,6 +352,10 @@ pub(crate) fn typed_array_exotic_prevent_extensions(
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-canonicalnumericindexstring
 fn canonical_numeric_index_string(argument: &JsString) -> Option<f64> {
+    if !may_be_canonical_numeric_index(argument) {
+        return None;
+    }
+
     // 1. If argument is "-0", return -0𝔽.
     if argument == &js_str!("-0") {
         return Some(-0.0);

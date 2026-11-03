@@ -324,6 +324,19 @@ always agree with one another.
   evaluated from a string, which no cache keeps, is used as parsed — writing it would compile it,
   and every function it declares, at the parse rather than at the first call.
 
+- `boa_engine`, `builtins/typed_array/object.rs`: `CanonicalNumericIndexString` rejects a key by its
+  first code unit before parsing it. Reading or writing any named property of a typed array —
+  `ta.length`, `ta.byteLength`, `ta.byteOffset`, `ta.buffer`, and every `ta.foo` — reached the
+  integer-indexed exotic `[[Get]]`, which ran the whole conversion for a key that could never be an
+  index: `ToNumber(key)` and then a `JsString::from(n)` allocation to compare back. A key that is
+  not a canonical numeric index string starts with `0`–`9`, `-`, `I` or `N` and with nothing else,
+  so the other keys are refused without parsing or allocating (`may_be_canonical_numeric_index`).
+  The check only widens what is let through to the parser: `-0`, `0`, `-1`, `1.5`, `1e+21`,
+  `Infinity`, `-Infinity` and `NaN` still pass and still resolve exactly as before. Measured on the
+  same round (interpreter, 1M iterations, median of five processes): `ta.length` 386.9 → 201.5 ms,
+  `ta.byteOffset` 374.3 → 212.7 ms, a missing string key 389.5 → 211.6 ms, and the suite's `typed`
+  (six 1M loops reading `f.length` per iteration) 3589.5 → 2350.1 ms.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

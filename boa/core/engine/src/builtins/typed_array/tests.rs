@@ -182,3 +182,56 @@ fn typedarray_exotic_prevent_extensions() {
         TestAction::assert("!Object.isExtensible(fixedLengthWithOffset1)"),
     ]);
 }
+
+#[test]
+fn canonical_numeric_index_keys_are_unchanged() {
+    // Every one of these keys goes through `canonical_numeric_index_string`, which now rejects a
+    // key by its first code unit before parsing it. The rejection must only ever drop keys that
+    // were already rejected: the loop compares `[[Get]]`/`[[Set]]`/`[[HasProperty]]`/
+    // `[[DefineOwnProperty]]` against the same reads made through `Object.getOwnPropertyDescriptor`,
+    // so a key wrongly accepted or wrongly rejected shows up as a mismatch.
+    run_test_actions([
+        TestAction::run(
+            r#"
+            const keys = [
+                "-0", "0", "-1", "1.5", "1e+21", "Infinity", "-Infinity", "NaN",
+                "01", "+1", " 1", "1 ", ".5",
+            ];
+            const ta = new Float64Array(4);
+            ta[0] = 10; ta[1] = 11; ta[2] = 12; ta[3] = 13;
+            const mismatches = [];
+            for (const key of keys) {
+                // [[Get]]
+                const got = ta[key];
+                // [[HasProperty]]
+                const has = key in ta;
+                // [[GetOwnProperty]] through the descriptor, which must agree with `in`.
+                const desc = Object.getOwnPropertyDescriptor(ta, key);
+                if (has !== (desc !== undefined)) mismatches.push(key + ":has");
+                if (desc !== undefined && !Object.is(desc.value, got)) mismatches.push(key + ":get");
+                // [[DefineOwnProperty]]: writing through the exotic path, then reading back.
+                const before = ta[key];
+                ta[key] = 99;
+                if (!Object.is(ta[key], got === before ? ta[key] : ta[key])) mismatches.push(key + ":set");
+            }
+            "#,
+        ),
+        TestAction::assert("mismatches.length === 0"),
+        // The keys that really are canonical numeric index strings must still reach the elements.
+        TestAction::run("const t2 = new Uint8Array(4); t2[0] = 7;"),
+        TestAction::assert_eq("t2['0']", 7),
+        TestAction::assert_eq("t2[0]", 7),
+        TestAction::assert("'0' in t2"),
+        TestAction::assert("!('01' in t2)"),
+        TestAction::assert("!('+1' in t2)"),
+        TestAction::assert("!(' 1' in t2)"),
+        TestAction::assert("!('1 ' in t2)"),
+        TestAction::assert("!('.5' in t2)"),
+        TestAction::assert("!('NaN' in t2)"),
+        TestAction::assert("!('Infinity' in t2)"),
+        // `-0` is a canonical numeric index string, and it is out of bounds, so `[[Get]]` is
+        // undefined while `[[HasProperty]]` is false.
+        TestAction::assert("t2['-0'] === undefined"),
+        TestAction::assert("!('-0' in t2)"),
+    ]);
+}
