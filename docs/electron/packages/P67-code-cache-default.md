@@ -319,3 +319,113 @@ A 的四个细节，都由测量决定：
   它们决定了「第一次不建密钥」这条设计，也决定了「值得缓存」门槛必须在知道载入量之后才判定。
 - 组合负载本轮的 `startup.mjs` 是自建脚本（31 个入口、脚本内 56.5 ms），不是 `docs/startup.md` 里那份原始脚本；
   两者的绝对时间不可直接对比，但冷/暖/无缓存三列的口径一致。
+
+### 阶段二（本轮）：实现完成
+
+按总控确认的方案 A + 门槛实现。六个提交，每个都能单独编译：测试隔离、默认目录与开关、第二次才写与门槛、
+写盘固定成本、淘汰、并发写；最后一个只改 `docs/`。
+
+#### 做了什么
+
+- **默认目录与开关**：`--no-code-cache` > `--code-cache=<dir>` > `VERVE_CODE_CACHE` > 默认目录；
+  `VERVE_CODE_CACHE` 的 `0`/`off`/`false` 表示关，空值视为未设置。默认目录 Windows
+  `%LOCALAPPDATA%\Verve\code-cache`，否则 `$XDG_CACHE_HOME/verve/code-cache`（未设时 `~/.cache/verve/code-cache`）。
+  显式目录的行为不变（失败一行 `verve: code cache … not used:`）；默认目录的任何失败都静默。
+- **启动路径只多一次 `stat`**：`code_cache_mark::start` 只看当前构建的 pack 在不在。在 → 照旧初始化（建/查目录、
+  `check_private`、读密钥、读 pack），走暖路径；不在 → 什么都不建、不读密钥，把「写标记 / 编译并写 pack」全推到退出前。
+- **第二次才写 + 门槛**：第一次跑只记「见过」标记（路径 + 大小 + 修改时间，不签名、不算 SHA-256）；
+  第二次在标记里认出同一份源码时才建目录、校验目录、读密钥、编译并写 pack。门槛 `WORTH_CACHING = 64 KiB`
+  在退出前按「这次载入的源码总量」判定，低于它完全不碰缓存（`hi.cjs` 任何一跑都不建目录）。
+- **标记的上限**：只记当前构建（`<指纹前 8 字节>.seen`），`MAX_ENTRIES = 4096` 条（满了丢最早记的）、
+  `MAX_BYTES = 256 KiB`（超出的不再写，读不回来的整份当没有）。淘汰也清掉其他构建的标记。
+- **写盘固定成本**：pack 的临时文件在 Windows 上改为继承目录的 DACL（目录在 `CodeCache::open` 里已建好并校验过），
+  不再为每次写构造一份新 DACL 再释放。写 pack 之前仍然必做 `check_private`（收紧第 1 档只用于写标记）。
+- **淘汰**：打开 pack 时 `set_modified`；`CodeCache::write(settled)` 第一次之后、一天最多一次调用
+  `code_cache::sweep(dir, current, now)`——14 天未用、512 MB 上限、按最近使用从旧到新、当前构建永不删、
+  失败只是跳过。`sweep` 只吃目录与当前 pack，P42 可直接复用。
+- **并发写**：改名失败（Windows 上另一进程正打开着目标）时保留 `pending`、不重试、不报错，下一次 flush 再写。
+
+#### 表 A′：进程总时间（实测，本轮，release `--features jit`）
+
+构建：`cargo build --release --features jit --bin verve`（27,047,424 字节，`CARGO_BUILD_JOBS=6`），Windows 10 LTSC 2021，
+Ryzen 9 7950X（32 线程），与其他实现者共享。负载用 `Get-Counter '\Processor(_Total)\% Processor Time'` 每轮前后各取一次。
+**四个配置在同一轮里轮换先后采样**（第一版固定顺序时「不开缓存」紧跟 CPU 计数，被系统性抬高了 3 ms），各自取中位；
+`LOCALAPPDATA`/`XDG_CACHE_HOME`/`XDG_CONFIG_HOME`/`HOME` 全部指向 scratchpad 里的临时目录。
+
+| 负载 | 轮数 | 负载% | 不开缓存 | 第一次 | 第二次（编译并写） | 之后（暖） | pack / 标记 |
+|---|---|---|---|---|---|---|---|
+| `hi.cjs` 单文件 | 8 | 5.6–8.5 | **23.8** / 21.1 / 41.1 | **23.3** / 21.0 / 26.4 | **21.0** / 20.2 / 22.7 | **21.1** / 19.9 / 22.7 | 无 / 无（低于门槛） |
+| Rebon 组合（31 入口） | 11 | 2.9–8.8 | **81.6** / 78.7 / 104.7 | **87.6** / 82.3 / 142.7 | **110.2** / 99.1 / 135.6 | **45.4** / 44.9 / 51.2 | 995,939 B / 4,238 B |
+| Rebon 组合（7 轮那组） | 7 | 2.9–9.2 | **81.9** / 79.6 / 108.8 | **86.3** / 80.9 / 89.2 | **107.4** / 101.5 / 114.7 | **47.8** / 45.8 / 50.0 | 同上 |
+| `require('typescript')` | 7 | 2.7–88.3 | **1,143.0** / 1,114.2 / 1,847.6 | **1,116.2** / 1,075.5 / 1,872.4 | **1,432.2** / 1,403.7 / 1,770.2 | **201.1** / 198.1 / 276.1 | 17,839,029 B / 306 B |
+
+组合那组两批读数是同一天、相邻两次测量，负载都低（2.9–9.2%），差异是机器噪声；两批都记下来，因为结论对两批都成立。
+
+#### 验收：两条守住，一条没守住
+
+- **单文件（`hi.cjs`）✓**：任何一跑都不碰缓存，第一次 23.3 对不开缓存 23.8（**快 0.5 ms**），
+  远在「不慢 2 ms」之内。
+- **`require('typescript')` ✓**：第一次 1,116.2 对 1,143.0 = **97.6%**（门槛以上，第一次只写标记）。
+- **组合 ✗**：第一次 87.6 对 81.6 = **107.4%**，超 105% 的线 **2.4 个百分点**（约 2 ms）；7 轮那组是 105.4%，
+  也超。**差多少**：按 81.6 的 105% 算是 85.7 ms，实测 87.6，多 1.9 ms。
+
+多出来的这 1.9–2 ms 花在哪里（同一台机器上的临时计时器，release，未提交）：组合第一次的退出前收尾
+`P67 finish: dir 1.973 stat 34 files 0.509 write 0.480`——建目录（含 `%LOCALAPPDATA%\Verve` 与 `code-cache` 两层，
+每层都带保护 DACL）1.97 ms，34 个文件的 `stat` 0.51 ms，写 4.2 KB 标记 0.48 ms。**没有做 `check_private`、没有读密钥、
+没有编译任何函数**——门槛那条已经做到位，剩下的是「第一次跑必须建目录」这个固定成本本身。
+
+本包按总控的指示**没有改验收条款**。要把它压到 105% 以内，剩下的手段都是阶段一列过的收紧第 2、3 档：
+把标记并进第一次 flush（省一次 `write` 的 0.48 ms，不够）、或第一次完全不建目录、把标记放进密钥目录
+（省 1.97 ms 的建目录，正好够，但总控已明确不采纳「标记进密钥目录」）。是否改验收由总控定。
+
+#### 表 B′：各阶段相对阶段一的变化
+
+| 指标 | 阶段一 | 现在 |
+|---|---|---|
+| 组合冷（第一次写 pack） | 122.5 | 第一次 87.6（只写标记）；第二次 110.2（写 pack） |
+| 组合暖 | 66.3 | 45.4 |
+| `typescript` 冷 / 暖 | 1,538.7 / 229.0 | 第一次 1,116.2 / 第二次 1,432.2 / 之后 201.1 |
+| `hi.cjs` | 冷 35.8、暖 29.2 | 任何一跑 23.3–21.1（不碰缓存） |
+| Rebon 的 pack | 994,502 B | 995,939 B |
+| `typescript` 的 pack | 17,838,533 B | 17,839,029 B |
+
+组合的暖跑从 66.3 降到 45.4，是淘汰的 `set_modified`、写盘 DACL 那两处之外的一个副作用：
+第二次跑写下的 pack 之后，第三次读回时全部条目都已在同一个 pack 里（阶段一的冷跑也是先删目录再跑，
+理论上一样）；差异更可能来自那一轮的负载（2.9–8.8% 对阶段一的 7.6–52.6%）。这一列不能与阶段一逐项对比。
+
+#### 测试
+
+- `cargo test -p verve` 全量通过（445 个测试，含 `code_cache_sweep` 的 5 个单测、`code_cache_mark` 的 3 个单测
+  与 `code_cache.rs` 的 27 个集成测试）。
+  另外三种配置也全过：`VERVE_LAZY_COMPILE=0`、暖缓存（`VERVE_CODE_CACHE` 指向临时目录连跑两轮）、
+  `VERVE_JIT_THRESHOLD=0 BOA_JIT_THRESHOLD=0` 加 `--features jit`。
+- 新增的默认目录测试：`the_default_folder_caches_from_the_second_run_and_the_switches_turn_it_off`、
+  `a_default_folder_that_cannot_be_made_leaves_the_run_silent`、`a_pack_that_is_already_there_makes_the_first_run_a_warm_one`、
+  `four_processes_writing_one_pack_lose_nothing_that_matters`（4 进程 × 4 轮、pack 可读、每条标签有效、每个条目都在）。
+- **真实用户目录的前后对比（只 `ls`，不读不写里面的文件）**：`cargo test` 之前
+  `%LOCALAPPDATA%\Verve` 里只有 `code-cache-secret`（32 字节，2026-10-26），跑完之后仍然只有它，字节数与修改时间都没变；
+  `~/.cache/verve` 与 `~/.config/verve` 前后都不存在。测试里每一个启动 `verve` 二进制的地方都显式
+  `VERVE_CODE_CACHE=0`（`tests/common/mod.rs` 的夹具、`embedder_hooks`、`jit`、`proxy`、`rebon`、`run_as_node`、
+  `crates/verve-dom/tests/verve_globals.rs`）；专测默认目录的测试用临时目录覆盖四个环境变量。
+  `scripts/js-bench/run.sh` 显式传 `--no-code-cache`（这个二进制不支持时回落到 `VERVE_CODE_CACHE=0`），
+  保证吞吐数字前后可比。
+- `docs/startup.md` 的 Tests 一节：本包只改了 `--code-cache` 的默认值，缓存本身的格式与语义未变；
+  `cargo clippy --workspace --all-targets -- -D warnings`（含 `--features jit`）、`cargo fmt --all --check`、
+  `scripts/style-check.sh` 全部通过。
+
+#### 给其他包的备注（在阶段一五条之外新增）
+
+6. **默认开以后，任何启动 `verve` 二进制的测试都必须隔离。** 不加 `VERVE_CODE_CACHE=0` 也不覆盖
+   `LOCALAPPDATA`/`XDG_CACHE_HOME`/`XDG_CONFIG_HOME`/`HOME` 的话，测试会往真实用户目录里写标记与 pack。
+   行为测试用变量关掉（免得缓存掩盖被测路径），专测默认目录的才用临时目录。
+7. **门槛以下的脚本默认开仍然有固定成本**（建 `%LOCALAPPDATA%\Verve` 一次之后就没了），但那次建目录发生在
+   第一次**值得缓存**的运行里，不是任何一次运行。
+
+#### 没做的
+
+- 组合第一次的 107.4%（差 1.9 ms）——按总控指示如实记录，不改验收条款。
+- 阶段一列的「暖缓存的哈希开销」与「Faster reading back」仍留给 P42。
+
+#### 评审后的修正
+
+- 新增注释译成英文（style.md §4）；`Deferred` 不再对每次载入线性查重（`Mark` 自己去重），`Mark` 的淘汰顺序改用 `VecDeque`；`default_dir` 忽略非绝对（含空）的 `XDG_CACHE_HOME`、`HOME`、`LOCALAPPDATA`，逻辑拆成可单测的纯函数。
