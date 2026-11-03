@@ -17,7 +17,8 @@ React 式 UI 与编辑器类应用的主要开销是对象分配、属性读写�
 | 带比较函数的 `sort`，1M | 15× |
 
 本包优化**解释器**本身（JIT 关时也受益，且 JIT 的慢路径就是解释器的处理函数）。
-**参考目标**（剖析后由实现者提出、总控确认）：`typed` ≤ 100×、`oo` ≤ 80×、`alloc` ≤ 15×、`mapset` ≤ 20×、`sort` ≤ 8×、`vdom` 与 `closure`（P60 新增）有明确改善。
+**参考目标**（第一阶段实测后由总控确认，2026-11-03；依据见「状态」第 3 节）：`typed` ≤ 250×、
+`oo` ≤ 300×、`alloc` ≤ 25×、`mapset` ≤ 8×、`sort` ≤ 14×、`vdom` ≤ 14×（不退步）、`closure` ≤ 24×。
 
 ## 背景（先读）
 
@@ -423,12 +424,137 @@ P64 拿下拼接后同一条记录还能再降一大截。本包不会为了这�
 
 ### 7. 没做 / 待确认
 
-- **没改任何代码**。本轮只改本文档；验收项（`perf-js.md` 追加本包那一行、`boa/SU.md` 每项一条、test262 前后
-  逐项比较、`cargo test`）留到实现阶段。test262 在 `E:\test262`（`boa/test262_config.toml` 固定 d86b229）。
-- **2.2 的 277 ns（class 构造）还没拆到具体行**。它是同一进程相邻项的差值测量，可靠；但「哪几段各占多少」
-  要在实现第 6 项时加临时计数器才能定（计数器不提交、不留在代码里）。
-- **`Map.get` 的 139/212 ns 的三段拆分**同理，实现第 7 项时确认。
-- **套件两轮差异 31–43%**（S1 与 S2）。实现阶段每项前后都在同一轮里测，并在「状态」里记该轮测量前后的负载读数；
-  某一轮明显偏离就重测、不引用。
-- 探针脚本在会话 scratchpad，未进仓库。若希望它们进 `scripts/js-bench/`，需要 P60 同意（那个目录归 P60）。
-- 未跑 `cargo test --workspace`、未跑 test262、未做 release 体积复查——按 `conventions.md` 归总控/实现阶段。
+- **第 6、8、9、10 项没合代码**，理由见第 9 节。前两项（class 构造、`sort`）已把成本拆到具体位置并证明剩余
+  部分落在 P66 的调用帧上；第 9 项按任务书「没净收益就只留分析」不合并；第 10 项要动 GC，归 P42。
+- **`Map.get`/`has` 的 139/212 ns 三段拆分没做**：`mapset` 在两轮套件里分别是 7.5× 与 7.2×，都低于 ≤8× 的
+  目标，再改没有可测收益。
+- **第 2 阶段没有重跑 `cargo test --workspace`**，只按任务书跑了 `cargo test -p boa_engine`（含 187 个
+  doctest）与 `cargo test -p verve`，两者全通过；也没有重跑带 `jit` feature 的 `boa_engine` 测试与
+  `vm/jit/tests.rs` 的差分测试——本包没有改 `vm/jit/`，JIT 只作为套件的第二列被计时。
+- **release 体积没有复查**：`perf-js.md` 那一条「二进制大小与基线一致」是 P60 的记录，本包重建后没有比对。
+- **探针脚本仍在会话 scratchpad**，没进仓库；`scripts/js-bench/` 归 P60。
+- **第二阶段新增了一条行为修复**（`ecdda0f8`，类型化数组 `sort` 的 `+0` 比较），是跑 test262 时发现的，
+  已连同测试与 `boa/SU.md` 一条一起提交；它与第 8 项的 `sort` 性能项无关（那两个文件在分支上与基线逐字节相同）。
+
+### 8. 第二阶段结果（2026-11-04）
+
+构建：`cargo build --release -p verve --features jit`，`CARGO_BUILD_JOBS=6`；解释器列是同一个二进制加
+`VERVE_JIT=0`。每项前后在同一轮里交替测量，5 个进程取中位。负载用 `Get-Counter '\Processor(_Total)\% Processor Time'`。
+
+| 顺序 | 改动 | 解释器列（改前 → 改后，ms） | JIT 列（改前 → 改后，ms） | 该轮负载 | 提交 |
+|---|---|---|---|---|---|
+| 1 | 具名键按首码元预判 | `ta.length` 386.9 → 201.5；`typed` 3589.5 → 2350.1 | 同左（内建，JIT 慢路径共用） | 未记 | `3bd42170` |
+| 2 | `GetLengthProperty` 直读类型化数组 | `ta.length` 238.6 → 102.8；`typed` 2907.7 → 1845.1 | 178.7 → 73.7；`typed` 2131.8 → 1391.2 | 13–48% | `af0c9a68` |
+| 3 | 元素直读写缓冲区 | `elem-i32-index` 80.5 → 65.6；`typed` 1559.8 → 1309.5 | 53.7 → 39.8；`typed` 1359.1 → 1060.2 | 13–48% | `b079fab3` |
+| 4 | 字面量新属性 define 捷径 | `alloc` 344.5 → 335.0；`vdom` 97.8 → 88.7 | 295.0 → 278.9；`vdom` 82.2 → 79.6 | 22–46% | `1e90e424` |
+| 5 | 新属性 set 捷径 | `new-field-store` 320.0 → 253.6；`empty-store` 73.7 → 60.3 | 304.1 → 232.4；68.4 → 46.7 | 27–37% | `a4633332` |
+| 7 | `clear()` 不截断活迭代器（行为缺陷） | 行为缺陷，见下 | 同左 | — | `5d10789d` |
+| — | 类型化数组 `sort` 的 `+0` 比较（行为缺陷） | 行为缺陷，见下 | 同左 | — | `ecdda0f8` |
+
+第 7 项的 `Map.get`/`has` 未做：套件的 `mapset` 在同一轮里已到 **7.5×**，低于 ≤8× 的目标，再改没有可测收益。
+第 6 项（class 构造）、第 8 项（`sort`）、第 9 项（解构 / `for…of`）、第 10 项（对象创建）**未合代码**，原因见第 9 节。
+
+**整轮套件**（最终二进制，`scripts/js-bench/run.sh ./target/release/verve.exe node`，5 次取中位）：
+测量前负载 4.9 2.2 4.2 3.2 1.2%（中位 3.2%），测量后 10.3 14.4 14.6 11.1 11.6%（中位 11.6%）。
+
+| test | Node | JIT | interp | JIT / Node | interp / Node | 目标 | 达标 |
+|---|---|---|---|---|---|---|---|
+| `alloc` | 9.3 | 253.2 | 276.3 | 27× | 30× | ≤25× | 否，差 2–5× |
+| `mapset` | 5.0 | 35.9 | 36.1 | 7.2× | 7.2× | ≤8× | 是 |
+| `typed` | 4.0 | 1046.6 | 1239.0 | 262× | 310× | ≤250× | 否，差 12–60× |
+| `oo` | 2.9 | 1099.8 | 1132.6 | 379× | 391× | ≤300× | 否，差 79–91× |
+| `sort` | 173.4 | 2891.3 | 3123.6 | 17× | 18× | ≤14× | 否，差 3–4× |
+| `vdom` | 4.1 | 67.0 | 72.1 | 16× | 18× | ≤14× | 否，差 2–4× |
+| `closure` | 19.7 | 593.1 | 634.8 | 30× | 32× | ≤24× | 否，差 6–8× |
+
+同一份代码的低负载套件跑了两轮（第一轮在 `packages/P65` 本轮开工时、第二轮是最终二进制），两轮的比值一并
+列出，好让读者看到噪声的量级：
+
+| test | 第一轮 JIT / interp（负载 10.8% → 4.4%） | 第二轮 JIT / interp（负载 3.2% → 11.6%） |
+|---|---|---|
+| `alloc` | 28× / 29× | 27× / 30× |
+| `mapset` | 7.5× / 7.6× | 7.2× / 7.2× |
+| `typed` | 251× / 306× | 262× / 310× |
+| `oo` | 376× / 392× | 379× / 391× |
+| `sort` | 15× / 15× | 17× / 18× |
+| `vdom` | 19× / 19× | 16× / 18× |
+| `closure` | 31× / 32× | 30× / 32× |
+
+`mapset` 两轮都达标；`typed` 的 JIT 列差 1×（第一轮）到 12×（第二轮）就到 250× 的目标线，`alloc` 差 2–5×，
+这两项都在两轮差异所显示的噪声范围内。`oo`、`sort`、`closure` 的差距远超噪声，`vdom` 在 14× 目标线附近浮动
+（第一阶段的 S1 是 14×，本轮 19× 与 16×）。后四项的剩余差距都在 `vm/opcode/call/` 与 `CallFrame`，
+那是 P66 的范围（第 3 节已经量过地板）。`sort` 第二轮比第一轮慢 2–3×（2891 对 2528 ms），与第二轮测量后的
+负载 11.6% 相符：它的 17.2 M 次比较全落在「原生调 JS」，对机器负载很敏感。
+
+**70k 字面量记录**（6.1 的复现，最终二进制，5 个进程取中位；测量前负载 10.0 11.2 9.5 12.4 11.0%，
+测量后 9.8 11.0 9.1 8.1 8.7%）：
+
+| 探针 | JIT ms | interp ms | Node ms |
+|---|---:|---:|---:|
+| `records-70k` | **194.4**（最好 182.4） | **197.8**（最好 194.3） | 11.3（最好 10.1） |
+
+P64 报的是 286.5 ms 对 Node 8.8 ms（32.6×）；同一条记录在本包最终树上 194.4 ms（17.2×），差额来自第 4、5 项
+（字面量 define 捷径与新属性 set 捷径）——6.1 预算的「234.6 → 约 193 ms」达成。这两条路径现在都是一次插入，
+而不是一次原型链走查加 `CreateDataProperty`。剩下的 194 ms 里仍有两次字符串拼接（`concat` 一行在本套件里
+35–136×），那是 P64 的；再少的分配次数要动 GC，归 P42。
+
+**行为缺陷修复**（第 7 项）：`Map.prototype.clear` 与 `Set.prototype.clear` 原先清空并释放底层存储，
+把迭代器计数的长度一起重置，于是走到一半的迭代器立刻结束。修复后，有活迭代器时只把每个条目标空
+（保持长度、留墓碑），没有迭代器时仍整块清空并释放容量。测试 `clear_keeps_a_live_iterator_running`。
+
+**第二个行为缺陷**（`ecdda0f8`，跑 test262 时发现）：`CompareTypedArrayElements` 用「符号位」判比较结果，
+把 `+0` 当成 `Greater`、其余非正数当成 `Less`，于是比较函数说「相等」时每一对都被判成有序。
+`new Uint8Array([0,1,2,3]).sort(() => 0)` 返回 `3,2,1,0`，规范要求保持输入顺序；test262 的
+`builtins/TypedArray/prototype/sort/stability` 因此失败（预先排好的输入也被重排）。现在两个零都表示
+`Equal`，只有大于或小于零才排序。测试 `typed_array_sort_treats_a_zero_comparison_as_equal`。
+这个缺陷与 `sort` 的性能项（第 8 项）无关：`builtins/typed_array/builtin.rs` 与 `builtins/array/mod.rs`
+在本包分支上与基线 `6335a760` 逐字节相同，改前就存在。
+
+### 8.1 test262 前后逐项比较（`E:	est262`，`d86b2294`，`-O`）
+
+改前 = 基线 `6335a760` 的源码编译出的 `boa_tester`（同一 `CARGO_BUILD_JOBS=6`，只把那 11 个文件换回基线，
+跑完即还原工作区）；改后 = 本分支最终树。两边的失败项按「相对路径 + 名字」逐条比对。
+
+| 目录 | Total | Passed（改前 → 改后） | Ignored | Failed（改前 → 改后） | 差异 |
+|---|---:|---|---:|---|---|
+| `built-ins/TypedArray` | 1446 | 1437 → **1438** | 8 | 1 → **0** | **−1 失败**（`prototype/sort/stability`，本包修掉） |
+| `built-ins/TypedArrayConstructors` | 738 | 736 → 736 | 2 | 0 → 0 | 0 |
+| `built-ins/Map` | 204 | 204 → 204 | 0 | 0 → 0 | 0 |
+| `built-ins/Set` | 383 | 383 → 383 | 0 | 0 → 0 | 0 |
+| `built-ins/Array/prototype/sort` | 54 | 54 → 54 | 0 | 0 → 0 | 0 |
+| `language/expressions/class` | 4059 | 4049 → 4049 | 10 | 0 → 0 | 0 |
+| `language/statements/class` | 4367 | 4353 → 4353 | 14 | 0 → 0 | 0 |
+| `language/destructuring` | 19 | 18 → 18 | 0 | 1 → 1 | 0（既有失败，见下） |
+| `language/expressions/assignment` | 485 | 484 → 484 | 0 | 1 → 1 | 0（既有失败） |
+| `language/statements/for-of` | 751 | 740 → 740 | 10 | 1 → 1 | 0（既有失败） |
+
+三个既有失败在基线上同样失败，改名与内容都不在本包范围内：
+`destructuring/binding/keyed-destructuring-property-reference-target-evaluation-order-with-bindings`、
+`assignment/dstr/obj-rest-before-comma-invalid`、`for-of/dstr/obj-rest-before-comma-invalid`。
+没有新增失败；`TypedArray` 净少一个失败。
+
+**评审后的两处修正**：类型化数组元素写入的快捷路径现在只在接收者就是该数组本身时生效（`super[0] = v` 这类接收者不同的写入走 `OrdinarySet`，在接收者上定义属性）；新属性快捷路径判断「普通对象」时把 `[[Set]]` 也纳入比较。
+
+### 9. 没合的项与理由
+
+- **第 6 项 class 构造**：拆开后，200k 次 `new Class()` 144 ms、`new Function()` 53 ms、`Object.create`
+  只有 30 ms——差额几乎全在 `function_construct` 之后的 `CallFrame` 建立与环境推送，属于 P66 的
+  `vm/call_frame/` 与 `vm/opcode/call/`，本包按任务书不改。`get_prototype_from_constructor` 的通用 `Get`
+  不是主项（`Object.create` 已证）。
+- **第 8 项 `sort`**：`stable_sort_by` 的 RUN=16 归并本身没有明显余量，剩余是 17.2 M 次「原生调 JS」
+  （每次 111 ns），归 P66。改块大小只会动常数中的小部分，且要重做稳定性与不一致比较的测试，
+  在剩余预算内没有可测收益。
+- **第 9 项解构 / `for…of` 数组快路径**：需要同时校验 `Array.prototype[Symbol.iterator]` 与
+  `%ArrayIteratorPrototype%.next` 未被改写，守卫成本接近省下的迭代器开销；按任务书「没净收益就只留分析」
+  不合并。
+- **第 10 项对象创建**：要动分配次数就得动 `Template::create` 与 GC，按任务书归 P42，写成方案另交。
+
+### 10. 给其他包的备注（补充）
+
+- **P66**：`oo`（379×）、`sort`（17×）、`closure`（30×）的剩余差距几乎全在调用帧（最终一轮的数字）。
+  第 6 项的拆分给出一个可直接用的对照：同一轮里 `new Class()` 144 ms 对 `Object.create` 30 ms（200k 次），
+  差额 = 建立 `CallFrame` + 推环境 + 收尾，不含对象分配。第 8 项的 `sort` 也一样：`stable_sort_by`
+  的 17.2 M 次比较每次 111 ns，全花在「原生调 JS」的固定成本上。
+- **P42**：第 10 项若要动，方向是 `Template::create` 少一次分配（形状与存储分开分配）；本包未动 GC。
+- **P64**：第 1 项的「按首码元预判」对字符串内建同样适用（`canonical numeric index` 之外，`ToNumber` 前
+  先看首字符），`builtins/typed_array/object.rs::may_be_canonical_numeric_index` 是现成写法。
