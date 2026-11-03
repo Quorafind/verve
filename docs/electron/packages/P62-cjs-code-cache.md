@@ -1,6 +1,11 @@
 # P62 CommonJS 进代码缓存
 
-**依赖**：无  **规模**：M  **修改**：`src/modules.rs`、`src/code_cache.rs`、`src/lib.rs`（只限 `CodeCacheStats`）、`tests/code_cache.rs`、`docs/startup.md`
+**依赖**：无  **规模**：M  **修改**：`src/modules.rs`、`src/code_cache.rs`、`src/esm.rs`（只限把格式判定拆出来）、
+新建 `src/code_cache_load.rs`（loader 两个入口，见「状态」：`style-check` 的文件长度棘轮不允许
+`src/code_cache.rs` 再变长）、`src/lib.rs`（只限 `CodeCacheStats`、模块声明与 `load_module` 的格式判定）、`src/cli.rs`（只限
+`start` 的格式判定）、`tests/code_cache.rs`、`tests/module_hooks.rs`、
+`docs/startup.md`、`boa/core/engine/src/code_cache.rs`、`boa/core/engine/src/script.rs`、`boa/core/engine/src/tests/code_cache.rs`、
+`boa/SU.md`
 
 本节原是 P42 的第 2 节，因为基线测得它是最大的单项差距之一，提前到性能线做。P42 只负责在 Electron 里**接入**缓存（目录、generation、flush 时机）。
 
