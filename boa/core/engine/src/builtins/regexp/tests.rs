@@ -440,3 +440,36 @@ fn a_split_drops_the_widened_subject_at_every_exit() {
         }),
     ]);
 }
+
+#[test]
+fn match_result_carries_groups_and_indices_as_node_does() {
+    // Expected values are Node 22.21.1's own output, frozen here.
+    run_test_actions([
+        // Without the `d` flag the result has no `indices`, and its `groups` is undefined
+        // when the pattern has no named group.
+        TestAction::assert("!('indices' in /a/.exec('a'))"),
+        TestAction::assert("/a/.exec('a').groups === undefined"),
+        TestAction::assert(
+            "Reflect.ownKeys(/a/.exec('a')).join() === '0,length,index,input,groups'",
+        ),
+        // With `d` the indices array exists, with the whole match at [0] and one entry per group.
+        TestAction::assert("'indices' in /a/d.exec('a')"),
+        TestAction::assert("/a/d.exec('a').indices[0].join() === '0,1'"),
+        // A group that did not participate is undefined in both arrays, not a pair.
+        TestAction::assert("/a(b)?c/d.exec('ac')[1] === undefined"),
+        TestAction::assert("/a(b)?c/d.exec('ac').indices[1] === undefined"),
+        // A named group is reachable by name in `groups` and in `indices.groups`, and the
+        // unmatched one stays undefined in both.
+        TestAction::assert("/(?<x>a)/d.exec('a').groups.x === 'a'"),
+        TestAction::assert("/(?<x>a)/d.exec('a').indices.groups.x.join() === '0,1'"),
+        TestAction::assert("/(?<x>a)?b/.exec('b').groups.x === undefined"),
+        TestAction::assert(
+            "Object.keys(/(?<x>a)(?<y>b)?/d.exec('a').indices.groups).join() === 'x,y'",
+        ),
+        TestAction::assert("/(?<x>a)(?<y>b)?/d.exec('a').indices.groups.y === undefined"),
+        TestAction::assert("/(?<x>a)(?<y>b)?/d.exec('a').indices.length === 3"),
+        // Without `d` a named-group match still has `groups` but no indices object.
+        TestAction::assert("/(?<x>a)/.exec('a').groups.x === 'a'"),
+        TestAction::assert("!('indices' in /(?<x>a)/.exec('a'))"),
+    ]);
+}

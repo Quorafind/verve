@@ -272,6 +272,28 @@ always agree with one another.
   `matchAll` iterator abandoned half-way, which has no point to release at. A sticky match that
   fails also keeps it: `@@split` runs the sticky splitter once per position of the subject.
 
+- `boa_engine`, `builtins/regexp/mod.rs`: a match result's `indices` array is built only for a
+  `d`-flagged pattern. `RegExpBuiltinExec` made it unconditionally — the array, its whole-match
+  pair and that pair's own array — and dropped all three unless step 34 read them, so every match
+  of every other pattern paid for a result nobody could observe. `MakeMatchIndicesIndexPairArray`
+  is now step 34's own work (`make_match_indices`), and step 25's "List" stays a list of nothing.
+
+  The result array is also made in one allocation: the whole match at 0 and the captures at
+  `1..n` are a single `Array::create_array_from_list`, where `ArrayCreate` plus one
+  `CreateDataPropertyOrThrow` per element made the same array in `n + 2` steps. Elements still
+  sort before `index`, `input` and `groups` in `Reflect.ownKeys`, and `length` still comes from
+  the number of elements, so what a script observes is unchanged; `groups` and `indices` keep
+  being defined afterwards, in the order steps 32 and 34 name. `groups` is `undefined` when the
+  pattern has no named group, and the `groupNames` object that only `indices` reads is no longer
+  built for a match that has no `indices` — nor is `named_groups` collected into a `Vec` just to
+  ask whether it is empty.
+
+  `tokenize` 200 KB of source with a sticky tokenizer: 262 ms to 190 ms (median, 5 runs, a shared
+  machine). A bare `exec` loop over one 8-code-unit subject, 100k times: 221–228 ms to
+  142–145 ms; the same loop over `/(a)(b)/g`, which has two captures: 257–265 ms to 162–175 ms.
+  A `d`-flagged pattern, which still builds `indices`, reads 229 ms either way — the saving is
+  the array that no longer exists, not the matcher.
+
 - `boa_engine`, `code_cache.rs`, `script.rs`: a classic script can be written down and read back, as
   a module could already be. `Script::code_cache` compiles the script with every function it
   declares and answers its bytes; `Script::from_code_cache` reads them into a script that runs as
