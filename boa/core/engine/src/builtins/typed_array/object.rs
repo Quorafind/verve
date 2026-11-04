@@ -383,7 +383,7 @@ fn is_intrinsic_length_getter(get: &JsValue) -> bool {
     let Some(function) = get.as_object() else {
         return false;
     };
-    let Some(native) = function.downcast_ref::<NativeFunctionObject>() else {
+    let Some(native) = function.try_downcast_ref::<NativeFunctionObject>() else {
         return false;
     };
     let Some(pointer) = native.f.as_fn_ptr() else {
@@ -408,12 +408,16 @@ pub(crate) fn typed_array_length_guard(object: &JsObject) -> bool {
 
     let key = PropertyKey::from(StaticJsStrings::LENGTH);
 
-    // An own `length` shadows the accessor.
-    if object.borrow().shape().lookup(&key).is_some() {
+    // An own `length` shadows the accessor. A typed array that is being written to is not
+    // answered for: the caller takes the spec path.
+    let Ok(borrowed) = object.try_borrow() else {
+        return false;
+    };
+    if borrowed.shape().lookup(&key).is_some() {
         return false;
     }
-
-    let mut current = object.prototype();
+    let mut current = borrowed.prototype().clone();
+    drop(borrowed);
     loop {
         let Some(prototype) = current else {
             return false;
@@ -421,7 +425,9 @@ pub(crate) fn typed_array_length_guard(object: &JsObject) -> bool {
         if !prototype.is::<OrdinaryObject>() {
             return false;
         }
-        let borrowed = prototype.borrow();
+        let Ok(borrowed) = prototype.try_borrow() else {
+            return false;
+        };
         let Some(slot) = borrowed.shape().lookup(&key) else {
             current = borrowed.shape().prototype();
             continue;
@@ -440,7 +446,7 @@ pub(crate) fn typed_array_length_guard(object: &JsObject) -> bool {
 /// A detached buffer and a variable-length buffer that shrank under the view read as zero.
 /// Returns `None` if `object` is not a typed array.
 pub(crate) fn typed_array_length_read(object: &JsObject) -> Option<JsValue> {
-    let typed_array = object.downcast_ref::<TypedArray>()?;
+    let typed_array = object.try_downcast_ref::<TypedArray>()?;
     let buffer = typed_array.viewed_array_buffer().as_buffer();
     let Some(bytes) = buffer.bytes(Ordering::SeqCst) else {
         return Some(0.into());
@@ -778,7 +784,7 @@ pub(crate) fn typed_array_exotic_own_property_keys(
 /// Returns `None` when `object` is not a typed array, so that the caller takes the spec path.
 /// No receiver can observe an integer-indexed read, so there is nothing else to check.
 pub(crate) fn typed_array_element_get_shortcut(object: &JsObject, index: u32) -> Option<JsValue> {
-    let typed_array = object.downcast_ref::<TypedArray>()?;
+    let typed_array = object.try_downcast_ref::<TypedArray>()?;
     let buffer = typed_array.viewed_array_buffer().as_buffer();
     let Some(bytes) = buffer.bytes(Ordering::Relaxed) else {
         return Some(JsValue::undefined());
@@ -811,7 +817,7 @@ pub(crate) fn typed_array_element_set_shortcut(
     value: &JsValue,
     context: &mut Context,
 ) -> Option<JsResult<()>> {
-    let kind = object.downcast_ref::<TypedArray>()?.kind();
+    let kind = object.try_downcast_ref::<TypedArray>()?.kind();
     let same_content_type = match kind.content_type() {
         ContentType::Number => value.is_number(),
         ContentType::BigInt => value.as_bigint().is_some(),
@@ -821,7 +827,7 @@ pub(crate) fn typed_array_element_set_shortcut(
     }
     let element = kind.get_element(value, context).ok()?;
 
-    let typed_array = object.downcast_ref::<TypedArray>()?;
+    let typed_array = object.try_downcast_ref::<TypedArray>()?;
     let mut buffer = typed_array.viewed_array_buffer().as_buffer_mut();
     let Some(mut bytes) = buffer.bytes(Ordering::Relaxed) else {
         return Some(Ok(()));

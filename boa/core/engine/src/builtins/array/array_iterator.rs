@@ -108,7 +108,7 @@ impl ArrayIterator {
     /// ordinary dense one. [`Declined`], with nothing changed, for any other.
     #[cfg(feature = "jit")]
     pub(crate) fn advance_dense(object: &JsObject) -> Result<Option<JsValue>, Declined> {
-        let mut iterator = object.downcast_mut::<Self>().ok_or(Declined)?;
+        let mut iterator = object.try_downcast_mut::<Self>().ok_or(Declined)?;
         if !matches!(iterator.kind, PropertyNameKind::Value) || !iterator.array.is_array() {
             return Err(Declined);
         }

@@ -66,7 +66,7 @@ fn compiled_callee(context: &Context, argument_count: usize) -> Option<(JsObject
     let vm = &context.vm;
     let callee = vm.stack.calling_convention_get_function(argument_count);
     let object = callee.as_object()?;
-    let function = object.downcast_ref::<OrdinaryFunction>()?;
+    let function = object.try_downcast_ref::<OrdinaryFunction>()?;
     let code = &function.code;
     if code.is_lazy() || code.is_class_constructor() || !code.jit.is_compiled() {
         return None;

@@ -658,3 +658,11 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
 - `boa_engine`, `object/operations.rs`: `OrdinaryHasInstance` of a bound function reads the target
   and releases the function before it asks the target `@@hasInstance`. A `@@hasInstance` that wrote
   to the bound function (`bf.x = 1` in `x instanceof bf`) panicked with `BorrowMutError`.
+
+- `boa_engine`, `vm/jit`, `builtins/typed_array/object.rs`, `builtins/array/array_iterator.rs`,
+  `builtins/iterable`: what compiled code reads an object through no longer panics when the object
+  is borrowed. The typed array element and `length` shortcuts, the compiled call's read of the
+  callee, and the quiet iterator steps use `JsObject::try_downcast_ref`/`try_downcast_mut` (new,
+  crate-private) or `try_borrow*` and answer "not here", so the slow path decides. Nothing in the
+  engine core (`vm/`, `object/`, `environments/`) borrows an object across user code any more, so
+  this is a guard, not a fix of a known crash.

@@ -388,6 +388,37 @@ impl JsObject {
         None
     }
 
+    /// [`downcast_ref`](Self::downcast_ref), but `None` while the object is mutably borrowed.
+    ///
+    /// For the paths that must not panic and have a slow path to fall back on.
+    #[must_use]
+    pub(crate) fn try_downcast_ref<T: NativeObject>(&self) -> Option<Ref<'_, T>> {
+        if self.is::<T>() {
+            let obj = self.try_borrow().ok()?;
+
+            // SAFETY: We have verified that the object is of type `T`, so we can safely cast it.
+            let obj = unsafe { GcRef::cast::<Object<T>>(obj) };
+
+            return Some(Ref::map(obj, |r| r.data()));
+        }
+        None
+    }
+
+    /// [`downcast_mut`](Self::downcast_mut), but `None` while the object is borrowed.
+    #[cfg(feature = "jit")]
+    #[must_use]
+    pub(crate) fn try_downcast_mut<T: NativeObject>(&self) -> Option<RefMut<'_, T>> {
+        if self.is::<T>() {
+            let obj = self.try_borrow_mut().ok()?;
+
+            // SAFETY: We have verified that the object is of type `T`, so we can safely cast it.
+            let obj = unsafe { GcRefMut::cast::<Object<T>>(obj) };
+
+            return Some(RefMut::map(obj, |c| c.data_mut()));
+        }
+        None
+    }
+
     /// Checks if this object is an instance of a certain `NativeObject`.
     ///
     /// # Panics
