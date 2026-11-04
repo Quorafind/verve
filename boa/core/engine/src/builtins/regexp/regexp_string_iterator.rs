@@ -141,24 +141,39 @@ impl RegExpStringIterator {
                 iterator.unicode,
             )
         };
-        let complete = || {
-            object
-                .downcast_mut::<Self>()
-                .expect("already checked that the object was a RegExpStringIterator")
-                .completed = true;
-        };
+        // The closure is a generator in the specification: an abrupt completion ends it.
+        Self::step(&object, &matcher, &string, global, unicode, context).inspect_err(|_| {
+            Self::complete(&object);
+        })
+    }
 
+    fn complete(object: &JsObject) {
+        object
+            .downcast_mut::<Self>()
+            .expect("already checked that the object was a RegExpStringIterator")
+            .completed = true;
+    }
+
+    /// The body of the closure of `CreateRegExpStringIterator`, run once per `next`.
+    fn step(
+        object: &JsObject,
+        matcher: &JsObject,
+        string: &JsString,
+        global: bool,
+        unicode: bool,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
         // TODO: This is the code that should be created as a closure in create_regexp_string_iterator.
 
         // i. Let match be ? RegExpExec(R, S).
-        let m = RegExp::abstract_exec(&matcher, string.clone(), context)?;
+        let m = RegExp::abstract_exec(matcher, string.clone(), context)?;
 
         if let Some(m) = m {
             // iii. If global is false, then
             if !global {
                 // 1. Perform ? Yield(match).
                 // 2. Return undefined.
-                complete();
+                Self::complete(object);
                 return Ok(create_iter_result_object(m.into(), false, context));
             }
 
@@ -173,7 +188,7 @@ impl RegExpStringIterator {
                     .to_length(context)?;
 
                 // 2. Let nextIndex be ! AdvanceStringIndex(S, thisIndex, fullUnicode).
-                let next_index = advance_string_index(&string, this_index, unicode);
+                let next_index = advance_string_index(string, this_index, unicode);
 
                 // 3. Perform ? Set(R, "lastIndex", 𝔽(nextIndex), true).
                 matcher.set(js_string!("lastIndex"), next_index, true, context)?;
@@ -183,7 +198,7 @@ impl RegExpStringIterator {
             Ok(create_iter_result_object(m.into(), false, context))
         } else {
             // ii. If match is null, return undefined.
-            complete();
+            Self::complete(object);
             Ok(create_iter_result_object(
                 JsValue::undefined(),
                 true,

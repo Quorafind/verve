@@ -648,3 +648,8 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   `TODO: invalidate the pointer`, so a cached slot kept the old bits: a property made read-only was
   still written). Compiled code takes the same entries, and
   reads a prototype's slot only through the helper.
+
+- `boa_engine`, `builtins/regexp/regexp_string_iterator.rs`: `%RegExpStringIteratorPrototype%.next`
+  completes the iterator when `exec`, `ToString(match[0])` or the `lastIndex` read or write throws,
+  as the specification's generator closure does: every later `next` is `{ value: undefined, done: true }`.
+  Node 22 (V8) does not end the iterator there and keeps stepping; the specification is followed.
