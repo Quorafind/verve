@@ -648,3 +648,15 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   `TODO: invalidate the pointer`, so a cached slot kept the old bits: a property made read-only was
   still written). Compiled code takes the same entries, and
   reads a prototype's slot only through the helper.
+
+- `boa_engine`, `vm/inline_cache/add.rs`, `vm/opcode/set/property.rs`, `vm/jit/helpers.rs`,
+  `object/shape`: an assignment that creates a property (`this.x = v` in a constructor) is
+  remembered per site: the receiver's shape, the shape it had afterwards and the stamps of its
+  prototypes (their shapes, and for a unique shape its number of properties, since a unique shape
+  gains properties in place and keeps its identity). A later assignment that finds the same shape
+  and stamps swaps the shape and pushes the value, skipping the lookups in the object and in each
+  prototype and the transition lookup (`new CX(i)` over `new C0()`: 241 to 68 ns). A hit needs an
+  ordinary, extensible receiver and the same prototype objects with the same tables, so no setter,
+  read-only property or proxy that `[[Set]]` would meet can be skipped; any change gives a miss,
+  and the next slow assignment records the entry again. Four shapes per site, then the site stops
+  recording. Compiled code takes the same entries through `jit_set_property`.

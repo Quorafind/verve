@@ -214,6 +214,18 @@ impl Shape {
         }
     }
 
+    /// The number of properties of a unique shape, which gains properties in place and keeps its
+    /// identity; zero for a shared shape, which never changes. Two unique shapes that are the same
+    /// shape and have the same count have the same table: losing a property, or changing the
+    /// kind or attributes of one, makes a new shape.
+    #[inline]
+    pub(crate) fn unique_property_count(&self) -> u32 {
+        match &self.inner {
+            Inner::Shared(_) => 0,
+            Inner::Unique(shape) => shape.property_count(),
+        }
+    }
+
     /// Returns the keys of the [`Shape`], in insertion order.
     #[inline]
     #[must_use]

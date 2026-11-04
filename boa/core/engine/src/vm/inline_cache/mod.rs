@@ -17,8 +17,11 @@ use crate::{
     property::PropertyKey,
 };
 
+mod add;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use add::{AddCache, has_ordinary_property_methods};
 
 pub(crate) const PIC_CAPACITY: usize = 4;
 
@@ -100,6 +103,9 @@ pub(crate) struct InlineCache {
     /// Whether this access site has seen too many shapes and should no longer be cached.
     #[unsafe_ignore_trace]
     pub(crate) megamorphic: Cell<bool>,
+
+    /// The properties this site has created, for a set.
+    pub(crate) adds: AddCache,
 }
 
 impl fmt::Display for InlineCache {
@@ -123,6 +129,7 @@ impl InlineCache {
             name,
             entries: GcRefCell::new(ArrayVec::new()),
             megamorphic: Cell::new(false),
+            adds: AddCache::default(),
         }
     }
 
