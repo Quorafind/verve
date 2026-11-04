@@ -502,6 +502,17 @@ always agree with one another.
   longer set the return value again after `push_frame` (which sets it), and the `this` binding
   status is read from the stack only for a frame that builds a function environment.
 
+- `boa_engine`, `vm/jit/` (feature `jit`), `builtins/typed_array/object.rs`: an element read or write
+  of a typed array by an `int32` index is done in machine code (`typed_elements.rs`, `compiler/typed.rs`)
+  when the view is a fixed-length one of a non-detached `ArrayBuffer` (not a `SharedArrayBuffer`),
+  the kind is one of the eight number kinds (not `BigInt`s, not `Float16`), the view lies within the
+  buffer as it is now and the index within the view; a write also needs a number to store (no
+  `ToNumber`) and, for `Uint8Clamped`, an `int32`. Anything else is the helper, which runs
+  `typed_array_element_get_shortcut` / `typed_array_element_set_shortcut` as before. The offsets of
+  the fields (`TypedArray`, `BufferObject`, `ArrayBuffer`'s bytes) are found and checked against real
+  objects when the object layout is. `TypedArray` gets four `cfg(feature = "jit")` constants, the
+  offsets of its fields; no interpreter code changes. `docs/jit.md` has the argument.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

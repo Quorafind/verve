@@ -24,6 +24,7 @@ use std::{cell::Cell, cell::OnceCell, mem::offset_of, ptr};
 
 use thin_vec::ThinVec;
 
+use super::typed_elements::{self, TypedLayout};
 use crate::{
     JsObject, JsValue,
     object::{
@@ -54,6 +55,8 @@ pub(crate) struct ObjectLayout {
     pub(crate) thin_data: i32,
     /// This thread's count of garbage collections (`boa_gc::raw::collections`).
     pub(crate) collections: *const Cell<u64>,
+    /// Where the elements of typed arrays are, if that checked out too.
+    pub(crate) typed: Option<TypedLayout>,
 }
 
 thread_local! {
@@ -148,8 +151,15 @@ fn compute() -> Option<ObjectLayout> {
         thin_len: offset(thin_len)?,
         thin_data: offset(thin_data)?,
         collections: boa_gc::raw::collections(),
+        typed: None,
     };
-    check(&layout).then_some(layout)
+    if !check(&layout) {
+        return None;
+    }
+    Some(ObjectLayout {
+        typed: typed_elements::compute(&layout),
+        ..layout
+    })
 }
 
 /// Reads a word at `offset` from an object's allocation.
@@ -157,7 +167,7 @@ fn compute() -> Option<ObjectLayout> {
 /// # Safety
 ///
 /// `offset` must be within the object's allocation, at a word-aligned initialized field.
-unsafe fn word(object: &JsObject, offset: i32) -> u64 {
+pub(super) unsafe fn word(object: &JsObject, offset: i32) -> u64 {
     let address = (JsValue::from(object.clone()).raw_bits() & 0x0000_FFFF_FFFF_FFFF) as usize
         + offset as usize;
     // SAFETY: guaranteed by the caller.

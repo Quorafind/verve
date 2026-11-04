@@ -33,6 +33,7 @@ mod layout;
 mod memory;
 mod runtime;
 mod stack_layout;
+mod typed_elements;
 mod typed_length;
 
 #[cfg(test)]
@@ -47,6 +48,8 @@ mod tests_elements;
 mod tests_iterators;
 #[cfg(test)]
 mod tests_prototype_cache;
+#[cfg(test)]
+mod tests_typed_elements;
 #[cfg(test)]
 mod tests_typed_length;
 

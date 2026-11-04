@@ -60,6 +60,16 @@ impl JsData for TypedArray {
     }
 }
 
+// Where a typed array keeps the fields compiled code reads, in bytes from the start of the
+// `TypedArray` (`vm/jit/typed_elements.rs` finds the rest by looking at real ones).
+#[cfg(feature = "jit")]
+impl TypedArray {
+    pub(crate) const BUFFER_OFFSET: usize = std::mem::offset_of!(Self, viewed_array_buffer);
+    pub(crate) const KIND_OFFSET: usize = std::mem::offset_of!(Self, kind);
+    pub(crate) const BYTE_OFFSET_OFFSET: usize = std::mem::offset_of!(Self, byte_offset);
+    pub(crate) const ARRAY_LENGTH_OFFSET: usize = std::mem::offset_of!(Self, array_length);
+}
+
 impl TypedArray {
     pub(crate) const fn new(
         viewed_array_buffer: BufferObject,

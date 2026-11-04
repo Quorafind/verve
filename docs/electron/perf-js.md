@@ -556,3 +556,40 @@ is met, the stretch (600) in one round of two. `vdom` left the ±3 % band in rou
 creating assignment, and two more rounds of eleven runs gave -3.2 and -2.5 %. `alloc` +0.4 and +2.7 % in those. The probe, ns per
 iteration (load about 10 %, round 3): `new CX(i)` less `new C0()` 177 to 83, `new CX3(i)` 690 to 353, `new CX6(i)` 1122 to 503,
 `new F(i)` 349 to 249. Details in `docs/jit.md` "Results (P78)" and `packages/P78-constructor-initial-shape.md`.
+
+### P76: typed-array elements are read and written in compiled code
+
+`electron/p76-jit-typed-elements` against `docs/electron-plan` `0cc1fa94` (P77 and P78 merged), both `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`, `VERVE_CODE_CACHE=0`, a throwaway profile folder. Suite round (`--runs 5`, before then after for each test, machine load 1–7 % throughout
+the round; median (best); compiled / interpreted):
+
+| test | before, JIT | after, JIT | before, interp | after, interp |
+|---|---|---|---|---|
+| `typed` | 356.1 (353.1) | 211.0 (210.6) | 1206.0 (1187.0) | 1220.6 (1216.3) |
+| `fib` | 222.7 (218.3) | 220.3 (219.5) | 350.2 (349.5) | 352.9 (348.3) |
+| `alloc` | 243.3 (235.2) | 244.3 (235.3) | 244.5 (240.3) | 261.6 (247.2) |
+| `concat` | 2.9 (2.9) | 3.0 (2.9) | 3.1 (3.0) | 3.3 (3.1) |
+| `splitjoin` | 10.5 (10.3) | 11.3 (10.5) | 11.1 (10.4) | 10.1 (10.1) |
+| `regex` | 23.3 (22.6) | 22.4 (22.1) | 23.6 (22.2) | 22.9 (22.2) |
+| `json` | 1184.4 (1168.7) | 1180.9 (1161.4) | 1171.6 (1165.5) | 1171.9 (1167.9) |
+| `sort` | 2231.2 (2225.9) | 2238.8 (2211.4) | 2574.6 (2543.1) | 2563.7 (2545.5) |
+| `mapset` | 19.9 (19.0) | 21.1 (20.2) | 21.9 (21.1) | 21.1 (20.3) |
+| `oo` | 563.2 (557.4) | 560.9 (557.3) | 669.4 (668.3) | 666.1 (651.4) |
+| `vdom` | 48.9 (46.6) | 47.8 (45.5) | 49.9 (48.0) | 49.2 (48.5) |
+| `tokenize` | 157.2 (151.7) | 152.3 (151.9) | 167.8 (165.2) | 168.3 (165.0) |
+| `template` | 1.7 (1.7) | 1.6 (1.6) | 0.9 (0.9) | 0.9 (0.9) |
+| `closure` | 422.5 (417.6) | 428.4 (423.0) | 622.5 (620.0) | 631.3 (618.5) |
+
+`typed` goes from 356 to 211 ms, under both the commit target (280) and the stretch (220). The others are within ±3 % of their medians except
+`splitjoin` (+7.6 %), `mapset` (+6 %) and `concat` (+3 %), tests of 1 to 20 ms that move that much between identical runs (an earlier round with nine
+runs and the first version of the change had `splitjoin` 10.5 / 11.2 before against 11.1 / 10.5 after and `mapset` 20.9 / 21.8 against 21.1 / 21.6).
+Probe (`-A`, the array in a local, best of 7, the loop itself 4.0 ns), ns per iteration:
+
+| body | before | after |
+|---|---|---|
+| `s += a[i & 1023]`, `Float64Array` / `Int32Array` / `Uint8Array` / `Float32Array` | 14.5 / 15.0 / 15.0 / 15.0 | 8.5 / 9.0 / 9.0 / 9.5 |
+| `a[i & 1023] = x`, `Float64Array` (number) / `Int32Array` / `Uint8Array` / `Float32Array` / `Uint8ClampedArray` | 16.5 / 15.0 / 20.5 / 16.5 / 17.0 | 6.5 / 6.5 / 6.0 / 6.5 / 6.0 |
+| `u8[i & 1023] = 200.5` (a float into an integer kind) | 20.0 | 7.0 |
+| a dense array, read / write | 7.5 / 6.0 | 7.5 / 5.5 |
+
+Details and the cost in compile time in `docs/jit.md` "Results (typed-array elements, P76)" and `packages/P76-jit-typed-elements.md`.

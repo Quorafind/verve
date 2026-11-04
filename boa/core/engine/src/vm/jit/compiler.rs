@@ -48,6 +48,7 @@ use crate::{
 mod arith;
 mod calls;
 mod stack;
+mod typed;
 
 use super::{
     JitCode, JitOptions,
@@ -1685,14 +1686,16 @@ impl Translator<'_> {
     }
 
     /// The address of the array that register `object` holds, and the index register `key`
-    /// holds, when the key is a non-negative `int32`; `miss` otherwise. Leaves the builder in a
-    /// new block.
+    /// holds, when the key is a non-negative `int32`; `miss` otherwise. An object that is not an
+    /// array goes to `not_array` (with the address and the index as `i64`s). Leaves the builder
+    /// in a new block.
     fn array_and_index(
         &mut self,
         layout: ObjectLayout,
         object: u32,
         key: u32,
         miss: Block,
+        not_array: Block,
     ) -> (Value, Value) {
         let key = self.load(key);
         let is_int = self.is_int(key);
@@ -1710,10 +1713,19 @@ impl Translator<'_> {
             std::ptr::from_ref(&crate::builtins::array::ARRAY_EXOTIC_INTERNAL_METHODS) as i64;
         let is_array = self.b.ins().icmp_imm_s(IntCC::Equal, vtable, array_vtable);
         let array = self.b.create_block();
-        self.b.ins().brif(is_array, array, &[], miss, &[]);
-        self.b.switch_to_block(array);
         let index = self.b.ins().uextend(I64, index);
+        let other = [address, index].map(BlockArg::Value);
+        self.b.ins().brif(is_array, array, &[], not_array, &other);
+        self.b.switch_to_block(array);
         (address, index)
+    }
+
+    /// A new block that takes an object's address and an index, both `i64`s.
+    fn address_and_index_block(&mut self) -> Block {
+        let block = self.b.create_block();
+        self.b.append_block_param(block, I64);
+        self.b.append_block_param(block, I64);
+        block
     }
 
     /// The tag of an array's elements, and the address of element `index` of a dense kind
@@ -1759,7 +1771,8 @@ impl Translator<'_> {
         let miss = self.b.create_block();
         self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
-            let (address, index) = self.array_and_index(layout, object, key, miss);
+            let not_array = self.address_and_index_block();
+            let (address, index) = self.array_and_index(layout, object, key, miss, not_array);
             let flag = self.load_at(I64, address, layout.flag);
             let writing = self.b.ins().icmp_imm_s(IntCC::Equal, flag, -1);
             let readable = self.b.create_block();
@@ -1809,6 +1822,16 @@ impl Translator<'_> {
             let result = self.b.block_params(store)[0];
             self.store(dst, result);
             self.b.ins().jump(done, &[]);
+            self.b.switch_to_block(not_array);
+            let [address, index] = self.b.block_params(not_array)[..] else {
+                unreachable!("an address and an index");
+            };
+            match layout.typed {
+                Some(typed) => self.typed_read(layout, typed, [address, index], miss, store),
+                None => {
+                    self.b.ins().jump(miss, &[]);
+                }
+            }
         } else {
             self.b.ins().jump(miss, &[]);
         }
@@ -1835,7 +1858,8 @@ impl Translator<'_> {
         self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
             let new = self.load(value);
-            let (address, index) = self.array_and_index(layout, object, key, miss);
+            let not_array = self.address_and_index_block();
+            let (address, index) = self.array_and_index(layout, object, key, miss, not_array);
             // Not borrowed at all, as `borrow_mut` requires, and extensible.
             let flag = self.load_at(I64, address, layout.flag);
             let unused = self.b.create_block();
@@ -1887,6 +1911,16 @@ impl Translator<'_> {
             self.b.switch_to_block(values);
             self.replace_value(element, new, miss);
             self.b.ins().jump(done, &[]);
+            self.b.switch_to_block(not_array);
+            let [address, index] = self.b.block_params(not_array)[..] else {
+                unreachable!("an address and an index");
+            };
+            match layout.typed {
+                Some(typed) => self.typed_write(layout, typed, [address, index], new, miss, done),
+                None => {
+                    self.b.ins().jump(miss, &[]);
+                }
+            }
         } else {
             self.b.ins().jump(miss, &[]);
         }

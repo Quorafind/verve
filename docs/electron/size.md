@@ -162,3 +162,9 @@ branches in `function_construct`, `prepare` and the class compiler, and one fiel
 `electron/p78-constructor-initial-shape`: `cargo build --release --features jit --bin verve` (not stripped, not the `size-report` build) is
 26,713,600 bytes against 26,702,848 for `docs/electron-plan` `c28e026c` built the same way, +10,752 bytes (+0.04 %): `vm/inline_cache/add.rs`
 (about 230 lines), a few branches in `SetPropertyByName` and its compiled helper, and 40 bytes more in each `InlineCache` (the `AddCache`).
+
+## P76: typed-array elements in compiled code
+
+`electron/p76-jit-typed-elements`: `cargo build --release --features jit --bin verve` (not stripped, not the `size-report` build) is
+26,756,608 bytes against 26,717,696 for `docs/electron-plan` `0cc1fa94` built the same way, +38,912 bytes (+0.146 %): the typed path of
+`GetPropertyByValue` and `SetPropertyByValue` in the compiler (`compiler/typed.rs`) and the layout probe (`typed_elements.rs`).
