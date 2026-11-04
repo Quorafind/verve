@@ -393,31 +393,33 @@ fn is_intrinsic_length_getter(get: &JsValue) -> bool {
     pointer as usize == intrinsic as usize
 }
 
-/// The value of `length` for `object`, when the accessor on the prototype chain can be bypassed.
+/// Whether `object` is a typed array whose `length` is the intrinsic getter's.
 ///
-/// Returns `None` unless `object` is a typed array, it has no own `length`, everything between it
-/// and `%TypedArray%.prototype` is an ordinary object without `length`, and the accessor found at
+/// True only if `object` is a typed array, it has no own `length`, everything between it and
+/// `%TypedArray%.prototype` is an ordinary object without `length`, and the accessor found at
 /// the end has the intrinsic getter. The getter itself only reads internal slots, so finding it
-/// anywhere on the chain gives the same answer as calling it. Everything else takes the spec path,
-/// which also covers a detached buffer, a resizable buffer that shrank, and a replaced or shadowed
+/// anywhere on the chain gives the same answer as calling it: [`typed_array_length_read`]. When
+/// this is false the access takes the spec path, which also covers a replaced or shadowed
 /// accessor.
-pub(crate) fn typed_array_length_shortcut(object: &JsObject) -> Option<JsValue> {
+pub(crate) fn typed_array_length_guard(object: &JsObject) -> bool {
     if !object.is::<TypedArray>() {
-        return None;
+        return false;
     }
 
     let key = PropertyKey::from(StaticJsStrings::LENGTH);
 
     // An own `length` shadows the accessor.
     if object.borrow().shape().lookup(&key).is_some() {
-        return None;
+        return false;
     }
 
     let mut current = object.prototype();
     loop {
-        let prototype = current?;
+        let Some(prototype) = current else {
+            return false;
+        };
         if !prototype.is::<OrdinaryObject>() {
-            return None;
+            return false;
         }
         let borrowed = prototype.borrow();
         let Some(slot) = borrowed.shape().lookup(&key) else {
@@ -425,15 +427,19 @@ pub(crate) fn typed_array_length_shortcut(object: &JsObject) -> Option<JsValue> 
             continue;
         };
         if !slot.attributes.has_get() {
-            return None;
+            return false;
         }
         let get = borrowed.properties().storage[slot.index as usize].clone();
-        if !is_intrinsic_length_getter(&get) {
-            return None;
-        }
-        break;
+        return is_intrinsic_length_getter(&get);
     }
+}
 
+/// The value of `length` for `object`, as the intrinsic getter computes it from the internal
+/// slots, once [`typed_array_length_guard`] has accepted `object`.
+///
+/// A detached buffer and a variable-length buffer that shrank under the view read as zero.
+/// Returns `None` if `object` is not a typed array.
+pub(crate) fn typed_array_length_read(object: &JsObject) -> Option<JsValue> {
     let typed_array = object.downcast_ref::<TypedArray>()?;
     let buffer = typed_array.viewed_array_buffer().as_buffer();
     let Some(bytes) = buffer.bytes(Ordering::SeqCst) else {

@@ -23,7 +23,6 @@ use crate::{
         Array,
         typed_array::object::{
             TypedArray, typed_array_element_get_shortcut, typed_array_element_set_shortcut,
-            typed_array_length_shortcut,
         },
     },
     environments::Environment,
@@ -300,12 +299,14 @@ pub(crate) unsafe extern "C" fn jit_get_property(
     })
 }
 
-/// `GetLengthProperty`: of an array, a string, or as `GetPropertyByName`.
+/// `GetLengthProperty`: of an array, a string, a typed array (through the site's cache of the
+/// guard), or as `GetPropertyByName`.
 pub(crate) unsafe extern "C" fn jit_get_length(
     state: *mut JitState,
     dst: u32,
     object: u32,
     ic: u32,
+    site: *const SiteCache,
 ) -> u32 {
     guarded(state, |context, code_block, rp| {
         let base = register(context, rp, object);
@@ -321,7 +322,14 @@ pub(crate) unsafe extern "C" fn jit_get_length(
             })??
         } else if let Some(string) = base.as_string() {
             JsValue::from(string.len() as u32)
-        } else if let Some(length) = base.with_object(typed_array_length_shortcut).flatten() {
+        } else if let Some(length) = base
+            .with_object(|object| {
+                // SAFETY: compiled code passes one of its own sites, which it keeps alive.
+                let site = unsafe { &*site };
+                site.typed_array_length(object)
+            })
+            .flatten()
+        {
             length
         } else {
             cached_data_property(base, code_block, ic, None)?

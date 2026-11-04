@@ -264,6 +264,17 @@ pub(crate) struct SiteCache {
     pub(crate) shape: [Cell<u64>; 2],
     pub(crate) collections: Cell<u64>,
     pub(crate) slot: Cell<u64>,
+    /// For a typed array's `length` (`typed_length.rs`): the shapes of the prototypes down to the
+    /// one with the accessor, how many there are (none while nothing is remembered), and the
+    /// length of the property storage of the receiver and of each of them. The receiver's shape
+    /// and the accessor's slot are the fields above.
+    pub(crate) chain: [[Cell<u64>; 2]; Self::CHAIN],
+    pub(crate) lens: [Cell<u32>; Self::CHAIN + 1],
+    /// The prototypes themselves (addresses of their `GcBox`es) and the bits of the intrinsic
+    /// getter found in the last of them.
+    pub(crate) objects: [Cell<u64>; Self::CHAIN],
+    pub(crate) getter: Cell<u64>,
+    pub(crate) depth: Cell<u32>,
 }
 
 impl SiteCache {
@@ -277,6 +288,11 @@ impl SiteCache {
             // Never a count of collections: matches nothing until filled.
             collections: Cell::new(u64::MAX),
             slot: Cell::new(0),
+            chain: std::array::from_fn(|_| [Cell::new(0), Cell::new(0)]),
+            lens: std::array::from_fn(|_| Cell::new(0)),
+            objects: std::array::from_fn(|_| Cell::new(0)),
+            getter: Cell::new(0),
+            depth: Cell::new(0),
         }
     }
 

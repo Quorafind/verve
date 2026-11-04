@@ -1600,8 +1600,10 @@ impl Translator<'_> {
         self.b.switch_to_block(done);
     }
 
-    /// `GetLengthProperty`: of an array, read inline; anything else through the helper.
+    /// `GetLengthProperty`: of an array, read inline; anything else through the helper, which
+    /// fills the site for a typed array.
     fn get_length(&mut self, [dst, object, ic]: [u32; 3], pc: u32, next: u32) {
+        let site = self.new_site();
         let done = self.b.create_block();
         let miss = self.b.create_block();
         self.b.set_cold_block(miss);
@@ -1636,15 +1638,14 @@ impl Translator<'_> {
             self.b.ins().jump(miss, &[]);
         }
         self.b.switch_to_block(miss);
-        let operands =
-            [dst, object, ic].map(|operand| self.b.ins().iconst(I32, i64::from(operand)));
-        let status = self.call(
-            self.helper_sig,
-            helpers::jit_get_length as *const () as i64,
-            &operands,
+        self.site_helper(
+            helpers::jit_get_length,
+            [dst, object, ic],
+            site,
+            pc,
+            next,
+            done,
         );
-        let slow = self.slow_block(pc, &[next]);
-        self.b.ins().brif(status, slow, &[], done, &[]);
         self.b.switch_to_block(done);
     }
 

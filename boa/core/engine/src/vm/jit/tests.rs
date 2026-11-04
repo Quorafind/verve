@@ -17,7 +17,7 @@ use crate::{Context, JsValue, NativeFunction, js_string};
 
 /// Shows a value so that what `String()` hides is visible: `-0`, the type of a string or a
 /// bigint, the elements of arrays and the properties of objects.
-const SHOW: &str = r#"
+pub(super) const SHOW: &str = r#"
 function show(v) {
   switch (typeof v) {
     case 'number': return Object.is(v, -0) ? '-0' : String(v);
@@ -35,7 +35,7 @@ function show(v) {
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
+pub(super) enum Mode {
     Interpreted,
     /// Every function compiled before it first runs.
     Eager,
@@ -43,7 +43,7 @@ enum Mode {
     Hot,
 }
 
-fn context(mode: Mode) -> Context {
+pub(super) fn context(mode: Mode) -> Context {
     let mut context = Context::default();
     *context.jit_options_mut() = match mode {
         Mode::Interpreted => JitOptions {

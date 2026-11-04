@@ -3,7 +3,7 @@ use boa_string::StaticJsStrings;
 use crate::{
     Context, JsResult, JsValue,
     builtins::typed_array::object::{
-        typed_array_element_get_shortcut, typed_array_length_shortcut,
+        typed_array_element_get_shortcut, typed_array_length_guard, typed_array_length_read,
     },
     js_string,
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
@@ -31,7 +31,8 @@ fn get_by_name<const LENGTH: bool>(
                 .set_register(dst.into(), (string.len() as u32).into());
             return Ok(());
         } else if let Some(object) = object.as_object()
-            && let Some(value) = typed_array_length_shortcut(&object)
+            && typed_array_length_guard(&object)
+            && let Some(value) = typed_array_length_read(&object)
         {
             context.vm.set_register(dst.into(), value);
             return Ok(());
