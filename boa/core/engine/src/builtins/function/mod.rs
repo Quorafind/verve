@@ -1117,38 +1117,29 @@ pub(crate) fn enter_ordinary_function(
         .with_argument_count(argument_count as u32)
         .with_env_fp(env_fp);
 
+    // `push_frame` has set the return value to `undefined`.
     context.vm.push_frame(frame);
-    context.vm.set_return_value(JsValue::undefined());
 
     let lexical_this_mode = context.vm.frame().code_block.this_mode == ThisMode::Lexical;
-    let this = if lexical_this_mode {
-        ThisBindingStatus::Lexical
-    } else {
-        let this = context.vm.stack.get_this(context.vm.frame());
+    if !lexical_this_mode {
         if context.vm.frame().code_block.strict() {
             context.vm.frame_mut().flags |= CallFrameFlags::THIS_VALUE_CACHED;
-            ThisBindingStatus::Initialized(this)
-        } else if this.is_null_or_undefined() {
-            context.vm.frame_mut().flags |= CallFrameFlags::THIS_VALUE_CACHED;
-            let this: JsValue = context.realm().global_this().clone().into();
-            context.vm.stack.set_this(
-                context.vm.frames.last().js_expect("frame must exist")?,
-                this.clone(),
-            );
-            ThisBindingStatus::Initialized(this)
         } else {
-            let this: JsValue = this
-                .to_object(context)
-                .js_expect("conversion cannot fail")?
-                .into();
+            let this = context.vm.stack.get_this(context.vm.frame());
+            let this: JsValue = if this.is_null_or_undefined() {
+                context.realm().global_this().clone().into()
+            } else {
+                this.to_object(context)
+                    .js_expect("conversion cannot fail")?
+                    .into()
+            };
             context.vm.frame_mut().flags |= CallFrameFlags::THIS_VALUE_CACHED;
             context.vm.stack.set_this(
                 context.vm.frames.last().js_expect("frame must exist")?,
-                this.clone(),
+                this,
             );
-            ThisBindingStatus::Initialized(this)
         }
-    };
+    }
 
     let mut last_env = 0;
 
@@ -1170,6 +1161,11 @@ pub(crate) fn enter_ordinary_function(
 
     if has_function_scope {
         let scope = context.vm.frame().code_block().constant_scope(last_env);
+        let this = if lexical_this_mode {
+            ThisBindingStatus::Lexical
+        } else {
+            ThisBindingStatus::Initialized(context.vm.stack.get_this(context.vm.frame()))
+        };
         let frame = context.vm.frame_mut();
         let global = frame.realm.environment();
         frame.environments.push_function(
@@ -1304,7 +1300,6 @@ fn function_construct(
     }
 
     context.vm.push_frame(frame);
-    context.vm.set_return_value(JsValue::undefined());
 
     let mut last_env = 0;
 

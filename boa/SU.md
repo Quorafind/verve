@@ -483,6 +483,10 @@ always agree with one another.
   entering and leaving compiled code costs more than interpreting a callee that short; a loop in
   it is still entered by OSR.
 
+- `boa_engine`, `builtins/function/mod.rs`: `enter_ordinary_function` and `function_construct` no
+  longer set the return value again after `push_frame` (which sets it), and the `this` binding
+  status is read from the stack only for a frame that builds a function environment.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
