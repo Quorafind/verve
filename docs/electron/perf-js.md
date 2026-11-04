@@ -437,3 +437,13 @@ the +8 % being `set-delete-while-iterating`, which does not touch strings, so th
 `charCodeAt` over a 16,000-code-unit string, 400 passes (6.4 M calls), five alternating pairs, ms: flat string 637 to 722
 before, 655 to 688 after; the same loop over a string that came out of a rope 678 to 759 before (it was flat), 735 to 874
 after. The rope's one-time flatten is in that number; the per-call cost is the flat string's.
+
+### P72: a site cache for typed-array `length`
+
+`electron/p72-jit-typed-length` against `docs/electron-plan` `345f1645`, both `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`, `VERVE_CODE_CACHE=0`, a throwaway profile folder, the machine shared with three other workers. Suite round (`typed`,
+`--runs 5`, before then after, load 13.4, 14.7, 19.6, 15.4, 15.3 % before and 16.5, 12.2, 11.4, 10.4, 14.4 % after): JIT 643.9 (618.5) to
+368.2 (365.9) ms against a target of 450; interpreter 1304.1 (1291.0) to 1308.3 (1291.5), unchanged. Probe round (`s += f.length` on a
+`Float64Array`, five alternating pairs, load 13.4 to 17.8 % before and 28 to 62 % after, the rise after the last process): 55.7 (54.5) to
+17.0 (16.5) ns an iteration, 3.3 of it the loop, against a target of 15; element read 15.2 and write 17.6 ns, and a dense array's `length`
+5.5 ns, unchanged. Details and what is left in `docs/jit.md` "Results (typed-array `length`, P72)".
