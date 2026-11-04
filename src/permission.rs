@@ -400,10 +400,10 @@ thread_local! {
 /// Module resolution reads `package.json` files deep in code that has no realm to ask. While
 /// one of these is held, it asks this one: a `package.json` the realm may not read is not read,
 /// and resolution goes on as though it were not there — the module it leads to is still refused
-/// when it is loaded. The one exception is the `package.json` of a package a bare specifier
-/// looks for in a `node_modules` folder: Node's `--permission` refuses to read it, so resolution
-/// stops with `ERR_ACCESS_DENIED` rather than report a module that may well be there (`require`
-/// asks for each candidate's, `import` for one whose folder exists).
+/// when it is loaded. The one exception is the `package.json` of a package that exists in a
+/// `node_modules` folder a bare specifier looks in: resolution stops with `ERR_ACCESS_DENIED`
+/// rather than report a module that is there as missing. A package that exists nowhere stays
+/// missing, as for `import` in Node.
 pub(crate) struct Resolving;
 
 impl Resolving {

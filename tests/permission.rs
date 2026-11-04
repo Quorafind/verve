@@ -652,9 +652,7 @@ fn a_package_outside_the_grant_is_refused_not_missing() {
             denied("plain"),
             denied("deep"),
             denied("mapped"),
-            // `require` reads the manifest of each candidate on its way up, as Node does, so the
-            // lookup of a package that is nowhere stops at the first folder it may not read.
-            denied("absent"),
+            "MODULE_NOT_FOUND::".to_owned(),
             denied("plain"),
             denied("mapped"),
             "ERR_MODULE_NOT_FOUND::".to_owned(),

@@ -141,23 +141,23 @@ P64 让无 reviver 的 `JSON.parse` 改用一遍读取器，孤立代理项（�
     `…\node_modules\nonesuch\package.json`：CJS 的查找不先看目录在不在，直接读候选的 `package.json`，权限检查先于存在检查；
   - `import('typescript')`：`ERR_ACCESS_DENIED`，同一个 `resource`；`import('nonesuch')`：`ERR_MODULE_NOT_FOUND`（ESM 先看目录在不在）；
   - 授权覆盖整个查找路径时，缺失的包仍是 `MODULE_NOT_FOUND` / `ERR_MODULE_NOT_FOUND`；`require('./missing.cjs')` 始终是 `MODULE_NOT_FOUND`。
-- **与任务书措辞的出入**：任务书写「真正不存在时仍是 `MODULE_NOT_FOUND`」。按 Node 实测，**裸说明符的 `require` 在查找路径上遇到读不了的
-  `node_modules/<名>/package.json` 时，不管包存不存在都抛 `ERR_ACCESS_DENIED`**；我按 Node 做了（任务书说以 Node 为准）。
-  代价：不带 `-A` 的 `verve run` 里，`try { require('可选包') } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e }` 这类写法，
-  在可选包缺失而查找路径越出授权目录时会抛 `ERR_ACCESS_DENIED`——和 Node `--permission` 一样。若总控想要「不存在就是 `MODULE_NOT_FOUND`」，
-  只需去掉 `esm_resolve.rs` 里 `Mode::Require` 的那一次 `ensure_package_readable`（`import` 路径与存在的包不受影响）。
+- **刻意与 Node 的 CJS 顺序不同（总控决定）**：按 Node 实测，裸说明符的 `require` 在查找路径遇到读不了的 `node_modules/<名>/package.json` 时，
+  不管包存不存在都抛 `ERR_ACCESS_DENIED`（先查权限、后看目录）。Verve 不这样做：`verve run` 默认就是受限的（Node 不是），照搬会让不带 `-A` 时
+  `try { require('可选包') } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e }` 这类现在能跑的脚本在可选包缺失时崩溃。所以 `require` 与 `import`
+  都用 Node ESM 的顺序：**先看目录在不在**——存在但 `package.json` 读不了 → `ERR_ACCESS_DENIED`；哪里都没有 → `MODULE_NOT_FOUND` / `ERR_MODULE_NOT_FOUND`。
+  （第一版曾按 Node 的 CJS 顺序做，随后的 `fix(modules): Report a missing package as missing in a confined realm too` 改回。）
 - **修复**：`ResolveError` 多一个 `resource: Option<PathBuf>`；`esm_resolve::ensure_package_readable(root)` 在 `node_modules/<包>` 的查找里，
-  `require`（`Mode::Require`）对每个候选、`import` 对目录存在的候选，若 `package.json` 当前 realm 不能读，就以 `ERR_ACCESS_DENIED` 结束解析。
+  对目录存在的候选（`require` 与 `import` 一样），若 `package.json` 当前 realm 不能读，就以 `ERR_ACCESS_DENIED` 结束解析。
   `esm::resolve_error`（改为 `pub(crate)`，`modules.rs` 也用它）把带 `resource` 的错误交给 `permission::denied(context, "FileSystemRead", resource)`，
   字段与 `require('./hi.cjs')` 的拒绝相同。`modules.rs::resolve` 的 `ERR_MODULE_NOT_FOUND` → `MODULE_NOT_FOUND` 映射不变，不会误伤新的码。
 - **`Resolving` 的约定**：只改了一处例外——裸说明符查找的那个 `package.json`。其余照旧：`scope()`（模块自己的 `type` 查找、`#imports`、自引用）
   与 CJS 的相对路径 `as_file_or_folder` 仍是「不读不可读的 `package.json`，加载时再拒绝」。`permission.rs` 里 `Resolving` 的文档注释已写明例外。
   `tests/permission.rs` 原有测试全部通过。
 - **实际命令**（临时目录，`HOME` 等指向 scratchpad，release 构建）：不带 `-A` 的 `verve run app.cjs`（工作目录没有任何授权，`./hi.cjs` 本来就是 `ERR_ACCESS_DENIED`）里，
-  `require('typescript')`、`require('typescript/lib/typescript.js')`、`require('nonesuch/sub')`、`require('@s/n')` 都是 `ERR_ACCESS_DENIED FileSystemRead`，
-  `resource` 为第一个候选的 `node_modules/<名>/package.json`；`import('typescript')` 是 `ERR_ACCESS_DENIED`，`import('nonesuch')` 是 `ERR_MODULE_NOT_FOUND`，
-  `require('./missing.cjs')` 是 `MODULE_NOT_FOUND`。带 `-A`：`typescript` 加载，缺失的是 `MODULE_NOT_FOUND`/`ERR_MODULE_NOT_FOUND`。逐项与上面的 Node 实测一致。
-- **测试**（`tests/permission.rs`）：`a_package_outside_the_grant_is_refused_not_missing`（裸、`deep/lib/x`、`exports` 映射、缺失包；`require` 与 `import` 各一遍，
+  `require('typescript')`、`require('typescript/lib/typescript.js')` 是 `ERR_ACCESS_DENIED FileSystemRead`，
+  `resource` 为 `node_modules/typescript/package.json`；`require('nonesuch/sub')`、`require('@s/n')` 是 `MODULE_NOT_FOUND`（与 Node 的 CJS 不同，见上）；`import('typescript')` 是 `ERR_ACCESS_DENIED`，`import('nonesuch')` 是 `ERR_MODULE_NOT_FOUND`，
+  `require('./missing.cjs')` 是 `MODULE_NOT_FOUND`。带 `-A`：`typescript` 加载，缺失的是 `MODULE_NOT_FOUND`/`ERR_MODULE_NOT_FOUND`。
+- **测试**（`tests/permission.rs`）：`a_package_outside_the_grant_is_refused_not_missing`（裸、`deep/lib/x`、`exports` 映射拒绝，缺失包仍是 `MODULE_NOT_FOUND`；`require` 与 `import` 各一遍，
   不授权的 realm）、`a_package_inside_the_grant_loads_and_a_missing_one_is_missing`（`FsAccess::All`：同样的说明符都能加载，缺失的是 `MODULE_NOT_FOUND`/`ERR_MODULE_NOT_FOUND`）、
   `a_package_in_a_readable_folder_is_found_before_a_folder_that_is_not`（近处可读的 `node_modules` 先命中，上面不可读的不被探测）。
 - **修复前的失败输出**（第一版测试；当时缺失的包期望 `MODULE_NOT_FOUND`，与最终按 Node 的期望只差这一项）：
@@ -199,7 +199,7 @@ P64 让无 reviver 的 `JSON.parse` 改用一遍读取器，孤立代理项（�
 
 ### 给其他包的备注
 
-- **给任何改模块解析的包**：`esm_resolve::resolve` 对 `require` 与 `import` 的存在性检查顺序不同（CJS 先查权限再看目录，ESM 先看目录），与 Node 对应；`ResolveError.resource` 是新增字段，
+- **给任何改模块解析的包**：`require` 与 `import` 的裸说明符查找都先看目录在不在（刻意不同于 Node 的 CJS，见第 3 项）；`ResolveError.resource` 是新增字段，
   转成 JS 错误一律走 `esm::resolve_error`，不要再直接 `coded_error(&error.message, error.code)`，否则 `ERR_ACCESS_DENIED` 会丢掉 `permission`/`resource`。
 - **给以后动 `SetPropertyByValue` 快路径的包**：凡是「直接写 `object`」的捷径都要先确认 `receiver` 就是 `object`；新增的测试在 `boa/core/engine/src/tests/class.rs`。
 - **给读 `context.source` 的代码**：`JsonNode::Primitive` 现在带读出的值，`source` 的条件是 `SameValue`，不再是文本重新解析后相等。

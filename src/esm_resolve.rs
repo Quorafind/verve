@@ -88,9 +88,11 @@ pub(crate) fn manifest(view: &View, dir: &Path) -> Result<Option<Value>> {
     }
 }
 
-/// Refuses a `package.json` of the package at `root` that the realm may not read, which a bare
-/// specifier's lookup is about to read. Unlike [`manifest`], which skips one, this is Node's
-/// `--permission`: the file is what is read, so it is what is refused, whether or not it exists.
+/// Refuses a `package.json` of the package at `root`, a folder that exists, that the realm may not
+/// read. Unlike [`manifest`], which skips one, the package is there and its entry points are in
+/// that file, so a lookup that went on would report it missing. A folder that does not exist is
+/// not asked about: Node's `--permission` also refuses those for `require`, but `verve run` is
+/// confined by default, and a missing optional dependency must stay `MODULE_NOT_FOUND` there.
 fn ensure_package_readable(root: &Path) -> Result<()> {
     let path = root.join("package.json");
     if crate::permission::resolution_may_read(&path) {
@@ -217,10 +219,6 @@ fn resolve_inner(rules: &Rules<'_>, specifier: &str, parent: &Url) -> Result<Url
     while let Some(dir) = at {
         if dir.file_name().is_none_or(|s| s != "node_modules") {
             let root = dir.join("node_modules").join(name);
-            // `require` reads the manifest of every candidate; `import` only of one that is there.
-            if rules.mode == Mode::Require {
-                ensure_package_readable(&root)?;
-            }
             if crate::fs::sys::is_dir(rules.view, &root) {
                 ensure_package_readable(&root)?;
                 let json = manifest(rules.view, &root)?;
