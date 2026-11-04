@@ -537,3 +537,75 @@ fn regexp_string_iterator_completed_by_a_nested_step() {
         js_str!("false true true"),
     )]);
 }
+
+#[test]
+fn regexp_string_iterator_is_completed_when_exec_throws() {
+    // The specification's closure ends at the throw, so every later `next` is done. Node 22
+    // keeps stepping after the throw instead.
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            class R extends RegExp { n = 0; exec(s) { if (this.n++ === 1) throw new Error('E'); return super.exec(s); } }
+            const it = 'aaa'.matchAll(new R('a', 'g'));
+            const log = [];
+            for (let i = 0; i < 4; i++) {
+              try { log.push(JSON.stringify(it.next())); } catch (e) { log.push('threw'); }
+            }
+            log.join(' | ');
+        "#},
+        js_str!("{\"value\":[\"a\"],\"done\":false} | threw | {\"done\":true} | {\"done\":true}"),
+    )]);
+}
+
+#[test]
+fn regexp_string_iterator_is_completed_when_to_string_throws() {
+    // The specification's closure ends at the throw, so every later `next` is done. Node 22
+    // keeps stepping after the throw instead.
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            class R extends RegExp { n = 0; exec(s) { const m = super.exec(s); if (this.n++ === 1) return { 0: { toString() { throw new Error('E'); } }, index: 0 }; return m; } }
+            const it = 'aaa'.matchAll(new R('a', 'g'));
+            const log = [];
+            for (let i = 0; i < 4; i++) {
+              try { log.push(JSON.stringify(it.next())); } catch (e) { log.push('threw'); }
+            }
+            log.join(' | ');
+        "#},
+        js_str!("{\"value\":[\"a\"],\"done\":false} | threw | {\"done\":true} | {\"done\":true}"),
+    )]);
+}
+
+#[test]
+fn regexp_string_iterator_is_completed_when_last_index_read_throws() {
+    // The specification's closure ends at the throw, so every later `next` is done. Node 22
+    // keeps stepping after the throw instead.
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            class R extends RegExp { n = 0; exec(s) { const m = super.exec(s); if (this.n++ === 0) this.lastIndex = { valueOf() { throw new Error('E'); } }; return m; } }
+            const it = 'abc'.matchAll(new R('', 'g'));
+            const log = [];
+            for (let i = 0; i < 4; i++) {
+              try { log.push(JSON.stringify(it.next())); } catch (e) { log.push('threw'); }
+            }
+            log.join(' | ');
+        "#},
+        js_str!("threw | {\"done\":true} | {\"done\":true} | {\"done\":true}"),
+    )]);
+}
+
+#[test]
+fn regexp_string_iterator_is_completed_when_last_index_write_throws() {
+    // The specification's closure ends at the throw, so every later `next` is done. Node 22
+    // keeps stepping after the throw instead.
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            class R extends RegExp { n = 0; exec(s) { const m = super.exec(s); if (this.n++ === 0) Object.defineProperty(this, 'lastIndex', { writable: false }); return m; } }
+            const it = 'abc'.matchAll(new R('', 'g'));
+            const log = [];
+            for (let i = 0; i < 4; i++) {
+              try { log.push(JSON.stringify(it.next())); } catch (e) { log.push('threw'); }
+            }
+            log.join(' | ');
+        "#},
+        js_str!("threw | {\"done\":true} | {\"done\":true} | {\"done\":true}"),
+    )]);
+}
