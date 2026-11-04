@@ -49,6 +49,8 @@ mod tests_iterators;
 #[cfg(test)]
 mod tests_prototype_cache;
 #[cfg(test)]
+mod tests_typed_elements;
+#[cfg(test)]
 mod tests_typed_length;
 
 use std::{

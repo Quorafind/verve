@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// A context with `detach(buffer)` and `gc()`, which the programs need and JavaScript lacks.
-fn context_with_natives(mode: Mode) -> Context {
+pub(super) fn context_with_natives(mode: Mode) -> Context {
     let mut context = context(mode);
     context
         .register_global_callable(
