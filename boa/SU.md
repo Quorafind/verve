@@ -648,3 +648,9 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   `TODO: invalidate the pointer`, so a cached slot kept the old bits: a property made read-only was
   still written). Compiled code takes the same entries, and
   reads a prototype's slot only through the helper.
+
+- `boa_engine`, `object/operations.rs`: `InitializeInstanceElements` no longer holds the class
+  constructor's borrow while it runs the field initializers. An initializer that wrote to the class
+  (`class X { static n = 0; id = ++X.n }`) panicked with `BorrowMutError`, and so did a derived class
+  whose base constructor returns the class itself. The private methods and the fields are copied out
+  first, so the list the instance is built from is the one at the start, as in the spec.
