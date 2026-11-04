@@ -33,6 +33,7 @@ mod layout;
 mod memory;
 mod runtime;
 mod stack_layout;
+mod typed_elements;
 mod typed_length;
 
 #[cfg(test)]
