@@ -110,7 +110,7 @@ Node 的数组迭代器：先读 `index`，再读 `length`，**之后**存 `inde
 - 新测试 11 个（数组迭代器 7、`matchAll` 3、Collator 1）；基线（`c91b2938`）上 8 个 panic（`ai6`/`ai7` 不 panic），Collator 在 `intl_bundled` 下修复前 panic、修复后通过。
 - `boa/`：`cargo test -p boa_engine` 默认 1221 + 其他套件全过；`BOA_JIT_THRESHOLD=0 --features jit` 1272 全过；`--features intl_bundled -- collator` 通过。
   `cargo clippy -p boa_engine --all-targets -- -D warnings` 有、无 `--features jit` 都过；`cargo fmt`、根 `cargo fmt --all --check`、`bash scripts/style-check.sh` 每个提交都过。
-- test262（`E:	est262`，release `boa_tester`，基线 `c91b2938` 对改动后，逐项 `compare`）：`built-ins/Array` 3082、`ArrayIteratorPrototype` 27、`RegExp` 1865（1 个既有失败）、`RegExpStringIteratorPrototype` 17、`Iterator` 420、`Proxy` 311、`language/statements/for-of` 740、`language/expressions/array` 52、`language/destructuring` 18：**全部 0 差异、0 panic**。`intl402` 没跑（tester 没有 `intl` 特性）。
+- test262（`E:\test262`，release `boa_tester`，基线 `c91b2938` 对改动后，逐项 `compare`）：`built-ins/Array` 3082、`ArrayIteratorPrototype` 27、`RegExp` 1865（1 个既有失败）、`RegExpStringIteratorPrototype` 17、`Iterator` 420、`Proxy` 311、`language/statements/for-of` 740、`language/expressions/array` 52、`language/destructuring` 18：**全部 0 差异、0 panic**。`intl402` 没跑（tester 没有 `intl` 特性）。
 - P60（release + `jit`，每格 7 个进程取中位数（最好），ms，基线与改动后在同一轮相邻测量；括号后为采样的整机负载 %）：
 
 | 测试 | 基线 JIT | 之后 JIT | 基线解释 | 之后解释 | 负载 |
