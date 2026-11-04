@@ -519,3 +519,29 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   An object's members are kept in an `FxHashMap` by key (a repeated key keeps the last member, as the
   object does), so the reviver finds the source of each key in constant time rather than by a search
   of the members, which made a reviver over n keys cost n² comparisons.
+
+- `boa_engine`, `builtins/iterable`, `array`, `map`, `set`, `string`, `vm/opcode/iteration`: a
+  `GetIterator` whose `next` is the untouched `next` of the running realm's array, map, set or
+  string iterator records which advance function that is, and `IteratorStep` (`for…of`, spread,
+  destructuring, `Array.from`, `new Map(entries)`, and the rest that go through
+  `IteratorRecord::step`) calls it directly and keeps the value, instead of calling `next` and
+  reading `done` and `value` from a result object made only to be read. The object is unobservable
+  there: it is a fresh ordinary object with own data properties. Every read the advance makes of the
+  iterated object (`length` and the elements of an array-like, a proxy's traps, a typed array's
+  buffer) is unchanged, the `next` method is still the one read at `GetIterator`, and a direct
+  `it.next()` still returns a new object. `IteratorNext` and `IteratorValue` step and read the
+  record in place instead of popping it off the frame's stack and pushing it back, and a new record
+  no longer allocates the empty object that stood for "no result yet". What is not kept: a native
+  frame for `next` in the shadow stack while a proxy trap runs inside the step, so an `Error.stack`
+  made there lacks that line; a `next` from another realm is stepped as before.
+  `for (const x of array)` per element, 1M elements, median of 5 processes: 369 to 75 ns
+  interpreted, 352 to 61 compiled; a `Set`: 598 to 47 and 534 to 29; a string: 456 to 100 and 519
+  to 84 (load 25–50%).
+
+- `boa_engine`, `vm/jit`: compiled code runs `IteratorNext`, `IteratorDone` and `IteratorValue` with
+  fast helpers instead of `jit_step`. `IteratorNext` is done by the helper only when stepping
+  cannot run JavaScript or fail: a map, set or string iterator, or an array iterator over a plain
+  array with an integer `length` and a dense element (an iterator whose `next` is the built-in one
+  is the only kind of record that has a stepper); a hole, a proxy, a typed array, a key or entries
+  iterator and every other record take the interpreter's handler. `for (const x of array)` per
+  element, compiled: 61 to 22 ns (1M elements, median of 5 processes, one round at 50–100% load).

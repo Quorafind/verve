@@ -2,11 +2,17 @@
 
 use crate::{
     Context, JsResult, JsValue,
-    builtins::{BuiltInBuilder, IntrinsicObject},
+    builtins::{
+        BuiltInBuilder, IntrinsicObject, array::array_iterator::ArrayIterator,
+        map::map_iterator::MapIterator, set::set_iterator::SetIterator,
+        string::string_iterator::StringIterator,
+    },
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
-    native_function::{CoroutineBranch, CoroutineState},
+    native_function::{
+        CoroutineBranch, CoroutineState, NativeFunctionObject, NativeFunctionPointer,
+    },
     object::JsObject,
     realm::Realm,
     symbol::JsSymbol,
@@ -219,6 +225,95 @@ pub fn create_iter_result_object(value: JsValue, done: bool, context: &mut Conte
     obj.into()
 }
 
+/// The result object of a built-in iterator's `next` for one step: `None` is the final
+/// `{ value: undefined, done: true }`.
+pub(crate) fn step_to_result_object(step: Option<JsValue>, context: &mut Context) -> JsValue {
+    match step {
+        Some(value) => create_iter_result_object(value, false, context),
+        None => create_iter_result_object(JsValue::undefined(), true, context),
+    }
+}
+
+/// The built-in iterators whose `next` can be run without making its result object.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Stepper {
+    Array,
+    Map,
+    Set,
+    String,
+}
+
+impl Stepper {
+    /// The stepper for `next_method`, if it is the untouched `next` of one of the built-in
+    /// iterators of the running realm.
+    ///
+    /// Such a `next` makes a fresh result object that only `IteratorStep` ever reads, and reading
+    /// the `done` and `value` of a fresh ordinary object runs no user code, so the object can be
+    /// skipped. A function from another realm is left alone: `next` would run there, creating its
+    /// arrays with that realm's prototypes.
+    fn of(next_method: &JsValue, context: &Context) -> Option<Self> {
+        let function = next_method.as_object()?;
+        let native = function.downcast_ref::<NativeFunctionObject>()?;
+        if native.realm.as_ref() != Some(context.realm()) {
+            return None;
+        }
+        let pointer = native.f.as_fn_ptr()?;
+        let is = |next: NativeFunctionPointer| pointer as usize == next as usize;
+        if is(ArrayIterator::next) {
+            Some(Self::Array)
+        } else if is(MapIterator::next) {
+            Some(Self::Map)
+        } else if is(SetIterator::next) {
+            Some(Self::Set)
+        } else if is(StringIterator::next) {
+            Some(Self::String)
+        } else {
+            None
+        }
+    }
+
+    /// The body of the iterator's `next` on `iterator`: the next value, or `None` once the
+    /// iterator is exhausted.
+    pub(crate) fn advance(
+        self,
+        iterator: &JsObject,
+        context: &mut Context,
+    ) -> JsResult<Option<JsValue>> {
+        match self {
+            Self::Array => ArrayIterator::advance(iterator, context),
+            Self::Map => MapIterator::advance(iterator, context),
+            Self::Set => SetIterator::advance(iterator, context),
+            Self::String => StringIterator::advance(iterator, context),
+        }
+    }
+
+    /// [`advance`](Self::advance) when it is known to run no JavaScript and not to fail;
+    /// [`Declined`], with nothing changed, when that cannot be known.
+    #[cfg(feature = "jit")]
+    fn advance_quietly(
+        self,
+        iterator: &JsObject,
+        context: &mut Context,
+    ) -> Result<Option<JsValue>, Declined> {
+        let right_type = match self {
+            Self::Array => return ArrayIterator::advance_dense(iterator),
+            Self::Map => iterator.is::<MapIterator>(),
+            Self::Set => iterator.is::<SetIterator>(),
+            Self::String => iterator.is::<StringIterator>(),
+        };
+        // These read nothing but their own state and make arrays and substrings.
+        if right_type {
+            self.advance(iterator, context).map_err(|_| Declined)
+        } else {
+            Err(Declined)
+        }
+    }
+}
+
+/// A step that was not made because it might run JavaScript or fail.
+#[cfg(feature = "jit")]
+pub(crate) struct Declined;
+
 /// Iterator hint for `GetIterator`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IteratorHint {
@@ -251,7 +346,9 @@ impl JsValue {
         let next_method = iterator_obj.get(js_string!("next"), context)?;
         // 4. Let iteratorRecord be the Iterator Record { [[Iterator]]: iterator, [[NextMethod]]: nextMethod, [[Done]]: false }.
         // 5. Return iteratorRecord.
-        Ok(IteratorRecord::new(iterator_obj.clone(), next_method))
+        let mut record = IteratorRecord::new(iterator_obj.clone(), next_method);
+        record.stepper = Stepper::of(&record.next_method, context);
+        Ok(record)
     }
 
     /// `GetIterator ( obj, kind )`
@@ -393,7 +490,23 @@ pub struct IteratorRecord {
     done: bool,
 
     /// The result of the last call to `next`.
-    last_result: IteratorResult,
+    last_result: LastResult,
+
+    /// How to step this record without making result objects, when `next_method` is a built-in
+    /// iterator's own `next`. Decided once, when the record is made by `GetIterator`.
+    #[unsafe_ignore_trace]
+    stepper: Option<Stepper>,
+}
+
+/// The result of the last step of an [`IteratorRecord`].
+#[derive(Clone, Debug, Finalize, Trace)]
+enum LastResult {
+    /// The object a `next` call returned.
+    Object(IteratorResult),
+
+    /// The value of a step made without a result object. After the last step it is `undefined`,
+    /// as in the object the built-in `next` would have made.
+    Value(JsValue),
 }
 
 impl IteratorRecord {
@@ -405,9 +518,8 @@ impl IteratorRecord {
             iterator,
             next_method,
             done: false,
-            last_result: IteratorResult {
-                object: JsObject::with_null_proto(),
-            },
+            last_result: LastResult::Value(JsValue::undefined()),
+            stepper: None,
         }
     }
 
@@ -421,9 +533,17 @@ impl IteratorRecord {
         &self.next_method
     }
 
-    /// Gets the last result object of the iterator record.
-    pub(crate) const fn last_result(&self) -> &IteratorResult {
-        &self.last_result
+    /// Gets the last result object of the iterator record, making it if the last step was made
+    /// without one.
+    pub(crate) fn last_result_object(&self, context: &mut Context) -> JsObject {
+        match &self.last_result {
+            LastResult::Object(result) => result.object().clone(),
+            LastResult::Value(value) => {
+                create_iter_result_object(value.clone(), self.done, context)
+                    .into_object()
+                    .expect("an iterator result is an object")
+            }
+        }
     }
 
     /// Runs `f`, setting the `done` field of this `IteratorRecord` to `true` if `f` returns
@@ -441,7 +561,10 @@ impl IteratorRecord {
 
     /// Gets the current value of the `IteratorRecord`.
     pub(crate) fn value(&mut self, context: &mut Context) -> JsResult<JsValue> {
-        self.set_done_on_err(|iter| iter.last_result.value(context))
+        self.set_done_on_err(|iter| match &iter.last_result {
+            LastResult::Object(result) => result.value(context),
+            LastResult::Value(value) => Ok(value.clone()),
+        })
     }
 
     /// Get the `[[Done]]` field of the `IteratorRecord`.
@@ -465,7 +588,7 @@ impl IteratorRecord {
             // 3. If done is true, return false.
             iter.done = result.complete(context)?;
 
-            iter.last_result = result;
+            iter.last_result = LastResult::Object(result);
 
             Ok(())
         })
@@ -511,6 +634,48 @@ impl IteratorRecord {
         })
     }
 
+    /// How to step this record without a result object, when its `next` is a built-in
+    /// iterator's own.
+    pub(crate) const fn stepper(&self) -> Option<Stepper> {
+        self.stepper
+    }
+
+    /// The value of the last step if it was made without a result object.
+    pub(crate) const fn unboxed_value(&self) -> Option<&JsValue> {
+        match &self.last_result {
+            LastResult::Value(value) => Some(value),
+            LastResult::Object(_) => None,
+        }
+    }
+
+    /// Steps a record that has a [`Stepper`] when that runs no JavaScript and cannot fail, as
+    /// fast helpers of compiled code need; [`Declined`], with nothing changed, for any other.
+    #[cfg(feature = "jit")]
+    pub(crate) fn step_quietly(&mut self, context: &mut Context) -> Result<(), Declined> {
+        let step = self
+            .stepper
+            .ok_or(Declined)?
+            .advance_quietly(&self.iterator, context)?;
+        self.finish_unboxed_step(Ok(step))
+            .map(|_| ())
+            .map_err(|_| Declined)
+    }
+
+    /// Records the outcome of `advance` (the next value, `None` at the end, or an error) as the
+    /// last step, and returns whether the iterator is done. The built-in `next` has no result
+    /// object here for anyone to read, so the value is all there is.
+    pub(crate) fn finish_unboxed_step(
+        &mut self,
+        step: JsResult<Option<JsValue>>,
+    ) -> JsResult<bool> {
+        self.set_done_on_err(|iter| {
+            let step = step?;
+            iter.done = step.is_none();
+            iter.last_result = LastResult::Value(step.unwrap_or_default());
+            Ok(iter.done)
+        })
+    }
+
     /// `IteratorStep ( iteratorRecord )`
     ///
     /// Updates the `IteratorRecord` and returns `true` if the next result record returned
@@ -523,6 +688,11 @@ impl IteratorRecord {
     /// [spec]: https://tc39.es/ecma262/#sec-iteratorstep
     pub(crate) fn step(&mut self, context: &mut Context) -> JsResult<bool> {
         self.set_done_on_err(|iter| {
+            if let Some(stepper) = iter.stepper {
+                let step = stepper.advance(&iter.iterator, context);
+                return iter.finish_unboxed_step(step);
+            }
+
             // 1. Let result be ? IteratorNext(iteratorRecord).
             let result = iter.next(None, context)?;
 
@@ -536,7 +706,7 @@ impl IteratorRecord {
             //     b. Return done.
             iter.done = result.complete(context)?;
 
-            iter.last_result = result;
+            iter.last_result = LastResult::Object(result);
 
             // 6. Return result.
             Ok(iter.done)

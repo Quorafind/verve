@@ -5,10 +5,12 @@
 //!
 //! [spec]: https://tc39.es/ecma262/#sec-array-iterator-objects
 
+#[cfg(feature = "jit")]
+use crate::builtins::iterable::Declined;
 use crate::{
     Context, JsData, JsResult,
     builtins::{
-        Array, BuiltInBuilder, IntrinsicObject, JsValue, iterable::create_iter_result_object,
+        Array, BuiltInBuilder, IntrinsicObject, JsValue, iterable::step_to_result_object,
         typed_array::TypedArray,
     },
     context::intrinsics::Intrinsics,
@@ -94,18 +96,57 @@ impl ArrayIterator {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-%arrayiteratorprototype%.next
     pub(crate) fn next(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-        let object = this.as_object();
+        let object = this
+            .as_object()
+            .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
+        let step = Self::advance(&object, context)?;
+        Ok(step_to_result_object(step, context))
+    }
+
+    /// [`advance`](Self::advance) for the common case that needs no JavaScript: a value
+    /// iterator over a plain array, whose `length` is an integer and whose next element is an
+    /// ordinary dense one. [`Declined`], with nothing changed, for any other.
+    #[cfg(feature = "jit")]
+    pub(crate) fn advance_dense(object: &JsObject) -> Result<Option<JsValue>, Declined> {
+        let mut iterator = object.downcast_mut::<Self>().ok_or(Declined)?;
+        if !matches!(iterator.kind, PropertyNameKind::Value) || !iterator.array.is_array() {
+            return Err(Declined);
+        }
+        if iterator.done {
+            return Ok(None);
+        }
+        let index = iterator.next_index;
+        let array = iterator.array.try_borrow().map_err(|_| Declined)?;
+        let length = array
+            .properties()
+            .storage
+            .first()
+            .and_then(JsValue::as_i32)
+            .and_then(|length| u64::try_from(length).ok())
+            .ok_or(Declined)?;
+        if index >= length {
+            drop(array);
+            iterator.done = true;
+            return Ok(None);
+        }
+        let value = u32::try_from(index)
+            .ok()
+            .and_then(|index| array.properties().get_dense_property(index))
+            .ok_or(Declined)?;
+        drop(array);
+        iterator.next_index = index + 1;
+        Ok(Some(value))
+    }
+
+    /// The body of `next` without the result object: the next value, or `None` once the
+    /// iterator is exhausted. Every read `next` makes of the array happens here.
+    pub(crate) fn advance(object: &JsObject, context: &mut Context) -> JsResult<Option<JsValue>> {
         let mut array_iterator = object
-            .as_ref()
-            .and_then(JsObject::downcast_mut::<Self>)
+            .downcast_mut::<Self>()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
         let index = array_iterator.next_index;
         if array_iterator.done {
-            return Ok(create_iter_result_object(
-                JsValue::undefined(),
-                true,
-                context,
-            ));
+            return Ok(None);
         }
 
         let len = if let Some(f) = array_iterator.array.downcast_ref::<TypedArray>() {
@@ -126,23 +167,16 @@ impl ArrayIterator {
 
         if index >= len {
             array_iterator.done = true;
-            return Ok(create_iter_result_object(
-                JsValue::undefined(),
-                true,
-                context,
-            ));
+            return Ok(None);
         }
         array_iterator.next_index = index + 1;
         match array_iterator.kind {
-            PropertyNameKind::Key => Ok(create_iter_result_object(index.into(), false, context)),
-            PropertyNameKind::Value => {
-                let element_value = array_iterator.array.get(index, context)?;
-                Ok(create_iter_result_object(element_value, false, context))
-            }
+            PropertyNameKind::Key => Ok(Some(index.into())),
+            PropertyNameKind::Value => array_iterator.array.get(index, context).map(Some),
             PropertyNameKind::KeyAndValue => {
                 let element_value = array_iterator.array.get(index, context)?;
                 let result = Array::create_array_from_list([index.into(), element_value], context);
-                Ok(create_iter_result_object(result.into(), false, context))
+                Ok(Some(result.into()))
             }
         }
     }

@@ -33,7 +33,7 @@ use std::{
 
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
 
-mod string_iterator;
+pub(crate) mod string_iterator;
 pub(crate) use string_iterator::StringIterator;
 
 #[cfg(feature = "annex-b")]

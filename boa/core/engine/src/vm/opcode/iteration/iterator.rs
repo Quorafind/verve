@@ -138,6 +138,23 @@ pub(crate) struct IteratorNext;
 impl IteratorNext {
     #[inline(always)]
     pub(crate) fn operation((): (), context: &mut Context) -> JsResult<()> {
+        // A built-in iterator is stepped where it sits: nothing in its `next` can reach this
+        // frame's iterator stack, so the record need not be taken out and put back.
+        let record = context.vm.frame().iterators.last();
+        if let Some((stepper, iterator)) =
+            record.and_then(|record| Some((record.stepper()?, record.iterator().clone())))
+        {
+            let step = stepper.advance(&iterator, context);
+            let record = context
+                .vm
+                .frame_mut()
+                .iterators
+                .last_mut()
+                .expect("iterator on the call frame must exist");
+            record.finish_unboxed_step(step)?;
+            return Ok(());
+        }
+
         let mut iterator = context
             .vm
             .frame_mut()
@@ -215,15 +232,14 @@ pub(crate) struct IteratorResult;
 impl IteratorResult {
     #[inline(always)]
     pub(crate) fn operation(value: RegisterOperand, context: &mut Context) {
-        let last_result = context
+        let iterator = context
             .vm
             .frame()
             .iterators
             .last()
             .expect("iterator on the call frame must exist")
-            .last_result()
-            .object()
             .clone();
+        let last_result = iterator.last_result_object(context);
         context.vm.set_register(value.into(), last_result.into());
     }
 }
@@ -244,6 +260,17 @@ pub(crate) struct IteratorValue;
 impl IteratorValue {
     #[inline(always)]
     pub(crate) fn operation(value: RegisterOperand, context: &mut Context) -> JsResult<()> {
+        let unboxed = context
+            .vm
+            .frame()
+            .iterators
+            .last()
+            .and_then(|record| record.unboxed_value().cloned());
+        if let Some(iter_value) = unboxed {
+            context.vm.set_register(value.into(), iter_value);
+            return Ok(());
+        }
+
         let mut iterator = context
             .vm
             .frame_mut()

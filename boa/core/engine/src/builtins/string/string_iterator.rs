@@ -7,7 +7,7 @@
 
 use crate::{
     Context, JsData, JsResult, JsString, JsValue,
-    builtins::{BuiltInBuilder, IntrinsicObject, iterable::create_iter_result_object},
+    builtins::{BuiltInBuilder, IntrinsicObject, iterable::step_to_result_object},
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
@@ -68,29 +68,29 @@ impl StringIterator {
 
     /// `StringIterator.prototype.next( )`
     pub(crate) fn next(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-        let object = this.as_object();
+        let object = this
+            .as_object()
+            .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
+        let step = Self::advance(&object, context)?;
+        Ok(step_to_result_object(step, context))
+    }
+
+    /// The body of `next` without the result object: the next code point as a string, or `None`
+    /// once the string is exhausted.
+    pub(crate) fn advance(object: &JsObject, context: &mut Context) -> JsResult<Option<JsValue>> {
         let mut string_iterator = object
-            .as_ref()
-            .and_then(JsObject::downcast_mut::<Self>)
+            .downcast_mut::<Self>()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
 
         if string_iterator.string.is_empty() {
-            return Ok(create_iter_result_object(
-                JsValue::undefined(),
-                true,
-                context,
-            ));
+            return Ok(None);
         }
         let native_string = &string_iterator.string;
         let len = native_string.len();
         let position = string_iterator.next_index;
         if position >= len {
             string_iterator.string = js_string!();
-            return Ok(create_iter_result_object(
-                JsValue::undefined(),
-                true,
-                context,
-            ));
+            return Ok(None);
         }
         let code_point = native_string.code_point_at(position);
         string_iterator.next_index += code_point.code_unit_count();
@@ -99,6 +99,6 @@ impl StringIterator {
             &[position.into(), string_iterator.next_index.into()],
             context,
         )?;
-        Ok(create_iter_result_object(result_string, false, context))
+        Ok(Some(result_string))
     }
 }
