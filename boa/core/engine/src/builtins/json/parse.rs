@@ -1,8 +1,13 @@
-//! The reader `JSON.parse` uses when no reviver asks for the text a value came from.
+//! The reader `JSON.parse` builds its values with.
 //!
 //! A JSON text is read once, straight from its code units into the values it describes, instead of
 //! being validated by one parser and then read again by the script parser and the bytecode
 //! compiler. Containers are kept on an explicit stack, so nested text costs heap, not Rust stack.
+//! A reviver asks for the text each primitive came from, so the reader can also keep a
+//! [`JsonNode`] tree beside the values: the text of every primitive, the members of every
+//! container.
+
+use rustc_hash::FxHashMap;
 
 use crate::{
     Context, JsError, JsNativeError, JsResult, JsString, JsValue,
@@ -48,19 +53,61 @@ impl<'a> Units<'a> {
     }
 }
 
-/// A container whose members are still being read.
+/// What was read for a value, kept for the reviver of `JSON.parse`: the text a primitive came from
+/// and the value it produced, and the members of a container in the order they were read.
+#[derive(Debug)]
+pub(super) enum JsonNode {
+    Primitive {
+        source: JsString,
+        value: JsValue,
+    },
+    Array(Vec<JsonNode>),
+    /// By key, so that the reviver finds a member in constant time; a repeated key keeps the
+    /// last member, as the object does.
+    Object(FxHashMap<JsString, JsonNode>),
+}
+
+impl Drop for JsonNode {
+    /// Takes a deep tree apart on the heap: the drop glue would recurse once per level.
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        self.take_children(&mut pending);
+        while let Some(mut node) = pending.pop() {
+            node.take_children(&mut pending);
+        }
+    }
+}
+
+impl JsonNode {
+    fn take_children(&mut self, into: &mut Vec<JsonNode>) {
+        match self {
+            Self::Primitive { .. } => {}
+            Self::Array(children) => into.append(children),
+            Self::Object(members) => into.extend(members.drain().map(|(_, node)| node)),
+        }
+    }
+}
+
+/// A container whose members are still being read. `nodes` stays empty unless the reader keeps
+/// the tree.
 enum Container {
-    Array(Vec<JsValue>),
+    Array {
+        elements: Vec<JsValue>,
+        nodes: Vec<JsonNode>,
+    },
     Object {
         object: JsObject,
         /// The key of the member being read, once it has been read and its value has not.
         key: Option<JsString>,
+        nodes: FxHashMap<JsString, JsonNode>,
     },
 }
 
 pub(super) struct Reader<'a> {
     input: Units<'a>,
     pos: usize,
+    /// Whether a [`JsonNode`] tree is kept beside the values.
+    keep_nodes: bool,
 }
 
 impl<'a> Reader<'a> {
@@ -70,28 +117,50 @@ impl<'a> Reader<'a> {
                 inner: text.variant(),
             },
             pos: 0,
+            keep_nodes: false,
         }
     }
 
     /// Reads the whole text and answers the value it describes.
     pub(super) fn read(&mut self, context: &mut Context) -> JsResult<JsValue> {
+        self.read_nodes(context).map(|(value, _)| value)
+    }
+
+    /// Reads the whole text and answers the value it describes, with the tree of what each part
+    /// of it was read from.
+    pub(super) fn read_with_nodes(
+        &mut self,
+        context: &mut Context,
+    ) -> JsResult<(JsValue, JsonNode)> {
+        self.keep_nodes = true;
+        let (value, node) = self.read_nodes(context)?;
+        Ok((value, node.expect("the tree is kept when it is asked for")))
+    }
+
+    fn read_nodes(&mut self, context: &mut Context) -> JsResult<(JsValue, Option<JsonNode>)> {
         let mut stack: Vec<Container> = Vec::new();
 
         loop {
             self.skip_whitespace();
 
+            let start = self.pos;
+            let mut node = None;
             let mut value = match self.peek() {
                 Some(unit) if unit == u16::from(b'{') => {
                     self.pos += 1;
                     let object = JsObject::with_object_proto(context.intrinsics());
                     if self.peek_after_whitespace() == Some(u16::from(b'}')) {
                         self.pos += 1;
+                        node = self
+                            .keep_nodes
+                            .then(|| JsonNode::Object(FxHashMap::default()));
                         object.into()
                     } else {
                         let key = self.read_key()?;
                         stack.push(Container::Object {
                             object,
                             key: Some(key),
+                            nodes: FxHashMap::default(),
                         });
                         continue;
                     }
@@ -100,9 +169,13 @@ impl<'a> Reader<'a> {
                     self.pos += 1;
                     if self.peek_after_whitespace() == Some(u16::from(b']')) {
                         self.pos += 1;
+                        node = self.keep_nodes.then(|| JsonNode::Array(Vec::new()));
                         Array::create_array_from_list(Vec::new(), context).into()
                     } else {
-                        stack.push(Container::Array(Vec::new()));
+                        stack.push(Container::Array {
+                            elements: Vec::new(),
+                            nodes: Vec::new(),
+                        });
                         continue;
                     }
                 }
@@ -123,6 +196,13 @@ impl<'a> Reader<'a> {
                 Some(_) => return Err(self.unexpected_token()),
                 None => return Err(Self::end_of_input()),
             };
+            // Whatever is not a container is a primitive, read from `start` to here.
+            if self.keep_nodes && node.is_none() {
+                node = Some(JsonNode::Primitive {
+                    source: self.input.slice(start, self.pos).into(),
+                    value: value.clone(),
+                });
+            }
 
             // The value is complete: give it to the container it belongs to, and close every
             // container it completes.
@@ -132,18 +212,24 @@ impl<'a> Reader<'a> {
                     if self.pos != self.input.len() {
                         return Err(self.at("Unexpected non-whitespace character after JSON"));
                     }
-                    return Ok(value);
+                    return Ok((value, node));
                 };
 
                 match container {
-                    Container::Array(elements) => elements.push(value),
-                    Container::Object { object, key } => {
+                    Container::Array { elements, nodes } => {
+                        elements.push(value);
+                        nodes.extend(node.take());
+                    }
+                    Container::Object { object, key, nodes } => {
                         let key = key.take().expect("a member's key is read before its value");
+                        if let Some(node) = node.take() {
+                            nodes.insert(key.clone(), node);
+                        }
                         object.create_data_property(key, value, context)?;
                     }
                 }
 
-                let is_array = matches!(stack.last(), Some(Container::Array(..)));
+                let is_array = matches!(stack.last(), Some(Container::Array { .. }));
                 let separator = if is_array {
                     "Expected ',' or ']' after array element in JSON"
                 } else {
@@ -162,16 +248,18 @@ impl<'a> Reader<'a> {
                     }
                     Some(unit) if unit == u16::from(b']') && is_array => {
                         self.pos += 1;
-                        let Some(Container::Array(elements)) = stack.pop() else {
+                        let Some(Container::Array { elements, nodes }) = stack.pop() else {
                             unreachable!("an array closes only an array")
                         };
+                        node = self.keep_nodes.then_some(JsonNode::Array(nodes));
                         value = Array::create_array_from_list(elements, context).into();
                     }
                     Some(unit) if unit == u16::from(b'}') && !is_array => {
                         self.pos += 1;
-                        let Some(Container::Object { object, .. }) = stack.pop() else {
+                        let Some(Container::Object { object, nodes, .. }) = stack.pop() else {
                             unreachable!("an object closes only an object")
                         };
+                        node = self.keep_nodes.then_some(JsonNode::Object(nodes));
                         value = object.into();
                     }
                     _ => return Err(self.at(separator)),

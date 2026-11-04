@@ -477,9 +477,8 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   it is read, an array is one `Array::create_array_from_list`, and a string without an escape is a
   slice of the text rather than a fresh buffer. Containers are kept on an explicit `Vec`, so a
   deeply nested text costs heap instead of Rust stack — the script parser gave up at 128 levels,
-  where Node answers as deep as memory allows. A reviver still builds its values through the script parser, since `context.source`
-  needs the text each primitive came from, but the text is validated by the same reader first, so
-  both paths throw the same messages.
+  where Node answers as deep as memory allows. A reviver is served by the same reader, which also keeps the text each
+  primitive came from (see the entry on `JSON.parse` with a reviver below).
 
   Because the reader is now the one validating, its `SyntaxError` messages are V8's, with the
   position and the line and column V8 names: `Unexpected token '}', "[1,]" is not valid JSON`,
@@ -492,3 +491,31 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   `JSON.parse` of 70,000 records (7,032,596 code units): 1536–2034 ms to 453–530 ms, five interleaved
   runs each, load 19–70%. The suite's `json` test, whose parse phase that is, went from 2926–3519 ms
   to 1315–1428 ms (JIT column, 5 runs, load 23–41%), which is 8.0× Node rather than 21×.
+
+- `boa_engine`, `vm/opcode/set/property.rs`: `SetPropertyByValue` stored into a dense array whenever the
+  object it was given was one, without asking who the receiver was. `super[k] = v` hands it the home
+  object's prototype as the object and `this` as the receiver, and `OrdinarySet` defines the element on
+  the receiver, so `{ __proto__: [0], m() { super[0] = 5 } }.m()` changed the prototype array and left
+  `this` alone. The dense shortcut now sits behind the same condition the typed array shortcut already
+  had: the receiver is the object itself. `SetPropertyByName` was checked for the same fault and has
+  none (a `super.name = v` that runs repeatedly, so that the inline cache is consulted, still defines
+  on the receiver each time), so it only gained a regression test.
+
+- `boa_engine`, `builtins/json/mod.rs`, `builtins/json/parse.rs`: `JSON.parse` with a reviver builds its
+  values with the same reader as one without. It used to hand the text to the script parser, the
+  bytecode compiler and the VM so as to get the text of each primitive for `context.source`, and that
+  path turned strings into UTF-8, so a lone surrogate (escaped or raw) was a `SyntaxError`
+  (`invalid utf-16: lone surrogate found`) where Node answers the one code unit. The reader now keeps
+  a `JsonNode` tree beside the values when asked: the code units each primitive was read from and the
+  value read, and the members of each container with their keys as `JsString`s (they were lossy
+  `String`s). The reviver gets `source` when the value it is handed is still `SameValue` as the one
+  read, which replaces re-parsing the source text to compare. `JSON.parse` no longer uses the script
+  parser at all; what that parser refuses in a string literal of a script is untouched. The reader
+  nests as deep as memory allows, but the reviver's walk (`InternalizeJSONProperty`) recurses on the
+  native stack, which the script parser's 128-level limit used to guard: past the native stack the
+  runtime allows nested runs (`RuntimeLimits::native_stack_limit`) it throws `RangeError: Maximum
+  call stack size exceeded`, as V8 does, and `JsonNode` is taken apart on the heap when it is dropped
+  rather than by drop glue that would recurse once per level.
+  An object's members are kept in an `FxHashMap` by key (a repeated key keeps the last member, as the
+  object does), so the reviver finds the source of each key in constant time rather than by a search
+  of the members, which made a reviver over n keys cost n² comparisons.

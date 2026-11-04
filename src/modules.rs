@@ -268,7 +268,7 @@ fn resolve(context: &mut Context, folder: &Path, name: &str) -> JsResult<Resolve
         return Err(not_found(context, name));
     }
     let path = crate::esm_resolve::file_path(&url)
-        .map_err(|error| crate::native::coded_error(context, &error.message, error.code))?;
+        .map_err(|error| crate::esm::resolve_error(context, error))?;
     Ok(Resolved::File(path))
 }
 

@@ -66,8 +66,12 @@ pub(crate) struct Loader {
     cjs_wrappers: RefCell<HashMap<PathBuf, (u64, Script)>>,
 }
 
-fn resolve_error(context: &mut Context, error: resolve::ResolveError) -> JsError {
-    coded_error(context, &error.message, error.code)
+/// A resolution failure as the error Node throws: `ERR_ACCESS_DENIED` names the file refused.
+pub(crate) fn resolve_error(context: &mut Context, error: resolve::ResolveError) -> JsError {
+    match error.resource {
+        Some(path) => crate::permission::denied(context, "FileSystemRead", &path.to_string_lossy()),
+        None => coded_error(context, &error.message, error.code),
+    }
 }
 
 /// A digest of `source`, to tell a wrapper kept for one text from another: it decides nothing

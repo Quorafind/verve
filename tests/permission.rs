@@ -589,3 +589,116 @@ fn promises_watch_validates_and_checks_its_path() {
         ]
     );
 }
+
+/// Packages in the tree's root `node_modules`, which `open/main.js` finds by walking up and the
+/// tree's grants do not cover: a plain one, a deep path into one, one with `exports`.
+fn packages_outside_the_grant(tree: &Tree) {
+    let modules = tree.root.join("node_modules");
+    for (name, manifest, files) in [
+        (
+            "plain",
+            r#"{"name":"plain","main":"lib/main.js"}"#,
+            &[("lib/main.js", "module.exports = 'plain';")][..],
+        ),
+        (
+            "deep",
+            r#"{"name":"deep"}"#,
+            &[("lib/x.js", "module.exports = 'deep';")][..],
+        ),
+        (
+            "mapped",
+            r#"{"name":"mapped","exports":{".":{"require":"./c.cjs","import":"./e.mjs"}}}"#,
+            &[
+                ("c.cjs", "module.exports = 'mapped';"),
+                ("e.mjs", "export default 'mapped';"),
+            ][..],
+        ),
+    ] {
+        let package = modules.join(name);
+        std::fs::create_dir_all(package.join("lib")).unwrap();
+        std::fs::write(package.join("package.json"), manifest).unwrap();
+        for (file, text) in files {
+            std::fs::write(package.join(file), text).unwrap();
+        }
+    }
+}
+
+const REQUIRE_PACKAGES: &str = r#"
+    const outcome = (f) => { try { return 'loaded ' + f(); } catch (e) { return e.code + ':' + (e.permission || '') + ':' + slash(e.resource || ''); } };
+    const imported = (name) => import(name).then((m) => 'loaded ' + m.default, (e) => e.code + ':' + (e.permission || '') + ':' + slash(e.resource || ''));
+    globalThis.result = [
+        outcome(() => require('plain')),
+        outcome(() => require('deep/lib/x')),
+        outcome(() => require('mapped')),
+        outcome(() => require('absent')),
+        await imported('plain'),
+        await imported('mapped'),
+        await imported('absent'),
+    ].map((text) => text.split(slash(root)).join('<root>'));
+"#;
+
+#[test]
+fn a_package_outside_the_grant_is_refused_not_missing() {
+    let tree = Tree::new("bare-denied");
+    packages_outside_the_grant(&tree);
+    let mut rt = tree.runtime();
+    let result = run(&mut rt, &tree, REQUIRE_PACKAGES);
+    let denied = |package: &str| {
+        format!("ERR_ACCESS_DENIED:FileSystemRead:<root>/node_modules/{package}/package.json")
+    };
+    assert_eq!(
+        result,
+        [
+            denied("plain"),
+            denied("deep"),
+            denied("mapped"),
+            "MODULE_NOT_FOUND::".to_owned(),
+            denied("plain"),
+            denied("mapped"),
+            "ERR_MODULE_NOT_FOUND::".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn a_package_inside_the_grant_loads_and_a_missing_one_is_missing() {
+    let tree = Tree::new("bare-granted");
+    packages_outside_the_grant(&tree);
+    // Every folder a lookup passes through may be read, so a package that is nowhere is missing.
+    let mut rt = Runtime::new();
+    rt.set_permissions(Permissions {
+        fs_read: FsAccess::All,
+        worker: false,
+        ..Permissions::default()
+    });
+    let result = run(&mut rt, &tree, REQUIRE_PACKAGES);
+    assert_eq!(
+        result,
+        [
+            "loaded plain",
+            "loaded deep",
+            "loaded mapped",
+            "MODULE_NOT_FOUND::",
+            "loaded plain",
+            "loaded mapped",
+            "ERR_MODULE_NOT_FOUND::",
+        ]
+    );
+}
+
+#[test]
+fn a_package_in_a_readable_folder_is_found_before_a_folder_that_is_not() {
+    let tree = Tree::new("bare-near");
+    for modules in ["open/node_modules", "node_modules"] {
+        let package = tree.path(modules).join("near");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("index.js"), "module.exports = 'near';").unwrap();
+    }
+    let mut rt = tree.runtime();
+    let result = run(
+        &mut rt,
+        &tree,
+        "globalThis.result = [require('near'), (await import('near')).default];",
+    );
+    assert_eq!(result, ["near", "near"]);
+}
