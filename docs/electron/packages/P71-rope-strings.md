@@ -62,7 +62,7 @@ JIT 里的字符串 `+`（方案已说明 JIT 只调同一个 `Add`，无需改�
 ## 状态
 
 
-分支 `electron/p71-rope-strings`，三个 commit：`boa_string` 的 rope 种类（含单元测试与 `size_of`）、`JsValue::add` 接入（含 `Context` 级测试）、
+分支 `electron/p71-rope-strings`，四个 commit：`boa_string` 的 rope 种类（含单元测试与 `size_of`）、`JsValue::add` 接入（含 `Context` 级测试）、miri 下缩小深链测试、
 本节与 `perf-js.md`/`size.md`。基线是 `docs/electron-plan` `05f26157`，对比用同一台机器上另建的基线 worktree 构建的同配置二进制。
 
 **做了什么**
