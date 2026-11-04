@@ -478,6 +478,11 @@ always agree with one another.
   proxy, an accessor, a unique shape or a value that is not an object take the generic path.
   `points_to` of the weak shapes is no longer behind the `jit` feature.
 
+- `boa_engine`, `vm/jit/mod.rs` (feature `jit`): `prepare` leaves a function that native code calls
+  (a frame with `EXIT_EARLY`, at `pc` 0) interpreted when its bytecode is at most 40 bytes, since
+  entering and leaving compiled code costs more than interpreting a callee that short; a loop in
+  it is still entered by OSR.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

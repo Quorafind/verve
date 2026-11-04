@@ -352,6 +352,10 @@ pub(crate) fn try_enter(context: &mut Context) -> Option<ControlFlow<CompletionR
     Some(runtime::execute(context, &code, block))
 }
 
+/// The bytecode size up to which a function that native code calls stays interpreted (a callback
+/// that returns a constant is 24 bytes, `x => x` 37, `v => v + 1` 55): see "Where a call goes".
+const TINY_CALLBACK_BYTES: usize = 40;
+
 /// Counts the frame on top hotter and compiles it when it is hot enough. Returns its compiled
 /// code and the block that starts at its `pc`, if it has both.
 pub(crate) fn prepare(context: &mut Context) -> Option<(Rc<JitCode>, u32)> {
@@ -373,6 +377,11 @@ pub(crate) fn prepare(context: &mut Context) -> Option<(Rc<JitCode>, u32)> {
     let code_block: *const CodeBlock = &raw const **frame.code_block();
     // SAFETY: the frame on top keeps its code block alive, and nothing here pops it.
     let code_block = unsafe { &*code_block };
+    // A callback that native code calls is entered and left once per call, and compiled code pays
+    // more for that than interpreting a callee of a few instructions costs.
+    if pc == 0 && frame.exit_early() && code_block.bytecode.bytes.len() <= TINY_CALLBACK_BYTES {
+        return None;
+    }
     let slot = &code_block.jit;
     let code = match slot.tier.get() {
         Tier::Rejected => return None,

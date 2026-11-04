@@ -119,3 +119,24 @@ fn constructors_match_the_interpreter() {
          out.map(show).join(' ')",
     );
 }
+
+/// Callbacks that native code calls and that are a few instructions long stay interpreted
+/// (`TINY_CALLBACK_BYTES`); the answers must be the compiled ones all the same, for callees that
+/// return, throw, loop, recurse or change their `this`.
+#[test]
+fn tiny_callbacks_match_the_interpreter() {
+    same(
+        "const zero = function () {}, k = () => 0, id = (x) => x, cmp = (a, b) => a - b;
+         function thrower(v) { if (v % 7 === 3) throw new RangeError('r' + v); return v; }
+         function spin() { let s = 0; for (let i = 0; i < 300; i++) s += i; return s; }
+         function self(n) { return n ? [n].map(self)[0] + 1 : 0; }
+         const out = [], arr = Array.from({ length: 50 }, (_, i) => (i * 7) % 50);
+         for (let r = 0; r < 30; r++) {
+           arr.forEach(zero); out.push(arr.map(k).length, arr.filter(zero).length, arr.reduce(id, 0));
+           out.push(arr.slice().sort(cmp).join(), arr.map(id).join(), [3, 1, 2].map(function () { return this.x; }, { x: r }).join());
+           for (const f of [thrower]) { try { arr.map(f); } catch (e) { out.push(e.name + e.message); } }
+           out.push(arr.map(spin).length, self(20), String([1, 2, 3].map(Math.abs)));
+         }
+         out.map(show).join(' ')",
+    );
+}
