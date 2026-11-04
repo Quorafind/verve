@@ -630,3 +630,21 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   a rope can see, and there is no new `unsafe`. `s += 'ab' + i`, 320k appends, peak working set
   (median of 5 processes): 66.5 to 16.3 MB, of which about 16 MB is the process itself; the loop
   takes the same time or less (load 15-25 %).
+
+- `boa_engine`, `vm/inline_cache`, `vm/opcode/{get,set}`, `vm/jit/helpers.rs`, `object/shape`: the
+  inline cache of a property found on the receiver's prototype records the prototype's shape as
+  well as the receiver's and a hit needs the prototype to still have it. Before, an entry was keyed
+  by the receiver's shape alone, so after `delete proto.x` (or `x` redefined as an accessor, or an
+  earlier property deleted) a hit read the slot out of the changed prototype: the getter function
+  instead of its result, another property's value, or `index out of bounds` past the end of the
+  storage (a panic). An entry whose prototype changed is dropped and recorded again. A slot in a
+  prototype is not recorded for a receiver with a unique shape (a unique shape gains own properties
+  in place, which can shadow the prototype's), and an entry is recorded only if the shape that holds
+  the slot answers the same slot for the name when it is made (a getter can change objects between
+  the lookup and the entry). A cached setter that is not a function (`set: undefined`) is a miss, so
+  a strict write throws as `[[Set]]` does. Cache reads use `get` on the storage: a slot out of
+  range is a miss, never a panic. `UniqueShape::change_attributes_transition` makes a new unique
+  shape for every change, also when the property keeps its kind (it kept the shape, with a
+  `TODO: invalidate the pointer`, so a cached slot kept the old bits: a property made read-only was
+  still written). Compiled code takes the same entries, and
+  reads a prototype's slot only through the helper.

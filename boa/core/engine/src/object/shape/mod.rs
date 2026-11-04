@@ -14,7 +14,7 @@ use std::fmt::Debug;
 
 use boa_gc::{Finalize, Trace};
 
-use crate::property::PropertyKey;
+use crate::{JsObject, property::PropertyKey};
 
 use self::{
     shared_shape::{TransitionKey, WeakSharedShape},
@@ -184,6 +184,15 @@ impl Shape {
                 shape.into()
             }
             Inner::Unique(shape) => shape.change_prototype_transition(prototype).into(),
+        }
+    }
+
+    /// The prototype of a shared shape, without cloning it (`None` for a unique shape, whose
+    /// prototype can be changed in place and has to be read through its cell).
+    pub(crate) fn shared_prototype(&self) -> Option<&JsObject> {
+        match &self.inner {
+            Inner::Shared(shape) => shape.prototype_ref(),
+            Inner::Unique(_) => None,
         }
     }
 

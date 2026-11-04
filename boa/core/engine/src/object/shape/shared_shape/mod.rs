@@ -140,6 +140,11 @@ impl SharedShape {
     pub fn prototype(&self) -> JsPrototype {
         self.inner.prototype.clone()
     }
+    /// The prototype of the shape, without cloning it.
+    pub(crate) fn prototype_ref(&self) -> Option<&JsObject> {
+        self.inner.prototype.as_ref()
+    }
+
     /// Get the property this [`SharedShape`] refers to.
     pub(crate) fn property(&self) -> (PropertyKey, Slot) {
         let inner = self.property_table().inner().borrow();

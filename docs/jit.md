@@ -129,7 +129,7 @@ calls JavaScript or reads `frame.pc`. A panic in one is caught, kept, and turned
 | `PushFromRegister` (up to three in a row, one call) | push a clone; the registers' address is reloaded, the stack may have moved |
 | `PopIntoRegister`, `SetAccumulator`, `GetArgument`, `CheckReturn` | as the handler, when there is a value to pop / the frame is not a constructor's |
 | `GetName`, `GetNameGlobal` | when `find_runtime_binding` would leave the binding where the bytecode compiler put it (declarative current environment, no `with`, not poisoned by `eval`, not deleted): read it as `get_binding` does; a binding on the global object through the instruction's inline cache |
-| `GetPropertyByName`, `SetPropertyByName` | a hit of the instruction's inline cache on a data property (own or, for a read, on the prototype); fills the access's site cache |
+| `GetPropertyByName`, `SetPropertyByName` | a hit of the instruction's inline cache on a data property (own or, for a read, on the prototype, which must still have the shape the entry recorded); fills the access's site cache |
 | `GetLengthProperty` | an array's `length`, a string's, a typed array's (through the access's guard cache, below), or as `GetPropertyByName` |
 | `GetPropertyByValue`, `SetPropertyByValue` | a dense array by an `int32` index, as `get_dense_property` and `set_dense_property` |
 
@@ -148,6 +148,46 @@ the site's, no collection has run since the site was filled, and the slot is in 
 they read or write the slot, counting references inline when the old or new value is an object
 (any other pointer — a string, a symbol, a bigint — takes the helper). On a miss the helper runs,
 and fills the site.
+
+**The interpreter's cache and a property of the prototype.** An entry is the receiver's shape and
+a slot. For a property found on the receiver's prototype it also records the *prototype's* shape,
+and a hit needs the prototype to have that shape now (`CacheEntry::holder`); a prototype that
+changed shape drops the entry, which the next access records again. Before, the entry was keyed
+by the receiver's shape alone, and a hit read the slot out of a prototype that had since lost,
+gained or re-kinded properties: the getter function instead of its result, another property's
+value after a `delete`, or a panic past the end of the storage. Why the two shapes are enough:
+
+- **A shared shape is immutable**: every change (add, delete, attributes, prototype) goes to
+  another shape, so the same shape has the same table, slots and kinds. The receiver's shape also
+  holds its prototype object. So the receiver's and the prototype's shapes pin the slot, its kind
+  (data, or accessor with its `get`/`set` bits), that the prototype is that object, and that the
+  receiver has no own property of the name (its table is its shape's).
+- **A unique shape** (the builtin prototypes, the global object, an object past 1024 transitions)
+  keeps its identity when it gains a property and changes it for everything else: a delete, a
+  change of kind, a change of prototype and, since this fix, a change of attributes that keeps the
+  kind (`unique_shape.rs` changed those in place, with a `TODO: invalidate the pointer`: a
+  getter-only accessor gaining a setter, or a data property turning read-only, kept a stale
+  slot's bits). Gaining a property leaves the slots already there alone, so for a *prototype*
+  with a unique shape the same shape still means the same slot. For a *receiver* it does not: the
+  property gained can shadow the prototype's, with the shape unchanged. So a slot in a prototype
+  is **not recorded for a unique receiver** (the slow path reads it); an own slot of a unique
+  receiver is recorded as before.
+- **Only the direct prototype is cached.** A property found further up has the `PROTOTYPE` bit
+  set twice, which makes the slot not cacheable, so nothing is cached whose answer a nearer
+  prototype's new property could change; adding one just misses.
+- **The entry is checked when it is made**: the slot comes from a lookup that may have run a
+  getter, which can change objects before `InlineCache::set`. The entry is recorded only if the
+  shape that holds the slot answers the same slot (index and attributes) for the name now.
+- **A cached setter** is called only if the storage holds a function there. A setter set to
+  `undefined` keeps the accessor's bits, and `[[Set]]` then fails (a strict function throws), so
+  that is a miss.
+- **The last guard**: storage is read with `get`, so a slot out of range is a miss and never a
+  panic. The checks above make it unreachable; the guard does not replace them.
+
+Compiled code follows the same entries (`InlineCache::slot_for`). It reads a prototype's slot only
+through the helper and fills its site cache only for an own slot of a shared shape, so the
+machine code needed no change. `tests_prototype_cache.rs` runs 45 scenarios in the three modes
+against Node's output.
 
 **Why the count of collections**: a shape is freed only by a collection, and its address may then
 be taken by a new shape. `boa_gc` counts collections (`boa_gc::raw::collections`), before anything
@@ -1216,11 +1256,11 @@ before them did.
    plain functions (no environment, no `arguments`) from compiled code, and keeping `this`/the
    function out of the value stack.
 2. **Method calls**: `o.m()` reads `m` from the prototype through the helper and the
-   interpreter's cache; inline prototype reads need a check of the prototype's shape too (the
-   object's shape does not change when its prototype's properties do).
+   interpreter's cache; inline prototype reads need the check of the prototype's shape that the
+   interpreter's entries now have (the object's shape does not change when its prototype's
+   properties do), and the unique-receiver rule.
 3. **Dictionary-mode objects and the global object** (unique shapes) inline: a unique shape keeps
-   its identity when a property is added or its attributes change, so a cache needs a version
-   (`unique_shape.rs` has a `TODO: invalidate the pointer`).
+   its identity when a property is added, so a cache needs a version or the storage length.
 4. **Strings and native calls**: `+` of strings, `length` and indexing of strings, and the cost of
    calling a native function (`native_function_call`: shadow stack, realm swap).
 5. **Constant blinding** of every program-chosen `Store*` immediate (`StoreDouble`, `StoreFloat`,
@@ -1265,10 +1305,17 @@ entirely. Background compilation on another thread fits here too, since `CodeBlo
   `length` cache (`typed_length.rs`) relies on a unique shape changing in place only by gaining a
   property.
 - **The interpreter's caches decide.** Fast helpers hit only where the interpreter's inline cache
-  hits, and site caches are filled only from such hits; if the interpreter's cache is wrong (for
-  example a prototype property removed under a cached `PROTOTYPE` slot), compiled code is wrong
-  the same way. That is by design — the differential tests compare the two — but it means a fix
-  to the caches must be made in the interpreter.
+  hits, and site caches are filled only from such hits; if the interpreter's cache is wrong,
+  compiled code is wrong the same way. That is by design — the differential tests compare the
+  two — but it means a fix to the caches must be made in the interpreter. The entry for a
+  property of the prototype was wrong that way (keyed by the receiver's shape alone, so a
+  prototype property deleted or made an accessor was read from its old slot, and the storage
+  could be read out of range: a panic). It now records and compares the prototype's shape, a
+  unique receiver gets no such entry, and a unique shape changes identity for any change of
+  attributes (see "Property caches and elements"). What is still relied on: a unique shape
+  changes in place **only** by gaining a property, and a slot is checked against its holder's
+  shape by name when the entry is made. A new in-place change of a shape, or a farther holder,
+  needs the entry's checks extended with it.
 - **Builtin shortcuts** (`push`, `fill`) are exact only while their preconditions mirror the
   specification's steps; a change to how arrays store `length` or elements must keep them in
   step. Their tests compare against Node's output, not only the interpreter.
