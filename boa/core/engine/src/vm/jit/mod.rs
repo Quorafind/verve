@@ -40,6 +40,8 @@ mod tests;
 #[cfg(test)]
 mod tests_calls;
 #[cfg(test)]
+mod tests_constructor_shape;
+#[cfg(test)]
 mod tests_elements;
 #[cfg(test)]
 mod tests_iterators;
