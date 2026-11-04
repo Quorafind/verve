@@ -6,6 +6,9 @@ use std::ptr::NonNull;
 mod sequence;
 pub(crate) use sequence::SequenceString;
 
+pub(crate) mod rope;
+pub(crate) use rope::RopeString;
+
 pub(crate) mod slice;
 pub(crate) use slice::SliceString;
 

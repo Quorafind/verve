@@ -633,3 +633,207 @@ fn ptr_eq_tells_one_allocation_from_an_equal_string() {
     assert!(x.ptr_eq(&clone));
     assert!(!x.ptr_eq(&equal));
 }
+
+mod rope {
+    use crate::vtable::RopeString;
+    use crate::{JsString, JsStringKind, ROPE_MIN_LEN};
+
+    fn latin1(n: usize, c: char) -> JsString {
+        JsString::from(c.to_string().repeat(n))
+    }
+
+    fn utf16(n: usize, unit: u16) -> JsString {
+        JsString::from(vec![unit; n].as_slice())
+    }
+
+    fn data_ptr(s: &JsString) -> *const u8 {
+        match s.variant() {
+            crate::JsStrVariant::Latin1(b) => b.as_ptr(),
+            crate::JsStrVariant::Utf16(u) => u.as_ptr().cast(),
+        }
+    }
+
+    fn is_flat(s: &JsString) -> bool {
+        RopeString::flat_of(s).is_some()
+    }
+
+    #[test]
+    fn node_size() {
+        // Reported in docs/electron/size.md; a bigger node costs every append that much more.
+        assert_eq!(size_of::<RopeString>(), 88);
+    }
+
+    #[test]
+    fn short_results_are_copied() {
+        let s = JsString::concat_lazy(&latin1(10, 'a'), &latin1(10, 'b'));
+        assert_eq!(s.kind(), JsStringKind::Latin1Sequence);
+        let s = JsString::concat_lazy(&latin1(ROPE_MIN_LEN - 2, 'a'), &latin1(1, 'b'));
+        assert_eq!(s.kind(), JsStringKind::Latin1Sequence);
+        let s = JsString::concat_lazy(&latin1(ROPE_MIN_LEN, 'a'), &latin1(1, 'b'));
+        assert_eq!(s.kind(), JsStringKind::Rope);
+    }
+
+    #[test]
+    fn empty_sides_return_the_other() {
+        let a = latin1(300, 'a');
+        let e = JsString::default();
+        assert!(JsString::concat_lazy(&a, &e).ptr_eq(&a));
+        assert!(JsString::concat_lazy(&e, &a).ptr_eq(&a));
+        assert!(JsString::concat_lazy(&e, &e).is_empty());
+    }
+
+    #[test]
+    fn latin1_content_and_width() {
+        let (a, b) = (latin1(200, 'a'), latin1(100, '\u{e9}'));
+        let s = JsString::concat_lazy(&a, &b);
+        assert_eq!(s.len(), 300);
+        assert!(!is_flat(&s));
+        assert!(s.as_str().is_latin1());
+        assert_eq!(
+            s.to_std_string().unwrap(),
+            format!("{}{}", "a".repeat(200), "\u{e9}".repeat(100))
+        );
+        assert!(is_flat(&s));
+    }
+
+    #[test]
+    fn mixed_width_content() {
+        let a = latin1(200, '\u{ff}');
+        let b = utf16(100, 0x20ac);
+        let s = JsString::concat_lazy(&a, &b);
+        assert!(!s.as_str().is_latin1());
+        let t = JsString::concat_lazy(&b, &a);
+        let mut want = vec![0xffu16; 200];
+        want.extend(vec![0x20ac; 100]);
+        assert_eq!(s.to_vec(), want);
+        want.rotate_left(200);
+        assert_eq!(t.to_vec(), want);
+    }
+
+    #[test]
+    fn lone_surrogates_at_the_boundary() {
+        let hi = JsString::from(&[&[0x61u16; 300][..], &[0xD83D]].concat()[..]);
+        let lo = JsString::from(&[0xDE00u16][..]);
+        let s = JsString::concat_lazy(&hi, &lo);
+        // The halves join into a valid pair only once flattened.
+        assert_eq!(s.code_points().count(), 301);
+        assert_eq!(s.code_point_at(300).as_char(), Some('\u{1F600}'));
+    }
+
+    #[test]
+    fn len_does_not_flatten() {
+        let s = JsString::concat_lazy(&latin1(300, 'a'), &latin1(5, 'b'));
+        let t = JsString::concat_lazy(&s, &latin1(5, 'c'));
+        assert_eq!(t.len(), 310);
+        assert!(!t.is_empty());
+        let _clone = t.clone();
+        assert!(!is_flat(&t));
+        assert!(!is_flat(&s));
+    }
+
+    #[test]
+    fn flattens_once() {
+        let s = JsString::concat_lazy(&latin1(300, 'a'), &latin1(5, 'b'));
+        let first = data_ptr(&s);
+        assert!(is_flat(&s));
+        assert_eq!(data_ptr(&s), first);
+        assert_eq!(data_ptr(&s.clone()), first);
+    }
+
+    #[test]
+    fn ptr_eq_and_refcount() {
+        let s = JsString::concat_lazy(&latin1(300, 'a'), &latin1(5, 'b'));
+        assert_eq!(s.refcount(), Some(1));
+        let c = s.clone();
+        assert!(c.ptr_eq(&s));
+        assert_eq!(s.refcount(), Some(2));
+        drop(c);
+        assert_eq!(s.refcount(), Some(1));
+    }
+
+    #[test]
+    fn halves_stay_shared() {
+        let a = latin1(300, 'a');
+        let s = JsString::concat_lazy(&a, &latin1(5, 'b'));
+        assert_eq!(a.refcount(), Some(2));
+        let _ = s.as_str();
+        // Flattening releases the halves.
+        assert_eq!(a.refcount(), Some(1));
+    }
+
+    #[test]
+    fn slice_and_clone_after_flatten() {
+        let s = JsString::concat_lazy(&latin1(300, 'a'), &latin1(300, 'b'));
+        let sub = s.slice(295, 305);
+        assert_eq!(sub.to_std_string().unwrap(), "aaaaabbbbb");
+        assert_eq!(sub.kind(), JsStringKind::Slice);
+        drop(s);
+        assert_eq!(sub.to_std_string().unwrap(), "aaaaabbbbb");
+    }
+
+    #[test]
+    fn rope_of_ropes_and_dag() {
+        let s = JsString::concat_lazy(&latin1(300, 'a'), &latin1(1, 'b'));
+        let t = JsString::concat_lazy(&s, &s);
+        let u = JsString::concat_lazy(&t, &utf16(1, 0x100));
+        assert_eq!(u.len(), 603);
+        let mut want = "a".repeat(300);
+        want.push('b');
+        let mut units: Vec<u16> = want.encode_utf16().collect();
+        units.extend(units.clone());
+        units.push(0x100);
+        assert_eq!(u.to_vec(), units);
+    }
+
+    #[test]
+    fn deep_left_chain() {
+        let mut s = latin1(ROPE_MIN_LEN, 'x');
+        let piece = latin1(1, 'y');
+        for _ in 0..1_000_000 {
+            s = JsString::concat_lazy(&s, &piece);
+        }
+        assert_eq!(s.len(), ROPE_MIN_LEN + 1_000_000);
+        let flat = s.as_str();
+        assert_eq!(flat.get(ROPE_MIN_LEN + 999_999), Some(u16::from(b'y')));
+        assert_eq!(flat.get(0), Some(u16::from(b'x')));
+    }
+
+    #[test]
+    fn deep_chains_drop_without_flattening() {
+        let mut left = latin1(ROPE_MIN_LEN, 'x');
+        let mut right = latin1(ROPE_MIN_LEN, 'z');
+        let piece = latin1(1, 'y');
+        for _ in 0..1_000_000 {
+            left = JsString::concat_lazy(&left, &piece);
+            right = JsString::concat_lazy(&piece, &right);
+        }
+        let both = JsString::concat_lazy(&left, &right);
+        assert_eq!(both.len(), 2 * ROPE_MIN_LEN + 2_000_000);
+        drop(both);
+        drop(left);
+        drop(right);
+    }
+
+    #[test]
+    fn deep_right_chain_flattens() {
+        let mut s = latin1(ROPE_MIN_LEN, 'x');
+        for i in 0..100_000u32 {
+            let piece = JsString::from(char::from(b'a' + (i % 26) as u8).to_string());
+            s = JsString::concat_lazy(&piece, &s);
+        }
+        let v = s.to_vec();
+        assert_eq!(v.len(), ROPE_MIN_LEN + 100_000);
+        assert_eq!(v[0], u16::from(b'a' + (99_999 % 26) as u8));
+        assert_eq!(v[100_000], u16::from(b'x'));
+    }
+
+    #[test]
+    fn equality_hash_and_order() {
+        let a = latin1(300, 'a');
+        let s = JsString::concat_lazy(&latin1(150, 'a'), &latin1(150, 'a'));
+        assert_eq!(s, a);
+        assert_eq!(super::hash_value(&s), super::hash_value(&a));
+        let t = JsString::concat_lazy(&a, &latin1(1, 'b'));
+        assert!(s < t);
+    }
+}
