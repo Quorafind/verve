@@ -361,6 +361,56 @@ pub(crate) unsafe extern "C" fn jit_set_property(
     })
 }
 
+/// `IteratorNext` of a built-in iterator that can be stepped without running JavaScript.
+pub(crate) unsafe extern "C" fn jit_iterator_next(
+    state: *mut JitState,
+    _: u32,
+    _: u32,
+    _: u32,
+) -> u32 {
+    guarded(state, |context, _, _| {
+        // The record is taken out while it is stepped, as the interpreter's handler does.
+        let mut record = context.vm.frame_mut().iterators.pop()?;
+        let stepped = record.step_quietly(context);
+        context.vm.frame_mut().iterators.push(record);
+        stepped.ok()
+    })
+}
+
+/// `IteratorDone`: the `done` of the current iterator record.
+pub(crate) unsafe extern "C" fn jit_iterator_done(
+    state: *mut JitState,
+    dst: u32,
+    _: u32,
+    _: u32,
+) -> u32 {
+    guarded(state, |context, _, rp| {
+        let done = context.vm.frame().iterators.last()?.done();
+        set_register(context, rp, dst, done.into());
+        Some(())
+    })
+}
+
+/// `IteratorValue` of a record whose last step was made without a result object.
+pub(crate) unsafe extern "C" fn jit_iterator_value(
+    state: *mut JitState,
+    dst: u32,
+    _: u32,
+    _: u32,
+) -> u32 {
+    guarded(state, |context, _, rp| {
+        let value = context
+            .vm
+            .frame()
+            .iterators
+            .last()?
+            .unboxed_value()?
+            .clone();
+        set_register(context, rp, dst, value);
+        Some(())
+    })
+}
+
 /// An `int32` key that is an array index.
 fn index_key(key: &JsValue) -> Option<u32> {
     u32::try_from(key.as_integer32()?).ok()

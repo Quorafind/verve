@@ -496,3 +496,11 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   `for (const x of array)` per element, 1M elements, median of 5 processes: 369 to 75 ns
   interpreted, 352 to 61 compiled; a `Set`: 598 to 47 and 534 to 29; a string: 456 to 100 and 519
   to 84 (load 25–50%).
+
+- `boa_engine`, `vm/jit`: compiled code runs `IteratorNext`, `IteratorDone` and `IteratorValue` with
+  fast helpers instead of `jit_step`. `IteratorNext` is done by the helper only when stepping
+  cannot run JavaScript or fail: a map, set or string iterator, or an array iterator over a plain
+  array with an integer `length` and a dense element (an iterator whose `next` is the built-in one
+  is the only kind of record that has a stepper); a hole, a proxy, a typed array, a key or entries
+  iterator and every other record take the interpreter's handler. `for (const x of array)` per
+  element, compiled: 61 to 22 ns (1M elements, median of 5 processes, one round at 50–100% load).

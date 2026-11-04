@@ -286,7 +286,33 @@ impl Stepper {
             Self::String => StringIterator::advance(iterator, context),
         }
     }
+
+    /// [`advance`](Self::advance) when it is known to run no JavaScript and not to fail;
+    /// [`Declined`], with nothing changed, when that cannot be known.
+    #[cfg(feature = "jit")]
+    fn advance_quietly(
+        self,
+        iterator: &JsObject,
+        context: &mut Context,
+    ) -> Result<Option<JsValue>, Declined> {
+        let right_type = match self {
+            Self::Array => return ArrayIterator::advance_dense(iterator),
+            Self::Map => iterator.is::<MapIterator>(),
+            Self::Set => iterator.is::<SetIterator>(),
+            Self::String => iterator.is::<StringIterator>(),
+        };
+        // These read nothing but their own state and make arrays and substrings.
+        if right_type {
+            self.advance(iterator, context).map_err(|_| Declined)
+        } else {
+            Err(Declined)
+        }
+    }
 }
+
+/// A step that was not made because it might run JavaScript or fail.
+#[cfg(feature = "jit")]
+pub(crate) struct Declined;
 
 /// Iterator hint for `GetIterator`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,6 +646,19 @@ impl IteratorRecord {
             LastResult::Value(value) => Some(value),
             LastResult::Object(_) => None,
         }
+    }
+
+    /// Steps a record that has a [`Stepper`] when that runs no JavaScript and cannot fail, as
+    /// fast helpers of compiled code need; [`Declined`], with nothing changed, for any other.
+    #[cfg(feature = "jit")]
+    pub(crate) fn step_quietly(&mut self, context: &mut Context) -> Result<(), Declined> {
+        let step = self
+            .stepper
+            .ok_or(Declined)?
+            .advance_quietly(&self.iterator, context)?;
+        self.finish_unboxed_step(Ok(step))
+            .map(|_| ())
+            .map_err(|_| Declined)
     }
 
     /// Records the outcome of `advance` (the next value, `None` at the end, or an error) as the

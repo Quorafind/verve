@@ -267,7 +267,10 @@ fn kind(instruction: &Instruction) -> Kind {
         | Instruction::GetLengthProperty { .. }
         | Instruction::SetPropertyByName { .. }
         | Instruction::GetPropertyByValue { .. }
-        | Instruction::SetPropertyByValue { .. } => Kind::Inline,
+        | Instruction::SetPropertyByValue { .. }
+        | Instruction::IteratorNext
+        | Instruction::IteratorDone { .. }
+        | Instruction::IteratorValue { .. } => Kind::Inline,
         Instruction::Jump { address } => Kind::Jump(address.as_u32()),
         Instruction::JumpIfTrue { address, .. }
         | Instruction::JumpIfFalse { address, .. }
@@ -312,7 +315,9 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
         | Instruction::PopIntoRegister { dst }
         | Instruction::GetArgument { dst, .. }
         | Instruction::GetName { dst, .. }
-        | Instruction::GetNameGlobal { dst, .. } => vec![dst.into()],
+        | Instruction::GetNameGlobal { dst, .. }
+        | Instruction::IteratorDone { dst }
+        | Instruction::IteratorValue { dst } => vec![dst.into()],
         Instruction::PushFromRegister { src } | Instruction::SetAccumulator { src } => {
             vec![src.into()]
         }
@@ -1129,6 +1134,17 @@ impl Translator<'_> {
             Instruction::GetArgument { index, dst } => {
                 let f = helpers::jit_get_argument;
                 self.fast(f, [index.into(), dst.into(), 0], Fast::Always, pc, next);
+            }
+            Instruction::IteratorNext => {
+                self.fast(helpers::jit_iterator_next, [0; 3], Fast::MaySlow, pc, next);
+            }
+            Instruction::IteratorDone { dst } => {
+                let f = helpers::jit_iterator_done;
+                self.fast(f, [dst.into(), 0, 0], Fast::MaySlow, pc, next);
+            }
+            Instruction::IteratorValue { dst } => {
+                let f = helpers::jit_iterator_value;
+                self.fast(f, [dst.into(), 0, 0], Fast::MaySlow, pc, next);
             }
             Instruction::GetName { dst, binding_index } => {
                 let operands = [dst.into(), binding_index.into(), 0];
