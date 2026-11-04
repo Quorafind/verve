@@ -465,6 +465,13 @@ always agree with one another.
   (all three string branches), so `s += x` in a loop builds a rope and is linear. Templates and
   `concat_array` callers still copy.
 
+- `boa_engine`, `bytecompiler/class.rs`, `boa_ast` `scope_analyzer.rs`: a base class constructor gets
+  a function environment only when a function would (a direct `eval`, an escaping `this`, `super`
+  or `new.target` in the body, a captured binding), as `bytecompiler/function.rs` decides for any
+  function; the analyzer no longer forces one for base constructors and an empty default base
+  constructor gets none. A derived constructor keeps it: its `this` binding lives there. The
+  environment is two collected objects and was 188 ns of every `new` of a class.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
