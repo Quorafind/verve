@@ -131,3 +131,43 @@ fn non_string_operands() {
     check("rope() + {toString() { return 'o'; }} === flat + 'o'");
     check("typeof (rope() + [1, 2]) === 'string' && (rope() + [1, 2]).endsWith('h1,2')");
 }
+
+#[test]
+fn ropes_that_share_a_prefix_stay_apart() {
+    check(indoc! {r#"
+        const s = rope() + 'x' + 'y';
+        const a = s + '1', b = s + '2', c = a + '3', d = a + '4', e = b + '5';
+        e === flat + 'xy25' && d === flat + 'xy14' && s === flat + 'xy' && c === flat + 'xy13'
+            && b === flat + 'xy2' && a === flat + 'xy1'
+    "#});
+    check(indoc! {r#"
+        const s = rope() + 'x' + 'y';
+        const parts = [];
+        let t = s;
+        for (let i = 0; i < 300; i++) { t += i % 10; if (i % 100 === 0) parts.push(t); }
+        const u = s + 'q';
+        parts[2] === t.slice(0, 802 + 201) && u === flat + 'xyq' && s === flat + 'xy'
+            && t.length === 802 + 300
+    "#});
+}
+
+#[test]
+fn numbers_join_strings_as_their_decimal_text() {
+    check(indoc! {r#"
+        const n = [0, 7, -1, 2147483647, -2147483648, 1.5, -0, NaN, 1e21];
+        n.map((x) => 'ab' + x).join() === 'ab0,ab7,ab-1,ab2147483647,ab-2147483648,ab1.5,ab0,abNaN,ab1e+21'
+            && n.map((x) => x + 'ab').join() === '0ab,7ab,-1ab,2147483647ab,-2147483648ab,1.5ab,0ab,NaNab,1e+21ab'
+    "#});
+    check(
+        "rope() + 12 === flat + '12' && 12 + rope() === '12' + flat && ('' + 5) === '5' && (5 + '') === '5'",
+    );
+    check(
+        "let s = 'x'.repeat(254); s + 12 === 'x'.repeat(254) + '12' && 12 + s === '12' + 'x'.repeat(254)",
+    );
+    check(
+        "let s = 'x'.repeat(250); (s + 12).length === 252 && (s + 123456).length === 256 && (123456 + s).length === 256",
+    );
+    check(
+        "'\\u20ac' + 42 === '\\u20ac42' && 42 + '\\u20ac' === '42\\u20ac' && ('\\u20ac'.repeat(300) + 42).endsWith('\\u20ac42')",
+    );
+}

@@ -671,7 +671,47 @@ impl JsString {
         if len < ROPE_MIN_LEN {
             return Self::concat(x.as_str(), y.as_str());
         }
-        RopeString::new(x.clone(), y.clone(), len)
+        RopeString::append_short(x, y, len)
+            .unwrap_or_else(|| RopeString::new(x.clone(), y.clone(), len))
+    }
+
+    /// Creates the concatenation of `x` and the decimal digits of `n`, as `x + n` is in
+    /// JavaScript, without building a string for `n` when the result is short.
+    #[inline]
+    #[must_use]
+    pub fn concat_i32(x: &JsString, n: i32) -> Self {
+        Self::concat_digits(x, n, false)
+    }
+
+    /// Creates the concatenation of the decimal digits of `n` and `x`, as `n + x` is in
+    /// JavaScript; see [`JsString::concat_i32`].
+    #[inline]
+    #[must_use]
+    pub fn concat_i32_before(n: i32, x: &JsString) -> Self {
+        Self::concat_digits(x, n, true)
+    }
+
+    fn concat_digits(x: &JsString, n: i32, digits_first: bool) -> Self {
+        let mut buffer = itoa::Buffer::new();
+        let digits = buffer.format(n).as_bytes();
+        let Some(len) = x.len().checked_add(digits.len()) else {
+            alloc_overflow()
+        };
+        // A rope is never shorter than `ROPE_MIN_LEN`, so below it `x` is read without flattening.
+        if len < ROPE_MIN_LEN {
+            let digits = JsStr::latin1(digits);
+            return if digits_first {
+                Self::concat(digits, x.as_str())
+            } else {
+                Self::concat(x.as_str(), digits)
+            };
+        }
+        let digits = Self::from(n);
+        if digits_first {
+            Self::concat_lazy(&digits, x)
+        } else {
+            Self::concat_lazy(x, &digits)
+        }
     }
 
     /// Creates a new [`JsString`] from the concatenation of every element of

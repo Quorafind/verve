@@ -575,3 +575,36 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
 - `boa_engine`, `builtins/intl/collator/mod.rs`: the function `Intl.Collator.prototype.compare`
   returns takes the collator's borrow after converting its arguments, not before: a `toString`
   that read `compare` borrowed the collator mutably under the held shared borrow.
+
+- `boa_string`, `common.rs`, `boa_engine`, `builtins/string/string_iterator.rs`: a string iterator
+  steps without `String.prototype.substring`. `StaticJsStrings::latin1_char` gives the static
+  one-code-unit string of a Latin-1 character (a table of 256, no allocation), and the iterator
+  returns it for any code point of U+0000..U+00FF; every other code point is a slice of the
+  iterated string, as before, but taken directly instead of through the `substring` built-in
+  (which converted its arguments through `ToIntegerOrInfinity` and cloned the string into a value
+  for each step).
+
+- `boa_string`, `lib.rs`, `boa_engine`, `value/operations.rs`: `s + n` and `n + s` with an `int32`
+  `n` skip the generic path. `JsValue::add` used to convert both operands with `ToPrimitive`,
+  build a `JsString` for the number (one allocation) and copy it into the result (a second one,
+  plus a look-up in the static string table). `JsString::concat_i32` and `concat_i32_before` format
+  the digits into a stack buffer and write them straight into the result when it is shorter than
+  `ROPE_MIN_LEN`; longer results build the digits' string and go through `concat_lazy`. The result
+  is the string `ToString(n)` gives, so nothing observable changes. `x = 'ab' + i` per iteration,
+  compiled, median of 5 processes: 117 to 72 ns (load 15-30 %).
+
+- `boa_string`, `vtable/rope.rs`, `lib.rs`: a rope can end in a byte buffer, so a loop of `s += x`
+  with short Latin-1 pieces no longer leaves one 96-byte node (it was 88 before this; the third
+  state needs a tag) and one small string per append until the first read. `concat_lazy` calls
+  `RopeString::append_short` when `y` is at most 64 Latin-1 code units and `x` is an unflattened
+  rope that is all Latin-1: if `x`'s last half is itself short, both are copied into a new `Vec`;
+  if `x` already ends in such a buffer (`RopeState::Appended`, the buffer in an `Rc<RefCell<..>>`),
+  `y` is appended to it in place. The refcount of `x` is no use as a test for "nobody else can see
+  this" (the variable holding it and the operand being added are both references), so a rope
+  appends in place only when its length is the buffer's current end: every rope that shares the
+  buffer reads only the first `len - left.len()` bytes, so appending past them changes none of
+  them (`a = s + 'x'; b = s + 'y'`: `b` finds the buffer already extended past `s` and builds a
+  plain node). Wider pieces, wider `x`, and long pieces take the old node. Nothing is mutated that
+  a rope can see, and there is no new `unsafe`. `s += 'ab' + i`, 320k appends, peak working set
+  (median of 5 processes): 66.5 to 16.3 MB, of which about 16 MB is the process itself; the loop
+  takes the same time or less (load 15-25 %).

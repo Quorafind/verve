@@ -142,3 +142,11 @@ more than a `SequenceString` header.
 `electron/p72-jit-typed-length`: `cargo build --release --features jit --bin verve` (not stripped, not the `size-report` build) is
 27,105,792 bytes against 27,104,256 for `docs/electron-plan` `345f1645` built the same way, +1,536 bytes (+0.006 %): a module of
 about 130 lines in `vm/jit/` and a helper that takes the access's site.
+
+## P74: string follow-ups
+
+`electron/p74-string-followups`: `cargo build --release --features jit --bin verve` (not stripped by `size-report`) is 26,700,800 bytes
+against 26,672,128 for `docs/electron-plan` `c91b2938` built the same way, +28,672 bytes (+0.11 %): a table of 256 one-character
+`StaticString`s for string iteration (+22,528 with the iterator change; the table is 256 × 72 bytes), the `int32` concatenation
+(+3,584) and the rope buffer (+2,560). A rope node is 96 bytes now (`size_of::<RopeString>()`), 8 more than P71's, for the third
+state (`Appended`) it needs a tag for.

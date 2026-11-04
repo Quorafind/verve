@@ -3,14 +3,29 @@ use crate::iter::CodePointsIter;
 use crate::r#type::{Latin1, Utf16};
 use crate::vtable::{JsStringVTable, SequenceString};
 use crate::{JsStr, JsStrVariant, JsString, JsStringKind};
-use std::cell::{Cell, UnsafeCell};
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::process::abort;
 use std::ptr::{self, NonNull};
+use std::rc::Rc;
+
+/// The longest string [`RopeString::append_short`] copies into a buffer; longer ones are cheaper
+/// to keep as they are.
+const MAX_BUFFERED_LEN: usize = 64;
+
+/// The room a buffer starts with, in bytes.
+const BUFFER_START_CAPACITY: usize = 128;
 
 /// What a rope currently holds.
 enum RopeState {
     /// The two halves, not yet copied into one buffer.
     Unflattened { left: JsString, right: JsString },
+    /// `left` followed by the first `len - left.len()` bytes of a Latin-1 buffer. Ropes made by
+    /// appending to each other share the buffer, each reading only up to its own length, and the
+    /// one whose length is the buffer's current end may append to it in place.
+    Appended {
+        left: JsString,
+        buffer: Rc<RefCell<Vec<u8>>>,
+    },
     /// The concatenation, built by the first read of the content. Once written it is never
     /// changed, which is what lets [`rope_as_str`] hand out slices borrowed from it.
     Flat(JsString),
@@ -45,8 +60,26 @@ fn is_latin1(string: &JsString) -> bool {
     }
 }
 
-/// The halves of `string` if it is a rope that has not been flattened yet.
-fn unflattened(string: &JsString) -> Option<(&JsString, &JsString)> {
+/// One piece of the content of a rope that has not been flattened.
+enum Piece<'a> {
+    String(&'a JsString),
+    /// The first bytes of an appended-to buffer.
+    Bytes(&'a RefCell<Vec<u8>>, usize),
+}
+
+/// The two pieces of `state`, a rope of length `len`, if it has not been flattened.
+fn pieces(state: &RopeState, len: usize) -> Option<[Piece<'_>; 2]> {
+    match state {
+        RopeState::Unflattened { left, right } => Some([Piece::String(left), Piece::String(right)]),
+        RopeState::Appended { left, buffer } => {
+            Some([Piece::String(left), Piece::Bytes(buffer, len - left.len())])
+        }
+        RopeState::Flat(_) => None,
+    }
+}
+
+/// The pieces of `string` if it is a rope that has not been flattened yet.
+fn unflattened(string: &JsString) -> Option<[Piece<'_>; 2]> {
     if string.kind() != JsStringKind::Rope {
         return None;
     }
@@ -55,10 +88,7 @@ fn unflattened(string: &JsString) -> Option<(&JsString, &JsString)> {
     // SAFETY: The state is only written by `flatten` and `take_rope_children`. `flatten` does
     // not write while it holds references from here (it writes after it is done with them),
     // and `take_rope_children` runs on the last reference only. The program is single-threaded.
-    match unsafe { &*rope.state.get() } {
-        RopeState::Unflattened { left, right } => Some((left, right)),
-        RopeState::Flat(_) => None,
-    }
+    pieces(unsafe { &*rope.state.get() }, rope.vtable.len)
 }
 
 impl RopeString {
@@ -66,6 +96,11 @@ impl RopeString {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(left: JsString, right: JsString, len: usize) -> JsString {
         let latin1 = is_latin1(&left) && is_latin1(&right);
+        Self::with_state(RopeState::Unflattened { left, right }, len, latin1)
+    }
+
+    /// Creates a rope in `state`, whose total length is `len`.
+    fn with_state(state: RopeState, len: usize, latin1: bool) -> JsString {
         let node = Box::new(RopeString {
             vtable: JsStringVTable {
                 clone: rope_clone,
@@ -77,11 +112,56 @@ impl RopeString {
                 kind: JsStringKind::Rope,
             },
             refcount: Cell::new(1),
-            state: UnsafeCell::new(RopeState::Unflattened { left, right }),
+            state: UnsafeCell::new(state),
             latin1,
         });
         // SAFETY: `RopeString` starts with its vtable, as every string must.
         unsafe { JsString::from_ptr(NonNull::from(Box::leak(node)).cast()) }
+    }
+
+    /// Creates the rope for `x` + `y` (of length `len`) that keeps the short Latin-1 `y` in a
+    /// byte buffer instead of a node of its own, or returns `None` if the two do not fit that.
+    ///
+    /// `x` must be a rope whose last half is itself short, or one that ends in a buffer. An
+    /// append to a rope that ends in a buffer extends the buffer where it ends, which no rope
+    /// sees past its own length, so every rope made before keeps its content. If the buffer has
+    /// been extended by another rope in the meantime, `None` sends the caller to a plain node.
+    pub(crate) fn append_short(x: &JsString, y: &JsString, len: usize) -> Option<JsString> {
+        if y.len() > MAX_BUFFERED_LEN || x.kind() != JsStringKind::Rope {
+            return None;
+        }
+        // SAFETY: The kind was just checked.
+        let rope: &RopeString = unsafe { x.as_inner() };
+        if !rope.latin1 {
+            return None;
+        }
+        let y_str = y.as_str();
+        let appended = y_str.as_latin1()?;
+        // SAFETY: See `unflattened`. Nothing writes the state while this reads it.
+        let state = unsafe { &*rope.state.get() };
+        let (left, buffer) = match state {
+            RopeState::Appended { left, buffer } => {
+                let mut bytes = buffer.borrow_mut();
+                if bytes.len() != rope.vtable.len - left.len() {
+                    return None;
+                }
+                bytes.extend_from_slice(appended);
+                drop(bytes);
+                (left, Rc::clone(buffer))
+            }
+            RopeState::Unflattened { left, right } if right.len() <= MAX_BUFFERED_LEN => {
+                let mut bytes = Vec::with_capacity(BUFFER_START_CAPACITY);
+                bytes.extend_from_slice(right.as_str().as_latin1()?);
+                bytes.extend_from_slice(appended);
+                (left, Rc::new(RefCell::new(bytes)))
+            }
+            _ => return None,
+        };
+        let state = RopeState::Appended {
+            left: left.clone(),
+            buffer,
+        };
+        Some(Self::with_state(state, len, true))
     }
 
     /// The flat string of `string` if it is a rope that has been flattened.
@@ -94,7 +174,7 @@ impl RopeString {
         // SAFETY: See `unflattened`.
         match unsafe { &*rope.state.get() } {
             RopeState::Flat(flat) => Some(flat),
-            RopeState::Unflattened { .. } => None,
+            RopeState::Unflattened { .. } | RopeState::Appended { .. } => None,
         }
     }
 
@@ -102,16 +182,16 @@ impl RopeString {
     #[cold]
     #[inline(never)]
     fn flatten(&self) -> JsStr<'static> {
+        let len = self.vtable.len;
         // SAFETY: See `unflattened`.
-        let RopeState::Unflattened { left, right } = (unsafe { &*self.state.get() }) else {
+        let Some(halves) = pieces(unsafe { &*self.state.get() }, len) else {
             unreachable!("`flatten` is only called on an unflattened rope");
         };
-        let len = self.vtable.len;
         let flat = if self.latin1 {
             let seq = SequenceString::<Latin1>::allocate(len);
             // SAFETY: The allocation holds `len` bytes after its header.
             let mut dst = unsafe { (&raw mut (*seq.as_ptr()).data).cast::<u8>().add(len) };
-            for_each_leaf_rev(left, right, |leaf| {
+            for_each_leaf_rev(halves, |leaf| {
                 let JsStrVariant::Latin1(bytes) = leaf.variant() else {
                     unreachable!("both halves of a Latin-1 rope are Latin-1");
                 };
@@ -129,7 +209,7 @@ impl RopeString {
             let seq = SequenceString::<Utf16>::allocate(len);
             // SAFETY: The allocation holds `len` code units after its header.
             let mut dst = unsafe { (&raw mut (*seq.as_ptr()).data).cast::<u16>().add(len) };
-            for_each_leaf_rev(left, right, |leaf| {
+            for_each_leaf_rev(halves, |leaf| {
                 // SAFETY: As for Latin-1: the leaves add up to `len`, written from the end into
                 // a new buffer.
                 unsafe {
@@ -152,7 +232,7 @@ impl RopeString {
 
         // SAFETY: The slice lives as long as `flat`, which the state keeps until the node dies.
         let content = unsafe { flat.as_str().as_static() };
-        // SAFETY: `left` and `right` are not used past this point, and nothing else holds a
+        // SAFETY: `halves` is not used past this point, and nothing else holds a
         // reference into the state (see `unflattened`).
         let old = std::mem::replace(unsafe { &mut *self.state.get() }, RopeState::Flat(flat));
         // Dropping the halves can release a very long chain; `rope_drop` does that iteratively.
@@ -178,21 +258,23 @@ impl RopeString {
                 keep(left);
                 keep(right);
             }
+            RopeState::Appended { left, .. } => keep(left),
             RopeState::Flat(flat) => keep(flat),
         }
     }
 }
 
-/// Calls `f` with every non-rope (or already flattened) string under the two halves, from the
-/// last one to the first, using a heap stack so that a chain of any depth is safe.
-fn for_each_leaf_rev(left: &JsString, right: &JsString, mut f: impl FnMut(JsStr<'_>)) {
-    let mut stack = vec![left, right];
-    while let Some(string) = stack.pop() {
-        if let Some((l, r)) = unflattened(string) {
-            stack.push(l);
-            stack.push(r);
-        } else {
-            f(string.as_str());
+/// Calls `f` with every non-rope (or already flattened) string and every buffer under `halves`,
+/// from the last one to the first, using a heap stack so that a chain of any depth is safe.
+fn for_each_leaf_rev(halves: [Piece<'_>; 2], mut f: impl FnMut(JsStr<'_>)) {
+    let mut stack = Vec::from(halves);
+    while let Some(piece) = stack.pop() {
+        match piece {
+            Piece::Bytes(buffer, len) => f(JsStr::latin1(&buffer.borrow()[..len])),
+            Piece::String(string) => match unflattened(string) {
+                Some(halves) => stack.extend(halves),
+                None => f(string.as_str()),
+            },
         }
     }
 }

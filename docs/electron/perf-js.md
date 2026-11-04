@@ -472,3 +472,27 @@ user-written iterators unchanged. `vdom` meets its 55 ms target (53.0). `docs/ji
 `Float64Array`, five alternating pairs, load 13.4 to 17.8 % before and 28 to 62 % after, the rise after the last process): 55.7 (54.5) to
 17.0 (16.5) ns an iteration, 3.3 of it the loop, against a target of 15; element read 15.2 and write 17.6 ns, and a dense array's `length`
 5.5 ns, unchanged. Details and what is left in `docs/jit.md` "Results (typed-array `length`, P72)".
+
+### P74: string follow-ups (`'ab' + i`, rope buffers, string iteration)
+
+`electron/p74-string-followups` against `docs/electron-plan` `c91b2938`, both `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`, `VERVE_CODE_CACHE=0`, a throwaway profile folder, machine shared with three other workers (load given per
+round; only same-round, adjacent numbers are compared). Probes are `scratchpad` scripts that time one loop in one process; median of
+5 processes, JIT unless said.
+
+| probe | before | after | load |
+|---|---|---|---|
+| `x = 'ab' + i`, ns per iteration | 117.0 | 72.0 | 17–37 % |
+| `s += 'ab' + i` (`concat` probe), 20,000 appends, ns per append | 273.4 | 146.9 | 14–24 % |
+| `s += 'ab123'`, 20,000 appends, ns per append | 112.8 | 79.1 | 14–24 % |
+| `s += 'ab'`, 320,000 appends, ns per append | 128.1 | 86.6 | 14–24 % |
+| 320,000 × `s += 'ab' + i`, peak working set, MB | 66.5 | 16.3 | 16–22 % |
+| `for (const c of text)`, Latin-1, ns per element | 74.0 | 21.3 | 17–37 % |
+| the same, with non-Latin-1 characters | 71.9 | 27.6 | 17–37 % |
+| the same, interpreted (`VERVE_JIT=0`) | 109.0 | 38.1 | 46–57 % |
+
+Suite `concat` (`run.sh --runs 5`, median (best) ms, Node 0.6 in the same round): JIT 5.6 (5.4) → 2.9 (2.8), 9.3× → 4.8× of Node;
+interpreter 5.6 (5.5) → 3.1 (3.0), 9.3× → 5.2×. `splitjoin`, `regex`, `json`, `tokenize` and `template` read within noise (load 13–17 %
+before, 55–68 % after, so the table in `packages/P74-string-followups.md` is the same pair, adjacent); the 44 `scaling.js` probes
+too, `concat` 20k/80k 7.6 → 3.0 and 27.9 → 12.2 ms. Peak memory is 16.3 MB against an empty process's 16.2: the rope's last piece is a
+shared byte buffer instead of a node per append. Appending UTF-16 pieces is not buffered (71.2 → 76.3 MB for 320k `s += '中' + i`).

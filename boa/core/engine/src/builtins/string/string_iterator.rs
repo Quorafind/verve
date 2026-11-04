@@ -14,6 +14,7 @@ use crate::{
     object::JsObject,
     property::Attribute,
     realm::Realm,
+    string::{CodePoint, StaticJsStrings},
     symbol::JsSymbol,
 };
 use boa_gc::{Finalize, Trace};
@@ -77,7 +78,7 @@ impl StringIterator {
 
     /// The body of `next` without the result object: the next code point as a string, or `None`
     /// once the string is exhausted.
-    pub(crate) fn advance(object: &JsObject, context: &mut Context) -> JsResult<Option<JsValue>> {
+    pub(crate) fn advance(object: &JsObject, _: &mut Context) -> JsResult<Option<JsValue>> {
         let mut string_iterator = object
             .downcast_mut::<Self>()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
@@ -93,12 +94,15 @@ impl StringIterator {
             return Ok(None);
         }
         let code_point = native_string.code_point_at(position);
-        string_iterator.next_index += code_point.code_unit_count();
-        let result_string = crate::builtins::string::String::substring(
-            &string_iterator.string.clone().into(),
-            &[position.into(), string_iterator.next_index.into()],
-            context,
-        )?;
-        Ok(Some(result_string))
+        let end = position + code_point.code_unit_count();
+        // A character of one Latin-1 code unit is a static string; the rest are slices.
+        let result = match code_point {
+            CodePoint::Unicode(c) if u8::try_from(c).is_ok() => {
+                StaticJsStrings::latin1_char(c as u8)
+            }
+            _ => native_string.slice(position, end),
+        };
+        string_iterator.next_index = end;
+        Ok(Some(result.into()))
     }
 }

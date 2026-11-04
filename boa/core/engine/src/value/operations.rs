@@ -27,6 +27,13 @@ impl JsValue {
                 Self::from(JsString::concat_lazy(&x, &y))
             }
 
+            (JsVariant::String(x), JsVariant::Integer32(n)) => {
+                Self::from(JsString::concat_i32(&x, n))
+            }
+            (JsVariant::Integer32(n), JsVariant::String(y)) => {
+                Self::from(JsString::concat_i32_before(n, &y))
+            }
+
             // Slow path:
             (_, _) => {
                 let x = self.to_primitive(context, PreferredType::Default)?;
