@@ -130,7 +130,7 @@ calls JavaScript or reads `frame.pc`. A panic in one is caught, kept, and turned
 | `PopIntoRegister`, `SetAccumulator`, `GetArgument`, `CheckReturn` | as the handler, when there is a value to pop / the frame is not a constructor's |
 | `GetName`, `GetNameGlobal` | when `find_runtime_binding` would leave the binding where the bytecode compiler put it (declarative current environment, no `with`, not poisoned by `eval`, not deleted): read it as `get_binding` does; a binding on the global object through the instruction's inline cache |
 | `GetPropertyByName`, `SetPropertyByName` | a hit of the instruction's inline cache on a data property (own or, for a read, on the prototype); fills the access's site cache |
-| `GetLengthProperty` | an array's `length`, a string's, or as `GetPropertyByName` |
+| `GetLengthProperty` | an array's `length`, a string's, a typed array's (through the access's guard cache, below), or as `GetPropertyByName` |
 | `GetPropertyByValue`, `SetPropertyByValue` | a dense array by an `int32` index, as `get_dense_property` and `set_dense_property` |
 
 ### Property caches and elements
@@ -169,6 +169,49 @@ Everything is checked on each thread, the first time it compiles, against a real
 borrow flag in each state, the shape's words, the storage, the vtable, `extensible`, each kind of
 elements). If anything does not match, property and element accesses are compiled as helper calls
 only.
+
+**A typed array's `length`** is not a property of the array: it is the getter on
+`%TypedArray%.prototype`, and the interpreter's shortcut (`typed_array_length_guard` and
+`typed_array_length_read`) skips calling it when the guard holds: the receiver has no `length` of its
+own, nothing between it and `%TypedArray%.prototype` has one, and the accessor found is the
+intrinsic getter. The guard is three property lookups per read, and at one site its answer is
+nearly always the one it gave last time, so the site remembers it (`typed_length.rs`, fields
+appended to the site cache) and the helper compares instead of looking up. Nothing of the read
+is cached: a detached buffer, or a resizable one that shrank, changes the length without changing
+any object.
+
+The site holds, for the receiver and for each prototype down to the one with the accessor (at
+most three: `Float64Array.prototype`, `%TypedArray%.prototype`, and one more for a subclass), the
+shape and the length of the property storage; the accessor's slot; and the accessor's bits. It is
+filled when the guard accepts a receiver and used while the count of collections is the one it
+was filled at. Why that is enough:
+
+- **A shared shape never changes.** Adding, removing or redefining a property, or changing the
+  prototype, moves the object to another shape. So an object with the shape it had still has no
+  `length` of its own.
+- **The builtin prototypes have unique shapes**, which are not the same story: the shape is a
+  table that changes in place. Removing a property, changing a property between data and accessor,
+  and changing the prototype all make a new unique shape (the old one is invalidated on purpose,
+  for the interpreter's caches). Adding a property changes the table in place, and takes a slot of the
+  object's storage, so comparing the length of the storage catches it: an own `length`
+  defined on `Float64Array.prototype` after the site was filled is a longer storage. Changing the
+  attributes of a property of the same width (an accessor to an accessor) also stays in place;
+  the only such property the site relies on is the accessor, whose value is checked next. Each of the two checks is needed:
+  with either one removed, `tests_typed_length.rs` fails (tried).
+- **The chain is the chain.** A shape holds its prototype, so the receiver's shape fixes the first
+  prototype, and each prototype's shape fixes the next. The site keeps the prototypes' addresses
+  and reads them without a lookup, which is sound for the same reason the shape addresses are:
+  an object is alive while a shape that holds it is, and nothing is freed before the count of
+  collections changes.
+- **The slot's value is checked each time**, by its bits against the intrinsic getter's. A shape does
+  not fix it: `Object.defineProperty` of another getter keeps the shape and the length of the
+  storage.
+- **A receiver with the same shape need not be a typed array** (`Object.create(Float64Array.prototype)`
+  has it): the read refuses it, and the access takes its ordinary path, which throws as the
+  getter does.
+
+Anything the site cannot hold (an accessor more than three prototypes up) is the guard's every
+time; any mismatch is a miss that runs the guard and fills the site again.
 
 Two builtins got the same kind of shortcut, in the interpreter as much as in compiled code:
 `Array.prototype.push` and `Array.prototype.fill` on a *plain dense array* — the realm's array
@@ -425,6 +468,15 @@ With the feature built, the JIT is on unless switched off.
   - generators (`yield*`, `return()`, `throw()`) and async functions and generators, with their
     promise jobs run;
   - `push` and `fill`, against Node's output;
+  - typed-array `length` (`tests_typed_length.rs`), against Node's output: the eleven kinds and
+    subclasses of them, buffers detached in the middle of the loop, resizable buffers that shrink
+    and grow (tracking views, fixed views, views with an offset), an own `length` defined before
+    and during the loop, `%TypedArray%.prototype`'s `length` replaced by another accessor, a data
+    property, `undefined` or deleted (before and during), `length` added to the kind's prototype,
+    prototypes inserted in the chain with and without a `length`, chains too deep for the site,
+    `Object.setPrototypeOf` of the receiver, one site seeing typed arrays, arrays, strings and
+    objects, an object with a typed array's shape, a prototype made dictionary-mode, and
+    collections in the loop; the site's fills are counted;
   - phase 2.5 (`tests_elements.rs`, `tests_calls.rs`): appending stores and every array that must
     refuse them (frozen, sealed, non-extensible, fixed length, holes, setters and elements on
     the prototypes, subclasses, proxies, array-likes), against Node's output; `/` over 26 values;
@@ -771,6 +823,45 @@ directory except `staging`, interpreted (`BOA_JIT=0`) against forced (`BOA_JIT_T
 52,095 results compared one by one, **0 differ** but for `Atomics/notify/bigint/notify-all-on-loc.js`
 (a timing test: it failed interpreted and passed forced).
 
+## Results (typed-array `length`, P72)
+
+The site cache for a typed array's `length` ("Property caches and elements"). Release `verve` with
+the `jit` feature, Windows x86-64, `docs/electron-plan` at `345f1645` (P71 merged) against the same
+plus this branch, built by `cargo build --release --features jit --bin verve`; the suite ran the two
+binaries back to back and the probe alternated them, one round each, milliseconds, median (best) of 5 processes. Round 1 (suite), machine load
+13.4, 14.7, 19.6, 15.4, 15.3% before and 16.5, 12.2, 11.4, 10.4, 14.4% after; round 2 (probe),
+13.4, 15.7, 17.8, 11.7, 13.5% before and 28, 57, 60, 61, 62% after (other workers started
+building at the end, and no probe process ran after that).
+
+| test (P60 suite) | before | after | target |
+|---|---|---|---|
+| `typed`, JIT | 643.9 (618.5) | 368.2 (365.9) | <= 450 |
+| `typed`, interpreter | 1304.1 (1291.0) | 1308.3 (1291.5) | |
+
+The probe is nothing but the loop body, ns per iteration (`s += f.length` for a `Float64Array`;
+the loop itself, `s += 1`, is 3.3 ns of each):
+
+| body | before | after |
+|---|---|---|
+| `s += f.length` | 55.7 (54.5) | 17.0 (16.5) |
+| `s += f[i & 511]` | 15.2 (15.1) | 15.3 (15.1) |
+| `f[i & 511] = i` | 17.6 (17.4) | 17.8 (17.4) |
+| `s += a.length`, a dense array | 5.5 (5.4) | 5.3 (5.2) |
+
+`typed` meets its target (368 against 450 ms); `f64.length` is 17.0 ns against a target of 15, 2 ns
+short. What is left is the helper call itself (inferred: an element read, which is the same call with
+a shortcut of similar weight, costs 15.3 in the same probe, 12 over the loop), the borrows of the
+receiver and of the prototypes, and the read of the buffer's length; getting under 15 means the
+guard compared in machine code and a helper for the read alone, which was not tried. The
+interpreter is untouched (1304 and 1308 ms). The array and element rows are within noise.
+
+The element rows say what the same treatment of element reads and writes could be worth (it was
+not done): both are a helper call that runs the interpreter's shortcut, 11.9 and 14.5 ns over an
+empty loop, against 2.0 ns for a dense array's `length`, which is inline. Of the 61 ns an iteration
+of `typed` takes now (inferred from 368 ms over 6M iterations), a `length`, two reads and a write
+are about 52 together (13.7 + 2 x 11.9 + 14.5 over the loop); inline elements might bring the reads and the write to a few ns each
+(inferred, not measured), which would put `typed` near 200 ms.
+
 ## Roadmap
 
 **Phase 1 (done)**: the baseline described above.
@@ -840,7 +931,9 @@ entirely. Background compilation on another thread fits here too, since `CodeBlo
   by looking, and are all checked against a real object before use, so a change to those types
   either keeps working or turns inline accesses off. What the checks cannot see is a change of
   *meaning* — a new borrow state, a new kind of elements, a shape that changes its properties in
-  place — which needs the JIT changed with it. `layout.rs` lists what is relied on.
+  place — which needs the JIT changed with it. `layout.rs` lists what is relied on, and the typed-array
+  `length` cache (`typed_length.rs`) relies on a unique shape changing in place only by gaining a
+  property.
 - **The interpreter's caches decide.** Fast helpers hit only where the interpreter's inline cache
   hits, and site caches are filled only from such hits; if the interpreter's cache is wrong (for
   example a prototype property removed under a cached `PROTOTYPE` slot), compiled code is wrong
