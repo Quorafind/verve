@@ -556,3 +556,7 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
 - `boa_engine`, `builtins/regexp/regexp_string_iterator.rs`: `%RegExpStringIteratorPrototype%.next`
   no longer holds the iterator's borrow while `exec`, `lastIndex` and the match's `0` run; an
   `exec` that called `next` on the iterator running it panicked with `BorrowError`.
+
+- `boa_engine`, `builtins/intl/collator/mod.rs`: the function `Intl.Collator.prototype.compare`
+  returns takes the collator's borrow after converting its arguments, not before: a `toString`
+  that read `compare` borrowed the collator mutably under the held shared borrow.
