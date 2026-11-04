@@ -346,7 +346,10 @@ pub(crate) unsafe extern "C" fn jit_set_property(
         let value = register(context, rp, value).clone();
         register(context, rp, object).with_object(|object| {
             let mut borrowed = object.try_borrow_mut().ok()?;
-            let (slot, _) = ic.slot_for(borrowed.shape(), borrowed.properties(), true)?;
+            let Some((slot, _)) = ic.slot_for(borrowed.shape(), borrowed.properties(), true) else {
+                drop(borrowed);
+                return ic.adds.add(object, &value).then_some(());
+            };
             if slot.attributes.is_accessor_descriptor()
                 || slot.attributes.contains(SlotAttributes::PROTOTYPE)
             {

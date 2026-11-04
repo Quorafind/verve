@@ -156,3 +156,9 @@ state (`Appended`) it needs a tag for.
 `electron/p69-call-cost`: `cargo build --release --features jit --bin verve` (not stripped, not the `size-report` build) is
 26,673,664 bytes against 26,672,128 for `docs/electron-plan` `c91b2938` built the same way, +1,536 bytes (+0.006 %): a few
 branches in `function_construct`, `prepare` and the class compiler, and one field in the `Vm`.
+
+## P78: the cache for a creating assignment
+
+`electron/p78-constructor-initial-shape`: `cargo build --release --features jit --bin verve` (not stripped, not the `size-report` build) is
+26,713,600 bytes against 26,702,848 for `docs/electron-plan` `c28e026c` built the same way, +10,752 bytes (+0.04 %): `vm/inline_cache/add.rs`
+(about 230 lines), a few branches in `SetPropertyByName` and its compiled helper, and 40 bytes more in each `InlineCache` (the `AddCache`).

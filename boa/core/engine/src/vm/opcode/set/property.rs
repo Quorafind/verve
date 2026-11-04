@@ -7,37 +7,14 @@ use crate::{
     builtins::{
         function::set_function_name, typed_array::object::typed_array_element_set_shortcut,
     },
-    object::{
-        internal_methods::{
-            InternalMethodPropertyContext, InternalObjectMethods, ORDINARY_INTERNAL_METHODS,
-        },
-        shape::slot::SlotAttributes,
-    },
+    object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::{PropertyDescriptor, PropertyKey},
-    vm::opcode::Operation,
+    vm::{
+        inline_cache::{AddCache, has_ordinary_property_methods},
+        opcode::Operation,
+    },
 };
 use boa_macros::js_str;
-
-/// Whether `vtable` runs the ordinary object's property internal methods.
-///
-/// A pointer comparison against `ORDINARY_INTERNAL_METHODS` would compare the address of a `const`
-/// that the compiler is free to materialise more than once, so the methods are compared by the
-/// function they call instead. The three property methods the shortcut replaces are checked, and so
-/// is `[[Set]]`: the object's own `[[Set]]` is what runs first, and `OrdinarySet` on a missing key
-/// calls `[[Set]]` on the prototype, so an override of it on the object or on any prototype changes
-/// the outcome.
-fn has_ordinary_property_methods(vtable: &InternalObjectMethods) -> bool {
-    std::ptr::fn_addr_eq(
-        vtable.__get_own_property__,
-        ORDINARY_INTERNAL_METHODS.__get_own_property__,
-    ) && std::ptr::fn_addr_eq(
-        vtable.__get_prototype_of__,
-        ORDINARY_INTERNAL_METHODS.__get_prototype_of__,
-    ) && std::ptr::fn_addr_eq(
-        vtable.__define_own_property__,
-        ORDINARY_INTERNAL_METHODS.__define_own_property__,
-    ) && std::ptr::fn_addr_eq(vtable.__set__, ORDINARY_INTERNAL_METHODS.__set__)
-}
 
 /// Sets `key` on `object` when no part of `[[Set]]` can be observed.
 ///
@@ -46,8 +23,14 @@ fn has_ordinary_property_methods(vtable: &InternalObjectMethods) -> bool {
 /// The answer is therefore only known up front when the object is ordinary and extensible, every
 /// prototype is ordinary and lacks the key, and the receiver is the object itself. That is exactly
 /// when `CreateDataProperty` inserts the value with the default attributes, so the walk is replaced
-/// by one insert.
-fn set_new_own_property(object: &JsObject, key: &PropertyKey, value: JsValue) -> bool {
+/// by one insert. The insert is remembered in `adds`, so that the next time the site finds the
+/// same shape and prototypes it can skip the lookups.
+fn set_new_own_property(
+    object: &JsObject,
+    key: &PropertyKey,
+    value: JsValue,
+    adds: &AddCache,
+) -> bool {
     if !has_ordinary_property_methods(object.vtable()) {
         return false;
     }
@@ -70,6 +53,7 @@ fn set_new_own_property(object: &JsObject, key: &PropertyKey, value: JsValue) ->
         current = borrowed.shape().prototype();
     }
 
+    let from = object.borrow().shape().clone();
     object.borrow_mut().properties.insert(
         key,
         PropertyDescriptor::builder()
@@ -79,6 +63,7 @@ fn set_new_own_property(object: &JsObject, key: &PropertyKey, value: JsValue) ->
             .configurable(true)
             .build(),
     );
+    adds.record(&from, key, object);
     true
 }
 
@@ -149,14 +134,17 @@ fn set_by_name(
     }
 
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
-    let name: PropertyKey = ic.name.clone().into();
 
-    // `[[Set]]` inserts on the receiver, so the shortcut only applies when the receiver is the
+    // `[[Set]]` inserts on the receiver, so the shortcuts only apply when the receiver is the
     // object being written through.
-    if let Some(receiver_object) = receiver.as_object()
-        && JsObject::equals(&object, &receiver_object)
-        && set_new_own_property(&object, &name, value.clone())
-    {
+    let is_receiver = receiver
+        .as_object()
+        .is_some_and(|receiver| JsObject::equals(&object, &receiver));
+    if is_receiver && ic.adds.add(&object, &value) {
+        return Ok(());
+    }
+    let name: PropertyKey = ic.name.clone().into();
+    if is_receiver && set_new_own_property(&object, &name, value.clone(), &ic.adds) {
         return Ok(());
     }
 

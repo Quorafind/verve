@@ -63,6 +63,11 @@ impl UniqueShape {
         &self.inner.property_table
     }
 
+    /// The number of properties in the [`UniqueShape`].
+    pub(crate) fn property_count(&self) -> u32 {
+        self.property_table().borrow().keys.len() as u32
+    }
+
     /// Inserts a new property into the [`UniqueShape`].
     pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> Self {
         let mut property_table = self.property_table().borrow_mut();
