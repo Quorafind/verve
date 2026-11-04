@@ -136,3 +136,11 @@ and loading rarely used Node modules on demand.
 27,104,256 bytes against 27,097,600 for `docs/electron-plan` `05f26157` built the same way, +6,656 bytes (+0.02 %): a fifth
 string kind in `boa_string` and a changed `JsValue::add`. A rope node is 88 bytes (`size_of::<RopeString>()`, measured), 24
 more than a `SequenceString` header.
+
+## P74: string follow-ups
+
+`electron/p74-string-followups`: `cargo build --release --features jit --bin verve` (not stripped by `size-report`) is 26,700,800 bytes
+against 26,672,128 for `docs/electron-plan` `c91b2938` built the same way, +28,672 bytes (+0.11 %): a table of 256 one-character
+`StaticString`s for string iteration (+22,528 with the iterator change; the table is 256 × 72 bytes), the `int32` concatenation
+(+3,584) and the rope buffer (+2,560). A rope node is 96 bytes now (`size_of::<RopeString>()`), 8 more than P71's, for the third
+state (`Appended`) it needs a tag for.
