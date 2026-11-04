@@ -9,7 +9,9 @@
 本包先**解释为什么**，再按剖析做 `docs/jit.md`「Phase 2, left over」里收益最大的几项，让 JIT 对 P60 套件里的循环型负载
 （`fib`、`oo`、`typed`、`alloc`、`vdom`、`closure`）有实在的倍数。
 
-**参考目标**（第 1 步的分析出来后由实现者提出、总控确认）：上述各项 JIT / 解释器 ≥ 2×，其中 `typed` ≥ 5×（P65 合并后的解释器为基准）。
+**目标**（第 1 步的分析之后由总控确认，2026-11-03，依据见「状态」）：JIT 列的绝对值，单位 ms ——
+`typed` ≤ 450、`fib` ≤ 180、`oo` ≤ 600、`alloc` ≤ 220、`vdom` ≤ 55、`closure` ≤ 430；
+合并时另记 JIT / 解释器的比值（对当时的解释器）；硬规则：套件里任何一项的 JIT 列都不得比解释器慢。
 
 ## 背景（先读）
 
@@ -150,3 +152,68 @@
 - 没有测 `electron` 二进制（P63 的构建）下的同一组数字；第 2 步做完后验收时再测。
 - 机器负载在微探针第二轮较高（31–59%），那一轮只用相对值；同名探针在两轮里一致（`call0` 90.0/109.1 对 `callid` 93.7/119.5）。
 
+
+### 第 2 步（2a、2b）：做了什么与结果（2026-11-04，已 rebase 到含 P65 的 `docs/electron-plan` `a5409ef8`）
+
+总控确认的目标（JIT 列绝对值，ms）：`typed` ≤ 450、`fib` ≤ 180、`oo` ≤ 600、`alloc` ≤ 220、`vdom` ≤ 55、`closure` ≤ 430；
+另记 JIT / 解释器，硬规则是任何一项的 JIT 列都不比解释器慢。下表是改前（`docs/electron-plan`，P65 的解释器加第二阶段的 JIT）
+与改后（本分支）在**同一轮**里交替测的，`scripts/js-bench/bench.js`，每项 5 个进程取中位（最好），负载 1.3–5.5% → 2.6–6.3%：
+
+| 测试 | 改前 JIT | 改后 JIT | 改后解释器 | JIT / 解释器 | 目标 | 达标 |
+|---|---|---|---|---|---|---|
+| `fib` | 273.6 (271.6) | 241.5 (225.4) | 355.7 (350.6) | 1.47× | ≤ 180 | 否，差 61 ms |
+| `oo` | 1043.2 (1023.0) | 1041.5 (996.3) | 1104.2 (1067.9) | 1.06× | ≤ 600 | 否，差 442 ms |
+| `typed` | 1020.6 (991.2) | 608.3 (604.5) | 1262.5 (1259.3) | 2.08× | ≤ 450 | 否，差 158 ms |
+| `alloc` | 251.6 (249.0) | 260.7 (258.2) | 277.4 (267.1) | 1.06× | ≤ 220 | 否，差 41 ms |
+| `vdom` | 63.8 (63.0) | 63.7 (63.1) | 68.5 (67.0) | 1.08× | ≤ 55 | 否，差 9 ms |
+| `closure` | 581.4 (576.8) | 417.7 (413.5) | 627.6 (618.9) | 1.50× | ≤ 430 | **是** |
+
+最后一个改动（原生调用更早离开 `jit_call`）之后又跑了一轮（负载 7.8–12% → 41–45%，后半段有别人的构建）：`fib` 234.3、`oo` 1145.5、
+`typed` 621.0、`alloc` 253.2、`vdom` 64.6、`closure` 433.2；解释器列 358.2、1208.1、1316.0、273.2、66.0、661.7。同一排名。
+`alloc` 在前一轮读成比改前慢 3–6%，这一轮 253.2 对 254.6，在噪声内；硬规则（JIT 不慢于解释器）六项都满足。
+
+对照 P65 §10 交过来的数字：`oo` 的 379× 是「`new Class()` 144 ms 对 `Object.create` 30 ms（20 万次）」那一块，即 `function_construct` 加
+`CallFrame` 建立；本包的 JIT 照原样执行它，`new F(i)` 编译后 419.8 ns、解释 415.3 ns，所以 `oo` 一点没动。`sort`（17.2 M 次原生调 JS，每次
+约 111 ns）与 `closure` 的回调同属「原生调 JS」：`closure` 的下降来自初始化循环的追加写，不是回调。
+
+#### 每项的前后（微探针，同一进程只换循环体，ns/次，5 个进程取中位，JIT 改前 → 改后）
+
+| 项 | 探针 | 改前 → 改后 | 备注 |
+|---|---|---|---|
+| 3 追加写 | `a[i] = i` 追加到 `[]` | 135.6 → 33.7 | `closure` −163 ms |
+| 3 追加写 | 在 `new Array(n)` 上 | 185.8 → 32.1 | |
+| 2 `Div` | `i / 3` | 9.6 → 3.9 | |
+| 5 栈操作内联 | `s = id(i)` | 93.2 → 80.6（对第二阶段的二进制，P65 之前） | `fib(20)` 105.6 → 87.4 |
+| 5 `jit_call` | `s = id(i)`、`zero()`、`closure_call` | 80.7 → 76.4、78.7 → 72.3、71.4 → 69.5 | 对「去掉 `jit_call`」的二进制；原生调用 `Math.abs` 68.0 → 71.7（+3.7） |
+| 2b 类型化数组 | `f64[k]` 读 / 写 / `length` | 46.6 → 23.3、41.9 → 26.2、79.0 → 65.6 | `typed` 1020.6 → 608.3 |
+| 2b `for…of` | 每元素 | 324.0 → 323.6 | 没做，见下 |
+| 2b `new` | `new F(i)` | 424.9 → 419.8 | 没做，见下 |
+
+提交（`git log docs/electron-plan..`）：`style(jit)`（总控加的 5 个 clippy 错误）、`perf(jit)` 追加写、`perf(jit)` 除法、`perf(jit)` 栈操作与
+`jit_call`、`fix(jit)` 接收者、`perf(jit)` 类型化数组。`boa/SU.md` 每项一条。
+
+**项 5（调用本身）改了共用调用机制**：`builtins/function/mod.rs` 把 `function_call` 拆成「检查与克隆」和 `enter_ordinary_function`
+（解释器行为不变）；`vm/mod.rs` 把 `check_runtime_limits` 拆成中断检查与只读的 `runtime_limits_exceeded`。没有碰
+`vm/call_frame/` 与 `vm/opcode/call/`。因为 P65 已合并，不再有「必须在 P65 之后」的顺序问题，但仍应在合并前由总控跑全量。
+
+**没做的与原因**
+
+- **`CallFrame` 瘦身、`this`/函数不进值栈**：`jit_call` 与栈操作内联之后，一次调用约 75 ns，其中 `Call` 处理函数约 35 ns、`Return` 约 20 ns
+  是解释器的帧建立与弹出；`fib` 要到 ≤ 180 ms（约 67 ns/次）还差 ≈ 8–10 ns/次，只能靠改 `CallFrame` 与 `handle_return`
+  （共用机制，动它要解释器一起测）。没做，数字在上面。
+- **`for…of` 内联**：先量：编译后与解释同价（323.6 对 340.4 ns/元素）。守卫其实很便宜（迭代器记录里缓存的 `next` 是不是固有函数，一次指针比较），
+  代价在每个元素分配结果对象（`IteratorNext` ≈ 275 ns）；省掉它要让 `IteratorRecord` 能存未装箱的 `(value, done)`，那是解释器与内建共用的
+  类型，不是 JIT 侧的改动。这一项能把 `vdom` 再降约 25% 并让解释器同样受益，**需要总控决定是否划给 JIT 包做**。
+- **`new` 与字面量形状缓存**：量过，JIT 侧能省的只有「辅助拒绝 + 处理函数里的查找」约 20 ns/419；大头在 `function_construct`，任务书把它划给 P65。
+- **类型化数组 `length` 的站点缓存**：`typed` 里 `f64.length` 65 ns 占一轮 140 ns 的近一半，是离 450 ms 最近的一步。缓存需要把 P65 的
+  `typed_array_length_shortcut` 拆成「走原型链的守卫」与「读长度」，那是 P65 的文件，按约定没动；如果总控同意单独一个「移动」提交，可以做。
+
+**测试**（均在 `CARGO_BUILD_JOBS=4–6`、`VERVE_CODE_CACHE=0`）：`vm/jit/tests_elements.rs`（追加写及全部退回条件，期望值取 Node 22；`/`；`super[k] = v`；
+各种类型化数组）、`tests_calls.rs`（参数、`this`、调用链里的异常与递归上限、经生成器 / async / `map` 的调用）。`boa_engine`（1239 个 + 集成）默认与
+`BOA_JIT_THRESHOLD=0` 全过；`BOA_JIT_FUZZ_COUNT=3000` 过；Verve 无 feature、有 feature、`VERVE_JIT_THRESHOLD=0`、`VERVE_JIT=0` 四种配置全过
+（`VERVE_JIT=0` 那一遍里 `tcp_socket_options_and_inactivity_timeout_are_chainable` 出过一次 `EIO`，重跑通过，与 JIT 无关）；`tests/jit.rs` 过；
+test262 除 `staging` 的 52,095 项解释对强制编译逐项比较 **0 差异**，只有计时类 `Atomics/notify/bigint/notify-all-on-loc.js`（解释器那边失败，强制编译那边通过）。
+clippy：`boa` 的 `boa_engine` 有无 `--features jit`、根的 `--workspace`、`-p verve --features jit` 均 `-D warnings` 通过；逐提交 `cargo fmt`、
+`style-check`、`boa` 的 `cargo fmt` 通过。体积增量与 `electron` 二进制下的数字没有量（见下）。
+
+**没量的**：`electron` 二进制（P63）下的同一组数字；发布构建体积增量（`size.md`）。这两条是验收项，留给合并前总控统一跑。

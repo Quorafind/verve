@@ -367,3 +367,25 @@ distance from their targets is 1–5× and therefore inside what the two passes 
 the test whose absolute ratio moves most with the machine; the per-change table in
 `packages/P65-objects-typed-arrays.md` §8, which alternates the two binaries inside one round, is
 the figure to trust for it.
+
+### P66: JIT coverage (phase 2.5)
+
+Built and measured on `electron/p66-jit-coverage` with `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`; the before column is `docs/electron-plan` `a5409ef8` built the same way. Both
+binaries and both modes were interleaved in one round, `--runs 5`, median (best), one process per
+measurement, `VERVE_CODE_CACHE=0`. Load before the round 1.3, 4.9, 4.5, 3.3 and 5.5 %, after it 2.6,
+3.2, 3.7, 6.3 and 5.9 %.
+
+| test | before, JIT | after, JIT | after, interp | JIT / interp | target (JIT) |
+|---|---|---|---|---|---|
+| `fib` | 273.6 (271.6) | 241.5 (225.4) | 355.7 (350.6) | 1.47× | ≤ 180 |
+| `oo` | 1043.2 (1023.0) | 1041.5 (996.3) | 1104.2 (1067.9) | 1.06× | ≤ 600 |
+| `typed` | 1020.6 (991.2) | 608.3 (604.5) | 1262.5 (1259.3) | 2.08× | ≤ 450 |
+| `alloc` | 251.6 (249.0) | 260.7 (258.2) | 277.4 (267.1) | 1.06× | ≤ 220 |
+| `vdom` | 63.8 (63.0) | 63.7 (63.1) | 68.5 (67.0) | 1.08× | ≤ 55 |
+| `closure` | 581.4 (576.8) | 417.7 (413.5) | 627.6 (618.9) | 1.50× | ≤ 430 |
+
+`closure` meets its target; the other five do not. What is left is `Call`/`Return` and the frame
+(`fib`, `oo`), the `length` of a typed array (`typed`), and object construction and iteration, which
+are the interpreter's (`alloc`, `vdom`); `docs/jit.md` "Results (phase 2.5)" has the causes and the
+micro-probes.
