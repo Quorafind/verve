@@ -235,3 +235,48 @@ fn super_call_as_the_base_of_a_chain() {
         TestAction::assert_eq("F.then", 4),
     ]);
 }
+
+#[test]
+fn super_store_of_an_index_defines_on_the_receiver_not_the_dense_array() {
+    // `super[k] = v` has the prototype as `object` and `this` as receiver, so `OrdinarySet` defines
+    // the element on `this`; a dense array that is the prototype must be left alone, for an index
+    // inside the array and for one that would append, in sloppy and strict code alike.
+    for directive in ["", "'use strict';"] {
+        run_test_actions([
+            TestAction::run(format!(
+                "{directive}
+                 const proto = [0];
+                 const o = {{ __proto__: proto, m(i) {{ super[i] = 5; }} }};
+                 o.m(0); o.m(1);"
+            )),
+            TestAction::assert("Object.hasOwn(o, '0') && Object.hasOwn(o, '1')"),
+            TestAction::assert("proto[0] === 0 && proto.length === 1"),
+            TestAction::run(format!(
+                "{directive}
+                 class B extends Array {{ f(i) {{ super[i] = 1; }} }}
+                 const b = new B();
+                 b.f(0); b.f(3);"
+            )),
+            TestAction::assert("b[0] === 1 && b[3] === 1 && b.length === 4"),
+            TestAction::assert(
+                "!Object.hasOwn(Array.prototype, '0') && Array.prototype.length === 0",
+            ),
+        ]);
+    }
+}
+
+#[test]
+fn super_store_of_a_name_defines_on_the_receiver_every_time() {
+    // The inline cache of `super.name = value` is keyed on the prototype's shape; a hit must not
+    // store into the prototype's slot instead of the receiver's.
+    run_test_actions([
+        TestAction::run(
+            "const proto = { x: 1 };
+             const make = () => ({ __proto__: proto, m(v) { super.x = v; } });
+             const seen = [];
+             for (let i = 0; i < 4; i++) { const o = make(); o.m(10 + i); seen.push(Object.hasOwn(o, 'x') && o.x); }",
+        ),
+        TestAction::assert("proto.x === 1"),
+        TestAction::assert("seen.join() === '10,11,12,13'"),
+    ]);
+}

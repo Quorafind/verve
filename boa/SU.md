@@ -478,3 +478,12 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   `JSON.parse` of 70,000 records (7,032,596 code units): 1536–2034 ms to 453–530 ms, five interleaved
   runs each, load 19–70%. The suite's `json` test, whose parse phase that is, went from 2926–3519 ms
   to 1315–1428 ms (JIT column, 5 runs, load 23–41%), which is 8.0× Node rather than 21×.
+
+- `boa_engine`, `vm/opcode/set/property.rs`: `SetPropertyByValue` stored into a dense array whenever the
+  object it was given was one, without asking who the receiver was. `super[k] = v` hands it the home
+  object's prototype as the object and `this` as the receiver, and `OrdinarySet` defines the element on
+  the receiver, so `{ __proto__: [0], m() { super[0] = 5 } }.m()` changed the prototype array and left
+  `this` alone. The dense shortcut now sits behind the same condition the typed array shortcut already
+  had: the receiver is the object itself. `SetPropertyByName` was checked for the same fault and has
+  none (a `super.name = v` that runs repeatedly, so that the inline cache is consulted, still defines
+  on the receiver each time), so it only gained a regression test.

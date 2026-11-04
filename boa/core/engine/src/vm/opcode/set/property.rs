@@ -256,37 +256,36 @@ impl SetPropertyByValue {
 
         let key = key.to_property_key(context)?;
 
-        // Fast Path:
+        // Fast Path: both shortcuts store on `object`, which is where `[[Set]]` stores only when
+        // the receiver is that object; `super[key] = value` has the prototype as `object`.
         'fast_path: {
-            if object.is_array()
-                && let PropertyKey::Index(index) = &key
-            {
-                let mut object_borrowed = object.borrow_mut();
-
-                // Cannot modify if not extensible.
-                if !object_borrowed.extensible {
-                    break 'fast_path;
-                }
-
-                if object_borrowed
-                    .properties_mut()
-                    .set_dense_property(index.get(), &value)
-                {
-                    return Ok(());
-                }
-            }
-
-            // `[[Set]]` of an integer index is `TypedArraySetElement` only when the receiver is the
-            // typed array itself; any other receiver gets `OrdinarySet`, which defines on the
-            // receiver. The shortcut also refuses a conversion that could run user code.
             if let PropertyKey::Index(index) = &key
                 && receiver
                     .as_object()
                     .is_some_and(|receiver| JsObject::equals(&object, &receiver))
-                && let Some(result) =
-                    typed_array_element_set_shortcut(&object, index.get(), &value, context)
             {
-                return result;
+                if object.is_array() {
+                    let mut object_borrowed = object.borrow_mut();
+
+                    // Cannot modify if not extensible.
+                    if !object_borrowed.extensible {
+                        break 'fast_path;
+                    }
+
+                    if object_borrowed
+                        .properties_mut()
+                        .set_dense_property(index.get(), &value)
+                    {
+                        return Ok(());
+                    }
+                }
+
+                // The typed array shortcut also refuses a conversion that could run user code.
+                if let Some(result) =
+                    typed_array_element_set_shortcut(&object, index.get(), &value, context)
+                {
+                    return result;
+                }
             }
         }
 
