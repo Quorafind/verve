@@ -545,3 +545,11 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   is the only kind of record that has a stepper); a hole, a proxy, a typed array, a key or entries
   iterator and every other record take the interpreter's handler. `for (const x of array)` per
   element, compiled: 61 to 22 ns (1M elements, median of 5 processes, one round at 50–100% load).
+
+- `boa_string`, `common.rs`, `boa_engine`, `builtins/string/string_iterator.rs`: a string iterator
+  steps without `String.prototype.substring`. `StaticJsStrings::latin1_char` gives the static
+  one-code-unit string of a Latin-1 character (a table of 256, no allocation), and the iterator
+  returns it for any code point of U+0000..U+00FF; every other code point is a slice of the
+  iterated string, as before, but taken directly instead of through the `substring` built-in
+  (which converted its arguments through `ToIntegerOrInfinity` and cloned the string into a value
+  for each step).

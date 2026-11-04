@@ -217,3 +217,26 @@ fn mixed_iterators_close_in_continue() {
         "#}),
     ]);
 }
+
+#[test]
+fn string_iteration_yields_each_code_point() {
+    run_test_actions([
+        TestAction::assert(indoc! {r#"
+            const text = 'a\u00e9\u00ff\u0100\u20ac\ud83d\ude00\ud83dz\ude00 \u0000';
+            const seen = [...text];
+            seen.map((c) => c.codePointAt(0)).join() === '97,233,255,256,8364,128512,55357,122,56832,32,0'
+                && seen.map((c) => c.length).join() === '1,1,1,1,1,2,1,1,1,1,1'
+        "#}),
+        TestAction::assert(indoc! {r#"
+            let all = '';
+            for (let code = 0; code < 256; code++) {
+                const ch = String.fromCharCode(code);
+                const [first] = ch + ch;
+                if (first !== ch || first.length !== 1 || first.charCodeAt(0) !== code) throw code;
+                all += first;
+            }
+            const wide = '\u20ac' + all;
+            [...wide].length === 257 && [...wide].slice(1).join('') === all
+        "#}),
+    ]);
+}

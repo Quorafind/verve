@@ -72,6 +72,13 @@ impl StaticJsStrings {
         Some(JsString::from_static(static_str))
     }
 
+    /// The one-code-unit string for the Latin-1 character `byte`, with no allocation.
+    #[inline]
+    #[must_use]
+    pub fn latin1_char(byte: u8) -> JsString {
+        JsString::from_static(&LATIN1_CHARS[usize::from(byte)])
+    }
+
     /// Gets the `JsStr` corresponding to `string`, or `None` if the string
     /// doesn't exist inside the static array.
     #[inline]
@@ -213,6 +220,29 @@ impl StaticJsStrings {
         (ZONED_DT_NAME, "ZonedDateTime"),
     }
 }
+
+/// The strings of one Latin-1 character each, indexed by that character.
+#[allow(clippy::cast_possible_truncation)] // `i < 256`.
+const LATIN1_CHARS: &[StaticString; 256] = &{
+    const BYTES: &[u8; 256] = &{
+        let mut bytes = [0u8; 256];
+        let mut i = 0;
+        while i < 256 {
+            bytes[i] = i as u8;
+            i += 1;
+        }
+        bytes
+    };
+    let mut chars = [StaticString::new(JsStr::latin1(b"")); 256];
+    let mut i = 0;
+    while i < 256 {
+        let (_, rest) = BYTES.as_slice().split_at(i);
+        let (one, _) = rest.split_at(1);
+        chars[i] = StaticString::new(JsStr::latin1(one));
+        i += 1;
+    }
+    chars
+};
 
 const MAX_STATIC_LENGTH: usize = {
     let mut max = 0;
