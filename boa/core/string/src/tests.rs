@@ -944,6 +944,11 @@ mod rope {
         assert_eq!(text(&v), format!("{}xyuv", "a".repeat(300)));
     }
 
+    /// A CJK unit that varies with `i`.
+    fn wide(i: usize) -> u16 {
+        0x4e00 + u16::try_from(i % 100).unwrap()
+    }
+
     fn units(s: &JsString) -> Vec<u16> {
         s.to_vec()
     }
@@ -1011,6 +1016,7 @@ mod rope {
     }
 
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn forks_on_both_sides_of_a_widening() {
         let base = latin1(300, 'a');
         let s = append_all(&base, &[&[0x31], &[0x32]]);
@@ -1086,15 +1092,12 @@ mod rope {
     fn deep_chains_of_wide_appends_flatten_and_drop() {
         let mut s = latin1(ROPE_MIN_LEN, 'x');
         for i in 0..DEEP {
-            s = JsString::concat_lazy(&s, &utf16(1, 0x4e00 + (i % 100) as u16));
+            s = JsString::concat_lazy(&s, &utf16(1, wide(i)));
         }
         assert_eq!(s.len(), ROPE_MIN_LEN + DEEP);
         let v = s.to_vec();
         assert_eq!(v[ROPE_MIN_LEN + 5], 0x4e05);
-        assert_eq!(
-            v[ROPE_MIN_LEN + DEEP - 1],
-            0x4e00 + ((DEEP - 1) % 100) as u16
-        );
+        assert_eq!(v[ROPE_MIN_LEN + DEEP - 1], wide(DEEP - 1));
         // Long wide pieces: a chain of nodes, not buffers.
         let mut s = utf16(ROPE_MIN_LEN, 0x4e2d);
         let piece = utf16(100, 0x4e2e);
@@ -1105,7 +1108,7 @@ mod rope {
         // Dropped unread.
         let mut s = latin1(ROPE_MIN_LEN, 'x');
         for i in 0..DEEP {
-            s = JsString::concat_lazy(&s, &utf16(1, 0x4e00 + (i % 100) as u16));
+            s = JsString::concat_lazy(&s, &utf16(1, wide(i)));
         }
         drop(s);
     }
