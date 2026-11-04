@@ -16,7 +16,7 @@ use crate::{
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
-    object::JsObject,
+    object::{JsObject, RefMut},
     property::{Attribute, PropertyNameKind},
     realm::Realm,
     symbol::JsSymbol,
@@ -140,16 +140,22 @@ impl ArrayIterator {
 
     /// The body of `next` without the result object: the next value, or `None` once the
     /// iterator is exhausted. Every read `next` makes of the array happens here.
+    ///
+    /// The iterator is not borrowed while the array is read, since reading `length` or an
+    /// element may run user code (a Proxy trap, a getter) that calls `next` on this same
+    /// iterator, or that iterates the iterator itself. As in V8, the index is read first, the
+    /// step stores `index + 1` once `length` is known and before the element is read, and what a
+    /// re-entrant call stored in between is overwritten.
     pub(crate) fn advance(object: &JsObject, context: &mut Context) -> JsResult<Option<JsValue>> {
-        let mut array_iterator = object
-            .downcast_mut::<Self>()
-            .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
-        let index = array_iterator.next_index;
-        if array_iterator.done {
-            return Ok(None);
-        }
+        let (array, index, kind) = {
+            let iterator = Self::borrow_mut(object)?;
+            if iterator.done {
+                return Ok(None);
+            }
+            (iterator.array.clone(), iterator.next_index, iterator.kind)
+        };
 
-        let len = if let Some(f) = array_iterator.array.downcast_ref::<TypedArray>() {
+        let len = if let Some(f) = array.downcast_ref::<TypedArray>() {
             let buf = f.viewed_array_buffer().as_buffer();
             let Some(buf) = buf
                 .bytes(std::sync::atomic::Ordering::SeqCst)
@@ -162,22 +168,34 @@ impl ArrayIterator {
 
             f.array_length(buf.len())
         } else {
-            array_iterator.array.length_of_array_like(context)?
+            array.length_of_array_like(context)?
         };
 
-        if index >= len {
-            array_iterator.done = true;
-            return Ok(None);
+        {
+            let mut iterator = Self::borrow_mut(object)?;
+            if index >= len {
+                iterator.done = true;
+                return Ok(None);
+            }
+            iterator.next_index = index + 1;
+            iterator.done = false;
         }
-        array_iterator.next_index = index + 1;
-        match array_iterator.kind {
+        match kind {
             PropertyNameKind::Key => Ok(Some(index.into())),
-            PropertyNameKind::Value => array_iterator.array.get(index, context).map(Some),
+            PropertyNameKind::Value => array.get(index, context).map(Some),
             PropertyNameKind::KeyAndValue => {
-                let element_value = array_iterator.array.get(index, context)?;
+                let element_value = array.get(index, context)?;
                 let result = Array::create_array_from_list([index.into(), element_value], context);
                 Ok(Some(result.into()))
             }
         }
+    }
+
+    fn borrow_mut(object: &JsObject) -> JsResult<RefMut<'_, Self>> {
+        object.downcast_mut::<Self>().ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("`this` is not an ArrayIterator")
+                .into()
+        })
     }
 }

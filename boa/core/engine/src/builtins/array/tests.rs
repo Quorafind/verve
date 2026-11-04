@@ -1089,3 +1089,139 @@ fn shipped_proposals_are_available() {
         TestAction::assert_eq("typeof Atomics.pause", js_str!("function")),
     ]);
 }
+
+#[test]
+fn array_iterator_may_be_stepped_again_from_a_length_trap() {
+    // `next` reads the index, then `length`: a call from the `length` trap sees the old index.
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const log = [];
+            const a = [1, 2];
+            let it, hit = false;
+            const p = new Proxy(a, { get(t, k, r) {
+              if (k === 'length' && !hit) { hit = true; log.push(JSON.stringify(it.next())); }
+              return Reflect.get(t, k, r);
+            } });
+            it = Array.prototype.values.call(p);
+            log.push(JSON.stringify(it.next()));
+            log.push(JSON.stringify(it.next()));
+            log.push(JSON.stringify(it.next()));
+            log.join(' ');
+        "#},
+        js_str!(
+            "{\"value\":1,\"done\":false} {\"value\":1,\"done\":false} {\"value\":2,\"done\":false} {\"done\":true}"
+        ),
+    )]);
+}
+
+#[test]
+fn array_iterator_may_be_stepped_again_from_an_element_trap() {
+    // The outer call has stored `index + 1` before it reads the element.
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const log = [];
+            let it, hit = false;
+            const p = new Proxy([10, 20, 30], { get(t, k, r) {
+              if (k === '0' && !hit) { hit = true; log.push(JSON.stringify(it.next())); }
+              return Reflect.get(t, k, r);
+            } });
+            it = Array.prototype.values.call(p);
+            log.push(JSON.stringify(it.next()));
+            log.push(JSON.stringify(it.next()));
+            log.push(JSON.stringify(it.next()));
+            log.join(' ');
+        "#},
+        js_str!(
+            "{\"value\":20,\"done\":false} {\"value\":10,\"done\":false} {\"value\":30,\"done\":false} {\"done\":true}"
+        ),
+    )]);
+}
+
+#[test]
+fn array_iterator_may_be_drained_from_a_length_trap() {
+    // A call that drains the iterator from the `length` trap does not stop the outer call.
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const log = [];
+            let it, hit = false;
+            const p = new Proxy([1, 2, 3], { get(t, k, r) {
+              if (k === 'length' && !hit) { hit = true; for (let i = 0; i < 5; i++) log.push(JSON.stringify(it.next())); }
+              return Reflect.get(t, k, r);
+            } });
+            it = Array.prototype.entries.call(p);
+            log.push(JSON.stringify(it.next()));
+            log.push(JSON.stringify(it.next()));
+            log.join(' ');
+        "#},
+        js_str!(
+            "{\"value\":[0,1],\"done\":false} {\"value\":[1,2],\"done\":false} {\"value\":[2,3],\"done\":false} {\"done\":true} {\"done\":true} {\"value\":[0,1],\"done\":false} {\"value\":[1,2],\"done\":false}"
+        ),
+    )]);
+}
+
+#[test]
+fn array_iterator_may_be_stepped_past_the_end_from_an_element_trap() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const log = [];
+            let it, hit = false;
+            const p = new Proxy([1, 2], { get(t, k, r) {
+              if (k === '1' && !hit) { hit = true; log.push(JSON.stringify(it.next())); log.push(JSON.stringify(it.next())); }
+              return Reflect.get(t, k, r);
+            } });
+            it = Array.prototype.values.call(p);
+            log.push(JSON.stringify(it.next()));
+            log.push(JSON.stringify(it.next()));
+            log.push(JSON.stringify(it.next()));
+            log.join(' ');
+        "#},
+        js_str!(
+            "{\"value\":1,\"done\":false} {\"done\":true} {\"done\":true} {\"value\":2,\"done\":false} {\"done\":true}"
+        ),
+    )]);
+}
+
+#[test]
+fn array_iterator_may_be_stepped_again_from_a_length_getter() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const log = [];
+            let it, hit = false;
+            const o = { 0: 'a', 1: 'b', get length() { if (!hit) { hit = true; log.push(JSON.stringify(it.next())); } return 2; } };
+            it = Array.prototype.values.call(o);
+            log.push(JSON.stringify(it.next()));
+            log.push(JSON.stringify(it.next()));
+            log.push(JSON.stringify(it.next()));
+            log.join(' ');
+        "#},
+        js_str!(
+            "{\"value\":\"a\",\"done\":false} {\"value\":\"a\",\"done\":false} {\"value\":\"b\",\"done\":false} {\"done\":true}"
+        ),
+    )]);
+}
+
+#[test]
+fn array_iterator_may_iterate_itself() {
+    // An array iterator over an array iterator has no elements.
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const it = [1, 2][Symbol.iterator]();
+            const self = Array.prototype.values.call(it);
+            const log = [JSON.stringify(self.next()), JSON.stringify(self.next()), JSON.stringify(it.next()), typeof it.length];
+            log.join(' ');
+        "#},
+        js_str!("{\"done\":true} {\"done\":true} {\"value\":1,\"done\":false} undefined"),
+    )]);
+}
+
+#[test]
+fn array_iterator_entries_may_iterate_itself() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const it = [1, 2].entries();
+            const self = Array.prototype.entries.call(it);
+            [JSON.stringify(self.next()), JSON.stringify(it.next())].join(" ");
+        "#},
+        js_str!("{\"done\":true} {\"value\":[0,1],\"done\":false}"),
+    )]);
+}
