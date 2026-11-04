@@ -1195,25 +1195,22 @@ fn own_prototype_object(new_target: &JsValue, context: &mut Context) -> Option<J
         .as_ref()
         .filter(|(shape, _)| shape.points_to(&properties.shape))
         .map(|(_, slot)| *slot);
-    let slot = match cached {
-        Some(slot) => slot,
-        None => {
-            let slot = properties
-                .shape
-                .lookup(&PropertyKey::String(crate::object::PROTOTYPE))?;
-            // A unique shape keeps its identity as properties come and go: not cacheable.
-            if slot.attributes.is_accessor_descriptor() {
-                return None;
-            }
-            if !properties.shape.is_unique() {
-                context.vm.construct_prototype_slot = Some(((&properties.shape).into(), slot));
-            }
-            slot
+    let slot = if let Some(slot) = cached {
+        slot
+    } else {
+        let slot = properties
+            .shape
+            .lookup(&PropertyKey::String(crate::object::PROTOTYPE))?;
+        if slot.attributes.is_accessor_descriptor() {
+            return None;
         }
+        // A unique shape keeps its identity as properties come and go: not cacheable.
+        if !properties.shape.is_unique() {
+            context.vm.construct_prototype_slot = Some(((&properties.shape).into(), slot));
+        }
+        slot
     };
-    properties.storage[slot.index as usize]
-        .as_object()
-        .map(|object| object.clone())
+    properties.storage[slot.index as usize].as_object()
 }
 
 /// Construct an instance of this object with the specified arguments.
