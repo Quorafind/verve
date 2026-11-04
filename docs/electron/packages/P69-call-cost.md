@@ -42,7 +42,7 @@ P66 把 JIT 能做的内联都做了，剩下的差距在解释器与 JIT **共�
 ### 2. 按拆账做（候选，顺序以第 1 步为准）
 
 - **更瘦的帧**：不再每次调用克隆能从 `code_block` 或调用者帧得到的句柄（`realm`、`active_runnable` 与调用者相同时共享）；
-  `iterators`、`binding_stack` 改为按需分配；`loop_iteration_count` 等字段合并。目标是 `push_frame`/`pop_frame` 不碰引用计数的常见情形。
+  （`iterators`、`binding_stack` 按需分配与 `loop_iteration_count` 合并已删：拆账量出无收益，且 P70 同时在改 `iterators` 的字段类型，不碰）。目标是 `push_frame`/`pop_frame` 不碰引用计数的常见情形。
 - **普通函数的直接进入**：无 `arguments` 对象、无参数表达式、无独立函数环境的函数（编译器已知道），跳过环境建立与 `this` 的通用分支。
 - **构造调用的快路径**：`function_construct` 对普通构造器（原型是普通对象、`prototype` 属性未被改成访问器）缓存原型查找，
   `this` 直接按构造器的初始形状分配；派生类构造器的 `super()` 走同一条路。
