@@ -105,6 +105,14 @@ code change: building the same unchanged tree twice in a row gives a pair of ima
 exactly those 12 bytes and nowhere else. Everything else is byte for byte identical, so the
 feature costs nothing when it is off.
 
+### Iterators without result objects (`P70`, measured 2026-11-04)
+
+`verve.exe` built by `cargo build --release --features jit --bin verve` (default features plus
+`jit`), the tree before the package against the tree after it: 27,097,600 bytes to 27,106,816, which
+is +9,216 bytes (+9.0 KiB, +0.03 %). The build without the `jit` feature was not measured; its share
+is the interpreter's half (the stepper and the in-place handlers), the three fast helpers and their
+compiler cases being `jit` only.
+
 ## Summary
 
 | step | verve.exe |

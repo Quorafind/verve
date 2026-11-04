@@ -432,7 +432,13 @@ With the feature built, the JIT is on unless switched off.
     (wrong value types, a `valueOf` that detaches the buffer, resizable buffers that shrink, a
     `length` that is shadowed, patched or overridden); arguments missing, extra and rest, `this`
     in sloppy and strict functions, exceptions through chains of calls, the recursion limit, and
-    chains through generators, async functions and `map`/`reduce` callbacks.
+    chains through generators, async functions and `map`/`reduce` callbacks;
+  - P70 (`tests_iterators.rs`): `for…of`, spread and destructuring over the six kinds of iterator;
+    arrays appended to, cut short and resized during the loop; `Array.prototype[Symbol.iterator]`
+    and `%ArrayIteratorPrototype%.next` rewritten before and inside the loop, and a built-in
+    `next` on an object of another type; proxies, accessors, holes, detached and shrinking typed
+    arrays; `break`/`return`/`throw`/`continue` closing the iterator, a `return` that throws or
+    answers a non-object; generators and `yield*` over built-in iterators.
 - **A generated-program fuzzer**: random expressions over every type, in loops, with exceptions
   caught, compared the same way. It runs 150 programs by default; `BOA_JIT_FUZZ_COUNT=3000` runs
   more. It found a real interpreter bug on its first long run: `i32::MIN % -1` panicked in builds
@@ -750,12 +756,8 @@ What phase 2.5 did not do, and why:
 
 - **`for…of` over arrays** costs the same compiled as interpreted (323.6 and 340.4 ns per
   element). An element is `IteratorNext` (a native call of `next` and a result object, about 275
-  ns), `IteratorDone` and `IteratorValue`. Skipping the call is easy: the iterator record holds
-  `next`, and whether it is the intrinsic one is a pointer comparison. The result object is
-  what `IteratorDone` and `IteratorValue` read, and keeping it unboxed means changing
-  `IteratorRecord`, which every iterating instruction and builtin shares. That is an interpreter
-  change with a gain for both tiers (about 275 of 324 ns), not a JIT one, and is left for a
-  decision.
+  ns), `IteratorDone` and `IteratorValue`. That was an interpreter change with a gain for both
+  tiers, not a JIT one, and became P70 (below).
 - **`new` and object literals**: `new F(i)` (419.8) costs the same compiled as interpreted
   (415.3): the cost is `function_construct` and the frame it builds (`new E()` of an empty function
   is 228 ns), which the JIT runs unchanged. A shape-transition cache for `this.x = x` would save
@@ -770,6 +772,32 @@ with `EIO` and passed on the rerun, with the JIT off); `tests/jit.rs` passes. te
 directory except `staging`, interpreted (`BOA_JIT=0`) against forced (`BOA_JIT_THRESHOLD=0`):
 52,095 results compared one by one, **0 differ** but for `Atomics/notify/bigint/notify-all-on-loc.js`
 (a timing test: it failed interpreted and passed forced).
+
+## Results (P70: iterators without result objects)
+
+`IteratorRecord` remembers when its `next` is the untouched built-in one of an array, map, set or
+string iterator in the running realm, and `IteratorStep` then takes the next value directly
+instead of making a `{ value, done }` object to read it back (a direct `it.next()` still makes
+one). Compiled code runs `IteratorNext`, `IteratorDone` and `IteratorValue` with fast helpers
+(`jit_iterator_next`, `jit_iterator_done`, `jit_iterator_value`) instead of `jit_step`. The
+helper for `IteratorNext` answers only when stepping cannot run JavaScript or fail: a map, set or
+string iterator, or a value iterator over a plain array with an integer `length` and a dense
+element; a hole, a proxy, a typed array, `keys()`/`entries()` and every other record take the
+interpreter's handler. Per element of `for (const x of source)`, 1M elements, ns, median of 5
+processes, `verve` base against after in the same round (`docs/electron/packages/P70-iterators.md`
+has the loads):
+
+| source | before, JIT | after, JIT | before, interp | after, interp |
+|---|---|---|---|---|
+| array | 413.8 | 22.2 | 431.4 | 71.8 |
+| `Set` | 611.9 | 24.0 | 546.9 | 46.9 |
+| `Map` (entries) | 1317.1 | 546.5 | 1172.8 | 566.1 |
+| string | 501.6 | 72.8 | 578.2 | 98.8 |
+| generator | 432.9 | 430.8 | 454.8 | 441.6 |
+| user-written iterator | 648.5 | 661.6 | 678.0 | 678.1 |
+
+A `Map` element is a fresh `[key, value]` array, which is most of what is left of its cost; the
+generator and the user iterator are not built-in, so nothing changes for them.
 
 ## Roadmap
 

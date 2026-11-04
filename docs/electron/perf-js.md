@@ -389,3 +389,28 @@ measurement, `VERVE_CODE_CACHE=0`. Load before the round 1.3, 4.9, 4.5, 3.3 and 
 (`fib`, `oo`), the `length` of a typed array (`typed`), and object construction and iteration, which
 are the interpreter's (`alloc`, `vdom`); `docs/jit.md` "Results (phase 2.5)" has the causes and the
 micro-probes.
+
+### P70: iterators without result objects
+
+Built and measured on `electron/p70-iterators` with `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`; the before column is `docs/electron-plan` `05f26157` built the same way. Both
+binaries, both modes, `--runs 5`, median (best), one process per measurement, `VERVE_CODE_CACHE=0`.
+Load before the base column 9–14 %, after it 18–50 %, before the after column 18–25 %, after it 23–27 %
+(other builds on the machine); `alloc`, `concat` and `oo` were rerun alternating the two binaries
+twice (load 9–30 %) and read within 2 % of each other.
+
+| test | before, JIT | after, JIT | before, interp | after, interp |
+|---|---|---|---|---|
+| `vdom` | 71.2 (69.3) | 53.0 (49.1) | 73.4 (71.4) | 60.3 (54.5) |
+| `mapset` | 39.7 (37.1) | 25.3 (21.9) | 43.7 (40.6) | 25.1 (23.3) |
+| `fib` | 236.0 (232.7) | 238.9 (236.5) | 359.5 (351.4) | 381.3 (371.7) |
+| `oo` | 1126.0 (1078.7) | 1097.0 (1051.8) | 1185.8 (1156.6) | 1304.7 (1197.3) |
+| `typed` | 629.1 (614.4) | 651.5 (639.9) | 1255.5 (1240.3) | 1310.2 (1263.3) |
+| `tokenize` | 164.4 (159.5) | 162.2 (157.1) | 183.2 (175.1) | 178.6 (175.2) |
+| `closure` | 456.1 (417.3) | 435.4 (429.2) | 712.1 (669.3) | 645.2 (640.3) |
+
+The other seven tests read within load noise. `for (const x of source)` per element, 1M elements: array
+413.8 → 22.2 ns compiled and 431.4 → 71.8 interpreted; `Set` 611.9 → 24.0 and 546.9 → 46.9; string
+501.6 → 72.8 and 578.2 → 98.8; `Map` (entries) 1317.1 → 546.5 and 1172.8 → 566.1; generators and
+user-written iterators unchanged. `vdom` meets its 55 ms target (53.0). `docs/jit.md` "Results (P70)" and
+`packages/P70-iterators.md` have the split and the loads.
