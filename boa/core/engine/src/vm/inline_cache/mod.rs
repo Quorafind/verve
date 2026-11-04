@@ -70,7 +70,8 @@ impl CacheEntry {
                     .map_or(Read::Unreadable, |value| Read::Value(value.clone()))
             };
         };
-        let Some(prototype) = shape.prototype() else {
+        // A prototype entry is only recorded for a receiver with a shared shape.
+        let Some(prototype) = shape.shared_prototype() else {
             return Read::Unreadable;
         };
         let Ok(prototype) = prototype.try_borrow() else {
