@@ -60,11 +60,11 @@ impl GetNameGlobal {
             let ic = &context.vm.frame().code_block().ic[usize::from(ic_index)];
 
             let object_borrowed = object.borrow();
-            if let Some(hit) = ic.get(object_borrowed.shape())
-                && let Some(mut result) = hit.read(object_borrowed.properties(), 0)
+            if let Some((slot, mut result)) =
+                ic.get(object_borrowed.shape(), object_borrowed.properties(), false)
             {
                 drop(object_borrowed);
-                if hit.slot.attributes.has_get() && result.is_object() {
+                if slot.attributes.has_get() && result.is_object() {
                     result = result.as_object().expect("should contain getter").call(
                         &object.clone().into(),
                         &[],

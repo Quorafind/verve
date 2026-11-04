@@ -7,8 +7,11 @@ use crate::{
     builtins::{
         function::set_function_name, typed_array::object::typed_array_element_set_shortcut,
     },
-    object::internal_methods::{
-        InternalMethodPropertyContext, InternalObjectMethods, ORDINARY_INTERNAL_METHODS,
+    object::{
+        internal_methods::{
+            InternalMethodPropertyContext, InternalObjectMethods, ORDINARY_INTERNAL_METHODS,
+        },
+        shape::slot::SlotAttributes,
     },
     property::{PropertyDescriptor, PropertyKey},
     vm::opcode::Operation,
@@ -93,16 +96,14 @@ fn cached_set(
 ) -> JsResult<bool> {
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
     let object_borrowed = object.borrow();
-    let Some(hit) = ic.get(object_borrowed.shape()) else {
+    let Some((slot, setter)) = ic.get(object_borrowed.shape(), object_borrowed.properties(), true)
+    else {
         return Ok(false);
     };
 
-    if hit.slot.attributes.is_accessor_descriptor() {
-        let Some(setter) = hit.read(object_borrowed.properties(), 1) else {
-            return Ok(false);
-        };
+    if slot.attributes.is_accessor_descriptor() {
         // No setter function is for `[[Set]]` to decide: it fails, and a strict function throws.
-        let Some(setter) = setter.as_object().filter(|_| hit.slot.attributes.has_set()) else {
+        let Some(setter) = setter.as_object().filter(|_| slot.attributes.has_set()) else {
             return Ok(false);
         };
         drop(object_borrowed);
@@ -110,7 +111,7 @@ fn cached_set(
         return Ok(true);
     }
 
-    if hit.prototype.is_some() {
+    if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
         return Ok(false);
     }
     drop(object_borrowed);
@@ -118,7 +119,7 @@ fn cached_set(
     let Some(stored) = object_borrowed
         .properties_mut()
         .storage
-        .get_mut(hit.slot.index as usize)
+        .get_mut(slot.index as usize)
     else {
         return Ok(false);
     };

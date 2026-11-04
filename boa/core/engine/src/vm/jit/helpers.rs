@@ -26,6 +26,7 @@ use crate::{
         },
     },
     environments::Environment,
+    object::shape::slot::SlotAttributes,
     vm::CodeBlock,
 };
 
@@ -263,15 +264,14 @@ fn cached_data_property(
     let ic = code_block.ic.get(ic as usize)?;
     object.with_object(|object| {
         let borrowed = object.try_borrow().ok()?;
-        let hit = ic.slot_for(borrowed.shape())?;
-        if hit.slot.attributes.is_accessor_descriptor() {
+        let (slot, value) = ic.slot_for(borrowed.shape(), borrowed.properties(), false)?;
+        if slot.attributes.is_accessor_descriptor() {
             return None;
         }
-        let value = hit.read(borrowed.properties(), 0)?;
         if let Some(site) = site
-            && hit.prototype.is_none()
+            && !slot.attributes.contains(SlotAttributes::PROTOTYPE)
         {
-            fill(site, object, hit.slot.index);
+            fill(site, object, slot.index);
         }
         Some(value)
     })?
@@ -346,16 +346,18 @@ pub(crate) unsafe extern "C" fn jit_set_property(
         let value = register(context, rp, value).clone();
         register(context, rp, object).with_object(|object| {
             let mut borrowed = object.try_borrow_mut().ok()?;
-            let hit = ic.slot_for(borrowed.shape())?;
-            if hit.slot.attributes.is_accessor_descriptor() || hit.prototype.is_some() {
+            let (slot, _) = ic.slot_for(borrowed.shape(), borrowed.properties(), true)?;
+            if slot.attributes.is_accessor_descriptor()
+                || slot.attributes.contains(SlotAttributes::PROTOTYPE)
+            {
                 return None;
             }
             *borrowed
                 .properties_mut()
                 .storage
-                .get_mut(hit.slot.index as usize)? = value;
+                .get_mut(slot.index as usize)? = value;
             drop(borrowed);
-            fill(site, object, hit.slot.index);
+            fill(site, object, slot.index);
             Some(())
         })?
     })
