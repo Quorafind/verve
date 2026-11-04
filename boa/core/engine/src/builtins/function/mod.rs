@@ -1075,12 +1075,6 @@ pub(crate) fn function_call(
         code
     };
 
-    let env_fp = environments.len() as u32;
-
-    let frame = CallFrame::new(code, script_or_module, environments, realm)
-        .with_argument_count(argument_count as u32)
-        .with_env_fp(env_fp);
-
     #[cfg(feature = "native-backtrace")]
     {
         let native_source_info = context.native_source_info();
@@ -1090,10 +1084,41 @@ pub(crate) fn function_call(
             .patch_last_native(native_source_info);
     }
 
+    enter_ordinary_function(
+        context.context(),
+        function_object,
+        (code, environments, script_or_module, realm),
+        argument_count,
+    )?;
+    Ok(CallValue::Ready)
+}
+
+/// What a frame of an ordinary function is made from: its code, its environments, its script
+/// or module and its realm.
+pub(crate) type FunctionParts = (
+    Gc<CodeBlock>,
+    EnvironmentStack,
+    Option<ActiveRunnable>,
+    Realm,
+);
+
+/// Pushes the frame of a call of `function_object`, whose arguments are on the stack, and sets
+/// up its `this` and its environments: what a call does once the function is known to be an
+/// ordinary function that may be called.
+pub(crate) fn enter_ordinary_function(
+    context: &mut Context,
+    function_object: &JsObject,
+    (code, environments, script_or_module, realm): FunctionParts,
+    argument_count: usize,
+) -> JsResult<()> {
+    let env_fp = environments.len() as u32;
+
+    let frame = CallFrame::new(code, script_or_module, environments, realm)
+        .with_argument_count(argument_count as u32)
+        .with_env_fp(env_fp);
+
     context.vm.push_frame(frame);
     context.vm.set_return_value(JsValue::undefined());
-
-    let context = context.context();
 
     let lexical_this_mode = context.vm.frame().code_block.this_mode == ThisMode::Lexical;
     let this = if lexical_this_mode {
@@ -1154,7 +1179,7 @@ pub(crate) fn function_call(
         );
     }
 
-    Ok(CallValue::Ready)
+    Ok(())
 }
 
 /// Construct an instance of this object with the specified arguments.

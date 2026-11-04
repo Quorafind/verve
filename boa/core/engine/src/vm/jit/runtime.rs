@@ -52,6 +52,8 @@ pub(crate) struct JitState {
     /// `RuntimeLimits::loop_iteration_limit`.
     loop_limit: u64,
     pub(super) context: *mut Context,
+    /// The VM stack's `Vec`, whose fields compiled code reads and writes to push and pop.
+    stack: *mut Vec<JsValue>,
     code: *const JitCode,
     pub(super) code_block: *const CodeBlock,
     frames_len: usize,
@@ -67,6 +69,11 @@ pub(crate) const FRAME_OFFSET: i32 = offset_of!(JitState, frame) as i32;
 pub(crate) const INTERRUPT_OFFSET: i32 = offset_of!(JitState, interrupt) as i32;
 pub(crate) const LOOP_LIMIT_OFFSET: i32 = offset_of!(JitState, loop_limit) as i32;
 pub(crate) const LOOP_COUNT_OFFSET: i32 = offset_of!(CallFrame, loop_iteration_count) as i32;
+pub(crate) const STACK_OFFSET: i32 = offset_of!(JitState, stack) as i32;
+pub(crate) const RP_OFFSET: i32 = offset_of!(JitState, rp) as i32;
+pub(crate) const FP_OFFSET: i32 = offset_of!(CallFrame, fp) as i32;
+pub(crate) const ARGUMENT_COUNT_OFFSET: i32 = offset_of!(CallFrame, argument_count) as i32;
+pub(crate) const FLAGS_OFFSET: i32 = offset_of!(CallFrame, flags) as i32;
 const _: () = assert!(size_of::<u64>() == size_of::<*const ()>());
 // Compiled code reads and writes registers as the 64-bit words of NaN-boxed values.
 const _: () = assert!(size_of::<JsValue>() == 8);
@@ -91,6 +98,7 @@ pub(crate) fn execute(
         interrupt,
         loop_limit,
         context: &raw mut *context,
+        stack: &raw mut context.vm.stack.stack,
         code: &raw const *code,
         code_block,
         frames_len,
@@ -166,7 +174,21 @@ fn step(
 ) -> u32 {
     // SAFETY: the context outlives compiled code, which uses it only through helpers.
     let context = unsafe { &mut *state.context };
-    if let ControlFlow::Break(record) = handler(context, pc as usize) {
+    let flow = handler(context, pc as usize);
+    finish(state, flow)
+}
+
+/// What follows an instruction run with the interpreter's handler, whose result is `flow`:
+/// runs the frames it pushed, if they can be, and answers the `pc` to go on at, or [`EXIT`].
+#[allow(
+    clippy::inline_always,
+    reason = "inlined into each jit_step instance, as the body of step was"
+)]
+#[inline(always)]
+pub(super) fn finish(state: &mut JitState, flow: ControlFlow<CompletionRecord>) -> u32 {
+    // SAFETY: as in `step`.
+    let context = unsafe { &mut *state.context };
+    if let ControlFlow::Break(record) = flow {
         state.outcome = Some(ControlFlow::Break(record));
         return EXIT;
     }

@@ -1163,6 +1163,15 @@ impl Context {
     /// Checks if we haven't exceeded the defined runtime limits.
     pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
         self.check_interrupt()?;
+        if self.runtime_limits_exceeded() {
+            return Err(Self::stack_overflow());
+        }
+        Ok(())
+    }
+
+    /// Whether a call now would pass the recursion, native stack or stack size limit, which
+    /// `check_runtime_limits` throws a `RangeError` for.
+    pub(crate) fn runtime_limits_exceeded(&self) -> bool {
         // Must throw if the number of recursive calls exceeds the defined limit.
         //
         // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking
@@ -1174,7 +1183,7 @@ impl Context {
         // safe all the same, since only the host calls nest on it.
         let recursion_depth = (self.vm.frames.len() - 1).saturating_add(self.vm.host_call_depth);
         if self.vm.runtime_limits.recursion_limit() <= recursion_depth {
-            return Err(Self::stack_overflow());
+            return true;
         }
         // Must throw if nested runs of the interpreter have taken too much native stack.
         if self.vm.run_depth > 1
@@ -1184,14 +1193,14 @@ impl Context {
                 .saturating_sub(native_stack_position())
                 > self.vm.runtime_limits.native_stack_limit()
         {
-            return Err(Self::stack_overflow());
+            return true;
         }
         // Must throw if the stack size exceeds the defined maximum length.
         if self.vm.runtime_limits.stack_size_limit() <= self.vm.stack.stack.len() {
-            return Err(Self::stack_overflow());
+            return true;
         }
 
-        Ok(())
+        false
     }
 }
 

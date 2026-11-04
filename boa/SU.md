@@ -418,6 +418,39 @@ always agree with one another.
   and test262's `builtins/TypedArray/prototype/sort/stability` failed. Both zeroes now mean
   `Equal`; only a number above or below zero orders the pair. NaN was already `Equal`.
 
+- `boa_engine`, `builtins/array/mod.rs`, `vm/jit/helpers.rs`: `Array::plain_dense_array` is
+  `pub(crate)`, and the JIT's `SetPropertyByValue` helper uses it to append: `a[i] = x` with `i`
+  the count of a plain dense array's elements (and `length` at least that) pushes the element
+  and grows `length` to cover it, as `[[Set]]` and `Array`'s `[[DefineOwnProperty]]` do there.
+  Any other array, index or `length` takes the interpreter's `[[Set]]`.
+
+- `boa_engine`, `vm/jit/compiler/arith.rs` (feature `jit`): `/` is compiled inline as `div_fast`
+  computes it: an exact `int32` quotient is an `int32`, every other quotient of numbers an `f64`.
+  A dividend of `0` takes the interpreter's handler, whose `0 / -5` is `0` where JavaScript's is
+  `-0`.
+
+- `boa_engine`, `builtins/function/mod.rs`, `vm/mod.rs`, `vm/jit/call.rs`: `function_call` is split
+  in two, the checks and the clones of the function's parts, and `enter_ordinary_function`, which
+  pushes the frame and sets `this` and the environments; the interpreter's behaviour is
+  unchanged. `Context::check_runtime_limits` is split into the interrupt check and
+  `runtime_limits_exceeded`, which only reads. Compiled code calls a compiled ordinary function
+  through `enter_ordinary_function` directly (`jit_call`), when no limit is about to be passed and
+  no interrupt is pending; every other callee goes through `jit_step`.
+
+- `boa_engine`, `vm/jit/` (feature `jit`): `PushFromRegister`, `PopIntoRegister`, `GetArgument` and
+  `CheckReturn` are compiled inline, reading and writing the VM stack's `Vec` (pointer, length and
+  capacity found by looking at a real one, as the object layout is) and the frame's `fp`,
+  `argument_count` and `CONSTRUCT` flag; a full stack, a pointer that is not an object and a
+  constructor's frame take the fast helper or the interpreter's handler. `JitState` carries the
+  stack's address. No interpreter code changes.
+
+- `boa_engine`, `vm/jit/helpers.rs` (feature `jit`): the fast helpers of `GetLengthProperty`,
+  `GetPropertyByValue` and `SetPropertyByValue` handle typed arrays by calling the interpreter's
+  own shortcuts (`typed_array_length_shortcut`, `typed_array_element_get_shortcut`,
+  `typed_array_element_set_shortcut`), so the guards live in one place. A store is the
+  helper's only when its receiver is the array itself, which compiled code decides at compile
+  time (the instruction's receiver register is the object's).
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

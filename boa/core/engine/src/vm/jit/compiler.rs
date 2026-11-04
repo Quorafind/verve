@@ -45,6 +45,10 @@ use crate::{
     },
 };
 
+mod arith;
+mod calls;
+mod stack;
+
 use super::{
     JitCode, JitOptions,
     helpers::{self, HelperFn, SiteHelperFn},
@@ -54,6 +58,7 @@ use super::{
         EXIT, FRAME_OFFSET, INTERRUPT_OFFSET, LOOP_COUNT_OFFSET, LOOP_LIMIT_OFFSET, REGS_OFFSET,
         STEPS, jit_lookup, jit_store,
     },
+    stack_layout::{StackLayout, stack_layout},
 };
 
 /// The tag bits of NaN-boxed values (`value/inner/nan_boxed.rs`); checked against values made
@@ -165,9 +170,10 @@ pub(super) fn compile(
             .as_ref()
             .map_err(|reason| CompileError::Unavailable(reason.clone()))?;
         #[cfg(test)]
-        if PANIC_IN_CODEGEN.with(std::cell::Cell::get) {
-            panic!("code generator panic (test)");
-        }
+        assert!(
+            !PANIC_IN_CODEGEN.with(std::cell::Cell::get),
+            "code generator panic (test)"
+        );
         let (function, sites) = translate(code_block, &block_pcs, isa);
         let mut context = ClifContext::for_function(function);
         let compiled = context
@@ -232,6 +238,7 @@ fn kind(instruction: &Instruction) -> Kind {
         | Instruction::Sub { .. }
         | Instruction::Mul { .. }
         | Instruction::Mod { .. }
+        | Instruction::Div { .. }
         | Instruction::BitAnd { .. }
         | Instruction::BitOr { .. }
         | Instruction::BitXor { .. }
@@ -325,6 +332,7 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
         | Instruction::Sub { dst, lhs, rhs }
         | Instruction::Mul { dst, lhs, rhs }
         | Instruction::Mod { dst, lhs, rhs }
+        | Instruction::Div { dst, lhs, rhs }
         | Instruction::BitAnd { dst, lhs, rhs }
         | Instruction::BitOr { dst, lhs, rhs }
         | Instruction::BitXor { dst, lhs, rhs }
@@ -541,6 +549,10 @@ struct Translator<'a> {
     site_helper_sig: SigRef,
     /// Where objects keep their shape and properties, if it checked out on this thread.
     layout: Option<ObjectLayout>,
+    /// Where the VM stack's fields are, if it checked out on this thread.
+    stack_layout: Option<StackLayout>,
+    /// The code block's register count, below which a pop would take a register.
+    register_count: u32,
     /// The caches of the property accesses compiled inline; the code keeps them.
     #[allow(
         clippy::vec_box,
@@ -623,6 +635,8 @@ fn translate(
         helper_sig,
         site_helper_sig,
         layout: object_layout(),
+        stack_layout: stack_layout(),
+        register_count: code_block.register_count,
         sites: Vec::new(),
         lookup_sig,
         slow: Vec::new(),
@@ -662,8 +676,9 @@ fn translate(
             pc = next;
             continue;
         }
-        // Pushes in a row (a call's `this`, function and arguments) are one helper call.
-        if let Instruction::PushFromRegister { src } = instruction {
+        // Pushes in a row (a call's `this`, function and arguments) are one helper call, unless
+        // they are done inline.
+        if let (&Instruction::PushFromRegister { src }, None) = (&instruction, t.stack_layout) {
             let mut sources = vec![u32::from(src)];
             let mut end = next;
             while sources.len() < 3 && end < len && !t.blocks.contains_key(&(end as u32)) {
@@ -1083,8 +1098,16 @@ impl Translator<'_> {
                 self.b.switch_to_block(done);
             }
             Instruction::PushFromRegister { src } => {
-                let operands = [src.into(), helpers::NO_REGISTER, helpers::NO_REGISTER];
-                self.fast(helpers::jit_push, operands, Fast::MovesStack, pc, next);
+                if let Some(layout) = self.stack_layout {
+                    self.push_inline(layout, src.into(), pc, next);
+                } else {
+                    let operands = [src.into(), helpers::NO_REGISTER, helpers::NO_REGISTER];
+                    self.fast(helpers::jit_push, operands, Fast::MovesStack, pc, next);
+                }
+            }
+            Instruction::PopIntoRegister { dst } if self.stack_layout.is_some() => {
+                let layout = self.stack_layout.expect("checked by the guard");
+                self.pop_inline(layout, dst.into(), pc, next);
             }
             Instruction::PopIntoRegister { dst } => {
                 self.fast(
@@ -1098,6 +1121,10 @@ impl Translator<'_> {
             Instruction::SetAccumulator { src } => {
                 let f = helpers::jit_set_accumulator;
                 self.fast(f, [src.into(), 0, 0], Fast::Always, pc, next);
+            }
+            Instruction::GetArgument { index, dst } if self.stack_layout.is_some() => {
+                let layout = self.stack_layout.expect("checked by the guard");
+                self.argument_inline(layout, [index.into(), dst.into()], pc, next);
             }
             Instruction::GetArgument { index, dst } => {
                 let f = helpers::jit_get_argument;
@@ -1120,6 +1147,10 @@ impl Translator<'_> {
                     pc,
                     next,
                 );
+            }
+            Instruction::CheckReturn if self.stack_layout.is_some() => {
+                let layout = self.stack_layout.expect("checked by the guard");
+                self.check_return_inline(layout, pc, next);
             }
             Instruction::CheckReturn => {
                 self.fast(helpers::jit_check_return, [0; 3], Fast::MaySlow, pc, next);
@@ -1154,9 +1185,17 @@ impl Translator<'_> {
                 self.get_element([dst.into(), key.into(), object.into()], pc, next);
             }
             Instruction::SetPropertyByValue {
-                value, key, object, ..
-            } => {
+                value,
+                key,
+                receiver,
+                object,
+            } if u32::from(receiver) == u32::from(object) => {
                 self.set_element([value.into(), key.into(), object.into()], pc, next);
+            }
+            // A receiver that is not the object (`super[key] = value`) is the interpreter's.
+            Instruction::SetPropertyByValue { .. } => {
+                self.step(pc, &[next]);
+                return true;
             }
             Instruction::Add { dst, lhs, rhs } => {
                 self.arithmetic(Arith::Add, dst.into(), lhs.into(), rhs.into(), pc, next);
@@ -1169,6 +1208,9 @@ impl Translator<'_> {
             }
             Instruction::Mod { dst, lhs, rhs } => {
                 self.remainder(dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::Div { dst, lhs, rhs } => {
+                self.divide(dst.into(), lhs.into(), rhs.into(), pc, next);
             }
             Instruction::BitAnd { dst, lhs, rhs } => {
                 self.bitwise(Bitwise::And, dst.into(), lhs.into(), rhs.into(), pc, next);
@@ -1331,6 +1373,10 @@ impl Translator<'_> {
             }
             Instruction::IncrementLoopIteration => {
                 self.loop_iteration(pc, next);
+                return true;
+            }
+            Instruction::Call { argument_count } => {
+                self.call_direct(pc, next, argument_count.into());
                 return true;
             }
             _ => {
