@@ -11,10 +11,13 @@ const SCENARIOS: &str = include_str!("tests_typed_elements/scenarios.js");
 /// What Node 22 prints for [`SCENARIOS`].
 const EXPECTED: &str = include_str!("tests_typed_elements/expected.txt");
 
-/// Floats of 2^63 and beyond written to the narrow integer kinds, which the helper and the
-/// interpreter convert alike but not as Node does (`to_int8` and its kin saturate at `i64`
-/// before taking the remainder), so only the three modes are compared.
+/// Huge, negative, fractional and non-finite numbers written to every element kind, to
+/// `DataView` and through `String.fromCharCode` and `Atomics`: the small integer conversions
+/// take the low bits of the truncated number however large it is.
 const HUGE: &str = include_str!("tests_typed_elements/huge.js");
+
+/// What Node 22 prints for [`HUGE`].
+const HUGE_EXPECTED: &str = include_str!("tests_typed_elements/huge.txt");
 
 /// Random operations of every numeric kind, one hot loop each: the three modes only.
 const RANDOM: &str = include_str!("tests_typed_elements/random.js");
@@ -70,7 +73,10 @@ fn the_layout_of_typed_arrays_checks_out() {
 }
 
 #[test]
-fn huge_floats_written_to_typed_arrays_match_the_interpreter() {
+fn huge_floats_written_to_typed_arrays_match_node() {
     let output = assert_modes_agree(HUGE);
-    assert_eq!(output.lines().count(), 9, "{output}");
+    assert_eq!(
+        output.lines().collect::<Vec<_>>(),
+        HUGE_EXPECTED.lines().collect::<Vec<_>>()
+    );
 }

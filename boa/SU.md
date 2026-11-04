@@ -694,3 +694,8 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   read-only property or proxy that `[[Set]]` would meet can be skipped; any change gives a miss,
   and the next slow assignment records the entry again. Four shapes per site, then the site stops
   recording. Compiled code takes the same entries through `jit_set_property`.
+
+- `boa_engine`, `value/mod.rs`: `ToInt8`, `ToUint8`, `ToInt16` and `ToUint16` take the low bits of
+  `ToInt32` of the number instead of casting to `i64` first, which saturated at 2^63: a float of 2^63
+  or more (`new Int8Array(1)[0] = 3.4e38`, `new Uint16Array(1)[0] = 2 ** 64 + 4096`) gave the wrong
+  element, `-1` or `65535` where the specification and Node give `0` or `4096`.

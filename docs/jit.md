@@ -289,8 +289,8 @@ A read boxes the element as the interpreter does (`TypedArrayElement` into `JsVa
 kind is an `f64` value, not an `int32` one, with `NaN` the canonical one. A write is the one the
 shortcut makes: `Float64` the number; `Float32` the number rounded to `f32` (`fdemote`, the
 instruction `as f32` is); the integer kinds the low bits of `ToInt32` of the number (`int32_of`,
-which leaves a finite float of 2^63 or more to the helper, since the interpreter's
-`to_int8` and its kin saturate there and differ from the specification, see below);
+which leaves a finite float of 2^63 or more to the helper, since the 64-bit truncation
+saturates there);
 `Uint8Clamped` an `int32` clamped to 0..255 (a float, whose rounding is the helper's, is the
 helper's). The offsets of the fields (`TypedArray`'s buffer, kind, offset and length; `BufferObject`'s
 two words; `ArrayBuffer`'s pointer and length) are found by looking at real objects, and checked
