@@ -6,7 +6,7 @@ use crate::{
         typed_array_element_get_shortcut, typed_array_length_guard, typed_array_length_read,
     },
     js_string,
-    object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
+    object::internal_methods::InternalMethodPropertyContext,
     property::PropertyKey,
     vm::opcode::{IndexOperand, Operation, RegisterOperand, nullish_base_error},
 };
@@ -55,17 +55,11 @@ fn get_by_name<const LENGTH: bool>(
 
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
     let object_borrowed = object.borrow();
-    if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
-        let mut result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let prototype = shape.prototype().expect("prototype should have value");
-            let prototype = prototype.borrow();
-            prototype.properties().storage[slot.index as usize].clone()
-        } else {
-            object_borrowed.properties().storage[slot.index as usize].clone()
-        };
-
+    if let Some(hit) = ic.get(object_borrowed.shape())
+        && let Some(mut result) = hit.read(object_borrowed.properties(), 0)
+    {
         drop(object_borrowed);
-        if slot.attributes.has_get() && result.is_object() {
+        if hit.slot.attributes.has_get() && result.is_object() {
             result =
                 result
                     .as_object()
