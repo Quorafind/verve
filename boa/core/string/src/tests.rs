@@ -944,6 +944,172 @@ mod rope {
         assert_eq!(text(&v), format!("{}xyuv", "a".repeat(300)));
     }
 
+    fn units(s: &JsString) -> Vec<u16> {
+        s.to_vec()
+    }
+
+    fn expected(head: usize, tail: &[u16]) -> Vec<u16> {
+        let mut v = vec![u16::from(b'a'); head];
+        v.extend_from_slice(tail);
+        v
+    }
+
+    /// Appends each of `pieces` in turn.
+    fn append_all(base: &JsString, pieces: &[&[u16]]) -> JsString {
+        let mut s = base.clone();
+        for p in pieces {
+            s = JsString::concat_lazy(&s, &JsString::from(*p));
+        }
+        s
+    }
+
+    #[test]
+    fn wide_appends_share_one_buffer() {
+        let base = latin1(300, 'a');
+        let s = append_all(&base, &[&[0x4e2d], &[0x31], &[0x4e2d, 0x32]]);
+        // A node for the base, one for the rope: the pieces live in a shared buffer.
+        assert_eq!(base.refcount(), Some(2));
+        assert_eq!(s.len(), 304);
+        assert_eq!(units(&s), expected(300, &[0x4e2d, 0x31, 0x4e2d, 0x32]));
+    }
+
+    #[test]
+    fn latin1_buffer_is_widened_mid_buffer() {
+        let base = latin1(300, 'a');
+        let s = append_all(&base, &[&[0x78], &[0x79], &[0x7a]]);
+        let t = JsString::concat_lazy(&s, &utf16(1, 0x20ac));
+        let u = JsString::concat_lazy(&t, &latin1(2, 'q'));
+        // The Latin-1 rope is still a Latin-1 rope that can be appended to and read.
+        let s2 = JsString::concat_lazy(&s, &latin1(1, 'w'));
+        assert_eq!(
+            units(&u),
+            expected(300, &[0x78, 0x79, 0x7a, 0x20ac, 0x71, 0x71])
+        );
+        assert_eq!(units(&t), expected(300, &[0x78, 0x79, 0x7a, 0x20ac]));
+        assert_eq!(units(&s2), expected(300, &[0x78, 0x79, 0x7a, 0x77]));
+        assert_eq!(units(&s), expected(300, &[0x78, 0x79, 0x7a]));
+        assert_eq!(s2.to_std_string().unwrap().len(), 304);
+    }
+
+    #[test]
+    fn surrogate_pair_split_across_appends() {
+        let base = latin1(300, 'a');
+        let s = append_all(&base, &[&[0x61], &[0xd83d], &[0xde00], &[0x62]]);
+        assert_eq!(units(&s), expected(300, &[0x61, 0xd83d, 0xde00, 0x62]));
+        assert_eq!(
+            s.to_std_string().unwrap().chars().nth(301),
+            Some('\u{1f600}')
+        );
+        // The first half alone is a lone surrogate, however it was appended.
+        let lone = append_all(&base, &[&[0x61], &[0xd83d]]);
+        assert_eq!(units(&lone), expected(300, &[0x61, 0xd83d]));
+        assert!(lone.to_std_string().is_err());
+        // The same text built from a wide base and from a flat string is equal.
+        let flat = JsString::from(expected(300, &[0x61, 0xd83d, 0xde00, 0x62]).as_slice());
+        assert_eq!(s, flat);
+        assert_eq!(super::hash_value(&s), super::hash_value(&flat));
+    }
+
+    #[test]
+    fn forks_on_both_sides_of_a_widening() {
+        let base = latin1(300, 'a');
+        let s = append_all(&base, &[&[0x31], &[0x32]]);
+        let s1 = s.clone();
+        let a = JsString::concat_lazy(&s, &latin1(1, 'a'));
+        let b = JsString::concat_lazy(&s1, &utf16(1, 0x4e2d));
+        let c = JsString::concat_lazy(&s1, &utf16(1, 0x20ac));
+        let b2 = JsString::concat_lazy(&b, &latin1(1, 'b'));
+        let b3 = JsString::concat_lazy(&b, &utf16(1, 0x4e2e));
+        let c2 = JsString::concat_lazy(&c, &latin1(1, 'c'));
+        let head = [0x31, 0x32];
+        let with = |t: &[u16]| expected(300, &[&head[..], t].concat());
+        assert_eq!(units(&c2), with(&[0x20ac, 0x63]));
+        assert_eq!(units(&b3), with(&[0x4e2d, 0x4e2e]));
+        assert_eq!(units(&a), with(&[0x61]));
+        assert_eq!(units(&b2), with(&[0x4e2d, 0x62]));
+        assert_eq!(units(&s1), with(&[]));
+        assert_eq!(units(&b), with(&[0x4e2d]));
+        assert_eq!(units(&c), with(&[0x20ac]));
+        // Forks of a wide rope too.
+        let w = append_all(&base, &[&[0x4e2d], &[0x4e2d]]);
+        let x = JsString::concat_lazy(&w, &latin1(1, 'x'));
+        let y = JsString::concat_lazy(&w, &utf16(1, 0x4e2f));
+        assert_eq!(units(&y), expected(300, &[0x4e2d, 0x4e2d, 0x4e2f]));
+        assert_eq!(units(&x), expected(300, &[0x4e2d, 0x4e2d, 0x78]));
+        assert_eq!(units(&w), expected(300, &[0x4e2d, 0x4e2d]));
+    }
+
+    #[test]
+    fn wide_base_and_wide_right_half() {
+        // The left half is wide while the pieces appended are Latin-1.
+        let base = utf16(300, 0x4e2d);
+        let s = append_all(&base, &[&[0x31], &[0x32], &[0x4e2d]]);
+        let mut want = vec![0x4e2d; 300];
+        want.extend([0x31, 0x32, 0x4e2d]);
+        assert_eq!(units(&s), want);
+        // A rope of two long pieces, the second one wide, followed by short appends.
+        let r = JsString::concat_lazy(&latin1(300, 'a'), &utf16(40, 0x4e2d));
+        let r = append_all(&r, &[&[0x31], &[0x32]]);
+        let mut want = vec![0x61; 300];
+        want.extend([0x4e2d; 40]);
+        want.extend([0x31, 0x32]);
+        assert_eq!(units(&r), want);
+    }
+
+    #[test]
+    fn empty_and_long_appends_with_buffers() {
+        let base = latin1(300, 'a');
+        let s = append_all(&base, &[&[0x4e2d], &[0x4e2d]]);
+        let same = JsString::concat_lazy(&s, &JsString::default());
+        assert_eq!(same.len(), s.len());
+        let same = JsString::concat_lazy(&JsString::default(), &s);
+        assert_eq!(same.len(), s.len());
+        // A piece longer than the buffer takes stays a node of its own; the buffer is intact.
+        let long = JsString::concat_lazy(&s, &utf16(100, 0x4e2e));
+        let t = JsString::concat_lazy(&s, &latin1(1, 'z'));
+        let mut want = expected(300, &[0x4e2d, 0x4e2d]);
+        want.extend([0x4e2e; 100]);
+        assert_eq!(units(&long), want);
+        assert_eq!(units(&t), expected(300, &[0x4e2d, 0x4e2d, 0x7a]));
+        // A long Latin-1 tail is not widened, and stays correct.
+        let mut big = latin1(300, 'a');
+        for _ in 0..40 {
+            big = JsString::concat_lazy(&big, &latin1(60, 'b'));
+        }
+        let wide = JsString::concat_lazy(&big, &utf16(1, 0x4e2d));
+        assert_eq!(wide.len(), 300 + 2400 + 1);
+        assert_eq!(wide.to_vec()[2700], 0x4e2d);
+        assert_eq!(big.to_vec().len(), 2700);
+    }
+
+    #[test]
+    fn deep_chains_of_wide_appends_flatten_and_drop() {
+        let mut s = latin1(ROPE_MIN_LEN, 'x');
+        for i in 0..DEEP {
+            s = JsString::concat_lazy(&s, &utf16(1, 0x4e00 + (i % 100) as u16));
+        }
+        assert_eq!(s.len(), ROPE_MIN_LEN + DEEP);
+        let v = s.to_vec();
+        assert_eq!(v[ROPE_MIN_LEN + 5], 0x4e05);
+        assert_eq!(
+            v[ROPE_MIN_LEN + DEEP - 1],
+            0x4e00 + ((DEEP - 1) % 100) as u16
+        );
+        // Long wide pieces: a chain of nodes, not buffers.
+        let mut s = utf16(ROPE_MIN_LEN, 0x4e2d);
+        let piece = utf16(100, 0x4e2e);
+        for _ in 0..DEEP / 10 {
+            s = JsString::concat_lazy(&s, &piece);
+        }
+        assert_eq!(s.to_vec().len(), ROPE_MIN_LEN + 100 * (DEEP / 10));
+        // Dropped unread.
+        let mut s = latin1(ROPE_MIN_LEN, 'x');
+        for i in 0..DEEP {
+            s = JsString::concat_lazy(&s, &utf16(1, 0x4e00 + (i % 100) as u16));
+        }
+        drop(s);
+    }
+
     #[test]
     fn deep_chains_of_long_pieces_still_flatten_and_drop() {
         let mut s = latin1(ROPE_MIN_LEN, 'x');
