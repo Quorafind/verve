@@ -472,3 +472,23 @@ user-written iterators unchanged. `vdom` meets its 55 ms target (53.0). `docs/ji
 `Float64Array`, five alternating pairs, load 13.4 to 17.8 % before and 28 to 62 % after, the rise after the last process): 55.7 (54.5) to
 17.0 (16.5) ns an iteration, 3.3 of it the loop, against a target of 15; element read 15.2 and write 17.6 ns, and a dense array's `length`
 5.5 ns, unchanged. Details and what is left in `docs/jit.md` "Results (typed-array `length`, P72)".
+
+### P75: the prototype inline cache checks the prototype's shape
+
+`electron/p75-prototype-inline-cache` against `docs/electron-plan` `2e902b19`, both `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`, `VERVE_CODE_CACHE=0`, a throwaway profile folder, the machine shared with three other workers. Suite round (`--runs 7`,
+before then after for each test, load 8.6–14.8 % before and 4–11 % after; median (best)):
+
+| test | before, JIT | after, JIT | before, interp | after, interp |
+|---|---|---|---|---|
+| `oo` | 1079.4 (1056.5) | 1101.2 (1062.0) | 1144.9 (1088.9) | 1167.4 (1105.6) |
+| `vdom` | 51.4 (49.0) | 53.2 (50.0) | 57.1 (52.6) | 53.9 (52.9) |
+| `alloc` | 264.6 (257.4) | 267.1 (262.9) | 277.6 (266.6) | 284.8 (277.3) |
+| `closure` | 435.3 (428.1) | 428.4 (421.6) | 646.8 (642.1) | 655.4 (637.2) |
+| `tokenize` | 161.6 (157.6) | 164.2 (154.1) | 173.5 (167.7) | 168.0 (165.4) |
+
+Medians move +2.0, +3.5, +1.0, -1.6, +1.6 % compiled and +2.0, -5.0, +2.6, +1.3, -3.2 % interpreted; `vdom` is the noisy one (its best
+runs: +2.0 and +0.6 %). An earlier round, before the hit path was trimmed (one borrow, no shape upgrades, no prototype clone), had `alloc`
+at +5.7 % compiled; two rounds at load 45–60 % were not used. Probe (a data property on the class prototype read in a loop, `-A`, five
+runs, best, minus the loop): 17.4 to 19.0 ns compiled, interpreted unchanged within noise; `a.push` on an array in a loop of 300k:
+86 to 88 ns an iteration. Details in `docs/jit.md` "Property caches and elements" and `packages/P75-prototype-inline-cache.md`.
