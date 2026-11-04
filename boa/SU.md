@@ -451,6 +451,20 @@ always agree with one another.
   helper's only when its receiver is the array itself, which compiled code decides at compile
   time (the instruction's receiver register is the object's).
 
+- `boa_string`, `vtable/rope.rs`, `lib.rs`: a fifth string kind, `JsStringKind::Rope`, the lazy
+  concatenation of two strings. `JsString::concat_lazy(x, y)` returns the other side for an empty
+  one, copies below `ROPE_MIN_LEN` (256 code units) like `concat`, and otherwise builds a node of
+  88 bytes (`size_of::<RopeString>()`, measured) holding both halves. The content is copied into
+  one buffer by the first `as_str` (iteratively, from the end, with a heap stack, so a chain of
+  any depth is safe), the node then keeps only that flat string and drops the halves; `len`,
+  `clone` and `ptr_eq` never flatten. Dropping a chain is iterative too. Slicing a flattened rope
+  slices its flat string. A flattened rope that is appended to again starts a new chain, so
+  reading before every append is as quadratic as it was.
+
+- `boa_engine`, `value/operations.rs`: `JsValue::add` joins strings with `JsString::concat_lazy`
+  (all three string branches), so `s += x` in a loop builds a rope and is linear. Templates and
+  `concat_array` callers still copy.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

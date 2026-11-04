@@ -1,0 +1,266 @@
+//! `VTable` implementations for [`RopeString`], a lazy concatenation of two strings.
+use crate::iter::CodePointsIter;
+use crate::r#type::{Latin1, Utf16};
+use crate::vtable::{JsStringVTable, SequenceString};
+use crate::{JsStr, JsStrVariant, JsString, JsStringKind};
+use std::cell::{Cell, UnsafeCell};
+use std::process::abort;
+use std::ptr::{self, NonNull};
+
+/// What a rope currently holds.
+enum RopeState {
+    /// The two halves, not yet copied into one buffer.
+    Unflattened { left: JsString, right: JsString },
+    /// The concatenation, built by the first read of the content. Once written it is never
+    /// changed, which is what lets [`rope_as_str`] hand out slices borrowed from it.
+    Flat(JsString),
+}
+
+/// The concatenation of two strings, copied into one buffer only when its content is first read.
+///
+/// `s += x` in a loop builds a chain of these instead of copying the whole accumulated string on
+/// every step; [`JsString::len`] and clones never read the content.
+///
+/// # Notes
+/// Like the other kinds it is `!Sync` (`Cell` refcount, `UnsafeCell` state).
+#[repr(C)]
+pub(crate) struct RopeString {
+    /// Embedded `VTable` - must be the first field for vtable dispatch.
+    vtable: JsStringVTable,
+    refcount: Cell<usize>,
+    state: UnsafeCell<RopeState>,
+    /// Whether the flat result is Latin-1, i.e. both halves are. Kept here so that building a
+    /// rope over another rope does not have to read the inner one's content.
+    latin1: bool,
+}
+
+/// Whether `string` is Latin-1, without flattening it if it is a rope.
+fn is_latin1(string: &JsString) -> bool {
+    if string.kind() == JsStringKind::Rope {
+        // SAFETY: The kind was just checked.
+        let rope: &RopeString = unsafe { string.as_inner() };
+        rope.latin1
+    } else {
+        string.as_str().is_latin1()
+    }
+}
+
+/// The halves of `string` if it is a rope that has not been flattened yet.
+fn unflattened(string: &JsString) -> Option<(&JsString, &JsString)> {
+    if string.kind() != JsStringKind::Rope {
+        return None;
+    }
+    // SAFETY: The kind was just checked.
+    let rope: &RopeString = unsafe { string.as_inner() };
+    // SAFETY: The state is only written by `flatten` and `take_rope_children`. `flatten` does
+    // not write while it holds references from here (it writes after it is done with them),
+    // and `take_rope_children` runs on the last reference only. The program is single-threaded.
+    match unsafe { &*rope.state.get() } {
+        RopeState::Unflattened { left, right } => Some((left, right)),
+        RopeState::Flat(_) => None,
+    }
+}
+
+impl RopeString {
+    /// Creates a rope for `left` + `right`, whose total length is `len`.
+    #[allow(clippy::new_ret_no_self)]
+    pub(crate) fn new(left: JsString, right: JsString, len: usize) -> JsString {
+        let latin1 = is_latin1(&left) && is_latin1(&right);
+        let node = Box::new(RopeString {
+            vtable: JsStringVTable {
+                clone: rope_clone,
+                drop: rope_drop,
+                as_str: rope_as_str,
+                code_points: rope_code_points,
+                refcount: rope_refcount,
+                len,
+                kind: JsStringKind::Rope,
+            },
+            refcount: Cell::new(1),
+            state: UnsafeCell::new(RopeState::Unflattened { left, right }),
+            latin1,
+        });
+        // SAFETY: `RopeString` starts with its vtable, as every string must.
+        unsafe { JsString::from_ptr(NonNull::from(Box::leak(node)).cast()) }
+    }
+
+    /// The flat string of `string` if it is a rope that has been flattened.
+    pub(crate) fn flat_of(string: &JsString) -> Option<&JsString> {
+        if string.kind() != JsStringKind::Rope {
+            return None;
+        }
+        // SAFETY: The kind was just checked.
+        let rope: &RopeString = unsafe { string.as_inner() };
+        // SAFETY: See `unflattened`.
+        match unsafe { &*rope.state.get() } {
+            RopeState::Flat(flat) => Some(flat),
+            RopeState::Unflattened { .. } => None,
+        }
+    }
+
+    /// Copies the halves into one buffer, stores it, releases the halves and returns its content.
+    #[cold]
+    #[inline(never)]
+    fn flatten(&self) -> JsStr<'static> {
+        // SAFETY: See `unflattened`.
+        let RopeState::Unflattened { left, right } = (unsafe { &*self.state.get() }) else {
+            unreachable!("`flatten` is only called on an unflattened rope");
+        };
+        let len = self.vtable.len;
+        let flat = if self.latin1 {
+            let seq = SequenceString::<Latin1>::allocate(len);
+            // SAFETY: The allocation holds `len` bytes after its header.
+            let mut dst = unsafe { (&raw mut (*seq.as_ptr()).data).cast::<u8>().add(len) };
+            for_each_leaf_rev(left, right, |leaf| {
+                let JsStrVariant::Latin1(bytes) = leaf.variant() else {
+                    unreachable!("both halves of a Latin-1 rope are Latin-1");
+                };
+                // SAFETY: The leaves add up to `len` and are written from the end, so
+                // `dst - bytes.len()` stays inside the buffer. The buffer is new, so it cannot
+                // overlap a leaf.
+                unsafe {
+                    dst = dst.sub(bytes.len());
+                    ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+                }
+            });
+            // SAFETY: A `SequenceString` starts with its vtable.
+            unsafe { JsString::from_ptr(seq.cast()) }
+        } else {
+            let seq = SequenceString::<Utf16>::allocate(len);
+            // SAFETY: The allocation holds `len` code units after its header.
+            let mut dst = unsafe { (&raw mut (*seq.as_ptr()).data).cast::<u16>().add(len) };
+            for_each_leaf_rev(left, right, |leaf| {
+                // SAFETY: As for Latin-1: the leaves add up to `len`, written from the end into
+                // a new buffer.
+                unsafe {
+                    dst = dst.sub(leaf.len());
+                    match leaf.variant() {
+                        JsStrVariant::Utf16(units) => {
+                            ptr::copy_nonoverlapping(units.as_ptr(), dst, units.len());
+                        }
+                        JsStrVariant::Latin1(bytes) => {
+                            for (i, byte) in bytes.iter().enumerate() {
+                                dst.add(i).write(u16::from(*byte));
+                            }
+                        }
+                    }
+                }
+            });
+            // SAFETY: A `SequenceString` starts with its vtable.
+            unsafe { JsString::from_ptr(seq.cast()) }
+        };
+
+        // SAFETY: The slice lives as long as `flat`, which the state keeps until the node dies.
+        let content = unsafe { flat.as_str().as_static() };
+        // SAFETY: `left` and `right` are not used past this point, and nothing else holds a
+        // reference into the state (see `unflattened`).
+        let old = std::mem::replace(unsafe { &mut *self.state.get() }, RopeState::Flat(flat));
+        // Dropping the halves can release a very long chain; `rope_drop` does that iteratively.
+        drop(old);
+        content
+    }
+
+    /// Moves what this rope holds that is itself a rope into `out`, leaving the node holding
+    /// nothing, so that dropping it does not recurse.
+    ///
+    /// The caller must own the last reference to the node.
+    fn take_rope_children(&self, out: &mut Vec<JsString>) {
+        // SAFETY: The caller owns the last reference to the node, so nothing else reads the state.
+        let state = unsafe { &mut *self.state.get() };
+        let old = std::mem::replace(state, RopeState::Flat(JsString::default()));
+        let mut keep = |s: JsString| {
+            if s.kind() == JsStringKind::Rope {
+                out.push(s);
+            }
+        };
+        match old {
+            RopeState::Unflattened { left, right } => {
+                keep(left);
+                keep(right);
+            }
+            RopeState::Flat(flat) => keep(flat),
+        }
+    }
+}
+
+/// Calls `f` with every non-rope (or already flattened) string under the two halves, from the
+/// last one to the first, using a heap stack so that a chain of any depth is safe.
+fn for_each_leaf_rev(left: &JsString, right: &JsString, mut f: impl FnMut(JsStr<'_>)) {
+    let mut stack = vec![left, right];
+    while let Some(string) = stack.pop() {
+        if let Some((l, r)) = unflattened(string) {
+            stack.push(l);
+            stack.push(r);
+        } else {
+            f(string.as_str());
+        }
+    }
+}
+
+#[inline]
+fn rope_clone(vtable: NonNull<JsStringVTable>) -> JsString {
+    // SAFETY: This is part of the correct vtable which is validated on construction.
+    let this: &RopeString = unsafe { vtable.cast().as_ref() };
+    let Some(strong) = this.refcount.get().checked_add(1) else {
+        abort();
+    };
+    this.refcount.set(strong);
+    // SAFETY: validated the string outside this function.
+    unsafe { JsString::from_ptr(vtable) }
+}
+
+fn rope_drop(vtable: NonNull<JsStringVTable>) {
+    // SAFETY: This is part of the correct vtable which is validated on construction.
+    let this: &RopeString = unsafe { vtable.cast().as_ref() };
+    let Some(new) = this.refcount.get().checked_sub(1) else {
+        abort();
+    };
+    this.refcount.set(new);
+    if new != 0 {
+        return;
+    }
+
+    // Release the chain below this node with a loop, not with the recursion that dropping the
+    // fields would be: `s += x` makes it as deep as the number of appends.
+    let mut pending = Vec::new();
+    this.take_rope_children(&mut pending);
+    while let Some(rope) = pending.pop() {
+        if rope.refcount() == Some(1) {
+            // SAFETY: Only ropes are pushed, and this is the last reference to it.
+            let node: &RopeString = unsafe { rope.as_inner() };
+            node.take_rope_children(&mut pending);
+        }
+        drop(rope);
+    }
+
+    // SAFETY: This was the last reference, and the node was allocated by `Box` in `new`.
+    unsafe {
+        drop(Box::from_raw(vtable.cast::<RopeString>().as_ptr()));
+    }
+}
+
+#[inline]
+fn rope_as_str(vtable: NonNull<JsStringVTable>) -> JsStr<'static> {
+    // SAFETY: This is part of the correct vtable which is validated on construction.
+    let this: &RopeString = unsafe { vtable.cast().as_ref() };
+    // SAFETY: See `unflattened`.
+    if let RopeState::Flat(flat) = unsafe { &*this.state.get() } {
+        // SAFETY: The flat string is never replaced, so it lives as long as the node.
+        return unsafe { flat.as_str().as_static() };
+    }
+    this.flatten()
+}
+
+#[inline]
+fn rope_code_points(vtable: NonNull<JsStringVTable>) -> CodePointsIter<'static> {
+    CodePointsIter::new(rope_as_str(vtable))
+}
+
+/// `VTable` function for refcount, need to return an `Option<usize>`.
+#[inline]
+#[allow(clippy::unnecessary_wraps)]
+fn rope_refcount(vtable: NonNull<JsStringVTable>) -> Option<usize> {
+    // SAFETY: This is part of the correct vtable which is validated on construction.
+    let this: &RopeString = unsafe { vtable.cast().as_ref() };
+    Some(this.refcount.get())
+}
