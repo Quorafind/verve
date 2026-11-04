@@ -133,3 +133,42 @@ P66 把 JIT 能做的内联都做了，剩下的差距在解释器与 JIT **共�
 `private_stack`，一个会分配的 `ThinVec`）；对象分配 85–92 ns 里收集器的份额；编译调用里约 20 ns 与回调进出的 27 ns 的内部划分（只有总量与几个小块的孤立值）；
 分支预测与缓存效应（不许用 samply/wpr/xperf，没有硬件计数器）；生成器与 async 函数的调用路径（本步没有拆）。编译路径的计时器读数含约 15 ns 的补丁开销，
 只可当份额。
+
+### 第 2 步：已做部分与结果
+
+提交（`git log docs/electron-plan..`）：`docs(jit)` 拆账；`docs(electron)` 确认目标；`perf(boa)` 基类 class 构造器按需建函数环境；
+`perf(boa)` `function_construct` 经形状缓存读 `prototype`；`perf(jit)` 原生调用的极短回调保持解释；`perf(boa)` 进入函数时不再重复设返回值与克隆
+`this`；`test(worker)` worker 测试在强制编译下的计时（见下）；本节文档。`boa/SU.md` 每项一条（范围增补：`bytecompiler/class.rs` 与
+`boa_ast` 的 `scope_analyzer.rs` 只改「class 构造器何时有函数作用域」，`WeakShape::points_to` 去掉 `jit` feature 门）。
+
+**结果**（`c91b2938` 对本分支，JIT / 解释器，ms，5 个进程中位与最好，负载 15% → 8%）：
+
+| 测试 | 之前 | 之后 | 目标（承诺 / 争取） | 结论 |
+|---|---|---|---|---|
+| `fib` | 243.5 / 369.9 | 236.5 / 363.2 | 195 / 180 | **未达，差 41**（JIT/解释器 1.54×） |
+| `oo` | 1106.4 / 1205.7 | 724.8 / 850.1 | 750 / 600 | **承诺达标**；争取差 125（1.17×） |
+| `closure` | 450.5 / 667.7 | 436.9 / 649.6 | 350 / 330 | **未达，差 87**（1.49×） |
+
+解释器列没有一项比 `c91b2938` 慢。微探针与四项回调检查见 `docs/jit.md`「Results (P69)」：`new C0()` 424 → 207 ns、`new E()` 216 → 170、
+`forEach(zero)` 编译 / 解释 93.3 / 91.8、`filter(zero)` 112.0 / 109.8、`map(zero)` 202.7 / 201.0、`sort` 比较函数 116.2 / 127.3 ns（改前 `forEach(zero)` 编译慢 11%、`filter(zero)` 慢 2%）；编译列在这三项上与解释列相差在 2% 内（噪声），**按「持平可接受」达标**。
+
+**目标修订建议**（数字见 `docs/jit.md`）：
+- `closure`：2.25M 次回调，再省的只有进出编译代码约 16 ns 与帧约 12 ns，合计 ≈ 63 ms → **≈ 375**；350 够不到，建议承诺 ≤ 400、争取 375。
+- `fib`：`CallFrame` 重做（句柄 4 个可去，≤ 10–12 ns / 次）可到约 205–210；建议承诺 ≤ 215、争取 205；195 / 180 需要编译代码直接调用编译代码，
+  那 ≈ 20 ns 的未归因部分没有拆开，**没有数字就不承诺**。
+- `oo`：承诺 750 已达（725）；600 取决于「`this` 按构造器初始形状分配」去掉首属性定义（`new CX` 比 `new C0` 多 183 ns），估 575–600，未做。
+
+**没做的**（各附原因）：更瘦的 `CallFrame`（`frame.realm` 39 处使用，帧拥有 `code_block`/环境，是重设计不是修剪，且收益上限 10–12 ns / 次）；
+原生→JS 回调入口的进一步压缩（第二轮计时器显示编译代码本体约 28 周期，`try_enter` 约 90 周期，没有任何单块超过 2 ns；
+上一轮「27 ns 在入口桩」的推断被修正为「在入口周围的机器里」）；`this` 初始形状；JIT 第 4 项。这些都不是「没时间」而是「没有可行动的数字或需要重设计」，
+等总控决定是否开新包。
+
+**验收**：`boa_engine` 1266 个测试默认与 `BOA_JIT_THRESHOLD=0` 全过；`BOA_JIT_FUZZ_COUNT=3000` 过；Verve 无 feature / 有 feature / 强制 / `VERVE_JIT=0`
+全过、`tests/jit.rs` 过。强制编译那一遍里 `tests/worker.rs::a_worker_answers_its_page` 起初失败，原因是它的 50 次等待里 `wait_for_workers`
+在 worker 还没开始处理消息时立即返回，而强制编译下每次 `rt.eval("heard.length")` 编译要几 ms，恰好把循环拖到 worker 答复；现在极短脚本不再被编译，
+循环瞬间走完。已在三处循环里加 20 ms 睡眠（`test(worker)` 提交），base 上与本分支上都稳定通过。test262 除 `staging` 解释对强制编译：harness 116、
+language 23087、annexB 1040、intl402 2623、built-ins 23029/23032 通过，**0 差异**，只有 `Atomics/notify/notify-all-on-loc.js`、`notify-two.js`、
+`bigint/notify-all-on-loc.js` 三个计时类（解释失败、强制通过，与上一个包相同的例外）。差分测试：`tests_calls.rs` 的
+`constructors_match_the_interpreter`、`tiny_callbacks_match_the_interpreter`，`tests/class.rs` 两个；覆盖 `this`、`new.target`、`Reflect.construct`
+不同 `newTarget`、派生类未调 `super()`、返回对象与原始值、私有成员、字段初始化器、`super.x`、绑定函数与 Proxy、生成器与 async 方法、递归上限、
+`error.stack`（与改动前逐字相同）。发布构建体积 +1,536 字节（`size.md`），`perf-js.md` 已追加。

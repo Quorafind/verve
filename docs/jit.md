@@ -1015,6 +1015,92 @@ A leaner `CallFrame` alone is therefore worth at most 15–20 ns of a compiled c
 reaches 180 ms only if nearly all of the bookkeeping goes, and `oo` cannot reach 600 ms without
 the environment, the prototype lookup and the first-property define all going.
 
+## Results (P69: the cost of calls and construction)
+
+What "Where a call goes" measured, acted on where the measurement said it would pay. Release `verve`
+with the `jit` feature, `docs/electron-plan` at `c91b2938` against the same plus this branch, built by
+`cargo build --release --features jit --bin verve`, `CARGO_BUILD_JOBS=6`; median (best) of 5 processes,
+milliseconds, the two binaries interleaved per test (load 15% before the suite and 8% after; the
+probes 9% and 9%).
+
+| test | before, JIT | after, JIT | before, interp | after, interp | target |
+|---|---|---|---|---|---|
+| `fib(30)` | 243.5 (240.0) | 236.5 (234.8) | 369.9 (364.6) | 363.2 (362.1) | ≤ 195, stretch 180: not met |
+| `oo` | 1106.4 (1067.5) | 724.8 (718.0) | 1205.7 (1180.1) | 850.1 (777.8) | ≤ 750: met; stretch 600: not met |
+| `closure` | 450.5 (439.3) | 436.9 (432.3) | 667.7 (642.2) | 649.6 (634.2) | ≤ 350, stretch 330: not met |
+
+The micro-probes, ns per iteration (per element for the callbacks), same round, JIT then interpreter:
+
+| body | before | after |
+|---|---|---|
+| `new E()` | 216.2 / 243.7 | 169.7 / 173.7 |
+| `new C0()` (empty class) | 424.1 / 453.9 | 206.5 / 214.5 |
+| `new CX(i)` (`this.x = x`) | 624.0 / 736.9 | 389.5 / 388.6 |
+| `new D0()` (derived, default) | 762.1 / 800.4 | 552.9 / 509.8 |
+| `new DX(i)` (derived, `super(x)`) | 1043.7 / 1121.1 | 818.8 / 792.5 |
+| `zero()` | 64.1 / 91.6 | 62.2 / 84.2 |
+| `pinst.get()` | 116.6 / 164.2 | 109.0 / 158.7 |
+| `arr.forEach(zero)` | 114.8 / 103.3 | 93.3 / 91.8 |
+| `arr.forEach(ar)` (an arrow function) | 117.3 / 127.0 | 105.9 / 106.9 |
+| `arr.filter(zero)` | 130.8 / 127.9 | 112.0 / 109.8 |
+| `arr.map(zero)` | 225.3 / 242.7 | 202.7 / 201.0 |
+| `arr.reduce(id, 0)` | 126.5 / 129.2 | 115.3 / 112.3 |
+| `sort` comparator `(a, b) => a - b`, per comparison | 123.5 / 129.3 | 116.2 / 127.3 |
+| `zero.call(null)` | 143.8 / 168.5 | 119.1 / 167.4 |
+
+What each change did:
+
+- **A base class constructor builds a function environment only when a function would** (a direct
+  `eval`, an escaping `this`, `super` or `new.target` in the body, a captured binding). The analyzer
+  forced one for every class constructor and the default base constructor carried an empty one;
+  each cost 188 ns, two collected objects, and its clone and drop another 28. A derived constructor
+  keeps it, since its `this` binding lives there. `new C0()` goes from 424 to 207 compiled.
+- **`function_construct` reads `prototype` through a one-entry cache** keyed on the constructor's
+  shared shape, instead of the generic `[[Get]]` (66–70 ns): `new E()` 216 to 170. A proxy, an
+  accessor, a unique shape or a value that is not an object take the generic path.
+- **A function that native code calls stays interpreted when its bytecode is at most 40 bytes**
+  (`() => 0` is 24, `x => x` 37, `v => v + 1` 55, a function with an empty body 2): entering and
+  leaving compiled code costs more than such a callee takes interpreted, so `forEach(zero)`
+  and `filter(zero)` were slower compiled than interpreted (114.8 against 103.3, 130.8 against 127.9;
+  `map(zero)` 225.3 against 242.7, ahead) and all three are now equal within 2% (93.3 against 91.8,
+  112.0 against 109.8, 202.7 against 201.0); the `sort` comparator is faster compiled (1312 against
+  1394 per element of the probe). A loop in such a callee is still entered by OSR. Callbacks of about
+  ten instructions, as in `closure`, are compiled as before: the crossover is between 24 and 55 bytes.
+- **Entering a function no longer sets the return value twice or clones `this` for a frame that has
+  no function environment**: 1.5–2.5 ns a call (`zero()` 64.1 to 62.2), `fib` 243.5 to 236.5.
+
+What was not done, with the numbers:
+
+- **A leaner `CallFrame`.** The measured ceiling is the seven handle pairs at 2–3 ns, 15–20 ns of a
+  call of 62, and the realm, the active runnable, the `SourceInfo` and the callee in the pending call
+  are the four that could go. `frame.realm` has 39 uses and the frame owns its code block and
+  environments, so it is a redesign of `CallFrame`, not a trim. At most 10–12 ns a call: `fib`
+  to about 205–210 ms, which is short of 195.
+- **Native→JS re-entry** beyond the tiny-callback rule. A second round of timers put the compiled
+  run itself at about 28 cycles and `try_enter` at about 90, so the 27 ns of "Where a call goes" is
+  mostly the machinery around the entry, not the entry stub, and no single piece measured above 2 ns.
+  `closure` at 437 has 2.25M callbacks; taking the remaining 16 ns of entry and 12 ns of frame off
+  each would give about 375, not 350.
+- **`this` allocated with the constructor's initial shape**, the path to `oo` at 600: `new CX(i)` less
+  `new C0()` is still 183 ns (the first property's shape transition), which is what separates 725
+  from about 575–600.
+- **The JIT follow-up** (compiled code calling compiled code without `finish`): the unattributed 20 ns
+  of the compiled call was not split further, so there is no number to act on.
+
+Correctness: `boa_engine` (1266 tests and the integration tests) passes at defaults and with
+`BOA_JIT_THRESHOLD=0`; the 3000 generated programs match; Verve passes without the feature, with it,
+forced and switched off, and `tests/jit.rs` passes. The new differential tests are
+`constructors_match_the_interpreter` and `tiny_callbacks_match_the_interpreter` in `tests_calls.rs`
+(interpreted, compiled eagerly, compiled when hot) and two in `tests/class.rs`; a script of 30
+constructor cases (`this`, `new.target`, `Reflect.construct` with another `newTarget`, derived
+classes without `super()`, returns of objects and primitives, private members, field initialisers,
+`super.x`, bound and proxy constructors, generators and async methods, the recursion limit,
+`error.stack`) prints the same under the interpreter, the JIT and forced compilation, and the same
+as the build before the branch. test262, every directory except `staging`, interpreted against forced:
+**0 differ**, but for `Atomics/notify/notify-all-on-loc.js`, `notify-two.js` and
+`bigint/notify-all-on-loc.js`, timing tests that failed interpreted and passed forced, as the one
+before them did.
+
 ## Roadmap
 
 **Phase 1 (done)**: the baseline described above.

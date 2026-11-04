@@ -136,3 +136,9 @@ and loading rarely used Node modules on demand.
 27,104,256 bytes against 27,097,600 for `docs/electron-plan` `05f26157` built the same way, +6,656 bytes (+0.02 %): a fifth
 string kind in `boa_string` and a changed `JsValue::add`. A rope node is 88 bytes (`size_of::<RopeString>()`, measured), 24
 more than a `SequenceString` header.
+
+## P69: calls and construction
+
+`electron/p69-call-cost`: `cargo build --release --features jit --bin verve` (not stripped, not the `size-report` build) is
+26,673,664 bytes against 26,672,128 for `docs/electron-plan` `c91b2938` built the same way, +1,536 bytes (+0.006 %): a few
+branches in `function_construct`, `prepare` and the class compiler, and one field in the `Vm`.

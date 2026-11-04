@@ -462,3 +462,23 @@ The other seven tests read within load noise. `for (const x of source)` per elem
 501.6 → 72.8 and 578.2 → 98.8; `Map` (entries) 1317.1 → 546.5 and 1172.8 → 566.1; generators and
 user-written iterators unchanged. `vdom` meets its 55 ms target (53.0). `docs/jit.md` "Results (P70)" and
 `packages/P70-iterators.md` have the split and the loads.
+
+### P69: the cost of calls and construction
+
+Built and measured on `electron/p69-call-cost` with `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`; the before column is `docs/electron-plan` `c91b2938` built the same way. Both
+binaries, both modes, `--runs 5`, median (best), one process per measurement, `VERVE_CODE_CACHE=0`,
+interleaved per test. Load 15 % before the suite, 8 % after.
+
+| test | before, JIT | after, JIT | before, interp | after, interp |
+|---|---|---|---|---|
+| `fib` | 243.5 (240.0) | 236.5 (234.8) | 369.9 (364.6) | 363.2 (362.1) |
+| `oo` | 1106.4 (1067.5) | 724.8 (718.0) | 1205.7 (1180.1) | 850.1 (777.8) |
+| `closure` | 450.5 (439.3) | 436.9 (432.3) | 667.7 (642.2) | 649.6 (634.2) |
+
+`oo` meets its commit target (≤ 750); `fib` (≤ 195) and `closure` (≤ 350) do not, and the remaining
+gap needs the `CallFrame` redesign `docs/jit.md` "Results (P69)" prices. The other eleven tests were
+not rerun. `new C0()` (an empty class) 424.1 → 206.5 ns compiled and 453.9 → 214.5 interpreted,
+`new E()` 216.2 → 169.7 and 243.7 → 173.7; `forEach`/`filter`/`map` with a callback of a few
+instructions are no longer slower compiled than interpreted (93.3 against 91.8, 112.0 against 109.8,
+202.7 against 201.0).
