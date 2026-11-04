@@ -471,6 +471,15 @@ always agree with one another.
   internal slots, zero for a detached or out-of-bounds view). `GetLengthProperty` calls them in
   sequence; the behaviour is the one it had.
 
+- `boa_engine`, `vm/jit/` (feature `jit`): `GetLengthProperty` of a typed array has a site cache
+  (`typed_length.rs`, fields appended to `SiteCache`): the interpreter's guard
+  (`typed_array_length_guard`) is answered by comparing the receiver's shape and each prototype's
+  up to the one with the accessor (three at most), the length of each one's property storage (the
+  builtin prototypes have unique shapes, which grow in place when a property is added), and the
+  accessor's bits against the intrinsic getter's; the read (`typed_array_length_read`) is
+  never cached. Trusted only while the count of collections is the one it was filled at. No
+  interpreter code changes. `docs/jit.md` has the argument.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

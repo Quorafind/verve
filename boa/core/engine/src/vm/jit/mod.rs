@@ -33,6 +33,7 @@ mod layout;
 mod memory;
 mod runtime;
 mod stack_layout;
+mod typed_length;
 
 #[cfg(test)]
 mod tests;
@@ -40,6 +41,8 @@ mod tests;
 mod tests_calls;
 #[cfg(test)]
 mod tests_elements;
+#[cfg(test)]
+mod tests_typed_length;
 
 use std::{
     cell::{Cell, OnceCell},
