@@ -97,7 +97,7 @@ crates/
   verve-layout/       新：布局引擎（taffy + 行内排版 + 层叠上下文 → DisplayList），不依赖 GPUI（P30/P31）
   verve-gpui/         新：`electron` 二进制（src/bin/electron.rs）、GPUI Shell、DomView（回放 DisplayList）、TextMeasurer 的 GPUI 实现、输入桥接、菜单托盘
   verve-electron-npm/ 新：npm 包模板与平台包脚本（P40，非 Rust）
-src/                  Verve 内核：只允许 P03、P11、P17、P42、P62、P67 修改（P42 还可改 boa/core/gc；性能线 P61、P62、P64–P66 可改 boa/core 的 engine 与 string；都需记入 boa/SU.md）
+src/                  Verve 内核：只允许 P03、P11、P17、P42、P62、P67、P68 修改（P42 还可改 boa/core/gc；性能线 P61、P62、P64–P66、P68–P72 可改 boa/core 的 engine 与 string；都需记入 boa/SU.md）
 docs/electron/        本方案
 tests/electron/       夹具应用与无头验收（P00）
 ```
@@ -127,7 +127,9 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 性能线（与批次 2 起并行，见下文「性能线」）
              P60 JS 基准与剖析 ─ P61 超线性内建   P62 CJS 代码缓存   P63 electron 可带 JIT
                │
-             P64 字符串/正则/JSON   P65 对象/集合/类型化数组   P66 JIT 覆盖扩展   P67 CLI 默认开缓存 ─ RP 性能复盘
+             P64 字符串/正则/JSON   P65 对象/集合/类型化数组   P66 JIT 覆盖扩展   P67 CLI 默认开缓存
+               │
+             P68 评审积压修正   P69 调用与构造   P70 迭代器   P71 rope 字符串   P72 JIT 类型化数组 length ─ RP 性能复盘
 ```
 
 | 包 | 名称 | 依赖 | 可并行 | 规模 |
@@ -169,6 +171,11 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 | [P65](packages/P65-objects-typed-arrays.md) | 对象、集合与类型化数组热路径（解释器） | P60 P61 | ✓ | L |
 | [P66](packages/P66-jit-coverage.md) | JIT 覆盖扩展 | P60 P63 | | L |
 | [P67](packages/P67-code-cache-default.md) | `verve run` 默认开代码缓存 | P62 | | M |
+| [P68](packages/P68-correctness-backlog.md) | 评审积压的三处语义修正（`super[k]=v`、reviver 孤立代理项、模块解析的权限错误） | P64 P65 P67 | ✓ | S |
+| [P69](packages/P69-call-cost.md) | 调用与构造的固定成本（帧、`new`、原生回调） | P65 P66 | ✓ | L |
+| [P70](packages/P70-iterators.md) | 迭代器结果不分配对象（`for…of`、展开、解构） | P65 P66 | ✓ | M |
+| [P71](packages/P71-rope-strings.md) | 字符串 `+=` 线性化（rope） | P64 | ✓ | M |
+| [P72](packages/P72-jit-typed-length.md) | JIT：类型化数组 `length` 的站点缓存 | P65 P66 | ✓ | S |
 
 ### 重构关卡
 
@@ -193,7 +200,8 @@ JIT 在这组测试上几乎没有收益，三个内建是平方级的，大 CJS
    P62 让 CJS 进代码缓存（原 P42 第 2 节）；P63 让 `electron` 二进制能带 JIT（默认开不开仍由 P42 第 5 节定）。
 2. **剖析驱动（P60、P61 合并后，与批次 3 并行）**：P64 字符串/正则/JSON，P65 对象/集合/类型化数组（解释器），P66 JIT 覆盖；P67 让 `verve run` 默认开代码缓存（P62 合并后即可派发，含首次运行成本、旧缓存淘汰与并发写）。
    这三个包的目标先写成「参考目标」，第一次剖析后由实现者提出、总控确认，才开始大改。
-3. **RP 性能复盘**：P41 能跑起 L2 应用（Vite/React）后、P64–P66 合并后，用真实应用（React 1000 行表格渲染、L3 编辑器的输入延迟、
+   **第二轮（P64–P67 合并后，2026-11-04）**：P68 修评审积压的三处语义偏差；P69 调用与构造的固定成本，P70 迭代器结果不装箱，P71 rope，P72 JIT 类型化数组 `length`——都来自 P64–P66 的「状态」里留下的差距。
+3. **RP 性能复盘**：P41 能跑起 L2 应用（Vite/React）后、P64–P66 与 P69–P72 合并后，用真实应用（React 1000 行表格渲染、L3 编辑器的输入延迟、
    主进程大 CJS 包启动）测 Verve 与 Electron 39，按剖析决定下一步：继续调内建与解释器，做 JIT 第 3 阶段（类型反馈），
    还是把差距作为已知限制写进兼容矩阵。
 
