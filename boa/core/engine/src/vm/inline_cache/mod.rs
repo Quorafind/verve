@@ -130,34 +130,27 @@ impl InlineCache {
         if self.megamorphic.get() {
             return;
         }
-        let Some(prototype_shape) = self.holder_shape(shape, slot) else {
+        let Some(entry) = self.new_entry(shape, slot) else {
             return;
         };
 
         let mut entries = self.entries.borrow_mut();
 
         // Add a new entry if there's space.
-        if entries
-            .try_push(CacheEntry {
-                shape: shape.into(),
-                prototype_shape,
-                slot,
-            })
-            .is_err()
-        {
+        if entries.try_push(entry).is_err() {
             // Polymorphic cache is full, transition to megamorphic.
             self.megamorphic.set(true);
             entries.clear();
         }
     }
 
-    /// For a slot to record: `Some` of the shape to compare the prototype with (`None` for an own
-    /// slot), if the slot is what the shape that holds it has now. The slot comes from a lookup
-    /// that may have run a getter, which can change objects before the entry is made.
+    /// The entry for a slot to record, if the slot is what the shape that holds it has now.
+    /// The slot comes from a lookup that may have run a getter, which can change objects before
+    /// the entry is made.
     ///
     /// A slot in a prototype is not recorded for a unique receiver: it gains own properties in
     /// place, keeping its shape, and one of them can shadow the prototype's.
-    fn holder_shape(&self, shape: &Shape, slot: Slot) -> Option<Option<WeakShape>> {
+    fn new_entry(&self, shape: &Shape, slot: Slot) -> Option<CacheEntry> {
         let (holder, prototype_shape) = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
             if shape.is_unique() {
                 return None;
@@ -171,8 +164,13 @@ impl InlineCache {
         };
         let current = holder.lookup(&PropertyKey::from(self.name.clone()))?;
         let attributes = |slot: Slot| slot.attributes & !SlotAttributes::INLINE_CACHE_BITS;
-        (current.index == slot.index && attributes(current) == attributes(slot))
-            .then_some(prototype_shape)
+        (current.index == slot.index && attributes(current) == attributes(slot)).then(|| {
+            CacheEntry {
+                shape: shape.into(),
+                prototype_shape,
+                slot,
+            }
+        })
     }
 
     /// The cached slot for `shape` and its value (see [`CacheEntry::read`]), if the cache has
