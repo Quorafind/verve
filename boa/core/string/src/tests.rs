@@ -4,7 +4,7 @@ use std::hash::{BuildHasher, BuildHasherDefault, Hash};
 
 use crate::{
     CodePoint, CommonJsStringBuilder, JsStr, JsString, JsStringKind, Latin1JsStringBuilder,
-    StaticJsStrings, StaticString, Utf16JsStringBuilder,
+    ROPE_MIN_LEN, StaticJsStrings, StaticString, Utf16JsStringBuilder,
 };
 
 use rustc_hash::FxHasher;
@@ -632,6 +632,53 @@ fn ptr_eq_tells_one_allocation_from_an_equal_string() {
 
     assert!(x.ptr_eq(&clone));
     assert!(!x.ptr_eq(&equal));
+}
+
+#[test]
+fn concat_with_an_int32() {
+    let text = JsString::from("ab");
+    for n in [0, 7, -1, 12345, i32::MAX, i32::MIN] {
+        assert_eq!(
+            JsString::concat_i32(&text, n),
+            JsString::from(format!("ab{n}"))
+        );
+        assert_eq!(
+            JsString::concat_i32_before(n, &text),
+            JsString::from(format!("{n}ab"))
+        );
+    }
+    let wide = JsString::from(&[0x20ac_u16, 0x61][..]);
+    assert_eq!(
+        JsString::concat_i32(&wide, 42).to_vec(),
+        [0x20ac, 0x61, 0x34, 0x32]
+    );
+    assert_eq!(
+        JsString::concat_i32_before(42, &wide).to_vec(),
+        [0x34, 0x32, 0x20ac, 0x61]
+    );
+    let empty = JsString::default();
+    assert_eq!(JsString::concat_i32(&empty, -5), JsString::from("-5"));
+    // Around the length at which the result is a rope.
+    for len in [
+        ROPE_MIN_LEN - 3,
+        ROPE_MIN_LEN - 2,
+        ROPE_MIN_LEN - 1,
+        ROPE_MIN_LEN,
+    ] {
+        let base = JsString::from("x".repeat(len - 2));
+        let want = format!("{}12", "x".repeat(len - 2));
+        assert_eq!(
+            JsString::concat_i32(&base, 12).to_std_string().unwrap(),
+            want
+        );
+        let want = format!("12{}", "x".repeat(len - 2));
+        assert_eq!(
+            JsString::concat_i32_before(12, &base)
+                .to_std_string()
+                .unwrap(),
+            want
+        );
+    }
 }
 
 mod rope {

@@ -553,3 +553,12 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   iterated string, as before, but taken directly instead of through the `substring` built-in
   (which converted its arguments through `ToIntegerOrInfinity` and cloned the string into a value
   for each step).
+
+- `boa_string`, `lib.rs`, `boa_engine`, `value/operations.rs`: `s + n` and `n + s` with an `int32`
+  `n` skip the generic path. `JsValue::add` used to convert both operands with `ToPrimitive`,
+  build a `JsString` for the number (one allocation) and copy it into the result (a second one,
+  plus a look-up in the static string table). `JsString::concat_i32` and `concat_i32_before` format
+  the digits into a stack buffer and write them straight into the result when it is shorter than
+  `ROPE_MIN_LEN`; longer results build the digits' string and go through `concat_lazy`. The result
+  is the string `ToString(n)` gives, so nothing observable changes. `x = 'ab' + i` per iteration,
+  compiled, median of 5 processes: 117 to 72 ns (load 15-30 %).
