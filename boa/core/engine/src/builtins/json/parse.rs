@@ -7,6 +7,8 @@
 //! [`JsonNode`] tree beside the values: the text of every primitive, the members of every
 //! container.
 
+use rustc_hash::FxHashMap;
+
 use crate::{
     Context, JsError, JsNativeError, JsResult, JsString, JsValue,
     builtins::Array,
@@ -55,9 +57,14 @@ impl<'a> Units<'a> {
 /// and the value it produced, and the members of a container in the order they were read.
 #[derive(Debug)]
 pub(super) enum JsonNode {
-    Primitive { source: JsString, value: JsValue },
+    Primitive {
+        source: JsString,
+        value: JsValue,
+    },
     Array(Vec<JsonNode>),
-    Object(Vec<(JsString, JsonNode)>),
+    /// By key, so that the reviver finds a member in constant time; a repeated key keeps the
+    /// last member, as the object does.
+    Object(FxHashMap<JsString, JsonNode>),
 }
 
 impl Drop for JsonNode {
@@ -76,7 +83,7 @@ impl JsonNode {
         match self {
             Self::Primitive { .. } => {}
             Self::Array(children) => into.append(children),
-            Self::Object(members) => into.extend(members.drain(..).map(|(_, node)| node)),
+            Self::Object(members) => into.extend(members.drain().map(|(_, node)| node)),
         }
     }
 }
@@ -92,7 +99,7 @@ enum Container {
         object: JsObject,
         /// The key of the member being read, once it has been read and its value has not.
         key: Option<JsString>,
-        nodes: Vec<(JsString, JsonNode)>,
+        nodes: FxHashMap<JsString, JsonNode>,
     },
 }
 
@@ -144,14 +151,16 @@ impl<'a> Reader<'a> {
                     let object = JsObject::with_object_proto(context.intrinsics());
                     if self.peek_after_whitespace() == Some(u16::from(b'}')) {
                         self.pos += 1;
-                        node = self.keep_nodes.then(|| JsonNode::Object(Vec::new()));
+                        node = self
+                            .keep_nodes
+                            .then(|| JsonNode::Object(FxHashMap::default()));
                         object.into()
                     } else {
                         let key = self.read_key()?;
                         stack.push(Container::Object {
                             object,
                             key: Some(key),
-                            nodes: Vec::new(),
+                            nodes: FxHashMap::default(),
                         });
                         continue;
                     }
@@ -214,7 +223,7 @@ impl<'a> Reader<'a> {
                     Container::Object { object, key, nodes } => {
                         let key = key.take().expect("a member's key is read before its value");
                         if let Some(node) = node.take() {
-                            nodes.push((key.clone(), node));
+                            nodes.insert(key.clone(), node);
                         }
                         object.create_data_property(key, value, context)?;
                     }

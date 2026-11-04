@@ -502,3 +502,6 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   runtime allows nested runs (`RuntimeLimits::native_stack_limit`) it throws `RangeError: Maximum
   call stack size exceeded`, as V8 does, and `JsonNode` is taken apart on the heap when it is dropped
   rather than by drop glue that would recurse once per level.
+  An object's members are kept in an `FxHashMap` by key (a repeated key keeps the last member, as the
+  object does), so the reviver finds the source of each key in constant time rather than by a search
+  of the members, which made a reviver over n keys cost n² comparisons.

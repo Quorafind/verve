@@ -210,8 +210,7 @@ impl Json {
                         .as_string()
                         .js_expect("EnumerableOwnPropertyNames only returns strings")?;
 
-                    let child_node =
-                        entries.and_then(|e| e.iter().rfind(|(k, _)| *k == p).map(|(_, v)| v));
+                    let child_node = entries.and_then(|e| e.get(&p));
 
                     // 1. Let newElement be ? InternalizeJSONProperty(val, P, reviver).
                     let new_element = Self::internalize_json_property(

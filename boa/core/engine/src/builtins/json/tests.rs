@@ -660,3 +660,18 @@ fn json_parse_with_a_reviver_reads_nesting_and_gives_up_before_the_stack_does() 
         ),
     ]);
 }
+
+#[test]
+fn json_parse_with_a_reviver_finds_each_keys_source_in_constant_time() {
+    // A walk that searched the members of an object for each key would make 100,000 keys cost
+    // billions of comparisons; this finishes in well under the bound if the lookup is by key.
+    run_test_actions([TestAction::assert(
+        r#"(() => {
+               const text = '{' + Array.from({ length: 100000 }, (_, i) => '"k' + i + '":' + i).join(',') + '}';
+               const start = Date.now();
+               let sources = 0;
+               JSON.parse(text, (k, v, { source }) => { if (source !== undefined) { sources++; } return v; });
+               return sources === 100000 && Date.now() - start < 10000;
+           })()"#,
+    )]);
+}
