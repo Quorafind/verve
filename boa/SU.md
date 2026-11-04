@@ -560,3 +560,18 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   is the only kind of record that has a stepper); a hole, a proxy, a typed array, a key or entries
   iterator and every other record take the interpreter's handler. `for (const x of array)` per
   element, compiled: 61 to 22 ns (1M elements, median of 5 processes, one round at 50–100% load).
+
+- `boa_engine`, `builtins/array/array_iterator.rs`: `%ArrayIteratorPrototype%.next` no longer holds
+  the iterator's borrow while it reads `length` and the element. A Proxy trap or getter that calls
+  `next` on the same iterator, or an array iterator made over an array iterator, panicked with
+  `BorrowError`. The step reads the index, reads `length`, stores `index + 1` and then reads the
+  element, as V8 does; what a re-entrant call stored while `length` was read is overwritten, and a
+  call that exhausted the iterator there does not keep the outer call from stepping.
+
+- `boa_engine`, `builtins/regexp/regexp_string_iterator.rs`: `%RegExpStringIteratorPrototype%.next`
+  no longer holds the iterator's borrow while `exec`, `lastIndex` and the match's `0` run; an
+  `exec` that called `next` on the iterator running it panicked with `BorrowError`.
+
+- `boa_engine`, `builtins/intl/collator/mod.rs`: the function `Intl.Collator.prototype.compare`
+  returns takes the collator's borrow after converting its arguments, not before: a `toString`
+  that read `compare` borrowed the collator mutably under the held shared borrow.
