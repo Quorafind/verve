@@ -133,6 +133,25 @@ fn non_string_operands() {
 }
 
 #[test]
+fn ropes_that_share_a_prefix_stay_apart() {
+    check(indoc! {r#"
+        const s = rope() + 'x' + 'y';
+        const a = s + '1', b = s + '2', c = a + '3', d = a + '4', e = b + '5';
+        e === flat + 'xy25' && d === flat + 'xy14' && s === flat + 'xy' && c === flat + 'xy13'
+            && b === flat + 'xy2' && a === flat + 'xy1'
+    "#});
+    check(indoc! {r#"
+        const s = rope() + 'x' + 'y';
+        const parts = [];
+        let t = s;
+        for (let i = 0; i < 300; i++) { t += i % 10; if (i % 100 === 0) parts.push(t); }
+        const u = s + 'q';
+        parts[2] === t.slice(0, 802 + 201) && u === flat + 'xyq' && s === flat + 'xy'
+            && t.length === 802 + 300
+    "#});
+}
+
+#[test]
 fn numbers_join_strings_as_their_decimal_text() {
     check(indoc! {r#"
         const n = [0, 7, -1, 2147483647, -2147483648, 1.5, -0, NaN, 1e21];

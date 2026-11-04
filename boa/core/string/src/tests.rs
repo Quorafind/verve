@@ -710,7 +710,7 @@ mod rope {
     #[test]
     fn node_size() {
         // Reported in docs/electron/size.md; a bigger node costs every append that much more.
-        assert_eq!(size_of::<RopeString>(), 88);
+        assert_eq!(size_of::<RopeString>(), 96);
     }
 
     #[test]
@@ -876,6 +876,83 @@ mod rope {
         assert_eq!(v.len(), ROPE_MIN_LEN + DEEP);
         assert_eq!(v[0], u16::from(letter(DEEP - 1)));
         assert_eq!(v[DEEP], u16::from(b'x'));
+    }
+
+    /// A rope that has taken two short appends, so that it ends in a shared buffer.
+    fn with_buffer(base: &JsString) -> JsString {
+        let s = JsString::concat_lazy(base, &latin1(1, 'x'));
+        JsString::concat_lazy(&s, &latin1(1, 'y'))
+    }
+
+    fn text(s: &JsString) -> String {
+        s.to_std_string().unwrap()
+    }
+
+    #[test]
+    fn short_appends_share_one_buffer() {
+        let base = latin1(300, 'a');
+        let s = with_buffer(&base);
+        // Appending to a rope that ends in a buffer adds no reference to the buffer's owner other
+        // than the new rope's, and the old rope keeps its length and content.
+        let t = JsString::concat_lazy(&s, &latin1(2, 'z'));
+        assert_eq!((s.len(), t.len()), (302, 304));
+        assert_eq!(base.refcount(), Some(3));
+        assert_eq!(text(&s), format!("{}xy", "a".repeat(300)));
+        assert_eq!(text(&t), format!("{}xyzz", "a".repeat(300)));
+    }
+
+    #[test]
+    fn shared_rope_is_not_modified_by_appends() {
+        let base = latin1(300, 'a');
+        let s = with_buffer(&base);
+        let one = JsString::concat_lazy(&s, &latin1(1, '1'));
+        let two = JsString::concat_lazy(&s, &latin1(1, '2'));
+        let one3 = JsString::concat_lazy(&one, &latin1(1, '3'));
+        let one4 = JsString::concat_lazy(&one, &latin1(1, '4'));
+        let two5 = JsString::concat_lazy(&two, &latin1(1, '5'));
+        let head = "a".repeat(300);
+        // Read in an order other than the order of creation.
+        assert_eq!(text(&two5), format!("{head}xy25"));
+        assert_eq!(text(&one4), format!("{head}xy14"));
+        assert_eq!(text(&s), format!("{head}xy"));
+        assert_eq!(text(&one3), format!("{head}xy13"));
+        assert_eq!(text(&two), format!("{head}xy2"));
+        assert_eq!(text(&one), format!("{head}xy1"));
+    }
+
+    #[test]
+    fn appends_after_a_read_and_across_widths() {
+        let base = latin1(300, 'a');
+        let s = with_buffer(&base);
+        let wide = JsString::concat_lazy(&s, &utf16(1, 0x20ac));
+        let later = JsString::concat_lazy(&wide, &latin1(1, 'q'));
+        assert_eq!(wide.len(), 303);
+        assert_eq!(later.to_vec().last(), Some(&u16::from(b'q')));
+        assert_eq!(wide.to_vec()[302], 0x20ac);
+        // A rope that has been read is flat; the next append starts over from it.
+        assert_eq!(text(&s).len(), 302);
+        let u = JsString::concat_lazy(&s, &latin1(1, 'u'));
+        let v = JsString::concat_lazy(&u, &latin1(1, 'v'));
+        assert_eq!(text(&v), format!("{}xyuv", "a".repeat(300)));
+        // A piece too long for the buffer gets a node of its own and the buffer is left alone.
+        let long = JsString::concat_lazy(&v, &latin1(100, 'l'));
+        assert_eq!(long.len(), 404);
+        assert_eq!(
+            text(&long),
+            format!("{}xyuv{}", "a".repeat(300), "l".repeat(100))
+        );
+        assert_eq!(text(&v), format!("{}xyuv", "a".repeat(300)));
+    }
+
+    #[test]
+    fn deep_chains_of_long_pieces_still_flatten_and_drop() {
+        let mut s = latin1(ROPE_MIN_LEN, 'x');
+        let piece = latin1(100, 'y');
+        for _ in 0..DEEP / 10 {
+            s = JsString::concat_lazy(&s, &piece);
+        }
+        assert_eq!(s.len(), ROPE_MIN_LEN + 100 * (DEEP / 10));
+        assert_eq!(s.to_vec().len(), s.len());
     }
 
     #[test]

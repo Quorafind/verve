@@ -671,7 +671,8 @@ impl JsString {
         if len < ROPE_MIN_LEN {
             return Self::concat(x.as_str(), y.as_str());
         }
-        RopeString::new(x.clone(), y.clone(), len)
+        RopeString::append_short(x, y, len)
+            .unwrap_or_else(|| RopeString::new(x.clone(), y.clone(), len))
     }
 
     /// Creates the concatenation of `x` and the decimal digits of `n`, as `x + n` is in
