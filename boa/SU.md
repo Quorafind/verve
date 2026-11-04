@@ -463,9 +463,8 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   it is read, an array is one `Array::create_array_from_list`, and a string without an escape is a
   slice of the text rather than a fresh buffer. Containers are kept on an explicit `Vec`, so a
   deeply nested text costs heap instead of Rust stack — the script parser gave up at 128 levels,
-  where Node answers as deep as memory allows. A reviver still builds its values through the script parser, since `context.source`
-  needs the text each primitive came from, but the text is validated by the same reader first, so
-  both paths throw the same messages.
+  where Node answers as deep as memory allows. A reviver is served by the same reader, which also keeps the text each
+  primitive came from (see the entry on `JSON.parse` with a reviver below).
 
   Because the reader is now the one validating, its `SyntaxError` messages are V8's, with the
   position and the line and column V8 names: `Unexpected token '}', "[1,]" is not valid JSON`,
@@ -487,3 +486,19 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   had: the receiver is the object itself. `SetPropertyByName` was checked for the same fault and has
   none (a `super.name = v` that runs repeatedly, so that the inline cache is consulted, still defines
   on the receiver each time), so it only gained a regression test.
+
+- `boa_engine`, `builtins/json/mod.rs`, `builtins/json/parse.rs`: `JSON.parse` with a reviver builds its
+  values with the same reader as one without. It used to hand the text to the script parser, the
+  bytecode compiler and the VM so as to get the text of each primitive for `context.source`, and that
+  path turned strings into UTF-8, so a lone surrogate (escaped or raw) was a `SyntaxError`
+  (`invalid utf-16: lone surrogate found`) where Node answers the one code unit. The reader now keeps
+  a `JsonNode` tree beside the values when asked: the code units each primitive was read from and the
+  value read, and the members of each container with their keys as `JsString`s (they were lossy
+  `String`s). The reviver gets `source` when the value it is handed is still `SameValue` as the one
+  read, which replaces re-parsing the source text to compare. `JSON.parse` no longer uses the script
+  parser at all; what that parser refuses in a string literal of a script is untouched. The reader
+  nests as deep as memory allows, but the reviver's walk (`InternalizeJSONProperty`) recurses on the
+  native stack, which the script parser's 128-level limit used to guard: past the native stack the
+  runtime allows nested runs (`RuntimeLimits::native_stack_limit`) it throws `RangeError: Maximum
+  call stack size exceeded`, as V8 does, and `JsonNode` is taken apart on the heap when it is dropped
+  rather than by drop glue that would recurse once per level.

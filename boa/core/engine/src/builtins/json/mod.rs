@@ -15,15 +15,13 @@
 
 use rustc_hash::FxHashSet;
 
-use boa_ast::scope::Scope;
-use boa_gc::{Finalize, Gc, Trace};
+use boa_gc::{Finalize, Trace};
 use boa_macros::{js_str, utf16};
 
 use crate::JsExpect;
 use crate::{
-    Context, JsArgs, JsBigInt, JsData, JsResult, JsString, JsValue, SpannedSourceText,
+    Context, JsArgs, JsBigInt, JsData, JsResult, JsString, JsValue,
     builtins::BuiltInObject,
-    bytecompiler::ByteCompiler,
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
@@ -33,9 +31,8 @@ use crate::{
     string::{CodePoint, StaticJsStrings},
     symbol::JsSymbol,
     value::IntegerOrInfinity,
-    vm::{CallFrame, CallFrameFlags, source_info::SourcePath},
+    vm::native_stack_position,
 };
-use boa_parser::{Parser, Source};
 
 use super::{BuiltInBuilder, IntrinsicObject};
 
@@ -48,150 +45,13 @@ const fn to_hex_digit(val: u16) -> u16 {
 }
 
 mod parse;
+use parse::JsonNode;
 #[cfg(test)]
 mod tests;
 
 /// Marker struct for the `[[IsRawJSON]]` internal slot.
 #[derive(Debug, Trace, Finalize, JsData)]
 pub(crate) struct RawJson;
-
-/// A tree node representing the structure of parsed JSON, preserving source
-/// text spans for primitive values. Used to provide `context.source` to
-/// the reviver function in `JSON.parse`.
-#[derive(Debug)]
-enum JsonNode {
-    /// A primitive value (string, number, boolean, null) with its original source text.
-    Primitive(String),
-    /// An array of child nodes.
-    Array(Vec<JsonNode>),
-    /// An object with key-value pairs.
-    Object(Vec<(String, JsonNode)>),
-}
-
-/// Visitor that builds a `JsonNode` source tree by walking the parsed AST,
-/// extracting source text from `LinearSpan` information tracked by the parser.
-/// Uses a stack to build the tree bottom-up during depth-first traversal.
-struct JsonSourceVisitor<'a> {
-    source_text: &'a boa_ast::SourceText,
-    interner: &'a boa_interner::Interner,
-    /// Stack used to build the tree bottom-up. Leaf nodes (literals) are pushed
-    /// first, then parent nodes (arrays/objects) pop their children and push themselves.
-    stack: Vec<JsonNode>,
-}
-
-impl<'a> JsonSourceVisitor<'a> {
-    /// Creates a new `JsonSourceVisitor`.
-    fn new(source_text: &'a boa_ast::SourceText, interner: &'a boa_interner::Interner) -> Self {
-        Self {
-            source_text,
-            interner,
-            stack: Vec::new(),
-        }
-    }
-
-    /// Consumes the visitor and returns the final `JsonNode` tree.
-    fn finish(mut self) -> Option<JsonNode> {
-        self.stack.pop()
-    }
-}
-
-impl<'ast> boa_ast::visitor::Visitor<'ast> for JsonSourceVisitor<'_> {
-    type BreakTy = std::convert::Infallible;
-
-    fn visit_literal(
-        &mut self,
-        node: &'ast boa_ast::expression::literal::Literal,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        let span = node.linear_span();
-        let code_points = self.source_text.get_code_points_from_span(span);
-        let text = String::from_utf16_lossy(code_points);
-        self.stack.push(JsonNode::Primitive(text));
-        std::ops::ControlFlow::Continue(())
-    }
-
-    fn visit_array_literal(
-        &mut self,
-        node: &'ast boa_ast::expression::literal::ArrayLiteral,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        let count = node.as_ref().len();
-        let base = self.stack.len();
-
-        // Visit each element, which pushes child nodes onto the stack
-        for elem in node.as_ref() {
-            if let Some(expr) = elem {
-                self.visit_expression(expr)?;
-            } else {
-                // Sparse element (should not happen in JSON)
-                self.stack.push(JsonNode::Primitive("null".to_string()));
-            }
-        }
-
-        // Pop the children that were just pushed and collect into array
-        let children: Vec<JsonNode> = self.stack.drain(base..).collect();
-        debug_assert_eq!(children.len(), count);
-        self.stack.push(JsonNode::Array(children));
-        std::ops::ControlFlow::Continue(())
-    }
-
-    fn visit_object_literal(
-        &mut self,
-        node: &'ast boa_ast::expression::literal::ObjectLiteral,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        use boa_ast::expression::literal::PropertyDefinition;
-
-        let base = self.stack.len();
-        let mut keys: Vec<String> = Vec::new();
-
-        for prop in node.properties() {
-            if let PropertyDefinition::Property(name, value) = prop {
-                let key = if let Some(ident) = name.literal() {
-                    self.interner.resolve_expect(ident.sym()).to_string()
-                } else {
-                    String::new()
-                };
-                keys.push(key);
-                // Visit the value expression, which pushes the child node
-                self.visit_expression(value)?;
-            }
-        }
-
-        // Pop the value nodes and zip with keys
-        let values: Vec<JsonNode> = self.stack.drain(base..).collect();
-        debug_assert_eq!(keys.len(), values.len());
-        let entries: Vec<(String, JsonNode)> = keys.into_iter().zip(values).collect();
-        self.stack.push(JsonNode::Object(entries));
-        std::ops::ControlFlow::Continue(())
-    }
-
-    fn visit_unary(
-        &mut self,
-        node: &'ast boa_ast::expression::operator::Unary,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        use boa_ast::expression::operator::unary::UnaryOp;
-        use boa_ast::visitor::VisitWith;
-
-        if node.op() == UnaryOp::Minus
-            && let boa_ast::Expression::Literal(lit) = node.target()
-        {
-            let span = lit.linear_span();
-            let code_points = self.source_text.get_code_points_from_span(span);
-            let num_text = String::from_utf16_lossy(code_points);
-            self.stack.push(JsonNode::Primitive(format!("-{num_text}")));
-            return std::ops::ControlFlow::Continue(());
-        }
-
-        // Default: recurse into children
-        node.visit_with(self)
-    }
-
-    fn visit_parenthesized(
-        &mut self,
-        node: &'ast boa_ast::expression::Parenthesized,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        // Unwrap parentheses and visit inner expression
-        self.visit_expression(node.expression())
-    }
-}
 
 /// JavaScript `JSON` global object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -241,118 +101,28 @@ impl Json {
             .unwrap_or_default()
             .to_string(context)?;
 
-        // 11. If IsCallable(reviver) is true, then the text every value came from is needed as
-        // well, which only the parser keeps track of. A parse without a reviver reads the text
-        // once, into the values themselves.
-        let Some(obj) = args.get_or_undefined(1).as_callable() else {
+        // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
+        //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
+        // 3-10. Evaluate it to a value. The reader does both at once, from the code units.
+        let Some(reviver) = args.get_or_undefined(1).as_callable() else {
             return parse::Reader::new(json_string.as_str()).read(context);
         };
 
-        // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
-        //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
-        //    The reader that parses without a reviver validates here too, so both paths throw the
-        //    same messages; the values it builds are dropped.
-        parse::Reader::new(json_string.as_str()).read(context)?;
+        // 11. If IsCallable(reviver) is true, then the text every primitive came from is needed
+        // as well, which the reader keeps beside the values it builds.
+        let (unfiltered, source_tree) =
+            parse::Reader::new(json_string.as_str()).read_with_nodes(context)?;
 
-        let json_string = json_string
-            .to_std_string()
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
+        // a. Let root be ! OrdinaryObjectCreate(%Object.prototype%).
+        let root = JsObject::with_object_proto(context.intrinsics());
 
-        // 3. Let scriptString be the string-concatenation of "(", jsonString, and ");".
-        let script_string = format!("({json_string});");
+        // b. Let rootName be the empty String.
+        // c. Perform ! CreateDataPropertyOrThrow(root, rootName, unfiltered).
+        root.create_data_property_or_throw(js_string!(), unfiltered, context)
+            .js_expect("CreateDataPropertyOrThrow should never throw here")?;
 
-        // 4-10. Parse and evaluate the script
-        let source = Source::from_bytes(&script_string);
-        let mut parser = Parser::new(source);
-        parser.set_json_parse();
-
-        // Use parse_script_with_source to get SourceText for span-based source extraction
-        let (script, source_text) =
-            parser.parse_script_with_source(&Scope::new_global(), context.interner_mut())?;
-
-        // Build the source tree from the AST.
-        // This walks the parsed AST and extracts source text from LinearSpan information,
-        // avoiding the need to re-parse the JSON string separately.
-        let source_tree = {
-            let expr = script.statements().statements().first().and_then(|item| {
-                if let boa_ast::StatementListItem::Statement(stmt) = item
-                    && let boa_ast::Statement::Expression(expr) = stmt.as_ref()
-                {
-                    return Some(expr);
-                }
-                None
-            });
-            expr.and_then(|e| {
-                use boa_ast::visitor::Visitor;
-                let mut visitor = JsonSourceVisitor::new(&source_text, context.interner());
-                let _ = visitor.visit_expression(e);
-                visitor.finish()
-            })
-        };
-
-        let code_block = {
-            let in_with = context.vm.frame().environments.has_object_environment();
-            let spanned_source_text = SpannedSourceText::new_source_only(
-                crate::spanned_source_text::SourceText::new(source_text),
-            );
-            let mut compiler = ByteCompiler::new(
-                js_string!("<json>"),
-                script.strict(),
-                true,
-                context.realm().scope().clone(),
-                context.realm().scope().clone(),
-                false,
-                false,
-                context.interner_mut(),
-                in_with,
-                spanned_source_text,
-                SourcePath::Json,
-            );
-            compiler.compile_statement_list(script.statements(), true, false);
-            Gc::new(compiler.finish())
-        };
-
-        let realm = context.realm().clone();
-
-        let env_fp = context.vm.frame().environments.len() as u32;
-        context.vm.push_frame_with_stack(
-            CallFrame::new(
-                code_block,
-                None,
-                context.vm.frame().environments.clone(),
-                realm,
-            )
-            .with_env_fp(env_fp)
-            .with_flags(CallFrameFlags::EXIT_EARLY),
-            JsValue::undefined(),
-            JsValue::null(),
-        );
-
-        context.realm().resize_global_env();
-        let record = context.run();
-        context.vm.pop_frame();
-
-        let unfiltered = record.consume()?;
-
-        // 11. If IsCallable(reviver) is true, then
-        {
-            // a. Let root be ! OrdinaryObjectCreate(%Object.prototype%).
-            let root = JsObject::with_object_proto(context.intrinsics());
-
-            // b. Let rootName be the empty String.
-            // c. Perform ! CreateDataPropertyOrThrow(root, rootName, unfiltered).
-            root.create_data_property_or_throw(js_string!(), unfiltered, context)
-                .js_expect("CreateDataPropertyOrThrow should never throw here")?;
-
-            // d. Return ? InternalizeJSONProperty(root, rootName, reviver).
-            Self::internalize_json_property(
-                &root,
-                js_string!(),
-                &obj,
-                source_tree.as_ref(),
-                context,
-            )
-        }
+        // d. Return ? InternalizeJSONProperty(root, rootName, reviver).
+        Self::internalize_json_property(&root, js_string!(), &reviver, Some(&source_tree), context)
     }
 
     /// `25.5.1.1 InternalizeJSONProperty ( holder, name, reviver )`
@@ -368,6 +138,19 @@ impl Json {
         source_node: Option<&JsonNode>,
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        // The reader nests as deep as memory allows, and this walk of the result recurses on the
+        // native stack: past what the runtime lets nested runs take, it throws what V8 throws.
+        if context
+            .vm
+            .native_stack_base
+            .saturating_sub(native_stack_position())
+            > context.runtime_limits().native_stack_limit()
+        {
+            return Err(JsNativeError::range()
+                .with_message("Maximum call stack size exceeded")
+                .into());
+        }
+
         // 1. Let val be ? Get(holder, name).
         let val = holder.get(name.clone(), context)?;
 
@@ -427,9 +210,8 @@ impl Json {
                         .as_string()
                         .js_expect("EnumerableOwnPropertyNames only returns strings")?;
 
-                    let p_std = p.to_std_string_escaped();
                     let child_node =
-                        entries.and_then(|e| e.iter().rfind(|(k, _)| k == &p_std).map(|(_, v)| v));
+                        entries.and_then(|e| e.iter().rfind(|(k, _)| *k == p).map(|(_, v)| v));
 
                     // 1. Let newElement be ? InternalizeJSONProperty(val, P, reviver).
                     let new_element = Self::internalize_json_property(
@@ -463,41 +245,14 @@ impl Json {
         // Per spec, source is only provided when the value is still the same
         // primitive that was produced by parsing the original JSON text.
         let ctx_obj = JsObject::with_object_proto(context.intrinsics());
-        if let Some(JsonNode::Primitive(source_text)) = source_node {
-            // Check if the current value matches what the source text produces.
-            // If the reviver modified the value, it won't match and we skip source.
-            let value_matches = match source_text.as_str() {
-                "null" => val.is_null(),
-                "true" => val.as_boolean() == Some(true),
-                "false" => val.as_boolean() == Some(false),
-                s if s.starts_with('"') => {
-                    // String: compare parsed string value
-                    if let Some(js_str) = val.as_string() {
-                        serde_json::from_str::<String>(s)
-                            .is_ok_and(|parsed| js_str.to_std_string_escaped() == parsed)
-                    } else {
-                        false
-                    }
-                }
-                s => {
-                    // Number: compare parsed number value
-                    // Exact comparison is intentional: we want to detect if the
-                    // value was replaced by the reviver, not approximate equality.
-                    #[allow(clippy::float_cmp)]
-                    if let Some(n) = val.as_number() {
-                        s.parse::<f64>().is_ok_and(|parsed| n == parsed)
-                    } else {
-                        false
-                    }
-                }
-            };
-            if value_matches {
-                ctx_obj.create_data_property_or_throw(
-                    js_string!("source"),
-                    JsValue::from(js_string!(source_text.as_str())),
-                    context,
-                )?;
-            }
+        if let Some(JsonNode::Primitive { source, value }) = source_node
+            && JsValue::same_value(&val, value)
+        {
+            ctx_obj.create_data_property_or_throw(
+                js_string!("source"),
+                JsValue::from(source.clone()),
+                context,
+            )?;
         }
 
         // 3. Return ? Call(reviver, holder, « name, val, context »).

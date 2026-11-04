@@ -594,3 +594,69 @@ fn json_parse_with_a_reviver_throws_the_same_messages() {
             })()"#,
     )]);
 }
+
+#[test]
+fn json_parse_with_a_reviver_keeps_a_lone_surrogate() {
+    // The values are built by the same reader with and without a reviver, so a lone surrogate,
+    // escaped or raw, is the one code unit it is either way.
+    run_test_actions([
+        TestAction::assert(r#"JSON.parse('"\ud800"', (k, v) => v).length === 1"#),
+        TestAction::assert(r#"JSON.parse('"\ud800"', (k, v) => v).charCodeAt(0) === 0xd800"#),
+        TestAction::assert(r#"JSON.parse('"\ud800"', (k, v) => v).charCodeAt(0) === 0xd800"#),
+        TestAction::assert(r#"JSON.parse('"\udc00"', (k, v) => v).charCodeAt(0) === 0xdc00"#),
+        // A pair stays a pair; the same two units in the other order are two lone surrogates.
+        TestAction::assert(r#"JSON.parse('"\ud83d\ude00"', (k, v) => v).length === 2"#),
+        TestAction::assert(
+            r#"JSON.parse('"\ud83d\ude00"', (k, v) => v).codePointAt(0) === 0x1f600"#,
+        ),
+        TestAction::assert(
+            r#"(() => { const s = JSON.parse('"\ude00\ud83d"', (k, v) => v);
+                         return s.length === 2 && s.codePointAt(0) === 0xde00 && s.codePointAt(1) === 0xd83d; })()"#,
+        ),
+        // Inside containers, as a key and as a value.
+        TestAction::assert(
+            r#"(() => { const o = JSON.parse('{"a\ud800":["\udfff",{"b":"\ud800x"}]}', (k, v) => v);
+                         const [key] = Object.keys(o);
+                         return key === 'a\ud800' && o[key][0] === '\udfff' && o[key][1].b === '\ud800x'; })()"#,
+        ),
+        // The reviver sees the text each primitive came from, lone surrogates included.
+        TestAction::assert(
+            r#"(() => { const seen = [];
+                         JSON.parse('["\ud800", "\ud800", 1.50, -0, true, null]', (k, v, { source }) => { seen.push(source); return v; });
+                         return seen.join('|') === '"\ud800"|"\ud800"|1.50|-0|true|null|'; })()"#,
+        ),
+        // A value the reviver replaced no longer has a source, and a key it added has none.
+        TestAction::assert(
+            r#"(() => { const seen = [];
+                         JSON.parse('{"a":"\ud800","b":2}', function (k, v, c) {
+                             if (k === 'a') { this.b = 3; }
+                             seen.push(k + ':' + c.source);
+                             return v;
+                         });
+                         return seen.join('|') === 'a:"\ud800"|b:undefined|:undefined'; })()"#,
+        ),
+        // Duplicate keys: the last one's source goes with the last one's value.
+        TestAction::assert(
+            r#"(() => { let source;
+                         JSON.parse('{"a":1,"a":2}', (k, v, c) => { if (k === 'a') { source = c.source; } return v; });
+                         return source === '2'; })()"#,
+        ),
+    ]);
+}
+
+#[test]
+fn json_parse_with_a_reviver_reads_nesting_and_gives_up_before_the_stack_does() {
+    // The reader nests as deep as memory allows, but the reviver's walk recurses on the native
+    // stack: a depth it can take is revived, one it cannot throws a `RangeError` as V8 does.
+    run_test_actions([
+        TestAction::assert(
+            r#"(() => { let n = 0;
+                         JSON.parse('['.repeat(1000) + ']'.repeat(1000), (k, v) => { n++; return v; });
+                         return n === 1000; })()"#,
+        ),
+        TestAction::assert(
+            r#"(() => { try { JSON.parse('['.repeat(1000000) + ']'.repeat(1000000), (k, v) => v); }
+                         catch (e) { return e instanceof RangeError; } })()"#,
+        ),
+    ]);
+}
