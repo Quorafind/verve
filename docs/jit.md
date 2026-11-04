@@ -259,6 +259,43 @@ was filled at. Why that is enough:
 Anything the site cannot hold (an accessor more than three prototypes up) is the guard's every
 time; any mismatch is a miss that runs the guard and fills the site again.
 
+**A typed array's elements** are read and written in machine code (`typed_elements.rs`,
+`compiler/typed.rs`), for an `int32` index that is not negative, when every guard below holds;
+otherwise the access is the helper, which runs the interpreter's shortcuts
+(`typed_array_element_get_shortcut`, `typed_array_element_set_shortcut`) and stays the reference. Each
+guard reads the objects at each access, nothing is cached, so a detach, a resize or a write by
+other code is seen:
+
+- the object's vtable is the typed arrays' (so its data is a `TypedArray`: no other object has that
+  vtable), and neither the view nor its buffer is borrowed mutably (a write needs the buffer not
+  borrowed at all, as the helper's `borrow_mut` does);
+- the buffer is an `ArrayBuffer`, not a `SharedArrayBuffer` (excluded: its length is atomic and its
+  accesses are `AtomicSlice`s, which the helper handles), and it is not detached (the pointer to
+  its bytes is zero);
+- the view has a fixed length (`[[ArrayLength]]` is not `auto`: the payload of an `Option::None` is
+  not specified, so the word that says `Some` is tested first). A length-tracking view is the
+  helper's;
+- the kind is one of the eight number kinds. `BigInt64`/`BigUint64` allocate and `Float16` converts,
+  so they are the helper's;
+- the view lies within the buffer *as it is now* (`byteOffset + length * size <= bytes`, the
+  `IsTypedArrayOutOfBounds` test, which a shrunk resizable buffer fails) and the index is below the
+  length. Both are compared each time, so no byte outside the view is touched; an index outside
+  gets `undefined` (or no effect) from the helper;
+- a write needs a value that is a number, so there is no `ToNumber` and no user code (a `valueOf` that
+  detaches the buffer stays in the helper, which converts before it looks at the buffer, as the
+  specification does).
+
+A read boxes the element as the interpreter does (`TypedArrayElement` into `JsValue`): every number
+kind is an `f64` value, not an `int32` one, with `NaN` the canonical one. A write is the one the
+shortcut makes: `Float64` the number; `Float32` the number rounded to `f32` (`fdemote`, the
+instruction `as f32` is); the integer kinds the low bits of `ToInt32` of the number (`int32_of`,
+which leaves a finite float of 2^63 or more to the helper, since the interpreter's
+`to_int8` and its kin saturate there and differ from the specification, see below);
+`Uint8Clamped` an `int32` clamped to 0..255 (a float, whose rounding is the helper's, is the
+helper's). The offsets of the fields (`TypedArray`'s buffer, kind, offset and length; `BufferObject`'s
+two words; `ArrayBuffer`'s pointer and length) are found by looking at real objects, and checked
+with the rest of `layout.rs`: if they do not match, typed arrays stay with the helper.
+
 Two builtins got the same kind of shortcut, in the interpreter as much as in compiled code:
 `Array.prototype.push` and `Array.prototype.fill` on a *plain dense array* — the realm's array
 shape (a writable `length`, nothing else), extensible, dense elements, and `Array.prototype` and
@@ -936,6 +973,32 @@ of `typed` takes now (inferred from 368 ms over 6M iterations), a `length`, two 
 are about 52 together (13.7 + 2 x 11.9 + 14.5 over the loop); inline elements might bring the reads and the write to a few ns each
 (inferred, not measured), which would put `typed` near 200 ms.
 
+## Results (typed-array elements, P76)
+
+Element reads and writes of typed arrays in machine code ("Property caches and elements"). Release `verve` with the `jit` feature, Windows x86-64,
+`docs/electron-plan` at `0cc1fa94` against the same plus this branch; the suite and probe numbers are in `docs/electron/perf-js.md` (`typed` 356.1 to
+211.0 ms, target 280 and stretch 220; a read 14.5 to 8.5 ns and a write 16.5 to 6.5 ns on a loop of 4.0).
+
+Where the time of one access went, before (a release build, one thread, best of five runs of 20M, `typed_array_element_get_shortcut` and its
+parts, in ns over an empty loop of 0.2):
+
+| part | ns |
+|---|---|
+| recognise the receiver (`downcast_ref::<TypedArray>`) | 0.7 |
+| borrow the buffer, get its pointer and length | 0.8 |
+| bounds (`validate_index_u64`) | 0.5 |
+| load by kind and box (`get_value`, `JsValue::from`) | 3.5 |
+| the shortcut in all | 5.5 |
+| the set shortcut in all (convert by kind, `borrow_mut`, store) | 8.4 |
+
+The helper call measured 11 ns over the loop in JavaScript (read) and 12.5 (write), so about half was the helper around the shortcut: `catch_unwind`, the
+closure, reading and cloning registers, `set_register`. Inline code does the five guard loads, three branches, the class dispatch and the load or store:
+4.5 ns over the loop for a read, 2.5 for a write (a write has no register to set).
+
+What a compile costs. A function of 40 element accesses (the same four-line body repeated; 60 or 400 such functions called once each at threshold 0,
+`VERVE_JIT_THRESHOLD=0`) compiles 55 to 60 % slower with the typed paths in than without: 13.1 to 16.9 s against 20.0 to 23.7 s for 400. Folding the guards into three
+branches and sharing the array path's register store changed that by about 5 %. See Risks.
+
 ## Where a call goes
 
 Phase 2.5 left a JavaScript call at about 70 ns compiled, `new` at 230–450 ns, and a callback from
@@ -1405,6 +1468,13 @@ entirely. Background compilation on another thread fits here too, since `CodeBlo
   interpreter boxes a result (for example `div_fast`, which returns `int32` `0` for `0 / -5`, where
   JavaScript gives `-0` — a Boa bug the JIT deliberately does not inline) must be mirrored. The
   differential tests and the fuzzer are the guard; run them on any change to `value/`.
+- **Typed-array element accesses cost compile time.** Each element read or write now carries the
+  typed path as well as the array one (about 35 blocks), and a function of 40 element accesses
+  compiles 55 to 60 % slower (400 such functions at threshold 0: 13.1 to 16.9 s before, 20.0 to
+  23.7 s after; the same ratio with the guards folded into three branches and the register store
+  shared with the array path). Programs with few element accesses in hot functions do not see it.
+  Next: one typed path per function, entered from every site, or compile the typed path only where
+  the interpreter saw a typed array.
 - **Compile time** is about 5 ms a function, on the JavaScript thread. The type checks of each
   inline instruction expand into many small blocks, and phase 2 added the property and element
   accesses. A threshold of 1000 and the profitability check keep compiles rare, but a program
