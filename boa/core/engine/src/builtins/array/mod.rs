@@ -36,7 +36,7 @@ use std::cmp::{Ordering, min};
 
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
 
-mod array_iterator;
+pub(crate) mod array_iterator;
 use crate::value::JsVariant;
 pub(crate) use array_iterator::ArrayIterator;
 

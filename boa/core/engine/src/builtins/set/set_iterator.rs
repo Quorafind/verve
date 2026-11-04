@@ -8,9 +8,7 @@
 use super::ordered_set::OrderedSet;
 use crate::{
     Context, JsData, JsResult,
-    builtins::{
-        Array, BuiltInBuilder, IntrinsicObject, JsValue, iterable::create_iter_result_object,
-    },
+    builtins::{Array, BuiltInBuilder, IntrinsicObject, JsValue, iterable::step_to_result_object},
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
@@ -115,10 +113,18 @@ impl SetIterator {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-%setiteratorprototype%.next
     pub(crate) fn next(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-        let object = this.as_object();
+        let object = this
+            .as_object()
+            .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an SetIterator"))?;
+        let step = Self::advance(&object, context)?;
+        Ok(step_to_result_object(step, context))
+    }
+
+    /// The body of `next` without the result object: the next item, or `None` once the set is
+    /// exhausted.
+    pub(crate) fn advance(object: &JsObject, context: &mut Context) -> JsResult<Option<JsValue>> {
         let mut set_iterator = object
-            .as_ref()
-            .and_then(JsObject::downcast_mut::<Self>)
+            .downcast_mut::<Self>()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an SetIterator"))?;
 
         let item_kind = set_iterator.iteration_kind;
@@ -140,23 +146,17 @@ impl SetIterator {
             if let Some(element) = e {
                 let item = match item_kind {
                     PropertyNameKind::KeyAndValue => {
-                        let result =
-                            Array::create_array_from_list([element.clone(), element], context);
-                        Ok(create_iter_result_object(result.into(), false, context))
+                        Array::create_array_from_list([element.clone(), element], context).into()
                     }
-                    _ => Ok(create_iter_result_object(element, false, context)),
+                    _ => element,
                 };
                 set_iterator.iterated_set = Some(obj);
-                return item;
+                return Ok(Some(item));
             }
             // The end of the set: give the lock back rather than dropping it while it is taken.
             obj.release();
         }
 
-        Ok(create_iter_result_object(
-            JsValue::undefined(),
-            true,
-            context,
-        ))
+        Ok(None)
     }
 }

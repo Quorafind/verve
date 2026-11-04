@@ -10,7 +10,7 @@
 //! [spec]: https://tc39.es/ecma262/#sec-set-objects
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set
 
-mod set_iterator;
+pub(crate) mod set_iterator;
 
 #[cfg(test)]
 mod tests;

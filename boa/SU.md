@@ -478,3 +478,21 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   `JSON.parse` of 70,000 records (7,032,596 code units): 1536–2034 ms to 453–530 ms, five interleaved
   runs each, load 19–70%. The suite's `json` test, whose parse phase that is, went from 2926–3519 ms
   to 1315–1428 ms (JIT column, 5 runs, load 23–41%), which is 8.0× Node rather than 21×.
+
+- `boa_engine`, `builtins/iterable`, `array`, `map`, `set`, `string`, `vm/opcode/iteration`: a
+  `GetIterator` whose `next` is the untouched `next` of the running realm's array, map, set or
+  string iterator records which advance function that is, and `IteratorStep` (`for…of`, spread,
+  destructuring, `Array.from`, `new Map(entries)`, and the rest that go through
+  `IteratorRecord::step`) calls it directly and keeps the value, instead of calling `next` and
+  reading `done` and `value` from a result object made only to be read. The object is unobservable
+  there: it is a fresh ordinary object with own data properties. Every read the advance makes of the
+  iterated object (`length` and the elements of an array-like, a proxy's traps, a typed array's
+  buffer) is unchanged, the `next` method is still the one read at `GetIterator`, and a direct
+  `it.next()` still returns a new object. `IteratorNext` and `IteratorValue` step and read the
+  record in place instead of popping it off the frame's stack and pushing it back, and a new record
+  no longer allocates the empty object that stood for "no result yet". What is not kept: a native
+  frame for `next` in the shadow stack while a proxy trap runs inside the step, so an `Error.stack`
+  made there lacks that line; a `next` from another realm is stepped as before.
+  `for (const x of array)` per element, 1M elements, median of 5 processes: 369 to 75 ns
+  interpreted, 352 to 61 compiled; a `Set`: 598 to 47 and 534 to 29; a string: 456 to 100 and 519
+  to 84 (load 25–50%).

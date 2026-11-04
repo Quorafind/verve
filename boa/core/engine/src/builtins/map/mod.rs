@@ -28,7 +28,7 @@ use super::{
     iterable::if_abrupt_close_iterator,
 };
 
-mod map_iterator;
+pub(crate) mod map_iterator;
 pub(crate) use map_iterator::MapIterator;
 
 pub mod ordered_map;
