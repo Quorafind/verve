@@ -132,7 +132,9 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
              P68 评审积压修正   P69 调用与构造   P70 迭代器   P71 rope 字符串   P72 JIT 类型化数组 length
              P73 内建借用重入   P74 字符串后续   P75 原型内联缓存失效
                │
-             P76 JIT 类型化数组元素   P77 vm/object 借用重入   P78 构造器初始形状   P79 两处小修 ─ RP 性能复盘
+             P76 JIT 类型化数组元素   P77 vm/object 借用重入   P78 构造器初始形状   P79 两处小修
+               │
+             P80 整数转换与 TCP 测试   P81 JIT 类型化数组编译时间   P82 Map 条目解构   P83 UTF-16 rope 追加 ─ RP 性能复盘
 ```
 
 | 包 | 名称 | 依赖 | 可并行 | 规模 |
@@ -186,6 +188,10 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 | [P77](packages/P77-reentrant-borrows-vm.md) | 借用重入排查：`vm/`、`object/`、`environments/` | P73 P75 | ✓ | S–M |
 | [P78](packages/P78-constructor-initial-shape.md) | `new` 出来的对象直接用构造器的最终形状 | P69 P75 | ✓ | M |
 | [P79](packages/P79-small-fixes.md) | 两处小修：`worker::wait` 漏等、`matchAll` 迭代器抛错后不结束 | P69 P73 | ✓ | S |
+| [P80](packages/P80-int-conversions-and-tcp-flake.md) | 两处小修：小整数转换在大浮点数上饱和、TCP 测试并发时 `EIO` | P76 | ✓ | S |
+| [P81](packages/P81-jit-typed-compile-time.md) | JIT：类型化数组元素内联的编译时间 | P76 | ✓ | S–M |
+| [P82](packages/P82-map-entry-destructuring.md) | `for (const [k, v] of map)` 不再为每个条目新建数组 | P70 | ✓ | M |
+| [P83](packages/P83-utf16-rope-appends.md) | rope 的 UTF-16 追加也走缓冲 | P74 | ✓ | S |
 
 ### 重构关卡
 
