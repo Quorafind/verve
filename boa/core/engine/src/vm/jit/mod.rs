@@ -40,6 +40,8 @@ mod tests;
 mod tests_calls;
 #[cfg(test)]
 mod tests_elements;
+#[cfg(test)]
+mod tests_iterators;
 
 use std::{
     cell::{Cell, OnceCell},
