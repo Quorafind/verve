@@ -472,6 +472,12 @@ always agree with one another.
   constructor gets none. A derived constructor keeps it: its `this` binding lives there. The
   environment is two collected objects and was 188 ns of every `new` of a class.
 
+- `boa_engine`, `builtins/function/mod.rs`, `vm/mod.rs`, `object/shape/`: `function_construct` reads an
+  ordinary function's `prototype` from its shared shape, through a one-entry cache in the `Vm` (the
+  shape, held weakly, and the slot of the data property), instead of the generic `[[Get]]`; a
+  proxy, an accessor, a unique shape or a value that is not an object take the generic path.
+  `points_to` of the weak shapes is no longer behind the `jit` feature.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.

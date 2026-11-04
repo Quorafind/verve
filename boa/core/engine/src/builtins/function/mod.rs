@@ -1182,6 +1182,44 @@ pub(crate) fn enter_ordinary_function(
     Ok(())
 }
 
+/// The `prototype` of an ordinary function when it is an own data property holding an object:
+/// what `Get(newTarget, "prototype")` answers for such a function, read without the generic
+/// `[[Get]]`. Anything else (a proxy, an accessor, a missing or non-object value) is `None`, and
+/// the caller takes the generic path.
+fn own_prototype_object(new_target: &JsValue, context: &mut Context) -> Option<JsObject> {
+    let function = new_target.as_object()?;
+    if !function.is::<OrdinaryFunction>() {
+        return None;
+    }
+    let function = function.borrow();
+    let properties = function.properties();
+    let cached = context
+        .vm
+        .construct_prototype_slot
+        .as_ref()
+        .filter(|(shape, _)| shape.points_to(&properties.shape))
+        .map(|(_, slot)| *slot);
+    let slot = match cached {
+        Some(slot) => slot,
+        None => {
+            let slot = properties
+                .shape
+                .lookup(&PropertyKey::String(crate::object::PROTOTYPE))?;
+            // A unique shape keeps its identity as properties come and go: not cacheable.
+            if slot.attributes.is_accessor_descriptor() {
+                return None;
+            }
+            if !properties.shape.is_unique() {
+                context.vm.construct_prototype_slot = Some(((&properties.shape).into(), slot));
+            }
+            slot
+        }
+    };
+    properties.storage[slot.index as usize]
+        .as_object()
+        .map(|object| object.clone())
+}
+
 /// Construct an instance of this object with the specified arguments.
 ///
 /// # Panics
@@ -1227,8 +1265,12 @@ fn function_construct(
         // prototype as prototype for the new object
         // see <https://tc39.es/ecma262/#sec-ordinarycreatefromconstructor>
         // see <https://tc39.es/ecma262/#sec-getprototypefromconstructor>
-        let prototype =
-            get_prototype_from_constructor(&new_target, StandardConstructors::object, context)?;
+        let prototype = match own_prototype_object(&new_target, context) {
+            Some(prototype) => prototype,
+            None => {
+                get_prototype_from_constructor(&new_target, StandardConstructors::object, context)?
+            }
+        };
         let this = JsObject::from_proto_and_data_with_shared_shape(
             context.root_shape(),
             prototype,
