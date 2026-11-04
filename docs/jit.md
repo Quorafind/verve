@@ -184,6 +184,12 @@ value after a `delete`, or a panic past the end of the storage. Why the two shap
 - **The last guard**: storage is read with `get`, so a slot out of range is a miss and never a
   panic. The checks above make it unreachable; the guard does not replace them.
 
+**A property an assignment creates** (`this.x = v` on an object without `x`) has a cache of its own
+per site, `AddCache` in `vm/inline_cache/add.rs`: up to four entries, each the receiver's shape, the
+shape after the insert, the slot, and the prototype chain as *stamps* (a prototype's shape and, for a
+unique shape, its number of properties). A hit swaps the shape and pushes the value. "Results (P78)"
+has the argument for why that is all `[[Set]]` would have done, and the measurements.
+
 Compiled code follows the same entries (`InlineCache::slot_for`). It reads a prototype's slot only
 through the helper and fills its site cache only for an own slot of a shared shape, so the
 machine code needed no change. `tests_prototype_cache.rs` runs 45 scenarios in the three modes
@@ -1214,7 +1220,8 @@ What was not done, with the numbers:
   each would give about 375, not 350.
 - **`this` allocated with the constructor's initial shape**, the path to `oo` at 600: `new CX(i)` less
   `new C0()` is still 183 ns (the first property's shape transition), which is what separates 725
-  from about 575–600.
+  from about 575–600. Done in P78, not as an allocation but as a cache of the transition
+  ("Results (P78)").
 - **The JIT follow-up** (compiled code calling compiled code without `finish`): the unattributed 20 ns
   of the compiled call was not split further, so there is no number to act on.
 
@@ -1231,6 +1238,113 @@ as the build before the branch. test262, every directory except `staging`, inter
 **0 differ**, but for `Atomics/notify/notify-all-on-loc.js`, `notify-two.js` and
 `bigint/notify-all-on-loc.js`, timing tests that failed interpreted and passed forced, as the one
 before them did.
+
+## Results (P78: the shape a constructor's assignments lead to)
+
+`new CX(i)` was 183 ns dearer than `new C0()`, all of it the constructor's `this.x = x`. This section
+takes that apart, and says what was done about it and what was not.
+
+Release `verve` with the `jit` feature, Windows x86-64, `docs/electron-plan` at `c28e026c` (P75
+merged) against the same plus this branch, built by `cargo build --release --features jit --bin
+verve`, `CARGO_BUILD_JOBS=6`, `VERVE_CODE_CACHE=0`, a throwaway profile folder.
+
+**Where the 183 ns went.** Rdtsc timers around adjacent pieces of the interpreter's `SetPropertyByName`
+handler (one build, 4M assignments of one property to a fresh object, each reading less 30 cycles;
+load 26–49 %, so read the shares), ns per assignment:
+
+| piece | ns |
+|---|---|
+| `cached_set`: the inline cache has no entry, a creating assignment never fills one | 3.2 |
+| `ic.name.clone()` into a `PropertyKey` | 4.6 |
+| the receiver: methods ordinary, extensible, `get(key)` finds nothing | 2.4 |
+| the prototype walk: two borrows, two methods checks, two hash lookups (class prototype, `Object.prototype`) | 19.6 |
+| `PropertyMap::insert`, of which: the shape's `lookup` | 2.3 |
+| the shape transition (`insert_property_transition`: key clone, forward-transition table, weak upgrade) | 12.0 |
+| the storage `push` (the first one allocates, 64 bytes) | 34.1 |
+| the rest of `insert` (descriptor and attribute conversion, the old shape's drop; not split further) | 37.7 |
+| **total in the handler** | **116** |
+
+The other 60 ns or so are outside it: the instruction dispatch and `GetArgument`, and the storage's
+free when the object is collected (inferred, not measured). Switching shapes is not the cost: the
+lookups and the building of the transition are 2 + 12 + 38, the prototype walk 20, and the only
+piece that cannot be skipped is the allocation of the storage.
+
+**Candidates.**
+
+1. *Reserve the storage the constructor ended with.* Measured with a temporary hack on top of the
+   cache (the first creating assignment `reserve_exact(6)`; not committed): `new CX6(i)` (six
+   properties) about 560 to 480 ns, i.e. one reallocation (4 to 8 slots) saved, about 70 ns;
+   `new CX3(i)` unchanged within noise; `new CX(i)` 0 to 25 ns *slower* (a 96-byte block for one
+   property). `oo` has one property, so it gains nothing. A per-constructor count would not make
+   the one-property case slower, but it is state in the function or the code block and a write at
+   every constructor return, for objects of five properties or more. Not done.
+2. *Predict the transition chain so the set cache hits* (chosen, in the form of a cache per site:
+   each `this.x = v` remembers its own transition, and the chain of a constructor is the chain of
+   its sites). `new CX(i)` less `new C0()`: 177 to 83 ns; `new CX3(i)` 690 to 353; `new CX6(i)` 1122
+   to 503; `new F(i)` 349 to 249.
+3. *Allocate `this` with the final shape and `undefined` slots.* Not built, and not buildable as
+   asked: during the constructor `'a' in this`, `hasOwnProperty`, `Object.keys(this)`,
+   `Object.getOwnPropertyNames(this)` and `JSON.stringify(this)` would see properties that do not
+   exist yet, their order would be the previous construction's rather than this one's (a conditional
+   property, a `delete`, a `defineProperty` with another attribute), and `this.a = v` would write
+   the slot instead of finding a setter or a read-only property on the prototype. A proof that none
+   of that is observable needs the whole constructor body, which the call site does not have. The
+   ceiling of what it could add over the chosen cache is the hit itself, about 15 ns a property
+   (inferred).
+
+**Why the chosen one cannot change what a program sees.** The cache is a record of what
+`set_new_own_property` did and checked, replayed when everything it checked is known to be the same:
+
+- It is only used for `receiver === object`, an ordinary object (the four methods that matter are
+  compared by function, as the uncached path does), extensible (read on every hit, as it is not in
+  the shape).
+- The receiver's shape is shared, so it is immutable: it lacks the name, has the recorded
+  prototype, and has the recorded transition to the shape after. A shape holds its prototype, so it
+  pins the nearest prototype *object*; that object's shape pins the next. An object's methods never
+  change after creation, and were ordinary when the entry was made (a proxy in the chain is not
+  recorded).
+- Each prototype's shape is compared, and for a unique shape (the builtin prototypes, a
+  dictionary-mode object) so is its number of properties. A unique shape gains properties in
+  place, which is why identity is not enough; everything else it can do (lose a property, change a
+  property's kind or attributes, change prototype) makes a new shape (`unique_shape.rs`). So a
+  setter or a read-only property added to `Object.prototype` or to any prototype after the entry
+  was made makes the hit fail, and the generic path runs the setter or throws as before.
+- A hit fails when the storage is not as long as the slot says, when a borrow fails, or when the
+  new shape was collected: it is then the uncached path, and the entry is made again.
+
+What is recorded is decided after the uncached insert has succeeded, so every case that did not go
+through it (a setter, a read-only property, a proxy, a non-extensible object, a shape past the
+transition limit that became unique) is not recorded, and a site that sees more than four shapes
+records no more. Constructor cases: a replaced `prototype` is another receiver shape (a miss, then
+another entry); a conditional property gives each distinct shape its own entry; `delete this.a`
+makes the object's shape another one, and the next site misses; a constructor that throws or
+returns another object leaves its entries, which describe a transition that really happened;
+`Reflect.construct` with another `newTarget` has another prototype, so another shape; a derived
+class's base constructor sees one shape per subclass, and past four the site stops recording (a
+miss, never wrong).
+
+**State.** The cache lives in the code block, in the `InlineCache` of the assignment (`AddCache`: a
+`Vec` header, a borrow flag and a flag, 40 bytes for a site that never creates a property; an entry
+is about 150 bytes: two weak shapes, the slot, and up to four stamps of a weak shape and a count).
+It holds weak shapes only, so it keeps no shape or prototype alive, and goes with the code block
+when that is collected. Nothing is kept in the function object, the `Vm` or the object.
+
+**Suite.** The two binaries interleaved per test, `--runs 7`, median (best), ms; the load before
+and after each run is in the package's status.
+
+| test | round 2 before | round 2 after | round 3 before | round 3 after |
+|---|---|---|---|---|
+| `oo`, JIT | 721.9 (710.1) | 590.5 (574.5) | 708.6 (692.8) | 608.9 (591.0) |
+| `oo`, interpreter | 811.6 (797.3) | 684.4 (683.7) | 789.1 (776.5) | 690.4 (676.1) |
+| `alloc`, JIT | 254.2 (232.8) | 249.7 (244.4) | 245.7 (240.1) | 253.4 (245.7) |
+| `vdom`, JIT | 48.3 (47.5) | 52.2 (50.8) | 52.7 (48.3) | 50.4 (48.8) |
+| `closure`, JIT | 437.9 (430.0) | 441.8 (429.8) | 439.4 (434.0) | 429.0 (424.6) |
+| `json`, JIT | 1233.5 (1220.3) | 1237.4 (1208.2) | 1214.0 (1202.6) | 1214.9 (1207.5) |
+
+`oo` is 18 % and 14 % faster: the commitment (650) is met in both rounds, the stretch (600) in the
+first only. `vdom` alone left the ±3 % band in a round (+8.1 and -4.4 %); it builds its tree from
+object literals and has no creating assignment, so a change there is noise, and two more rounds of
+eleven runs gave -3.2 and -2.5 % (`vdom`), +0.4 and +2.7 % (`alloc`).
 
 ## Roadmap
 

@@ -535,3 +535,24 @@ runs: +2.0 and +0.6 %). An earlier round, before the hit path was trimmed (one b
 at +5.7 % compiled; two rounds at load 45–60 % were not used. Probe (a data property on the class prototype read in a loop, `-A`, five
 runs, best, minus the loop): 17.4 to 19.0 ns compiled, interpreted unchanged within noise; `a.push` on an array in a loop of 300k:
 86 to 88 ns an iteration. Details in `docs/jit.md` "Property caches and elements" and `packages/P75-prototype-inline-cache.md`.
+
+### P78: a cache for the property an assignment creates (constructors)
+
+`electron/p78-constructor-initial-shape` against `docs/electron-plan` `c28e026c`, both `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`, `VERVE_CODE_CACHE=0`, a throwaway profile folder, the machine shared with three other workers. Suite rounds
+(`--runs 7`, before then after for each test, median (best); load before/after each run 5–20 %), JIT then interpreter for `oo`:
+
+| test | before, JIT | after, JIT | before, interp | after, interp |
+|---|---|---|---|---|
+| `oo` (round 2) | 721.9 (710.1) | 590.5 (574.5) | 811.6 (797.3) | 684.4 (683.7) |
+| `oo` (round 3) | 708.6 (692.8) | 608.9 (591.0) | 789.1 (776.5) | 690.4 (676.1) |
+| `alloc` (rounds 2, 3) | 254.2 → 245.7 | 249.7 → 253.4 | 264.1 → 261.5 | 259.2 → 254.6 |
+| `vdom` (rounds 2, 3) | 48.3 → 52.7 | 52.2 → 50.4 | 52.2 → 52.3 | 53.2 → 50.9 |
+| `closure` (rounds 2, 3) | 437.9 → 439.4 | 441.8 → 429.0 | 674.0 → 664.8 | 644.6 → 627.1 |
+| `json` (rounds 2, 3) | 1233.5 → 1214.0 | 1237.4 → 1214.9 | 1226.6 → 1221.2 | 1223.4 → 1225.2 |
+
+(Cells with an arrow are round 2 then round 3.) `oo` is 18 and 14 % faster compiled, 16 and 12 % interpreted: the commitment (650)
+is met, the stretch (600) in one round of two. `vdom` left the ±3 % band in round 2 (+8.1 % compiled, -4.4 % in round 3); it has no
+creating assignment, and two more rounds of eleven runs gave -3.2 and -2.5 %. `alloc` +0.4 and +2.7 % in those. The probe, ns per
+iteration (load about 10 %, round 3): `new CX(i)` less `new C0()` 177 to 83, `new CX3(i)` 690 to 353, `new CX6(i)` 1122 to 503,
+`new F(i)` 349 to 249. Details in `docs/jit.md` "Results (P78)" and `packages/P78-constructor-initial-shape.md`.
