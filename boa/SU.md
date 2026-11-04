@@ -461,6 +461,10 @@ always agree with one another.
   slices its flat string. A flattened rope that is appended to again starts a new chain, so
   reading before every append is as quadratic as it was.
 
+- `boa_engine`, `value/operations.rs`: `JsValue::add` joins strings with `JsString::concat_lazy`
+  (all three string branches), so `s += x` in a loop builds a rope and is linear. Templates and
+  `concat_array` callers still copy.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
