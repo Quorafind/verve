@@ -97,7 +97,7 @@ crates/
   verve-layout/       新：布局引擎（taffy + 行内排版 + 层叠上下文 → DisplayList），不依赖 GPUI（P30/P31）
   verve-gpui/         新：`electron` 二进制（src/bin/electron.rs）、GPUI Shell、DomView（回放 DisplayList）、TextMeasurer 的 GPUI 实现、输入桥接、菜单托盘
   verve-electron-npm/ 新：npm 包模板与平台包脚本（P40，非 Rust）
-src/                  Verve 内核：只允许 P03、P11、P17、P42、P62、P67、P68 修改（P42 还可改 boa/core/gc；性能线 P61、P62、P64–P66、P68–P74 可改 boa/core 的 engine 与 string；都需记入 boa/SU.md）
+src/                  Verve 内核：只允许 P03、P11、P17、P42、P62、P67、P68 修改（P42 还可改 boa/core/gc；性能线 P61、P62、P64–P66、P68–P75 可改 boa/core 的 engine 与 string；都需记入 boa/SU.md）
 docs/electron/        本方案
 tests/electron/       夹具应用与无头验收（P00）
 ```
@@ -130,7 +130,7 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
              P64 字符串/正则/JSON   P65 对象/集合/类型化数组   P66 JIT 覆盖扩展   P67 CLI 默认开缓存
                │
              P68 评审积压修正   P69 调用与构造   P70 迭代器   P71 rope 字符串   P72 JIT 类型化数组 length
-             P73 内建借用重入   P74 字符串后续 ─ RP 性能复盘
+             P73 内建借用重入   P74 字符串后续   P75 原型内联缓存失效 ─ RP 性能复盘
 ```
 
 | 包 | 名称 | 依赖 | 可并行 | 规模 |
@@ -179,6 +179,7 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 | [P72](packages/P72-jit-typed-length.md) | JIT：类型化数组 `length` 的站点缓存 | P65 P66 | ✓ | S |
 | [P73](packages/P73-reentrant-borrows.md) | 内建对象调用用户代码时仍借用着自身（重入 panic） | P70 | ✓ | S |
 | [P74](packages/P74-string-followups.md) | 字符串后续：数字转字符串、rope 叶子合并、字符串迭代 | P70 P71 | ✓ | S–M |
+| [P75](packages/P75-prototype-inline-cache.md) | 原型属性的内联缓存在原型变化后不失效（读到旧槽、越界 panic） | P70 P72 | ✓ | S–M |
 
 ### 重构关卡
 
