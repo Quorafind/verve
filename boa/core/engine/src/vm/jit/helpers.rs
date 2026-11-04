@@ -23,7 +23,7 @@ use crate::{
         Array,
         typed_array::object::{
             TypedArray, typed_array_element_get_shortcut, typed_array_element_set_shortcut,
-            typed_array_length_shortcut,
+            typed_array_length_guard, typed_array_length_read,
         },
     },
     environments::Environment,
@@ -321,7 +321,13 @@ pub(crate) unsafe extern "C" fn jit_get_length(
             })??
         } else if let Some(string) = base.as_string() {
             JsValue::from(string.len() as u32)
-        } else if let Some(length) = base.with_object(typed_array_length_shortcut).flatten() {
+        } else if let Some(length) = base
+            .with_object(|object| {
+                typed_array_length_guard(object).then(|| typed_array_length_read(object))
+            })
+            .flatten()
+            .flatten()
+        {
             length
         } else {
             cached_data_property(base, code_block, ic, None)?

@@ -446,7 +446,7 @@ always agree with one another.
 
 - `boa_engine`, `vm/jit/helpers.rs` (feature `jit`): the fast helpers of `GetLengthProperty`,
   `GetPropertyByValue` and `SetPropertyByValue` handle typed arrays by calling the interpreter's
-  own shortcuts (`typed_array_length_shortcut`, `typed_array_element_get_shortcut`,
+  own shortcuts (`typed_array_length_guard` with `typed_array_length_read`, `typed_array_element_get_shortcut`,
   `typed_array_element_set_shortcut`), so the guards live in one place. A store is the
   helper's only when its receiver is the array itself, which compiled code decides at compile
   time (the instruction's receiver register is the object's).
@@ -464,6 +464,12 @@ always agree with one another.
 - `boa_engine`, `value/operations.rs`: `JsValue::add` joins strings with `JsString::concat_lazy`
   (all three string branches), so `s += x` in a loop builds a rope and is linear. Templates and
   `concat_array` callers still copy.
+
+- `boa_engine`, `builtins/typed_array/object.rs`, `vm/opcode/get/property.rs`: the typed-array
+  `length` shortcut is two functions, `typed_array_length_guard` (the object's `length` is the
+  intrinsic getter: walks the prototype chain) and `typed_array_length_read` (the length from the
+  internal slots, zero for a detached or out-of-bounds view). `GetLengthProperty` calls them in
+  sequence; the behaviour is the one it had.
 
 ## Keeping it
 
