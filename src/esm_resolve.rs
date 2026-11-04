@@ -17,6 +17,8 @@ pub(crate) enum Mode {
 pub(crate) struct ResolveError {
     pub code: &'static str,
     pub message: String,
+    /// The file the realm may not read, when `code` is `ERR_ACCESS_DENIED`.
+    pub resource: Option<PathBuf>,
 }
 
 pub(crate) type Result<T> = std::result::Result<T, ResolveError>;
@@ -25,6 +27,19 @@ fn error(code: &'static str, message: impl Into<String>) -> ResolveError {
     ResolveError {
         code,
         message: message.into(),
+        resource: None,
+    }
+}
+
+/// Resolution reached `path`, which exists, and the realm may not read it: Node's refusal, not
+/// a module that is missing.
+fn refused(path: &Path) -> ResolveError {
+    ResolveError {
+        resource: Some(path.to_path_buf()),
+        ..error(
+            "ERR_ACCESS_DENIED",
+            "Access to this API has been restricted",
+        )
     }
 }
 
@@ -70,6 +85,18 @@ pub(crate) fn manifest(view: &View, dir: &Path) -> Result<Option<Value>> {
             "ERR_INVALID_PACKAGE_CONFIG",
             format!("{}: {err}", path.display()),
         )),
+    }
+}
+
+/// Refuses a `package.json` of the package at `root` that the realm may not read, which a bare
+/// specifier's lookup is about to read. Unlike [`manifest`], which skips one, this is Node's
+/// `--permission`: the file is what is read, so it is what is refused, whether or not it exists.
+fn ensure_package_readable(root: &Path) -> Result<()> {
+    let path = root.join("package.json");
+    if crate::permission::resolution_may_read(&path) {
+        Ok(())
+    } else {
+        Err(refused(&path))
     }
 }
 
@@ -190,7 +217,12 @@ fn resolve_inner(rules: &Rules<'_>, specifier: &str, parent: &Url) -> Result<Url
     while let Some(dir) = at {
         if dir.file_name().is_none_or(|s| s != "node_modules") {
             let root = dir.join("node_modules").join(name);
+            // `require` reads the manifest of every candidate; `import` only of one that is there.
+            if rules.mode == Mode::Require {
+                ensure_package_readable(&root)?;
+            }
             if crate::fs::sys::is_dir(rules.view, &root) {
+                ensure_package_readable(&root)?;
                 let json = manifest(rules.view, &root)?;
                 if let Some(exports) = json
                     .as_ref()
