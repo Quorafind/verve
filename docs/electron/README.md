@@ -130,7 +130,9 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
              P64 字符串/正则/JSON   P65 对象/集合/类型化数组   P66 JIT 覆盖扩展   P67 CLI 默认开缓存
                │
              P68 评审积压修正   P69 调用与构造   P70 迭代器   P71 rope 字符串   P72 JIT 类型化数组 length
-             P73 内建借用重入   P74 字符串后续   P75 原型内联缓存失效 ─ RP 性能复盘
+             P73 内建借用重入   P74 字符串后续   P75 原型内联缓存失效
+               │
+             P76 JIT 类型化数组元素   P77 vm/object 借用重入   P78 构造器初始形状   P79 两处小修 ─ RP 性能复盘
 ```
 
 | 包 | 名称 | 依赖 | 可并行 | 规模 |
@@ -180,6 +182,10 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 | [P73](packages/P73-reentrant-borrows.md) | 内建对象调用用户代码时仍借用着自身（重入 panic） | P70 | ✓ | S |
 | [P74](packages/P74-string-followups.md) | 字符串后续：数字转字符串、rope 叶子合并、字符串迭代 | P70 P71 | ✓ | S–M |
 | [P75](packages/P75-prototype-inline-cache.md) | 原型属性的内联缓存在原型变化后不失效（读到旧槽、越界 panic） | P70 P72 | ✓ | S–M |
+| [P76](packages/P76-jit-typed-elements.md) | JIT：类型化数组元素读写内联 | P72 P75 | ✓ | M |
+| [P77](packages/P77-reentrant-borrows-vm.md) | 借用重入排查：`vm/`、`object/`、`environments/` | P73 P75 | ✓ | S–M |
+| [P78](packages/P78-constructor-initial-shape.md) | `new` 出来的对象直接用构造器的最终形状 | P69 P75 | ✓ | M |
+| [P79](packages/P79-small-fixes.md) | 两处小修：`worker::wait` 漏等、`matchAll` 迭代器抛错后不结束 | P69 P73 | ✓ | S |
 
 ### 重构关卡
 
