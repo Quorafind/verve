@@ -473,3 +473,67 @@ fn match_result_carries_groups_and_indices_as_node_does() {
         TestAction::assert("!('indices' in /(?<x>a)/.exec('a'))"),
     ]);
 }
+
+#[test]
+fn regexp_string_iterator_may_be_stepped_again_from_exec() {
+    // `exec` calls `next` on the iterator that is running it.
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const log = [];
+            const orig = RegExp.prototype.exec;
+            let it, hit = false;
+            RegExp.prototype.exec = function (s) {
+              if (!hit) { hit = true; try { log.push(JSON.stringify(it.next())); } catch (e) { log.push(e.constructor.name + ': ' + e.message); } }
+              return orig.call(this, s);
+            };
+            it = 'aaa'.matchAll(/a/g);
+            try { log.push(JSON.stringify(it.next())); } catch (e) { log.push('outer ' + e.constructor.name); }
+            RegExp.prototype.exec = orig;
+            log.join(' | ');
+        "#},
+        js_str!("{\"value\":[\"a\"],\"done\":false} | {\"value\":[\"a\"],\"done\":false}"),
+    )]);
+}
+
+#[test]
+fn regexp_string_iterator_steps_in_order_when_exec_steps_it() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const log = [];
+            const orig = RegExp.prototype.exec;
+            let it, hit = false;
+            RegExp.prototype.exec = function (s) {
+              const m = orig.call(this, s);
+              if (m && !hit) { hit = true; const inner = it.next(); log.push('inner ' + inner.value.index + ' ' + inner.done); }
+              return m;
+            };
+            it = 'aaa'.matchAll(/a/g);
+            const outer = it.next();
+            log.push('outer ' + outer.value.index);
+            log.push(JSON.stringify(it.next().value.index));
+            RegExp.prototype.exec = orig;
+            log.join(' | ');
+        "#},
+        js_str!("inner 1 false | outer 0 | 2"),
+    )]);
+}
+
+#[test]
+fn regexp_string_iterator_completed_by_a_nested_step() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const log = [];
+            const orig = RegExp.prototype.exec;
+            let it, hit = false;
+            RegExp.prototype.exec = function (s) {
+              if (!hit) { hit = true; log.push(JSON.stringify(it.next().done)); }
+              return orig.call(this, s);
+            };
+            it = 'a'.matchAll(/a/g);
+            log.push(JSON.stringify(it.next().done), JSON.stringify(it.next().done));
+            RegExp.prototype.exec = orig;
+            log.join(' ');
+        "#},
+        js_str!("false true true"),
+    )]);
+}

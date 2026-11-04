@@ -552,3 +552,7 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   `BorrowError`. The step reads the index, reads `length`, stores `index + 1` and then reads the
   element, as V8 does; what a re-entrant call stored while `length` was read is overwritten, and a
   call that exhausted the iterator there does not keep the outer call from stepping.
+
+- `boa_engine`, `builtins/regexp/regexp_string_iterator.rs`: `%RegExpStringIteratorPrototype%.next`
+  no longer holds the iterator's borrow while `exec`, `lastIndex` and the match's `0` run; an
+  `exec` that called `next` on the iterator running it panicked with `BorrowError`.
