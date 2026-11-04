@@ -41,7 +41,6 @@ fn a_worker_answers_its_page() {
     assert!(rt.next_due().is_some(), "the worker has work waiting");
     for _ in 0..50 {
         rt.wait_for_workers(std::time::Duration::from_millis(100));
-        std::thread::sleep(std::time::Duration::from_millis(20));
         rt.run_workers();
         if js(&mut rt, "heard.length") != "0" {
             break;
@@ -60,7 +59,6 @@ fn a_worker_answers_its_page() {
     js(&mut rt, "worker.postMessage('bye')");
     for _ in 0..50 {
         rt.wait_for_workers(std::time::Duration::from_millis(100));
-        std::thread::sleep(std::time::Duration::from_millis(20));
         rt.run_workers();
         if rt.next_due().is_none() {
             break;
@@ -142,7 +140,6 @@ fn a_worker_is_heard_from_its_script_alone() {
     );
     for _ in 0..50 {
         rt.wait_for_workers(std::time::Duration::from_millis(100));
-        std::thread::sleep(std::time::Duration::from_millis(20));
         rt.run_workers();
         if js(&mut rt, "heard.length") != "0" {
             break;
@@ -154,4 +151,38 @@ fn a_worker_is_heard_from_its_script_alone() {
     rt.wait_for_workers(std::time::Duration::from_secs(5));
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
     js(&mut rt, "worker.terminate(); brokenWorker.terminate()");
+}
+
+/// A message posted and at once waited on is waited for, whether the worker answers it straight
+/// away or arms a timer to answer later: no moment of the worker's picking it up and answering
+/// it looks like nothing being worked on.
+#[test]
+fn a_page_waiting_at_once_hears_the_answer() {
+    for reply in [
+        "postMessage(e.data + 1)",
+        "setTimeout(() => postMessage(e.data + 1), 30)",
+    ] {
+        let mut rt = Runtime::new();
+        js(
+            &mut rt,
+            &format!(
+                r#"
+                globalThis.heard = [];
+                const url = URL.createObjectURL(new Blob(['self.onmessage = (e) => {{ {reply} }}']));
+                globalThis.worker = new Worker(url);
+                worker.onmessage = (e) => heard.push(e.data);
+            "#
+            ),
+        );
+        // The worker's script is waited out first, then a message posted and waited on at once.
+        rt.wait_for_workers(std::time::Duration::from_secs(5));
+        js(&mut rt, "worker.postMessage(1)");
+        assert!(
+            rt.wait_for_workers(std::time::Duration::from_secs(5)),
+            "no answer from {reply}"
+        );
+        rt.run_workers();
+        assert_eq!(js(&mut rt, "heard.join()"), "2", "{reply}");
+        js(&mut rt, "worker.terminate()");
+    }
 }

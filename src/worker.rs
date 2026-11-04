@@ -727,21 +727,22 @@ pub(crate) fn alive(page: &Context) -> bool {
 /// Waits, up to `timeout`, until a worker that is working on a message has something for its
 /// page. Answers whether one has. For a host on a clock of its own — a test's — that has to
 /// let the workers' threads catch up.
+///
+/// A worker is at work while it has a message or its script to finish, or a timer that falls due
+/// before `timeout` is up: a message it answered by arming a timer is not done with yet.
 pub(crate) fn wait(page: &Context, timeout: Duration) -> bool {
     let started = std::time::Instant::now();
     loop {
+        // Whether any worker is at work is read before what it sent is gathered: a worker sends
+        // before it stops counting as at work, so one seen idle has already sent all it will.
+        let working = is_working(page, timeout.saturating_sub(started.elapsed()));
         gather(page);
-        let (heard, working) = {
-            let state = shared(page);
-            let workers = state.workers.borrow();
-            (
-                workers.iter().any(|w| !w.heard.is_empty()),
-                workers
-                    .iter()
-                    .any(|w| w.progress.pending.load(Ordering::SeqCst) > 0),
-            )
-        };
-        if heard {
+        if shared(page)
+            .workers
+            .borrow()
+            .iter()
+            .any(|w| !w.heard.is_empty())
+        {
             return true;
         }
         if !working || started.elapsed() >= timeout {
@@ -749,6 +750,18 @@ pub(crate) fn wait(page: &Context, timeout: Duration) -> bool {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+/// Whether some worker has a message or its script to finish, or a timer due within `horizon`.
+fn is_working(page: &Context, horizon: Duration) -> bool {
+    let until = epoch_ms() + horizon.as_secs_f64() * 1000.;
+    shared(page).workers.borrow().iter().any(|w| {
+        w.progress.pending.load(Ordering::SeqCst) > 0
+            || match w.progress.next_timer.load(Ordering::SeqCst) {
+                0 => false,
+                at => at as f64 <= until,
+            }
+    })
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
