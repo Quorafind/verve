@@ -12,8 +12,13 @@ use std::rc::Rc;
 /// to keep as they are.
 const MAX_BUFFERED_LEN: usize = 64;
 
-/// The room a buffer starts with, in bytes.
+/// The room a buffer starts with, in code units.
 const BUFFER_START_CAPACITY: usize = 128;
+
+/// The longest Latin-1 buffer tail [`RopeString::append_short`] widens to UTF-16 to take a wide
+/// append. Beyond it the copy could cost more than the nodes it saves (and repeated on forks of
+/// one rope, add up to a quadratic cost), so the append gets a node of its own instead.
+const MAX_WIDEN_LEN: usize = 1024;
 
 /// What a rope currently holds.
 enum RopeState {
@@ -25,6 +30,12 @@ enum RopeState {
     Appended {
         left: JsString,
         buffer: Rc<RefCell<Vec<u8>>>,
+    },
+    /// As `Appended`, for a rope that is not Latin-1: the buffer holds UTF-16 code units, whatever
+    /// width the pieces appended to it had.
+    AppendedWide {
+        left: JsString,
+        buffer: Rc<RefCell<Vec<u16>>>,
     },
     /// The concatenation, built by the first read of the content. Once written it is never
     /// changed, which is what lets [`rope_as_str`] hand out slices borrowed from it.
@@ -65,6 +76,8 @@ enum Piece<'a> {
     String(&'a JsString),
     /// The first bytes of an appended-to buffer.
     Bytes(&'a RefCell<Vec<u8>>, usize),
+    /// The first code units of an appended-to UTF-16 buffer.
+    Units(&'a RefCell<Vec<u16>>, usize),
 }
 
 /// The two pieces of `state`, a rope of length `len`, if it has not been flattened.
@@ -73,6 +86,9 @@ fn pieces(state: &RopeState, len: usize) -> Option<[Piece<'_>; 2]> {
         RopeState::Unflattened { left, right } => Some([Piece::String(left), Piece::String(right)]),
         RopeState::Appended { left, buffer } => {
             Some([Piece::String(left), Piece::Bytes(buffer, len - left.len())])
+        }
+        RopeState::AppendedWide { left, buffer } => {
+            Some([Piece::String(left), Piece::Units(buffer, len - left.len())])
         }
         RopeState::Flat(_) => None,
     }
@@ -119,49 +135,97 @@ impl RopeString {
         unsafe { JsString::from_ptr(NonNull::from(Box::leak(node)).cast()) }
     }
 
-    /// Creates the rope for `x` + `y` (of length `len`) that keeps the short Latin-1 `y` in a
-    /// byte buffer instead of a node of its own, or returns `None` if the two do not fit that.
+    /// Creates the rope for `x` + `y` (of length `len`) that keeps the short `y` in a buffer
+    /// instead of a node of its own, or returns `None` if the two do not fit that.
     ///
     /// `x` must be a rope whose last half is itself short, or one that ends in a buffer. An
     /// append to a rope that ends in a buffer extends the buffer where it ends, which no rope
     /// sees past its own length, so every rope made before keeps its content. If the buffer has
     /// been extended by another rope in the meantime, `None` sends the caller to a plain node.
+    ///
+    /// A buffer holds bytes while everything in the rope is Latin-1 and UTF-16 code units from the
+    /// first piece that is not. A byte buffer is never turned into a unit buffer in place (ropes
+    /// made before would read it as bytes): the first wide append copies it into a new one.
     pub(crate) fn append_short(x: &JsString, y: &JsString, len: usize) -> Option<JsString> {
         if y.len() > MAX_BUFFERED_LEN || x.kind() != JsStringKind::Rope {
             return None;
         }
         // SAFETY: The kind was just checked.
         let rope: &RopeString = unsafe { x.as_inner() };
-        if !rope.latin1 {
-            return None;
-        }
         let y_str = y.as_str();
-        let appended = y_str.as_latin1()?;
         // SAFETY: See `unflattened`. Nothing writes the state while this reads it.
         let state = unsafe { &*rope.state.get() };
-        let (left, buffer) = match state {
+        let tail = |left: &JsString| rope.vtable.len - left.len();
+        let state = match state {
             RopeState::Appended { left, buffer } => {
-                let mut bytes = buffer.borrow_mut();
-                if bytes.len() != rope.vtable.len - left.len() {
+                if let Some(appended) = y_str.as_latin1() {
+                    let mut bytes = buffer.borrow_mut();
+                    if bytes.len() != tail(left) {
+                        return None;
+                    }
+                    bytes.extend_from_slice(appended);
+                    drop(bytes);
+                    RopeState::Appended {
+                        left: left.clone(),
+                        buffer: Rc::clone(buffer),
+                    }
+                } else {
+                    // Only the part this rope sees is copied, so it does not matter whether
+                    // another rope has taken the end of the buffer.
+                    let tail = tail(left);
+                    if tail > MAX_WIDEN_LEN {
+                        return None;
+                    }
+                    let bytes = buffer.borrow();
+                    let mut units = Vec::with_capacity(BUFFER_START_CAPACITY.max(tail * 2));
+                    units.extend(bytes[..tail].iter().map(|b| u16::from(*b)));
+                    drop(bytes);
+                    push_units(&mut units, y_str);
+                    RopeState::AppendedWide {
+                        left: left.clone(),
+                        buffer: Rc::new(RefCell::new(units)),
+                    }
+                }
+            }
+            RopeState::AppendedWide { left, buffer } => {
+                let mut units = buffer.borrow_mut();
+                if units.len() != tail(left) {
                     return None;
                 }
-                bytes.extend_from_slice(appended);
-                drop(bytes);
-                (left, Rc::clone(buffer))
+                push_units(&mut units, y_str);
+                drop(units);
+                RopeState::AppendedWide {
+                    left: left.clone(),
+                    buffer: Rc::clone(buffer),
+                }
             }
             RopeState::Unflattened { left, right } if right.len() <= MAX_BUFFERED_LEN => {
-                let mut bytes = Vec::with_capacity(BUFFER_START_CAPACITY);
-                bytes.extend_from_slice(right.as_str().as_latin1()?);
-                bytes.extend_from_slice(appended);
-                (left, Rc::new(RefCell::new(bytes)))
+                let right_str = right.as_str();
+                match (right_str.as_latin1(), y_str.as_latin1()) {
+                    (Some(r), Some(appended)) if rope.latin1 => {
+                        let mut bytes = Vec::with_capacity(BUFFER_START_CAPACITY);
+                        bytes.extend_from_slice(r);
+                        bytes.extend_from_slice(appended);
+                        RopeState::Appended {
+                            left: left.clone(),
+                            buffer: Rc::new(RefCell::new(bytes)),
+                        }
+                    }
+                    _ => {
+                        let mut units = Vec::with_capacity(BUFFER_START_CAPACITY);
+                        push_units(&mut units, right_str);
+                        push_units(&mut units, y_str);
+                        RopeState::AppendedWide {
+                            left: left.clone(),
+                            buffer: Rc::new(RefCell::new(units)),
+                        }
+                    }
+                }
             }
             _ => return None,
         };
-        let state = RopeState::Appended {
-            left: left.clone(),
-            buffer,
-        };
-        Some(Self::with_state(state, len, true))
+        let latin1 = matches!(state, RopeState::Appended { .. });
+        Some(Self::with_state(state, len, latin1))
     }
 
     /// The flat string of `string` if it is a rope that has been flattened.
@@ -174,7 +238,9 @@ impl RopeString {
         // SAFETY: See `unflattened`.
         match unsafe { &*rope.state.get() } {
             RopeState::Flat(flat) => Some(flat),
-            RopeState::Unflattened { .. } | RopeState::Appended { .. } => None,
+            RopeState::Unflattened { .. }
+            | RopeState::Appended { .. }
+            | RopeState::AppendedWide { .. } => None,
         }
     }
 
@@ -258,9 +324,17 @@ impl RopeString {
                 keep(left);
                 keep(right);
             }
-            RopeState::Appended { left, .. } => keep(left),
+            RopeState::Appended { left, .. } | RopeState::AppendedWide { left, .. } => keep(left),
             RopeState::Flat(flat) => keep(flat),
         }
+    }
+}
+
+/// Appends the code units of `string` to `units`.
+fn push_units(units: &mut Vec<u16>, string: JsStr<'_>) {
+    match string.variant() {
+        JsStrVariant::Latin1(bytes) => units.extend(bytes.iter().map(|b| u16::from(*b))),
+        JsStrVariant::Utf16(wide) => units.extend_from_slice(wide),
     }
 }
 
@@ -271,6 +345,7 @@ fn for_each_leaf_rev(halves: [Piece<'_>; 2], mut f: impl FnMut(JsStr<'_>)) {
     while let Some(piece) = stack.pop() {
         match piece {
             Piece::Bytes(buffer, len) => f(JsStr::latin1(&buffer.borrow()[..len])),
+            Piece::Units(buffer, len) => f(JsStr::utf16(&buffer.borrow()[..len])),
             Piece::String(string) => match unflattened(string) {
                 Some(halves) => stack.extend(halves),
                 None => f(string.as_str()),
