@@ -301,8 +301,9 @@ impl Stepper {
             Self::Set => iterator.is::<SetIterator>(),
             Self::String => iterator.is::<StringIterator>(),
         };
-        // These read nothing but their own state and make arrays and substrings.
-        if right_type {
+        // These read nothing but their own state and make arrays and substrings. An iterator
+        // that is borrowed is declined, as `advance` would panic at it.
+        if right_type && iterator.try_borrow_mut().is_ok() {
             self.advance(iterator, context).map_err(|_| Declined)
         } else {
             Err(Declined)

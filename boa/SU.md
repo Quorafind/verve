@@ -653,3 +653,21 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   completes the iterator when `exec`, `ToString(match[0])` or the `lastIndex` read or write throws,
   as the specification's generator closure does: every later `next` is `{ value: undefined, done: true }`.
   Node 22 (V8) does not end the iterator there and keeps stepping; the specification is followed.
+
+- `boa_engine`, `object/operations.rs`: `InitializeInstanceElements` no longer holds the class
+  constructor's borrow while it runs the field initializers. An initializer that wrote to the class
+  (`class X { static n = 0; id = ++X.n }`) panicked with `BorrowMutError`, and so did a derived class
+  whose base constructor returns the class itself. The private methods and the fields are copied out
+  first, so the list the instance is built from is the one at the start, as in the spec.
+
+- `boa_engine`, `object/operations.rs`: `OrdinaryHasInstance` of a bound function reads the target
+  and releases the function before it asks the target `@@hasInstance`. A `@@hasInstance` that wrote
+  to the bound function (`bf.x = 1` in `x instanceof bf`) panicked with `BorrowMutError`.
+
+- `boa_engine`, `vm/jit`, `builtins/typed_array/object.rs`, `builtins/array/array_iterator.rs`,
+  `builtins/iterable`: what compiled code reads an object through no longer panics when the object
+  is borrowed. The typed array element and `length` shortcuts, the compiled call's read of the
+  callee, and the quiet iterator steps use `JsObject::try_downcast_ref`/`try_downcast_mut` (new,
+  crate-private) or `try_borrow*` and answer "not here", so the slow path decides. Nothing in the
+  engine core (`vm/`, `object/`, `environments/`) borrows an object across user code any more, so
+  this is a guard, not a fix of a known crash.
