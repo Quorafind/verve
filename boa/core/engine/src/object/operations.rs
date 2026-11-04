@@ -1517,10 +1517,14 @@ impl JsValue {
         };
 
         // 2. If C has a [[BoundTargetFunction]] internal slot, then
-        if let Some(bound_function) = function.downcast_ref::<BoundFunction>() {
+        // The target is read first: `InstanceofOperator` runs user code that may write to `C`.
+        let bound_target = function
+            .downcast_ref::<BoundFunction>()
+            .map(|bound_function| bound_function.target_function().clone());
+        if let Some(bc) = bound_target {
             // a. Let BC be C.[[BoundTargetFunction]].
             // b. Return ? InstanceofOperator(O, BC).
-            return object.instance_of(&bound_function.target_function().clone().into(), context);
+            return object.instance_of(&bc.into(), context);
         }
 
         let Some(mut object) = object.as_object() else {

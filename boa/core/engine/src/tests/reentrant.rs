@@ -45,3 +45,48 @@ fn private_methods_may_be_added_to_the_class_itself() {
         7,
     )]);
 }
+
+#[test]
+fn has_instance_may_write_to_a_bound_function() {
+    // `OrdinaryHasInstance` of a bound function runs the target's `@@hasInstance`.
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            function F() {}
+            const bf = F.bind();
+            Object.defineProperty(F, Symbol.hasInstance, { value() { bf.x = 1; return true; } });
+            [({}) instanceof bf, bf.x].join(' ')
+        "#},
+        js_str!("true 1"),
+    )]);
+}
+
+#[test]
+fn bound_native_function_may_be_written_to_by_its_callback() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const bf = Array.prototype.forEach.bind([1, 2], function () { bf.x = (bf.x || 0) + 1; });
+            bf();
+            const bp = Promise.bind(null);
+            new bp(function () { bp.y = 5; });
+            [bf.x, bp.y].join(' ')
+        "#},
+        js_str!("2 5"),
+    )]);
+}
+
+#[test]
+fn bound_proxy_may_be_written_to_by_its_traps() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const p = new Proxy(function () {}, {
+              apply() { bf.x = 1; return 1; },
+              construct() { bf.y = 2; return {}; },
+            });
+            const bf = p.bind();
+            const r = bf();
+            new bf();
+            [r, bf.x, bf.y].join(' ')
+        "#},
+        js_str!("1 1 2"),
+    )]);
+}

@@ -654,3 +654,7 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   (`class X { static n = 0; id = ++X.n }`) panicked with `BorrowMutError`, and so did a derived class
   whose base constructor returns the class itself. The private methods and the fields are copied out
   first, so the list the instance is built from is the one at the start, as in the spec.
+
+- `boa_engine`, `object/operations.rs`: `OrdinaryHasInstance` of a bound function reads the target
+  and releases the function before it asks the target `@@hasInstance`. A `@@hasInstance` that wrote
+  to the bound function (`bf.x = 1` in `x instanceof bf`) panicked with `BorrowMutError`.
