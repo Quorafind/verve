@@ -43,7 +43,7 @@ fn context_with_natives(mode: Mode) -> Context {
     context
 }
 
-fn run_with_natives(source: &str, mode: Mode) -> String {
+pub(super) fn run_with_natives(source: &str, mode: Mode) -> String {
     let mut context = context_with_natives(mode);
     match context.eval(Source::from_bytes(&format!(
         "{SHOW}
