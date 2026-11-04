@@ -121,3 +121,10 @@ Recommended Electron combination for the core: `--no-default-features --features
 once GPUI is measured. Candidates still open: `wasm` off (-0.7 MB), the 4.4 MiB `.rdata`
 (not attributed; panic locations and string tables), `std` at 2.4 MiB, `opt-level = "z"`,
 and loading rarely used Node modules on demand.
+
+## P71: rope strings
+
+`electron/p71-rope-strings`: `cargo build --release --features jit --bin verve` (not stripped, not the `size-report` build) is
+27,104,256 bytes against 27,097,600 for `docs/electron-plan` `05f26157` built the same way, +6,656 bytes (+0.02 %): a fifth
+string kind in `boa_string` and a changed `JsValue::add`. A rope node is 88 bytes (`size_of::<RopeString>()`, measured), 24
+more than a `SequenceString` header.

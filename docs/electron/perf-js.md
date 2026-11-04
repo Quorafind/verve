@@ -389,3 +389,51 @@ measurement, `VERVE_CODE_CACHE=0`. Load before the round 1.3, 4.9, 4.5, 3.3 and 
 (`fib`, `oo`), the `length` of a typed array (`typed`), and object construction and iteration, which
 are the interpreter's (`alloc`, `vdom`); `docs/jit.md` "Results (phase 2.5)" has the causes and the
 micro-probes.
+
+### P71: `+=` on strings is linear (ropes)
+
+`electron/p71-rope-strings` against `docs/electron-plan` `05f26157`, both `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`, `VERVE_CODE_CACHE=0`, a throwaway profile folder. The machine was shared with three other workers, so
+the load is given and only same-round numbers are compared. Round 1 (suite): load 23.0, 22.6, 20.7, 22.6, 21.6 % before,
+23.4, 23.5, 20.7, 18.4, 15.7 % after. Round 2 (`concat` probe, `charCodeAt`): 18.1, 13.6, 13.9, 16.4, 13.6 % before,
+57.4, 81.4, 66.9, 63.9, 60.1 % after (other workers started building during it).
+
+`s += 'ab' + i`, interpreter and JIT alike (the JIT calls the same `Add`), process wall time of the loop, median (best) of 5
+runs, 2 runs for the 320k baseline (one run is a minute); peak working set sampled every 5 ms from outside, so only its
+order of magnitude is exact:
+
+| appends | before, ms | after, ms | before, peak MB | after, peak MB |
+|---|---|---|---|---|
+| 20,000 | 30.4 (28.2) | 11.0 (10.3) | 15 | 12–15 |
+| 80,000 | 795.3 (785.2) | 23.4 (23.1) | 15 | 14–26 |
+| 320,000 | 62,744 (58,893) | 75.5 (74.3) | 17–20 | 66.5 |
+
+Before grows 26× then 79× for 4× the input (quadratic); after grows 2.1× then 3.2× (linear). Memory is the price:
+every append that is not merged keeps a 88-byte node (`size_of::<RopeString>()`) and its operand alive until the first read,
+so 320k appends of a 6-code-unit piece peak at about 66 MB where the copying version, which freed each intermediate, stayed
+near 20 MB. Leaf merging (the spike's phase 4) is the cure and was not done; see the package's status.
+
+The suite's string tests, one round (`--runs 5`, median (best) ms, Node in the same round), before / after:
+
+| test | Node | JIT before | JIT after | interp before | interp after |
+|---|---|---|---|---|---|
+| `concat` | 0.7 (0.6) / 0.7 (0.6) | 21.5 (21.1) | 5.7 (5.3) | 93.9 (53.0) | 5.8 (5.4) |
+| `splitjoin` | 3.5 (2.7) / 3.3 (2.7) | 12.3 (11.1) | 12.1 (12.0) | 12.3 (11.9) | 13.4 (12.7) |
+| `regex` | 2.4 (2.2) / 2.0 (1.9) | 38.3 (33.0) | 36.6 (26.7) | 35.0 (33.9) | 28.9 (27.2) |
+| `json` | 177.5 (157.2) / 168.1 (151.5) | 1306.7 (1264.3) | 1453.5 (1253.9) | 1347.1 (1307.5) | 1286.4 (1257.7) |
+| `tokenize` | 2.5 (2.4) / 2.5 (2.4) | 167.8 (162.1) | 171.7 (166.1) | 175.4 (170.8) | 191.2 (180.1) |
+| `template` | 0.2 (0.2) / 0.2 (0.2) | 1.8 (1.8) | 2.2 (1.7) | 0.9 (0.9) | 0.9 (0.9) |
+
+`concat` goes from 31× Node (JIT) to 8.1×; the target is 5×. What stops it is not the append: `x = 'ab' + i` alone
+(number to string, one `concat_array`, no append) takes 2.3 ms of the 5.7, and the append of ready-made pieces 3.0 ms, in
+the same process. Node does the whole loop in 0.25 to 0.85 ms. The other five are inside the round's noise: the medians
+differ by up to 11 % (`json` JIT, whose best times are 1264 and 1254; `template` JIT 1.8 to 2.2 ms is 22 % of a sub-3-ms test whose best times are 1.8 and 1.7) and neither direction is consistent. Those tests do not
+read a rope in their timed region and a flat string's `as_str` is untouched, so no regression is expected (inferred).
+
+All 44 `scaling.js` probes, base then after, 3 runs, load 21.9, 22.4, 23.5, 27.2, 18.2 % before and 14.9, 17.8, 72.7, 93.5,
+95.2 % after: `concat` goes from 16× (super-linear) to 4.2×; every other probe's t(4n) is within -13 % to +8 % of the base,
+the +8 % being `set-delete-while-iterating`, which does not touch strings, so the spread is the noise of that round.
+
+`charCodeAt` over a 16,000-code-unit string, 400 passes (6.4 M calls), five alternating pairs, ms: flat string 637 to 722
+before, 655 to 688 after; the same loop over a string that came out of a rope 678 to 759 before (it was flat), 735 to 874
+after. The rope's one-time flatten is in that number; the per-call cost is the flat string's.
