@@ -638,6 +638,9 @@ mod rope {
     use crate::vtable::RopeString;
     use crate::{JsString, JsStringKind, ROPE_MIN_LEN};
 
+    /// Chain depth of the deep tests: a million, or little enough for Miri to finish.
+    const DEEP: usize = if cfg!(miri) { 2_000 } else { 1_000_000 };
+
     fn latin1(n: usize, c: char) -> JsString {
         JsString::from(c.to_string().repeat(n))
     }
@@ -789,12 +792,12 @@ mod rope {
     fn deep_left_chain() {
         let mut s = latin1(ROPE_MIN_LEN, 'x');
         let piece = latin1(1, 'y');
-        for _ in 0..1_000_000 {
+        for _ in 0..DEEP {
             s = JsString::concat_lazy(&s, &piece);
         }
-        assert_eq!(s.len(), ROPE_MIN_LEN + 1_000_000);
+        assert_eq!(s.len(), ROPE_MIN_LEN + DEEP);
         let flat = s.as_str();
-        assert_eq!(flat.get(ROPE_MIN_LEN + 999_999), Some(u16::from(b'y')));
+        assert_eq!(flat.get(ROPE_MIN_LEN + DEEP - 1), Some(u16::from(b'y')));
         assert_eq!(flat.get(0), Some(u16::from(b'x')));
     }
 
@@ -803,12 +806,12 @@ mod rope {
         let mut left = latin1(ROPE_MIN_LEN, 'x');
         let mut right = latin1(ROPE_MIN_LEN, 'z');
         let piece = latin1(1, 'y');
-        for _ in 0..1_000_000 {
+        for _ in 0..DEEP {
             left = JsString::concat_lazy(&left, &piece);
             right = JsString::concat_lazy(&piece, &right);
         }
         let both = JsString::concat_lazy(&left, &right);
-        assert_eq!(both.len(), 2 * ROPE_MIN_LEN + 2_000_000);
+        assert_eq!(both.len(), 2 * ROPE_MIN_LEN + 2 * DEEP);
         drop(both);
         drop(left);
         drop(right);
@@ -817,14 +820,15 @@ mod rope {
     #[test]
     fn deep_right_chain_flattens() {
         let mut s = latin1(ROPE_MIN_LEN, 'x');
-        for i in 0..100_000u32 {
-            let piece = JsString::from(char::from(b'a' + (i % 26) as u8).to_string());
+        let letter = |i: usize| b'a' + u8::try_from(i % 26).unwrap();
+        for i in 0..DEEP {
+            let piece = JsString::from(char::from(letter(i)).to_string());
             s = JsString::concat_lazy(&piece, &s);
         }
         let v = s.to_vec();
-        assert_eq!(v.len(), ROPE_MIN_LEN + 100_000);
-        assert_eq!(v[0], u16::from(b'a' + (99_999 % 26) as u8));
-        assert_eq!(v[100_000], u16::from(b'x'));
+        assert_eq!(v.len(), ROPE_MIN_LEN + DEEP);
+        assert_eq!(v[0], u16::from(letter(DEEP - 1)));
+        assert_eq!(v[DEEP], u16::from(b'x'));
     }
 
     #[test]
