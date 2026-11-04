@@ -334,7 +334,6 @@ Throughput (from `bash scripts/js-bench/run.sh <verve.exe> node`, which prints t
 | P65 | `vdom` | 4.1 (3.7) | 67.0 (66.2) | 72.1 (70.0) | 16× | 18× |
 | P65 | `closure` | 19.7 (19.5) | 593.1 (591.0) | 634.8 (621.5) | 30× | 32× |
 
-
 P64 rows: this branch against `6335a760`, `cargo build --release -p verve --features jit`, same round, load 9-34% before and after each pass (one 61% peak at the end of the `tokenize` pass); details in `packages/P64-strings-regex-json.md`.
 
 Scaling (from `bash scripts/js-bench/run.sh --scaling <verve.exe>`, the first table it prints):
@@ -496,3 +495,23 @@ interpreter 5.6 (5.5) → 3.1 (3.0), 9.3× → 5.2×. `splitjoin`, `regex`, `jso
 before, 55–68 % after, so the table in `packages/P74-string-followups.md` is the same pair, adjacent); the 44 `scaling.js` probes
 too, `concat` 20k/80k 7.6 → 3.0 and 27.9 → 12.2 ms. Peak memory is 16.3 MB against an empty process's 16.2: the rope's last piece is a
 shared byte buffer instead of a node per append. Appending UTF-16 pieces is not buffered (71.2 → 76.3 MB for 320k `s += '中' + i`).
+
+### P69: the cost of calls and construction
+
+Built and measured on `electron/p69-call-cost` with `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`; the before column is `docs/electron-plan` `c91b2938` built the same way. Both
+binaries, both modes, `--runs 5`, median (best), one process per measurement, `VERVE_CODE_CACHE=0`,
+interleaved per test. Load 15 % before the suite, 8 % after.
+
+| test | before, JIT | after, JIT | before, interp | after, interp |
+|---|---|---|---|---|
+| `fib` | 243.5 (240.0) | 236.5 (234.8) | 369.9 (364.6) | 363.2 (362.1) |
+| `oo` | 1106.4 (1067.5) | 724.8 (718.0) | 1205.7 (1180.1) | 850.1 (777.8) |
+| `closure` | 450.5 (439.3) | 436.9 (432.3) | 667.7 (642.2) | 649.6 (634.2) |
+
+`oo` meets its commit target (≤ 750); `fib` (≤ 195) and `closure` (≤ 350) do not, and the remaining
+gap needs the `CallFrame` redesign `docs/jit.md` "Results (P69)" prices. The other eleven tests were
+not rerun. `new C0()` (an empty class) 424.1 → 206.5 ns compiled and 453.9 → 214.5 interpreted,
+`new E()` 216.2 → 169.7 and 243.7 → 173.7; `forEach`/`filter`/`map` with a callback of a few
+instructions are no longer slower compiled than interpreted (93.3 against 91.8, 112.0 against 109.8,
+202.7 against 201.0).

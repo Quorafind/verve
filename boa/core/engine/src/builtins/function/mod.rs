@@ -1117,38 +1117,29 @@ pub(crate) fn enter_ordinary_function(
         .with_argument_count(argument_count as u32)
         .with_env_fp(env_fp);
 
+    // `push_frame` has set the return value to `undefined`.
     context.vm.push_frame(frame);
-    context.vm.set_return_value(JsValue::undefined());
 
     let lexical_this_mode = context.vm.frame().code_block.this_mode == ThisMode::Lexical;
-    let this = if lexical_this_mode {
-        ThisBindingStatus::Lexical
-    } else {
-        let this = context.vm.stack.get_this(context.vm.frame());
+    if !lexical_this_mode {
         if context.vm.frame().code_block.strict() {
             context.vm.frame_mut().flags |= CallFrameFlags::THIS_VALUE_CACHED;
-            ThisBindingStatus::Initialized(this)
-        } else if this.is_null_or_undefined() {
-            context.vm.frame_mut().flags |= CallFrameFlags::THIS_VALUE_CACHED;
-            let this: JsValue = context.realm().global_this().clone().into();
-            context.vm.stack.set_this(
-                context.vm.frames.last().js_expect("frame must exist")?,
-                this.clone(),
-            );
-            ThisBindingStatus::Initialized(this)
         } else {
-            let this: JsValue = this
-                .to_object(context)
-                .js_expect("conversion cannot fail")?
-                .into();
+            let this = context.vm.stack.get_this(context.vm.frame());
+            let this: JsValue = if this.is_null_or_undefined() {
+                context.realm().global_this().clone().into()
+            } else {
+                this.to_object(context)
+                    .js_expect("conversion cannot fail")?
+                    .into()
+            };
             context.vm.frame_mut().flags |= CallFrameFlags::THIS_VALUE_CACHED;
             context.vm.stack.set_this(
                 context.vm.frames.last().js_expect("frame must exist")?,
-                this.clone(),
+                this,
             );
-            ThisBindingStatus::Initialized(this)
         }
-    };
+    }
 
     let mut last_env = 0;
 
@@ -1170,6 +1161,11 @@ pub(crate) fn enter_ordinary_function(
 
     if has_function_scope {
         let scope = context.vm.frame().code_block().constant_scope(last_env);
+        let this = if lexical_this_mode {
+            ThisBindingStatus::Lexical
+        } else {
+            ThisBindingStatus::Initialized(context.vm.stack.get_this(context.vm.frame()))
+        };
         let frame = context.vm.frame_mut();
         let global = frame.realm.environment();
         frame.environments.push_function(
@@ -1180,6 +1176,44 @@ pub(crate) fn enter_ordinary_function(
     }
 
     Ok(())
+}
+
+/// The `prototype` of an ordinary function when it is an own data property holding an object:
+/// what `Get(newTarget, "prototype")` answers for such a function, read without the generic
+/// `[[Get]]`. Anything else (a proxy, an accessor, a missing or non-object value) is `None`, and
+/// the caller takes the generic path.
+fn own_prototype_object(new_target: &JsValue, context: &mut Context) -> Option<JsObject> {
+    let function = new_target.as_object()?;
+    if !function.is::<OrdinaryFunction>() {
+        return None;
+    }
+    let function = function.borrow();
+    let properties = function.properties();
+    let cached = context
+        .vm
+        .construct_prototype_slot
+        .as_ref()
+        .filter(|(shape, _)| shape.points_to(&properties.shape))
+        .map(|(_, slot)| *slot);
+    let slot = match cached {
+        Some(slot) => slot,
+        None => {
+            let slot = properties
+                .shape
+                .lookup(&PropertyKey::String(crate::object::PROTOTYPE))?;
+            // A unique shape keeps its identity as properties come and go: not cacheable.
+            if slot.attributes.is_accessor_descriptor() {
+                return None;
+            }
+            if !properties.shape.is_unique() {
+                context.vm.construct_prototype_slot = Some(((&properties.shape).into(), slot));
+            }
+            slot
+        }
+    };
+    properties.storage[slot.index as usize]
+        .as_object()
+        .map(|object| object.clone())
 }
 
 /// Construct an instance of this object with the specified arguments.
@@ -1227,8 +1261,12 @@ fn function_construct(
         // prototype as prototype for the new object
         // see <https://tc39.es/ecma262/#sec-ordinarycreatefromconstructor>
         // see <https://tc39.es/ecma262/#sec-getprototypefromconstructor>
-        let prototype =
-            get_prototype_from_constructor(&new_target, StandardConstructors::object, context)?;
+        let prototype = match own_prototype_object(&new_target, context) {
+            Some(prototype) => prototype,
+            None => {
+                get_prototype_from_constructor(&new_target, StandardConstructors::object, context)?
+            }
+        };
         let this = JsObject::from_proto_and_data_with_shared_shape(
             context.root_shape(),
             prototype,
@@ -1262,7 +1300,6 @@ fn function_construct(
     }
 
     context.vm.push_frame(frame);
-    context.vm.set_return_value(JsValue::undefined());
 
     let mut last_env = 0;
 

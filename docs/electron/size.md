@@ -150,3 +150,9 @@ against 26,672,128 for `docs/electron-plan` `c91b2938` built the same way, +28,6
 `StaticString`s for string iteration (+22,528 with the iterator change; the table is 256 × 72 bytes), the `int32` concatenation
 (+3,584) and the rope buffer (+2,560). A rope node is 96 bytes now (`size_of::<RopeString>()`), 8 more than P71's, for the third
 state (`Appended`) it needs a tag for.
+
+## P69: calls and construction
+
+`electron/p69-call-cost`: `cargo build --release --features jit --bin verve` (not stripped, not the `size-report` build) is
+26,673,664 bytes against 26,672,128 for `docs/electron-plan` `c91b2938` built the same way, +1,536 bytes (+0.006 %): a few
+branches in `function_construct`, `prepare` and the class compiler, and one field in the `Vm`.

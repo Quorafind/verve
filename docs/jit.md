@@ -890,6 +890,308 @@ of `typed` takes now (inferred from 368 ms over 6M iterations), a `length`, two 
 are about 52 together (13.7 + 2 x 11.9 + 14.5 over the loop); inline elements might bring the reads and the write to a few ns each
 (inferred, not measured), which would put `typed` near 200 ms.
 
+## Where a call goes
+
+Phase 2.5 left a JavaScript call at about 70 ns compiled, `new` at 230–450 ns, and a callback from
+native code at 120–145 ns, all in machinery that the interpreter and compiled code share. This
+section takes that machinery apart in both tiers. Nothing here changes the engine: the
+instruments were temporary patches, kept outside the repository.
+
+Release `verve` with the `jit` feature, Windows x86-64, Ryzen 9 7950X (the TSC runs at 4.5 GHz),
+`docs/electron-plan` at `05f26157` (P66 merged). The machine was shared by four builders; every
+table is from one round and compared within it only. Three instruments:
+
+- **Differential micro-probes** on the unmodified build: the same process, one loop body each,
+  ns per iteration, median (best) of five processes, the loop's own cost (1.8 compiled, 15.8
+  interpreted) included. Load 30% before the round, 20% after.
+- **Eight-times probes.** A piece of the call (a clone, the limits check, a stack push) is done
+  eight more times in place with the state restored; the run's time less the plain run's, over
+  eight, is what the piece costs when hot. Median of 3–10 processes, load 15–45%. A piece that
+  does nothing reads 1.1 ns (not subtracted). These are costs in isolation: in a real call the
+  pieces overlap, so their sum is an upper bound on what removing them saves.
+- **`rdtsc` timers, one enabled per run.** A bare timer pair reads 30 cycles (6.7 ns) around
+  nothing. Nested timers hid each other's work in their own latency (every small region read 30
+  cycles), so each region was read alone, less 30 cycles; under about 50 cycles a reading is a
+  lower bound.
+
+The instrumented build with every timer off is slower than the clean one on the compiled call
+path: `zero()` 84.3 against 69.3 ns compiled and 102.5 against 101.3 interpreted, `new E()` 266
+against 232 compiled (one round, five processes each). Compiled timer readings add up to more than
+the clean wall time, so read them as shares.
+
+### A JavaScript call
+
+| body, ns per iteration | compiled | interpreted |
+|---|---|---|
+| `zero()` (`function zero() {}`) | 69.3 (63.2) | 101.3 (85.6) |
+| `id(i)` | 73.6 (69.7) | 116.6 (110.8) |
+| `ar()` (an arrow function) | 66.1 (64.9) | 96.2 (93.0) |
+| `obj.m()` (own method) | 81.6 (80.0) | 144.6 (140.7) |
+| `pinst.get()` (method on the prototype) | 118.2 (112.5) | 168.7 (159.8) |
+| `bound()` | 102.0 (92.5) | 118.9 (105.6) |
+| `Math.abs(i)` (a native call) | 80.4 (73.8) | 144.1 (138.9) |
+
+A counter shows `zero()` interpreted runs 11 instructions an iteration, 4 of them the loop's, so
+a call is 7 dispatches (the pushes of `this` and the function, `Call`, the callee's body and
+`Return`, taking the result). Compiled, it is `jit_call` and one stepped instruction, the callee's
+`Return`.
+
+The interpreted call, `zero()` less the loop: 85 ns (best 71). Timers, except the dispatch, which
+is inferred from the 3.7 ns an instruction costs in the empty loop:
+
+| part | ns |
+|---|---|
+| dispatch of the 7 instructions | ≈ 26 (inferred) |
+| `Call` handler | 30.8 |
+| – `__call__` (builds the pending call) and `resolve` | 8.6 |
+| – `function_call`: limits check, downcast, four clones | 7.6 |
+| – `enter_ordinary_function` | 14.6, of it `push_frame` 4.4 |
+| `Return` → `handle_return` | 15.7, of it `pop_frame` 1.6 and the rest (truncating the stack, dropping the `CallFrame`) 14.1 |
+| not attributed | 13 against the median, about 0 against the best |
+
+The compiled call, from the instrumented build (shares, not absolute): `jit_call` 73.2 ns from
+the call to the callee's return, of which `compiled_callee` (the checks and the four clones) 4.6,
+`enter_ordinary_function` 15.6 (`push_frame` 7.1), and `finish` 33.4, in which `prepare` is 0.9
+and the nested `execute` 27.3, of which the callee's `Return` step 17.2 (`handle_return` 16.0).
+About 20 ns is left: the `catch_unwind` wrappers, entering and leaving compiled code, the callee's
+body (inferred; the isolated cost of the state build, 0.9, and of a `catch_unwind`, 1.3, are
+small). Call and return come to about 45 ns interpreted and, compiled, the three timed parts are
+37 with the rest in that 20: both tiers run the same `function_call` and `handle_return`.
+
+Eight-times probes on `zero()`, ns, compiled / interpreted:
+
+| piece | cost |
+|---|---|
+| clone and drop of the four handles the frame owns | 12.3 / 13.0 |
+| – each alone: code block 3.0 / 2.0, realm 3.6 / 2.4, environments 2.5 / 2.5, script or module 2.8 / 2.3 | |
+| the callee object cloned into the pending call | 2.1 / 1.7 |
+| the `SourceInfo` cloned for the shadow stack, alone | 2.7 / 3.0 |
+| the function value pushed and popped on the VM stack | 3.3 / 3.2 |
+| `check_runtime_limits` | 5.5 / 6.3 (its timer reads 0.6–3: a lower bound) |
+| `this` read and written | 3.0 / 4.2 |
+| registers extended and truncated | 1.2 / 3.4 |
+| return value set and taken | 1.8 / 3.1 |
+| the shadow stack pushed and popped, that clone included | 2.1 / 3.2 |
+| the pending call built and dropped | 3.1 / 3.4 |
+| `downcast_ref::<OrdinaryFunction>` | 2.2 / 2.2 |
+| `CallFrame::new` from the four clones | 9.5 / 9.5: the frame itself costs nothing |
+| the frame (104 bytes) popped and pushed | −0.2 / 1.6 |
+
+A call clones and drops seven handles: realm, code block, environments, script or module, the
+callee (in the pending call), the `SourceInfo`, and the function value on the stack. At 2–3 ns a
+pair that is 15–20 ns, which is what the roadmap's leaner `CallFrame` can take and no more. With
+the limits check, the shadow stack, `this`, the registers, the return value, the pending call and
+the downcast, the isolated pieces come to about 37 ns of the compiled call's 67 and 45 of the
+interpreter's 85.
+
+### `new`
+
+| body, ns per iteration | compiled | interpreted |
+|---|---|---|
+| `new E()` (`function E() {}`) | 231.5 (217.3) | 308.0 (233.0) |
+| `new F(i)` (`this.x = x`) | 413.2 (392.7) | 558.0 (408.1) |
+| `new G(i, i)` | 565.4 (539.7) | 686.4 (543.3) |
+| `new C0()` (`class C0 {}`) | 450.4 (423.9) | 541.1 (445.8) |
+| `new CX(i)` (`constructor(x) { this.x = x }`) | 678.8 (636.7) | 849.3 (634.6) |
+| `new D0()` (`class D0 extends Base {}`) | 785.9 (741.9) | 786.2 (725.7) |
+| `new D1()` (`constructor() { super() }`) | 821.3 (786.6) | 853.7 (776.5) |
+| `new DX(i)` (derived, `super(x)` into `CX`) | 1075.9 (1019.9) | 1105.1 (998.7) |
+
+The interpreted medians of this round are noisy; the best is the better guide. In `new E()` the
+`New` handler is 200.8 ns compiled and 194.8 interpreted (timers), `function_construct` 179.4 and
+185.0 of it, and in `function_construct`:
+
+| piece | timer, compiled / interpreted | eight-times probe |
+|---|---|---|
+| `get_prototype_from_constructor` | 66.1 / 65.6 | 70.2 / 68.8 |
+| the object (`from_proto_and_data_with_shared_shape`, then dropped) | 84.7 / 82.6 | 91.6 / 92.0 |
+| `initialize_instance_elements` (nothing to initialise) | | 3.4 / 3.7 |
+| the four handles | 1.1 / 0.8 | 13.6 / 12.6 |
+| `push_frame` | 6.3 / 5.3 | |
+
+So 150 of the 180 ns are two things: reading `prototype` off the constructor with a generic `Get`
+(that `Get` alone is 66.3 / 68.3 in the probe), and allocating the object, which includes
+whatever the collector does for it. Every `new` does both again, with the answers the last one
+found.
+
+A class constructor adds, per constructor frame:
+
+| piece | compiled / interpreted |
+|---|---|
+| `push_function` and the pop of the function environment | 187.8 / 184.3 |
+| cloning the frame's `EnvironmentStack` | 28.4 / 34.4 (a plain function's: 3.2 / 2.8) |
+| the four handles together | 32.6 / 34.8 (a plain function's: 12.3 / 13.5) |
+
+`new C0()` less `new E()` is 219 ns compiled, and the environment push with the dearer clone (one
+clone at construction, a drop at return) accounts for it. The compiler gives every class
+constructor a function scope (`bytecompiler/class.rs` sets `HAS_FUNCTION_SCOPE` for explicit and
+default constructors alike), which the frame then builds as collected objects. A counter shows
+`zero()` and `new E()` build none, `new C0()` one and `new D0()` two (the derived constructor's and
+`Base`'s); the push probe on `new D1()` reads 408 ns, two frames' worth. How the 188 ns divides
+between the allocations and the walk that decides whether the environment is poisoned was not
+measured. Why a class constructor's environments clone is nine times a function's was not found
+(inferred: a non-empty `private_stack`, which is a `ThinVec` and allocates when cloned).
+
+The rest is not call machinery: `new F(i)` less `new E()` is 182 ns compiled (250 interpreted)
+and `new CX(i)` less `new C0()` 228 (308), the first property defined on a fresh object, a shape
+transition neither tier caches (P65 measured 319). In `oo` an iteration is two method calls
+(`add`, `get`: 118 each by the prototype-method probe) and one `new CX(i)` (679): 915 of its
+1041 ns.
+
+### A callback from native code
+
+| body, ns per element or call | compiled | interpreted |
+|---|---|---|
+| `zero.call(null)` | 144.6 (142.1) | 174.7 (174.5) |
+| `Reflect.apply(zero, null, [])` | 197.6 (184.1) | 242.1 (211.6) |
+| `arr.forEach(Math.abs)`, 100 elements, a native callback | 72.0 (70.6) | 80.9 (71.0) |
+| `arr.forEach(zero)` | 117.5 (115.9) | 101.5 (93.3) |
+| `arr.forEach(() => 0)` | 117.3 (116.2) | 114.8 (105.3) |
+| `arr.map(zero)` | 237.9 (230.0) | 220.6 (204.1) |
+| `arr.map(() => 0)` | 234.0 (230.3) | 244.0 (219.0) |
+| `arr.filter(zero)` | 137.2 (130.3) | 111.8 (104.8) |
+| `arr.reduce(id, 0)` | 127.9 (121.4) | 123.2 (115.2) |
+| `sort` comparator `(a, b) => a - b`, per comparison | 122 | 137 |
+
+The `sort` figure is the probe's time less building the array, over the 852 comparisons a
+reversed array of 100 takes (counted by a comparator that counts).
+
+`JsObject::call`, as `zero.call(null)` runs it (timers, compiled / interpreted):
+
+| part | ns |
+|---|---|
+| pushes of `this`, the function and the arguments | 0.9 / 0.8 (five values, in `forEach`: 7.9 / 8.0) |
+| `__call__` and `resolve`: `function_call` and the frame | 29.3 / 30.1 |
+| `context.run()` | 37.6 / 10.5 |
+| – entering the loop, the `run_depth` bookkeeping | 0.4 / 0.5 |
+| – `jit_poll`: `try_enter`, `execute` of compiled code | 28.1 / 0.4 |
+| `pop_frame`, which drops the `CallFrame` | 13.4 / 12.6 |
+
+That is 81 ns compiled and 54 interpreted besides the callee's own work (the interpreted `run`
+includes the callee's one instruction and its `Return`). Two things are in it: the same
+`function_call` as a call from JavaScript (29 ns) and a frame drop (13), and, compiled, about
+27 ns more than interpreting a callee of one instruction. That 27 is entering and leaving
+compiled code for a callee that runs a few instructions; the state build and a `catch_unwind` are
+under 2 ns each in isolation and the rest was not split (inferred: the entry stub, the callee's
+`Return` step with its `finish`, the return through `execute`). It is why `forEach(zero)`
+compiled (117.5) is slower than interpreted (101.5), as are `filter(zero)` (137.2 against 111.8)
+and `map(zero)`: **for callbacks of a few instructions the compiled column loses to the
+interpreter's**, which the suite's callbacks (about ten instructions) do not show.
+
+### What the suite pays
+
+`fib(30)` is 2,692,537 calls: 242.5 ms compiled and 364.5 interpreted (median of 5, load 35%
+before and 24% after) is 90 and 135 ns a call, of which `zero()`'s 67 and 85 are the call and the
+rest the body. `oo` (1096 compiled, 1258 interpreted) is a million iterations of two calls and one
+`new CX(i)`. `closure` (457 and 688) is about 2.25M callbacks (a million each for `map` and
+`filter`, a quarter million for `reduce`) and the 32 ms of its initialising loop.
+
+The causes, by what they cost in the suite:
+
+1. **The function environment of a class constructor**: 188 ns, and about 28 more to clone the
+   frame's environments, per constructor frame. *Measured.* About 215 of `oo`'s 1041 ns an
+   iteration, and twice that in a derived class.
+2. **`new` finds the prototype and allocates the object afresh**: 66–70 and 85–92 ns, 150 of the
+   180 ns of `function_construct` for a plain function. *Measured.*
+3. **The callback from native code**: 81 ns compiled and 54 interpreted, against 67 and 85 for a
+   call from JavaScript; compiled code pays about 27 ns to enter and leave. *Measured; the cause
+   of the 27 is inferred.*
+4. **The frame's bookkeeping in every call**: seven handles at 2–3 ns a pair, the limits check at
+   5–6 and about 15 more in the shadow stack, `this`, the registers, the return value,
+   the pending call and the downcast: 37 ns compiled and 45 interpreted, in isolation. *Measured.*
+   Building the `CallFrame` costs nothing and is not a cause.
+5. **Dispatch of the call's instructions**: 26 ns interpreted. *Inferred.* Not the frame's.
+
+A leaner `CallFrame` alone is therefore worth at most 15–20 ns of a compiled call of 67: `fib`
+reaches 180 ms only if nearly all of the bookkeeping goes, and `oo` cannot reach 600 ms without
+the environment, the prototype lookup and the first-property define all going.
+
+## Results (P69: the cost of calls and construction)
+
+What "Where a call goes" measured, acted on where the measurement said it would pay. Release `verve`
+with the `jit` feature, `docs/electron-plan` at `c91b2938` against the same plus this branch, built by
+`cargo build --release --features jit --bin verve`, `CARGO_BUILD_JOBS=6`; median (best) of 5 processes,
+milliseconds, the two binaries interleaved per test (load 15% before the suite and 8% after; the
+probes 9% and 9%).
+
+| test | before, JIT | after, JIT | before, interp | after, interp | target |
+|---|---|---|---|---|---|
+| `fib(30)` | 243.5 (240.0) | 236.5 (234.8) | 369.9 (364.6) | 363.2 (362.1) | ≤ 195, stretch 180: not met |
+| `oo` | 1106.4 (1067.5) | 724.8 (718.0) | 1205.7 (1180.1) | 850.1 (777.8) | ≤ 750: met; stretch 600: not met |
+| `closure` | 450.5 (439.3) | 436.9 (432.3) | 667.7 (642.2) | 649.6 (634.2) | ≤ 350, stretch 330: not met |
+
+The micro-probes, ns per iteration (per element for the callbacks), same round, JIT then interpreter:
+
+| body | before | after |
+|---|---|---|
+| `new E()` | 216.2 / 243.7 | 169.7 / 173.7 |
+| `new C0()` (empty class) | 424.1 / 453.9 | 206.5 / 214.5 |
+| `new CX(i)` (`this.x = x`) | 624.0 / 736.9 | 389.5 / 388.6 |
+| `new D0()` (derived, default) | 762.1 / 800.4 | 552.9 / 509.8 |
+| `new DX(i)` (derived, `super(x)`) | 1043.7 / 1121.1 | 818.8 / 792.5 |
+| `zero()` | 64.1 / 91.6 | 62.2 / 84.2 |
+| `pinst.get()` | 116.6 / 164.2 | 109.0 / 158.7 |
+| `arr.forEach(zero)` | 114.8 / 103.3 | 93.3 / 91.8 |
+| `arr.forEach(ar)` (an arrow function) | 117.3 / 127.0 | 105.9 / 106.9 |
+| `arr.filter(zero)` | 130.8 / 127.9 | 112.0 / 109.8 |
+| `arr.map(zero)` | 225.3 / 242.7 | 202.7 / 201.0 |
+| `arr.reduce(id, 0)` | 126.5 / 129.2 | 115.3 / 112.3 |
+| `sort` comparator `(a, b) => a - b`, per comparison | 123.5 / 129.3 | 116.2 / 127.3 |
+| `zero.call(null)` | 143.8 / 168.5 | 119.1 / 167.4 |
+
+What each change did:
+
+- **A base class constructor builds a function environment only when a function would** (a direct
+  `eval`, an escaping `this`, `super` or `new.target` in the body, a captured binding). The analyzer
+  forced one for every class constructor and the default base constructor carried an empty one;
+  each cost 188 ns, two collected objects, and its clone and drop another 28. A derived constructor
+  keeps it, since its `this` binding lives there. `new C0()` goes from 424 to 207 compiled.
+- **`function_construct` reads `prototype` through a one-entry cache** keyed on the constructor's
+  shared shape, instead of the generic `[[Get]]` (66–70 ns): `new E()` 216 to 170. A proxy, an
+  accessor, a unique shape or a value that is not an object take the generic path.
+- **A function that native code calls stays interpreted when its bytecode is at most 40 bytes**
+  (`() => 0` is 24, `x => x` 37, `v => v + 1` 55, a function with an empty body 2): entering and
+  leaving compiled code costs more than such a callee takes interpreted, so `forEach(zero)`
+  and `filter(zero)` were slower compiled than interpreted (114.8 against 103.3, 130.8 against 127.9;
+  `map(zero)` 225.3 against 242.7, ahead) and all three are now equal within 2% (93.3 against 91.8,
+  112.0 against 109.8, 202.7 against 201.0); the `sort` comparator is faster compiled (1312 against
+  1394 per element of the probe). A loop in such a callee is still entered by OSR. Callbacks of about
+  ten instructions, as in `closure`, are compiled as before: the crossover is between 24 and 55 bytes.
+- **Entering a function no longer sets the return value twice or clones `this` for a frame that has
+  no function environment**: 1.5–2.5 ns a call (`zero()` 64.1 to 62.2), `fib` 243.5 to 236.5.
+
+What was not done, with the numbers:
+
+- **A leaner `CallFrame`.** The measured ceiling is the seven handle pairs at 2–3 ns, 15–20 ns of a
+  call of 62, and the realm, the active runnable, the `SourceInfo` and the callee in the pending call
+  are the four that could go. `frame.realm` has 39 uses and the frame owns its code block and
+  environments, so it is a redesign of `CallFrame`, not a trim. At most 10–12 ns a call: `fib`
+  to about 205–210 ms, which is short of 195.
+- **Native→JS re-entry** beyond the tiny-callback rule. A second round of timers put the compiled
+  run itself at about 28 cycles and `try_enter` at about 90, so the 27 ns of "Where a call goes" is
+  mostly the machinery around the entry, not the entry stub, and no single piece measured above 2 ns.
+  `closure` at 437 has 2.25M callbacks; taking the remaining 16 ns of entry and 12 ns of frame off
+  each would give about 375, not 350.
+- **`this` allocated with the constructor's initial shape**, the path to `oo` at 600: `new CX(i)` less
+  `new C0()` is still 183 ns (the first property's shape transition), which is what separates 725
+  from about 575–600.
+- **The JIT follow-up** (compiled code calling compiled code without `finish`): the unattributed 20 ns
+  of the compiled call was not split further, so there is no number to act on.
+
+Correctness: `boa_engine` (1266 tests and the integration tests) passes at defaults and with
+`BOA_JIT_THRESHOLD=0`; the 3000 generated programs match; Verve passes without the feature, with it,
+forced and switched off, and `tests/jit.rs` passes. The new differential tests are
+`constructors_match_the_interpreter` and `tiny_callbacks_match_the_interpreter` in `tests_calls.rs`
+(interpreted, compiled eagerly, compiled when hot) and two in `tests/class.rs`; a script of 30
+constructor cases (`this`, `new.target`, `Reflect.construct` with another `newTarget`, derived
+classes without `super()`, returns of objects and primitives, private members, field initialisers,
+`super.x`, bound and proxy constructors, generators and async methods, the recursion limit,
+`error.stack`) prints the same under the interpreter, the JIT and forced compilation, and the same
+as the build before the branch. test262, every directory except `staging`, interpreted against forced:
+**0 differ**, but for `Atomics/notify/notify-all-on-loc.js`, `notify-two.js` and
+`bigint/notify-all-on-loc.js`, timing tests that failed interpreted and passed forced, as the one
+before them did.
+
 ## Roadmap
 
 **Phase 1 (done)**: the baseline described above.

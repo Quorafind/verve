@@ -10,6 +10,7 @@ use crate::{
     environments::EnvironmentStack,
     error::RuntimeLimitError,
     object::JsFunction,
+    object::shape::{WeakShape, slot::Slot},
     realm::Realm,
     script::Script,
     vm::opcode::{OPCODE_HANDLERS, OPCODE_HANDLERS_BUDGET},
@@ -103,6 +104,10 @@ pub struct Vm {
     /// [`JsObject::call`](crate::object::JsObject::call) and
     /// [`JsObject::construct`](crate::object::JsObject::construct).
     pub(crate) host_call_depth: usize,
+
+    /// Where `prototype` is in the last shared shape of a constructor that `function_construct`
+    /// read it from: the shape (weakly held) and the slot of the data property.
+    pub(crate) construct_prototype_slot: Option<(WeakShape, Slot)>,
 
     /// How many runs of the interpreter are nested on the native stack.
     pub(crate) run_depth: usize,
@@ -486,6 +491,7 @@ impl Vm {
             interrupt: None,
             native_active_function: None,
             host_call_depth: 0,
+            construct_prototype_slot: None,
             run_depth: 0,
             native_stack_base: 0,
             shadow_stack: ShadowStack::default(),

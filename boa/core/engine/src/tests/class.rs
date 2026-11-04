@@ -280,3 +280,63 @@ fn super_store_of_a_name_defines_on_the_receiver_every_time() {
         TestAction::assert("seen.join() === '10,11,12,13'"),
     ]);
 }
+
+/// A base class constructor gets a function environment only when something needs it (an arrow
+/// function, `eval`, `super.x` or `new.target` in the body, a binding a closure captures); the
+/// answers must be the same either way.
+#[test]
+fn base_constructor_function_environment_is_built_only_when_needed() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            class Plain { constructor(x) { this.x = x; } }
+            class Empty {}
+            class Arrow { constructor() { this.f = () => this; this.g = () => new.target; } }
+            class Eval { constructor() { this.ok = eval("this") === this; } }
+            class Super { constructor() { this.ok = super.toString === Object.prototype.toString; } }
+            class Captured { constructor(a) { this.get = () => a; } }
+            class Returns { constructor() { return { z: 1 }; } }
+            class Prim { constructor() { return 5; } }
+            class Derived extends Plain { constructor() { super(4); this.nt = new.target === Derived; } }
+            class DefaultDerived extends Plain {}
+            const plain = new Plain(3);
+            const arrow = new Arrow();
+            const proto = Reflect.construct(Plain, [1], Derived);
+            function F() {}
+            F.prototype = 3;
+        "#}),
+        TestAction::assert_eq("plain.x", 3),
+        TestAction::assert("Object.getPrototypeOf(plain) === Plain.prototype"),
+        TestAction::assert("new Empty() instanceof Empty"),
+        TestAction::assert("arrow.f() === arrow && arrow.g() === Arrow"),
+        TestAction::assert("new Eval().ok"),
+        TestAction::assert("new Super().ok"),
+        TestAction::assert_eq("new Captured(7).get()", 7),
+        TestAction::assert_eq("new Returns().z", 1),
+        TestAction::assert("new Prim() instanceof Prim"),
+        TestAction::assert("new Derived().nt"),
+        TestAction::assert_eq("new DefaultDerived(8).x", 8),
+        TestAction::assert("Object.getPrototypeOf(proto) === Derived.prototype && proto.x === 1"),
+        TestAction::assert("Object.getPrototypeOf(new F()) === Object.prototype"),
+    ]);
+}
+
+/// `function_construct` reads `prototype` from the constructor's shape; it must see a changed
+/// value, and a proxy as `Get` does.
+#[test]
+fn construct_follows_changes_to_prototype() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            function F() {}
+            const first = new F();
+            const other = { tag: 1 };
+            F.prototype = other;
+            const second = new F();
+            const viaProxy = Reflect.construct(F, [], new Proxy(F, {
+                get(target, key) { return key === "prototype" ? Array.prototype : target[key]; },
+            }));
+        "#}),
+        TestAction::assert("Object.getPrototypeOf(first) === F.prototype === false"),
+        TestAction::assert("Object.getPrototypeOf(second) === other"),
+        TestAction::assert("Object.getPrototypeOf(viaProxy) === Array.prototype"),
+    ]);
+}

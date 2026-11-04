@@ -41,6 +41,7 @@ fn a_worker_answers_its_page() {
     assert!(rt.next_due().is_some(), "the worker has work waiting");
     for _ in 0..50 {
         rt.wait_for_workers(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         rt.run_workers();
         if js(&mut rt, "heard.length") != "0" {
             break;
@@ -59,6 +60,7 @@ fn a_worker_answers_its_page() {
     js(&mut rt, "worker.postMessage('bye')");
     for _ in 0..50 {
         rt.wait_for_workers(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         rt.run_workers();
         if rt.next_due().is_none() {
             break;
@@ -140,6 +142,7 @@ fn a_worker_is_heard_from_its_script_alone() {
     );
     for _ in 0..50 {
         rt.wait_for_workers(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         rt.run_workers();
         if js(&mut rt, "heard.length") != "0" {
             break;

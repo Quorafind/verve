@@ -480,6 +480,28 @@ always agree with one another.
   never cached. Trusted only while the count of collections is the one it was filled at. No
   interpreter code changes. `docs/jit.md` has the argument.
 
+- `boa_engine`, `bytecompiler/class.rs`, `boa_ast` `scope_analyzer.rs`: a base class constructor gets
+  a function environment only when a function would (a direct `eval`, an escaping `this`, `super`
+  or `new.target` in the body, a captured binding), as `bytecompiler/function.rs` decides for any
+  function; the analyzer no longer forces one for base constructors and an empty default base
+  constructor gets none. A derived constructor keeps it: its `this` binding lives there. The
+  environment is two collected objects and was 188 ns of every `new` of a class.
+
+- `boa_engine`, `builtins/function/mod.rs`, `vm/mod.rs`, `object/shape/`: `function_construct` reads an
+  ordinary function's `prototype` from its shared shape, through a one-entry cache in the `Vm` (the
+  shape, held weakly, and the slot of the data property), instead of the generic `[[Get]]`; a
+  proxy, an accessor, a unique shape or a value that is not an object take the generic path.
+  `points_to` of the weak shapes is no longer behind the `jit` feature.
+
+- `boa_engine`, `vm/jit/mod.rs` (feature `jit`): `prepare` leaves a function that native code calls
+  (a frame with `EXIT_EARLY`, at `pc` 0) interpreted when its bytecode is at most 40 bytes, since
+  entering and leaving compiled code costs more than interpreting a callee that short; a loop in
+  it is still entered by OSR.
+
+- `boa_engine`, `builtins/function/mod.rs`: `enter_ordinary_function` and `function_construct` no
+  longer set the return value again after `push_frame` (which sets it), and the `this` binding
+  status is read from the stack only for a frame that builds a function environment.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
