@@ -94,3 +94,41 @@ fn stores_through_super_take_the_receiver() {
          out.join(' ')",
     );
 }
+
+/// Typed arrays: every kind, out-of-range and negative indexes, values of the wrong type, a
+/// `valueOf` that detaches the buffer, detached and shrinking buffers, and a `length` that is
+/// shadowed, redefined on the prototypes or overridden in a subclass.
+#[test]
+fn typed_arrays_match_the_interpreter() {
+    same(
+        "const out = [];
+         const run = (f) => { try { out.push(show(f())); } catch (e) { out.push(e.name); } };
+         const kinds = [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array,
+                        Uint32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array];
+         const read = (a, i) => a[i];
+         const write = (a, i, v) => { a[i] = v; return a[i]; };
+         const len = (a) => a.length;
+         for (const K of kinds) {
+           const big = K.name.startsWith('Big');
+           const a = new K(5);
+           const vals = big ? [1n, -2n, 2n ** 63n, 5, 'x', null] : [1, -2.5, 300, 2 ** 33, NaN, -0, 1n, 'y', undefined];
+           for (let i = -1; i < 8; i++) for (const v of vals) run(() => [write(a, i, v), len(a), read(a, i)]);
+         }
+         run(() => { const a = new Int8Array(4); const v = { valueOf() { return 7; } }; for (let i = 0; i < 6; i++) a[i % 4] = v; return [...a]; });
+         run(() => { const buffer = new ArrayBuffer(8); const a = new Int8Array(buffer);
+                     const v = { valueOf() { structuredClone(buffer, { transfer: [buffer] }); return 1; } };
+                     const r = []; for (let i = 0; i < 4; i++) { try { a[i] = v; } catch (e) { r.push(e.name); } r.push(a.length, a[0]); } return r; });
+         run(() => { const buffer = new ArrayBuffer(8, { maxByteLength: 16 }); const a = new Int8Array(buffer); const r = [];
+                     for (let i = 0; i < 6; i++) { a[i] = i + 1; r.push(a.length, a[i]); if (i == 3) buffer.resize(2); } return r; });
+         run(() => { const a = new Float64Array(3); Object.defineProperty(a, 'length', { value: 42 }); const r = []; for (let i = 0; i < 5; i++) r.push(len(a)); return r; });
+         run(() => { class S extends Uint8Array { get length() { return 7; } } const a = new S(3); const r = []; for (let i = 0; i < 5; i++) r.push(len(a)); return r; });
+         run(() => { const a = new Int16Array(3); const r = [len(a)];
+                     for (let i = 0; i < 4; i++) r.push(len(a));
+                     Object.defineProperty(Object.getPrototypeOf(Int16Array.prototype), 'length', { get() { return 'patched'; }, configurable: true });
+                     for (let i = 0; i < 4; i++) r.push(len(a)); return r; });
+         run(() => { const a = new Int16Array(3); return [len(a), len(new Int8Array(2)), len('abc'), len([1, 2]), len({ length: 9 })]; });
+         run(() => { const a = new Int8Array(2); a.__proto__ = { length: 'own proto' }; return [len(a), len(a)]; });
+         run(() => { const a = new Uint8Array([1, 2, 3]); let s = 0; for (let i = 0; i < 20; i++) s += read(a, i % 5) || 0; return s; });
+         out.join(' ')",
+    );
+}

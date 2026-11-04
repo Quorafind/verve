@@ -18,8 +18,17 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use boa_ast::scope::BindingLocatorScope;
 
 use crate::{
-    Context, JsObject, JsValue, builtins::Array, environments::Environment,
-    object::shape::slot::SlotAttributes, vm::CodeBlock,
+    Context, JsObject, JsValue,
+    builtins::{
+        Array,
+        typed_array::object::{
+            TypedArray, typed_array_element_get_shortcut, typed_array_element_set_shortcut,
+            typed_array_length_shortcut,
+        },
+    },
+    environments::Environment,
+    object::shape::slot::SlotAttributes,
+    vm::CodeBlock,
 };
 
 use super::{
@@ -312,6 +321,8 @@ pub(crate) unsafe extern "C" fn jit_get_length(
             })??
         } else if let Some(string) = base.as_string() {
             JsValue::from(string.len() as u32)
+        } else if let Some(length) = base.with_object(typed_array_length_shortcut).flatten() {
+            length
         } else {
             cached_data_property(base, code_block, ic, None)?
         };
@@ -366,7 +377,7 @@ pub(crate) unsafe extern "C" fn jit_get_element(
         let index = index_key(register(context, rp, key))?;
         let value = register(context, rp, object).with_object(|object| {
             if !object.is_array() {
-                return None;
+                return typed_array_element_get_shortcut(object, index);
             }
             object
                 .try_borrow()
@@ -380,7 +391,8 @@ pub(crate) unsafe extern "C" fn jit_get_element(
 }
 
 /// `SetPropertyByValue`: an element of a dense, extensible array, by an `int32` index, or one
-/// appended to a plain dense array.
+/// appended to a plain dense array, or one of a typed array (as the interpreter's shortcut
+/// has it). The receiver is the object: compiled code leaves other stores to the interpreter.
 pub(crate) unsafe extern "C" fn jit_set_element(
     state: *mut JitState,
     value: u32,
@@ -389,22 +401,24 @@ pub(crate) unsafe extern "C" fn jit_set_element(
 ) -> u32 {
     guarded(state, |context, _, rp| {
         let index = index_key(register(context, rp, key))?;
-        let value = register(context, rp, value);
-        register(context, rp, object).with_object(|object| {
-            if !object.is_array() {
+        let value = register(context, rp, value).clone();
+        let object = register(context, rp, object).as_object()?.clone();
+        if object.is::<TypedArray>() {
+            return typed_array_element_set_shortcut(&object, index, &value, context)?.ok();
+        }
+        if !object.is_array() {
+            return None;
+        }
+        {
+            let mut borrowed = object.try_borrow_mut().ok()?;
+            if !borrowed.extensible {
                 return None;
             }
-            {
-                let mut borrowed = object.try_borrow_mut().ok()?;
-                if !borrowed.extensible {
-                    return None;
-                }
-                if borrowed.properties_mut().set_dense_property(index, value) {
-                    return Some(());
-                }
+            if borrowed.properties_mut().set_dense_property(index, &value) {
+                return Some(());
             }
-            append_element(context, object, index, value)
-        })?
+        }
+        append_element(context, &object, index, &value)
     })
 }
 

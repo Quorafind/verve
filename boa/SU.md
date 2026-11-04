@@ -444,6 +444,13 @@ always agree with one another.
   constructor's frame take the fast helper or the interpreter's handler. `JitState` carries the
   stack's address. No interpreter code changes.
 
+- `boa_engine`, `vm/jit/helpers.rs` (feature `jit`): the fast helpers of `GetLengthProperty`,
+  `GetPropertyByValue` and `SetPropertyByValue` handle typed arrays by calling the interpreter's
+  own shortcuts (`typed_array_length_shortcut`, `typed_array_element_get_shortcut`,
+  `typed_array_element_set_shortcut`), so the guards live in one place. A store is the
+  helper's only when its receiver is the array itself, which compiled code decides at compile
+  time (the instruction's receiver register is the object's).
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
