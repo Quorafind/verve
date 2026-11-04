@@ -57,7 +57,7 @@ worker 的其他调度改进；`RegExp` 的其他行为。
 
 **第 2 项（`regexp_string_iterator.rs`）**：`next` 的函数体拆成 `step`，`next` 在 `step` 返回 `Err`（`exec`、`ToString(match[0])`、`lastIndex` 读写任一处抛错）时置 `completed`，之后的 `next()` 返回 `{ value: undefined, done: true }`。四个抛错点各一个测试（`boa/core/engine/src/builtins/regexp/tests.rs`），修复前四个全部失败（抛错后的每次 `next` 都再抛一次），修复后通过。`boa/SU.md` 已记一条。
 
-**与 Node 22 的偏差（需总控确认）**：Node 22.21.1（V8）并不在抛错后结束迭代器：`exec` 第二次抛错后，下一次 `next()` 照常返回下一个匹配（`threw | {"value":["a"],"done":false}`），`ToString` 抛错同理；`lastIndex` 读/写抛错时（空匹配）每次 `next()` 都重新抛。这是 V8 把它实现为内建函数而不是生成器，与规范（`CreateIteratorFromClosure`，抛错即 completed）不符。任务书写的目标是 `done: true`，所以按规范与任务书做，没有照搬 V8；测试注释里写明了。
+**与 Node 22 的偏差（总控已确认按规范）**：Node 22.21.1（V8）并不在抛错后结束迭代器：`exec` 第二次抛错后，下一次 `next()` 照常返回下一个匹配（`threw | {"value":["a"],"done":false}`），`ToString` 抛错同理；`lastIndex` 读/写抛错时（空匹配）每次 `next()` 都重新抛。这是 V8 把它实现为内建函数而不是生成器，与规范（`CreateIteratorFromClosure`，抛错即 completed）不符。任务书写的目标是 `done: true`，所以按规范与任务书做，没有照搬 V8；测试注释里写明了。
 
 test262：`built-ins/RegExpStringIteratorPrototype`（17）、`built-ins/RegExp/prototype/Symbol.matchAll`（26）、`built-ins/String/prototype/matchAll`（25）修复前后都是全部通过，0 回退（test262 没有覆盖抛错后继续 `next` 的用例）。
 
