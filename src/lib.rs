@@ -738,8 +738,13 @@ impl Runtime {
     /// host puts it on `window` itself, if it has one.
     pub fn global_require(&mut self) -> JsValue {
         let cwd = PathBuf::from(shared(&self.context).cwd.borrow().clone());
-        modules::require_function(&mut self.context, &cwd, None)
-            .expect("a require function is made")
+        self.global_require_in(&cwd)
+    }
+
+    /// [`Self::global_require`] resolving relative names against `dir`: a page's `require`
+    /// resolves against the folder of the page.
+    pub fn global_require_in(&mut self, dir: &Path) -> JsValue {
+        modules::require_function(&mut self.context, dir, None).expect("a require function is made")
     }
 
     /// Runs `source` in the Node-selected format at `filename`: CommonJS exports or the

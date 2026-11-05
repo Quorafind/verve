@@ -34,11 +34,11 @@ fn replays(name: &str) {
 #[test]
 fn hello_shows_the_versions_in_one_window_and_ends_with_zero() {
     let app = App::launch(&fixture("hello"));
-    let window = app.window("hello").expect("the app made its window");
+    // The window is titled by its page once it has loaded, as Electron's is.
+    let window = app
+        .window("Hello Verve")
+        .expect("the page titled the window");
     assert_eq!((window.bounds.width, window.bounds.height), (800., 600.));
-    // The page's <title> reaches the window as 'page-title-updated' in Electron: P13 and P20.
-    let title = |app: &App| app.eval_renderer(window.contents, "document.title");
-    assert!(app.run_until(|app| title(app) == r#""Hello Verve""#, TIMEOUT));
 
     assert!(app.run_until(
         |app| {
@@ -57,7 +57,6 @@ fn hello_shows_the_versions_in_one_window_and_ends_with_zero() {
 }
 
 #[test]
-#[ignore = "P20: loadFile needs the page loader; the app module is there (P10)"]
 fn quick_start_opens_its_window_and_quits_when_it_closes() {
     let app = App::launch(&fixture("quick-start"));
     let window = app
@@ -130,7 +129,7 @@ fn an_app_runs_from_an_asar_archive() {
 }
 
 #[test]
-#[ignore = "P20: the page loader, and P30 for the layout a React page needs"]
+#[ignore = "P30: the layout a click needs (P20 loads and renders the page: tests/page_load.rs)"]
 fn a_react_app_built_by_vite_renders_and_counts_clicks() {
     let app = App::launch(&fixture("react-vite"));
     let window = app

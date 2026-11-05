@@ -21,7 +21,7 @@ use crate::beat;
 use crate::hub::{Hub, Program};
 use crate::ids::{ContentsId, WindowId};
 use crate::launcher::Target;
-use crate::msg::{AppEvent, FromRenderer, FromShell, ToShell, WindowEvent, WindowOp};
+use crate::msg::{AppEvent, FromRenderer, FromShell, PageEvent, ToShell, WindowEvent, WindowOp};
 use crate::probe;
 
 /// The browser process: its runtime, the API the app's script calls, and what ends the app.
@@ -184,7 +184,10 @@ impl MainGuest {
                 self.runtime.run_microtasks();
                 self.sweep_at = api::ipc_main::watch_unanswered(self.runtime.context());
             }
-            FromRenderer::Dom(verve_dom::Request::Title(title)) => {
+            // The window is titled by its page, as in Electron; P13 adds 'page-title-updated',
+            // which a listener may cancel.
+            FromRenderer::Dom(verve_dom::Request::Title(title))
+            | FromRenderer::Lifecycle(PageEvent::TitleUpdated(title)) => {
                 if let Some(window) = self.hub.window_of(contents) {
                     self.hub.to_shell(ToShell::Window {
                         window,

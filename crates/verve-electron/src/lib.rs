@@ -17,6 +17,7 @@ pub mod hub;
 pub mod ids;
 mod ipc;
 pub mod launcher;
+mod loader;
 pub mod main_guest;
 pub mod msg;
 mod probe;

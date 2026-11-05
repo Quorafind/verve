@@ -19,8 +19,8 @@ use verve::vfs::Overlay;
 use crate::ids::{ContentsId, Ids, WindowId};
 use crate::launcher::Start;
 use crate::msg::{
-    AppEvent, FromRenderer, FromShell, GoneReason, RendererView, ToRenderer, ToRendererInput,
-    ToShell, WebPreferences,
+    AppEvent, FromRenderer, FromShell, GoneReason, PageEvent, RendererView, ToRenderer,
+    ToRendererInput, ToShell, WebPreferences,
 };
 use crate::{ElectronOptions, MainGuest, RendererGuest};
 
@@ -148,6 +148,10 @@ pub struct Hub {
     exit: Mutex<Option<i32>>,
     /// Every console line, once someone asked to keep them: a long-running app is not made to.
     console: Mutex<Option<Vec<ConsoleLine>>>,
+    /// Every lifecycle event of every page, once someone asked to keep them.
+    page_events: Mutex<Option<Vec<(ContentsId, PageEvent)>>>,
+    /// Numbers the asks of every page's loader for the main process.
+    protocol_calls: Arc<AtomicU64>,
     launch: Mutex<Option<Arc<Start>>>,
     /// Whether [`Hub::set_launch`] was called: an app that was not launched has a profile of
     /// its own to clean up.
@@ -174,6 +178,8 @@ impl Hub {
             shell: Mutex::new(None),
             exit: Mutex::new(None),
             console: Mutex::new(None),
+            page_events: Mutex::new(None),
+            protocol_calls: Arc::default(),
             launch: Mutex::new(None),
             told: AtomicBool::new(false),
             beats: AtomicU64::new(0),
@@ -401,6 +407,11 @@ impl Hub {
             if let FromRenderer::Console { message, .. } = event {
                 self.log_console(Some(contents), message);
             }
+            if let FromRenderer::Lifecycle(page_event) = event
+                && let Some(kept) = lock(&self.page_events).as_mut()
+            {
+                kept.push((contents, page_event.clone()));
+            }
         }
         // At most `PER_JOB` to a job, so what the shell or another page says in the meantime is
         // heard between them.
@@ -489,6 +500,26 @@ impl Hub {
     /// Starts keeping every console line the app writes, from now on.
     pub fn record_console(&self) {
         lock(&self.console).get_or_insert_with(Vec::new);
+    }
+
+    /// The counter a page's loader numbers its asks of the main process from: one for the app,
+    /// so a page's ask is never mistaken for the one the page before it made.
+    pub fn protocol_calls(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.protocol_calls)
+    }
+
+    /// Starts keeping every lifecycle event the pages report, from now on.
+    pub fn record_page_events(&self) {
+        lock(&self.page_events).get_or_insert_with(Vec::new);
+    }
+
+    /// The lifecycle events page `contents` reported since [`Hub::record_page_events`], in order.
+    pub fn page_events(&self, contents: ContentsId) -> Vec<PageEvent> {
+        let kept = lock(&self.page_events);
+        let all = kept.iter().flatten();
+        all.filter(|(page, _)| *page == contents)
+            .map(|(_, event)| event.clone())
+            .collect()
     }
 
     /// Notes a console line, if they are being kept.

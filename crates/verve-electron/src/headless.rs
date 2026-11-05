@@ -226,6 +226,7 @@ impl HeadlessShell {
             }),
         });
         hub.record_console();
+        hub.record_page_events();
         hub.set_shell(shell.clone());
         shell
     }
