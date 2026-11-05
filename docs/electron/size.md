@@ -168,3 +168,10 @@ branches in `function_construct`, `prepare` and the class compiler, and one fiel
 `electron/p76-jit-typed-elements`: `cargo build --release --features jit --bin verve` (not stripped, not the `size-report` build) is
 26,756,608 bytes against 26,717,696 for `docs/electron-plan` `0cc1fa94` built the same way, +38,912 bytes (+0.146 %): the typed path of
 `GetPropertyByValue` and `SetPropertyByValue` in the compiler (`compiler/typed.rs`) and the layout probe (`typed_elements.rs`).
+
+## P83: UTF-16 rope appends
+
+`electron/p83-utf16-rope-appends`: `cargo build --release --features jit --bin verve` (not stripped, not the `size-report` build) is
+26,759,680 bytes against 26,756,608 for `docs/electron-plan` `2cb3f702` built the same way, +3,072 bytes (+0.011 %): the `AppendedWide`
+state and the widening path in `RopeString::append_short`. A rope node keeps its size (the new state holds the same two fields as
+`Appended`).

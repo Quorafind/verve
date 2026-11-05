@@ -593,3 +593,28 @@ Probe (`-A`, the array in a local, best of 7, the loop itself 4.0 ns), ns per it
 | a dense array, read / write | 7.5 / 6.0 | 7.5 / 5.5 |
 
 Details and the cost in compile time in `docs/jit.md` "Results (typed-array elements, P76)" and `packages/P76-jit-typed-elements.md`.
+
+### P83: UTF-16 appends go through the rope buffer
+
+`electron/p83-utf16-rope-appends` against `docs/electron-plan` `2cb3f702`, both `cargo build --release --features jit --bin verve`,
+`CARGO_BUILD_JOBS=6`, `VERVE_CODE_CACHE=0`, a throwaway profile folder. Machine shared with three other workers; the load (CPU %, five
+1 s samples) was 16–24 % around the probe rounds and 16–26 % around the suite. Base and after are run adjacent, median of 5 processes,
+JIT. Peak memory is the process's `PeakWorkingSet64`, polled every 2 ms from PowerShell while the script runs (an empty process is
+16.7 MB).
+
+| probe | before | after |
+|---|---|---|
+| 320,000 × `s += '中' + i`, loop ms | 67.7 (65.5) | 60.2 (57.4) |
+| the same, peak working set, MB | 76.2 | 16.8 |
+| 320,000 × `s += '中'`, loop ms | 43.2 (42.4) | 38.7 (38.3) |
+| the same, peak working set, MB | 46.0 | 16.8 |
+| 320,000 × `s += 'ab' + i` (Latin-1), loop ms | 62.0 (58.2) | 59.2 (57.8) |
+| the same, peak working set, MB | 16.8 | 16.9 |
+| 320,000 × `s += 'ab'` (Latin-1), loop ms | 38.3 (37.4) | 38.1 (36.9) |
+| the same, peak working set, MB | 16.8 | 16.8 |
+
+Suite (`run.sh --runs 5`, median (best) ms, JIT / interpreter), base then after: `concat` 3.2 (3.0) / 3.6 (3.1) then 2.9 (2.9) / 3.1 (3.1).
+The other rows differ by up to a few percent in either direction with load 16–26 %, and none of them touches a rope of wide text. `fib`
+and `alloc` re-run with 7 processes: `fib` JIT 230.6 (229.4) then 226.8 (225.3), `alloc` JIT 312.8 (266.9) then 287.5 (266.2). `sort` (numbers only)
+read +6.5 % in the median of its re-run (2353.8 then 2507.8, best 2312.1 then 2407.5) with its interpreter column the other way round
+(3076.5 then 2723.7): load, not the change.
