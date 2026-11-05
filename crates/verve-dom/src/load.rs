@@ -16,9 +16,11 @@ use url::Url;
 use crate::Document;
 use crate::html::{Step, StreamParser};
 
+mod handlers;
 mod net;
 mod script;
 
+pub(crate) use handlers::attribute;
 pub(crate) use script::{connected, install, write};
 
 /// What a page fetches as it loads: its scripts, sheets, images, fonts, icons — and what its
@@ -194,6 +196,8 @@ pub(crate) struct Load {
     /// A script that does not hold the parser (`async`, `defer`, a module) is running: what it
     /// `document.write`s is ignored, with a console warning, as Chromium does.
     pub apart: bool,
+    /// The event handler attributes read already, by element.
+    pub handled: HashSet<(crate::dom::NodeId, String)>,
     /// Scripts a page made and ran: `script.async` stays true for them.
     pub forced: HashSet<crate::dom::NodeId>,
     pub parser: Option<StreamParser>,

@@ -514,6 +514,29 @@ fn an_async_script_cannot_write_into_the_page() {
 }
 
 #[test]
+fn a_body_handler_attribute_is_read_and_goes_where_html_says() {
+    let html = format!(
+        "{LOG}<body onload=\"__log.push('load')\" onclick=\"__log.push('click')\" \
+         onmessage=\"__log.push('message')\"><p id=p onclick=\"__log.push('p')\">"
+    );
+    let mut page = loaded(&[], &html);
+    assert_eq!(page.log(), ["load"]);
+    assert_eq!(page.eval("typeof document.body.onclick"), "function");
+    assert_eq!(page.eval("typeof window.onclick"), "object");
+    assert_eq!(page.eval("typeof window.onmessage"), "function");
+}
+
+#[test]
+fn moving_an_element_leaves_the_handler_a_script_set() {
+    let html = format!("{LOG}<p id=p onclick=\"__log.push('attr')\">x</p><div id=d></div>");
+    let mut page = loaded(&[], &html);
+    page.eval("var p = document.getElementById('p'), d = document.getElementById('d'); p.onclick = () => __log.push('set'); d.appendChild(p); p.click()");
+    assert_eq!(page.log(), ["set"]);
+    page.eval("var p = document.getElementById('p'); p.setAttribute('onclick', \"__log.push('again')\"); p.click()");
+    assert_eq!(page.log(), ["set", "again"]);
+}
+
+#[test]
 fn a_redirected_page_resolves_what_it_names_against_where_it_ended() {
     let files = [
         ("r.html", "<script src=s.js></script>"),

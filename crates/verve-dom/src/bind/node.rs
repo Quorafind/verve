@@ -56,14 +56,20 @@ fn settle(context: &mut Context) {
         let moved = state.dom.take_moved();
         // Only custom elements hear what happens to them.
         let attrs = state.dom.take_attr_changes();
-        let joined = if state.load.active {
+        let (joined, written) = if state.load.active {
             page_changes(&state.dom, &moved, &attrs)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let reactions = (!state.custom.is_empty()).then_some((attrs, moved));
-        (state.dom.has_relinked(), mutated, reactions, joined)
+        (
+            state.dom.has_relinked(),
+            mutated,
+            reactions,
+            (joined, written),
+        )
     };
+    let (joined, written) = joined;
     if let Err(error) = crate::media::sync(context) {
         verve::report(context, &error);
     }
@@ -79,18 +85,21 @@ fn settle(context: &mut Context) {
     if let Some((attrs, moved)) = reactions {
         super::custom::react(context, attrs, moved);
     }
+    for (node, name) in written {
+        crate::load::attribute(context, node, &name);
+    }
     if !joined.is_empty() {
         crate::load::connected(context, &joined);
     }
 }
 
 /// What a change made means to the page's loading: the subtrees that joined the document (and a
-/// `<script>` that got a `src` or text meanwhile).
+/// `<script>` that got a `src` or text meanwhile), and the attributes set.
 fn page_changes(
     dom: &Dom,
     moved: &[(NodeId, bool)],
     attrs: &[crate::dom::AttrChange],
-) -> Vec<NodeId> {
+) -> (Vec<NodeId>, Vec<(NodeId, String)>) {
     let is_script = |id: NodeId| dom.get(id).and_then(|n| n.tag()) == Some("script");
     let mut joined: Vec<NodeId> = moved.iter().filter(|(_, c)| *c).map(|(n, _)| *n).collect();
     // Text put into a script that is in the page is the script's to run.
@@ -106,7 +115,8 @@ fn page_changes(
             .filter(|a| a.name == "src" && is_script(a.node))
             .map(|a| a.node),
     );
-    joined
+    let written = attrs.iter().map(|a| (a.node, a.name.clone())).collect();
+    (joined, written)
 }
 
 pub fn read_dom<R>(context: &Context, f: impl FnOnce(&Dom) -> R) -> R {

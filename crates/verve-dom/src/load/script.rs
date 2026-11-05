@@ -119,6 +119,7 @@ fn collect(state: &State, roots: &[NodeId]) -> Found {
 /// Subtrees that joined the document: the `<script>`s in them that no parser read are the page's
 /// to load now.
 pub(crate) fn connected(context: &mut Context, roots: &[NodeId]) {
+    super::handlers::connected(context, roots);
     let found = {
         let state = shared(context);
         let state = state.borrow();
