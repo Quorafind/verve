@@ -14,6 +14,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use verve_electron::ids::{ContentsId, WindowId};
+use verve_electron::launcher::{self, Env, Launch, Start, Target};
 use verve_electron::{ElectronOptions, HeadlessOptions, HeadlessShell, HeadlessWindow, Hub};
 
 /// How long a test waits for something that has to happen.
@@ -27,13 +28,39 @@ pub struct App {
     pub hub: Arc<Hub>,
     pub shell: Arc<HeadlessShell>,
     scratch: Option<PathBuf>,
+    /// The profile directory (`userData`) of the app, removed with it.
+    profile: PathBuf,
 }
 
 impl App {
     /// Runs the app in `app_dir`, as `electron <app_dir>` does.
-    // P10: this takes the entry from `launcher::parse` once that merges.
     pub fn launch(app_dir: &Path) -> App {
-        Self::start(app_dir, entry_of(app_dir), None, false)
+        let args = vec![app_dir.as_os_str().to_owned()];
+        match launcher::parse(args, &launcher::exe_path(), &Env::default()) {
+            Ok(Launch::Start(start)) => Self::launch_with(*start, None),
+            other => panic!("{} is not an app: {other:?}", app_dir.display()),
+        }
+    }
+
+    /// Runs a development app as `start` says it was started: its switches and command line are
+    /// the app's. `scratch` is a directory to remove when the app is dropped.
+    pub fn launch_with(start: Start, scratch: Option<PathBuf>) -> App {
+        let Target::App { app_path, entry } = &start.target else {
+            panic!("launch_with runs an app from a folder or a script");
+        };
+        let (app_path, entry) = (app_path.clone(), entry.clone());
+        Self::start(&app_path, entry, scratch, false, Some(start))
+    }
+
+    /// A directory of its own for a test to use, made.
+    pub fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "verve-electron-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("a scratch directory is made");
+        dir
     }
 
     /// Writes `main.js` and `files` (paths relative to it) into a directory of their own and
@@ -58,14 +85,37 @@ impl App {
                 .expect("the app's directory is made");
             std::fs::write(path, text).expect("the app's file is written");
         }
-        Self::start(&dir, dir.join("main.js"), Some(dir.clone()), dark)
+        Self::start(&dir, dir.join("main.js"), Some(dir.clone()), dark, None)
     }
 
-    fn start(app_dir: &Path, entry: PathBuf, scratch: Option<PathBuf>, dark: bool) -> App {
+    fn start(
+        app_dir: &Path,
+        entry: PathBuf,
+        scratch: Option<PathBuf>,
+        dark: bool,
+        launch: Option<Start>,
+    ) -> App {
         let hub = Hub::new(ElectronOptions {
             app_path: app_dir.to_path_buf(),
             dark,
         });
+        // Every app of a test has a profile directory of its own in the temporary one — whichever
+        // way it was launched — and it is removed with the app. An app that took the user's
+        // (`%APPDATA%\<name>`) would leave folders there, take the lock of a real instance, and
+        // fail this assertion.
+        let mut launch = launch.unwrap_or_else(|| Start::development(app_dir.to_path_buf()));
+        let profile = launch.user_data_dir().unwrap_or_else(|| {
+            let dir = App::scratch_dir("profile");
+            let switch = ("user-data-dir".to_owned(), dir.display().to_string());
+            launch.switches.push(switch);
+            dir
+        });
+        assert!(
+            profile.starts_with(std::env::temp_dir()),
+            "{} is not in the temporary directory: a test must not use a real profile",
+            profile.display()
+        );
+        hub.set_launch(launch);
         let options = HeadlessOptions {
             dark,
             ..HeadlessOptions::default()
@@ -76,6 +126,7 @@ impl App {
             hub,
             shell,
             scratch,
+            profile,
         }
     }
 
@@ -155,17 +206,10 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         self.hub.shutdown(0);
+        // The directories may not exist: an app that never got ready made no profile.
+        let _ = std::fs::remove_dir_all(&self.profile);
         if let Some(dir) = &self.scratch {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
-}
-
-/// The script `electron <dir>` runs: `main.js` or else `index.js`.
-fn entry_of(dir: &Path) -> PathBuf {
-    ["main.js", "index.js"]
-        .iter()
-        .map(|name| dir.join(name))
-        .find(|entry| entry.is_file())
-        .unwrap_or_else(|| panic!("{} has no main.js or index.js", dir.display()))
 }
