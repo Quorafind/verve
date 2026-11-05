@@ -265,6 +265,8 @@ pub enum AppEvent {
         /// The `additionalData` the second instance gave, as JSON text: it crossed a process.
         data: String,
     },
+    /// The system asks the app to quit (a shutdown, a Cmd+Q no menu took): the same as `app.quit()`.
+    QuitRequested,
 }
 
 /// A display, as `screen` reports it.

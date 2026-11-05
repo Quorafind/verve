@@ -194,6 +194,7 @@ pub(crate) fn platform_event(context: &mut Context, event: AppEvent) {
         } => ("activate", vec![has_visible_windows.into()]),
         AppEvent::OpenFile(path) => ("open-file", vec![path_text(&path)]),
         AppEvent::OpenUrl(url) => ("open-url", vec![js_text(&url)]),
+        AppEvent::QuitRequested => return quit::quit(context),
         _ => return,
     };
     emit_quietly(context, name, &args);
