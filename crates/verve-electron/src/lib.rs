@@ -17,12 +17,13 @@ pub mod hub;
 pub mod ids;
 pub mod main_guest;
 pub mod msg;
+mod probe;
 pub mod renderer_guest;
 
 use std::path::PathBuf;
 
-pub use headless::{HeadlessShell, HeadlessWindow};
-pub use hub::{Hub, RendererHandle, ShellPort};
+pub use headless::{FakeLayout, HeadlessOptions, HeadlessShell, HeadlessWindow};
+pub use hub::{ConsoleLine, Hub, RendererHandle, ShellPort};
 pub use main_guest::MainGuest;
 pub use renderer_guest::RendererGuest;
 

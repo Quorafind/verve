@@ -19,6 +19,7 @@ use crate::beat;
 use crate::hub::Hub;
 use crate::ids::{ContentsId, WindowId};
 use crate::msg::{FromRenderer, FromShell, ToShell, WindowEvent, WindowOp};
+use crate::probe;
 
 /// The browser process: its runtime, the API the app's script calls, and what ends the app.
 pub struct MainGuest {
@@ -78,6 +79,11 @@ impl MainGuest {
             eprintln!("electron: {error}");
             self.failed = Some(1);
         }
+    }
+
+    /// Evaluates `code` in the main process's realm, answering the result as JSON.
+    pub fn eval(&mut self, code: &str) -> Result<String, String> {
+        probe::evaluate(&mut self.runtime, code)
     }
 
     /// What the shell saw, told to the window it is about. The app's own events, menus and the
@@ -164,9 +170,15 @@ fn set_up_process(runtime: &mut Runtime, hub: &Arc<Hub>, entry: &Path) {
     if let Err(error) = runtime.set_process_info(info) {
         eprintln!("electron: process could not be set up: {error}");
     }
-    runtime.set_console_sink(Some(Box::new(|level, text, _| match level {
-        Level::Warn | Level::Error => eprintln!("{text}"),
-        _ => println!("{text}"),
+    let log = Arc::downgrade(hub);
+    runtime.set_console_sink(Some(Box::new(move |level, text, _| {
+        if let Some(hub) = log.upgrade() {
+            hub.log_console(None, text);
+        }
+        match level {
+            Level::Warn | Level::Error => eprintln!("{text}"),
+            _ => println!("{text}"),
+        }
     })));
 }
 

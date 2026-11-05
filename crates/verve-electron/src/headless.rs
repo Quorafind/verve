@@ -1,171 +1,230 @@
 //! A shell for a machine with no display: it does with the messages it is sent what the GPUI
 //! shell does, keeps the window state they add up to, and can be told that a person did
-//! something. P00 builds its end-to-end assertions on this, and the state machine here is the one
-//! the real shell runs — P34 keeps them in step.
+//! something. P00 builds its end-to-end assertions on this, and the state machine here — the
+//! rules are in [`window`] — is the one the real shell runs: P34 keeps them in step.
+//!
+//! Pages are laid out by a [`FakeLayout`] on every view they publish, so `getBoundingClientRect`
+//! and the observers answer without a drawer. The shell never waits for a page or the main
+//! process: it is called on their threads.
+
+mod layout;
+mod window;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::Duration;
+
+use verve_dom::{NodeId, Snapshot};
+
+pub use layout::FakeLayout;
+pub use window::HeadlessWindow;
 
 use crate::hub::{Hub, ShellPort};
 use crate::ids::{ContentsId, WindowId};
-use crate::msg::{FromShell, Rect, ToShell, WindowEvent, WindowOp};
+use crate::msg::{
+    AppEvent, Display, FromShell, Rect, ToRendererInput, ToShell, WindowEvent, WindowOp,
+};
+use window::Window;
 
-/// A window as the shell has it.
+/// What a headless shell is told about the machine it pretends to be.
 #[derive(Clone, Debug)]
-pub struct HeadlessWindow {
-    /// The window's id.
-    pub id: WindowId,
-    /// The page it shows.
-    pub contents: ContentsId,
-    /// Its title now.
-    pub title: String,
-    /// Where it is and how big.
-    pub bounds: Rect,
-    /// Whether it is shown.
-    pub visible: bool,
-    /// Whether it has focus.
-    pub focused: bool,
-    /// Whether it was closed; a closed window stays listed.
-    pub closed: bool,
+pub struct HeadlessOptions {
+    /// How the pages' boxes are worked out.
+    pub layout: FakeLayout,
+    /// The displays; the first is the primary one that windows open on.
+    pub displays: Vec<Display>,
+    /// Whether the system theme is dark: what each page's `prefers-color-scheme` is told.
+    pub dark: bool,
+    /// Whether each message to the shell is also written to standard error as a line, like
+    /// `[window 1] create 800x600 "title"`, for a person watching an app run.
+    pub trace: bool,
+}
+
+impl Default for HeadlessOptions {
+    /// One 1920 x 1080 display at 1x, a light theme, block-stack layout.
+    fn default() -> Self {
+        let screen = Rect {
+            x: 0.,
+            y: 0.,
+            width: 1920.,
+            height: 1080.,
+        };
+        Self {
+            layout: FakeLayout::default(),
+            displays: vec![Display {
+                id: 1,
+                bounds: screen,
+                work_area: screen,
+                scale_factor: 1.,
+                primary: true,
+            }],
+            dark: false,
+            trace: false,
+        }
+    }
 }
 
 /// The shell of a machine with no display.
 pub struct HeadlessShell {
     /// Held weakly: the Hub holds the shell, and neither keeps the other alive.
     hub: Weak<Hub>,
+    layout: FakeLayout,
+    displays: Vec<Display>,
+    trace: bool,
     state: Mutex<State>,
 }
 
 #[derive(Default)]
 struct State {
     received: Vec<ToShell>,
-    windows: BTreeMap<WindowId, HeadlessWindow>,
+    windows: BTreeMap<WindowId, Window>,
+    pages: BTreeMap<ContentsId, Page>,
+    dark: bool,
     exit: Option<i32>,
 }
 
+/// What the shell has of a page: the last document it published and the boxes it was given.
+#[derive(Default)]
+struct Page {
+    snapshot: Option<Snapshot>,
+    boxes: Vec<(NodeId, verve_dom::Rect)>,
+}
+
+/// What a message did, to be said to the app once the shell's own state is let go.
+#[derive(Default)]
+struct Outcome {
+    events: Vec<FromShell>,
+    inputs: Vec<(ContentsId, ToRendererInput)>,
+}
+
+impl Outcome {
+    /// `events` of `window`, and what each tells its page.
+    fn window(&mut self, window: &Window, events: Vec<WindowEvent>, scale: f32) {
+        let shown = &window.shown;
+        for event in events {
+            let input = match &event {
+                WindowEvent::Resized { width, height } => Some(ToRendererInput::Viewport {
+                    width: *width,
+                    height: *height,
+                    scale,
+                }),
+                WindowEvent::Focus => Some(ToRendererInput::Focus(true)),
+                WindowEvent::Blur => Some(ToRendererInput::Focus(false)),
+                _ => None,
+            };
+            self.inputs
+                .extend(input.map(|input| (shown.contents, input)));
+            self.events.push(FromShell::Window {
+                window: shown.id,
+                event,
+            });
+        }
+    }
+}
+
 impl State {
-    /// What the shell does with a message, and what it says back to the main process.
-    fn apply(&mut self, msg: ToShell) -> Vec<FromShell> {
-        let replies = match &msg {
+    /// What the shell does with a message, and what it says back.
+    fn apply(&mut self, msg: ToShell, primary: &Display) -> Outcome {
+        let mut out = Outcome::default();
+        match &msg {
             ToShell::CreateWindow {
                 window,
                 contents,
                 options,
             } => {
-                let bounds = Rect {
-                    x: options.x.unwrap_or(0.),
-                    y: options.y.unwrap_or(0.),
-                    width: options.width,
-                    height: options.height,
-                };
-                self.windows.insert(
-                    *window,
-                    HeadlessWindow {
-                        id: *window,
-                        contents: *contents,
-                        title: options.title.clone(),
-                        bounds,
-                        visible: options.show,
-                        focused: options.show && options.focusable,
-                        closed: false,
+                let created = Window::new(*window, *contents, options, primary);
+                let bounds = created.shown.bounds;
+                out.inputs.push((
+                    *contents,
+                    ToRendererInput::Viewport {
+                        width: bounds.width,
+                        height: bounds.height,
+                        scale: primary.scale_factor,
                     },
-                );
-                Vec::new()
+                ));
+                out.inputs
+                    .push((*contents, ToRendererInput::ColorScheme { dark: self.dark }));
+                if created.shown.focused {
+                    out.inputs.push((*contents, ToRendererInput::Focus(true)));
+                }
+                self.windows.insert(*window, created);
             }
-            ToShell::Window { window, op } => self.apply_op(*window, op),
-            ToShell::Menu(_) => Vec::new(),
+            ToShell::Window { window, op } => self.apply_op(*window, op, primary, &mut out),
+            ToShell::Menu(_) => {}
             ToShell::Quit { exit_code } => {
                 self.exit = Some(*exit_code);
-                Vec::new()
+                self.windows.values_mut().for_each(|window| {
+                    window.close();
+                });
             }
-        };
+        }
         self.received.push(msg);
-        replies
+        out
     }
 
-    fn apply_op(&mut self, window: WindowId, op: &WindowOp) -> Vec<FromShell> {
-        match op {
+    fn apply_op(&mut self, id: WindowId, op: &WindowOp, primary: &Display, out: &mut Outcome) {
+        let Some(window) = self.windows.get_mut(&id) else {
+            return;
+        };
+        let events = match op {
             // Closing is the page's to cancel, so it is asked first.
             WindowOp::Close => {
-                return vec![FromShell::Window {
-                    window,
+                out.events.push(FromShell::Window {
+                    window: id,
                     event: WindowEvent::CloseRequested,
-                }];
+                });
+                return;
             }
-            WindowOp::Destroy => return self.close(window),
-            WindowOp::CloseAnswer { prevented: false } => return self.close(window),
-            _ => {}
-        }
-        let Some(entry) = self.windows.get_mut(&window) else {
-            return Vec::new();
+            WindowOp::Destroy | WindowOp::CloseAnswer { prevented: false } => window.close(),
+            _ => window.apply(op, primary),
         };
-        match op {
-            WindowOp::Show => entry.visible = true,
-            WindowOp::ShowInactive => {
-                entry.visible = true;
-                entry.focused = false;
-            }
-            WindowOp::Hide => entry.visible = false,
-            WindowOp::Focus => entry.focused = true,
-            WindowOp::Blur => entry.focused = false,
-            WindowOp::SetTitle(title) => entry.title.clone_from(title),
-            WindowOp::SetBounds {
-                x,
-                y,
-                width,
-                height,
-                ..
-            } => {
-                if let Some(x) = x {
-                    entry.bounds.x = *x;
-                }
-                if let Some(y) = y {
-                    entry.bounds.y = *y;
-                }
-                if let Some(width) = width {
-                    entry.bounds.width = *width;
-                }
-                if let Some(height) = height {
-                    entry.bounds.height = *height;
-                }
-            }
-            _ => {}
-        }
-        Vec::new()
+        out.window(window, events, primary.scale_factor);
     }
 
-    /// The window goes, and that is what the main process is told — once.
-    fn close(&mut self, window: WindowId) -> Vec<FromShell> {
-        let Some(entry) = self.windows.get_mut(&window) else {
-            return Vec::new();
-        };
-        if entry.closed {
-            return Vec::new();
-        }
-        entry.closed = true;
-        entry.visible = false;
-        entry.focused = false;
-        vec![FromShell::Window {
-            window,
-            event: WindowEvent::Closed,
-        }]
+    /// Takes a view the page published and lays it out; answers the boxes if they are new.
+    fn settle(
+        &mut self,
+        contents: ContentsId,
+        snapshot: Snapshot,
+        layout: FakeLayout,
+    ) -> Option<Vec<(NodeId, verve_dom::Rect)>> {
+        let boxes = layout.boxes(&snapshot);
+        let page = self.pages.entry(contents).or_default();
+        page.snapshot = Some(snapshot);
+        (page.boxes != boxes).then(|| {
+            page.boxes.clone_from(&boxes);
+            boxes
+        })
     }
 }
 
 impl HeadlessShell {
-    /// A shell that takes this app's messages: from now on the Hub sends them here.
-    pub fn new(hub: &Arc<Hub>) -> Arc<Self> {
+    /// A shell that takes this app's messages: from now on the Hub sends them here, and keeps
+    /// every console line the app writes.
+    pub fn new(hub: &Arc<Hub>, options: HeadlessOptions) -> Arc<Self> {
         let shell = Arc::new(Self {
             hub: Arc::downgrade(hub),
-            state: Mutex::new(State::default()),
+            layout: options.layout,
+            displays: options.displays,
+            trace: options.trace,
+            state: Mutex::new(State {
+                dark: options.dark,
+                ..State::default()
+            }),
         });
+        hub.record_console();
         hub.set_shell(shell.clone());
         shell
     }
 
     /// Every window this app made, open or closed.
     pub fn windows(&self) -> Vec<HeadlessWindow> {
-        self.state().windows.values().cloned().collect()
+        self.state()
+            .windows
+            .values()
+            .map(|window| window.shown.clone())
+            .collect()
     }
 
     /// Everything the main process asked of the shell, in order.
@@ -178,13 +237,135 @@ impl HeadlessShell {
         self.state().exit
     }
 
-    /// A person clicked `window`'s close button.
+    /// The document `window`'s page last published, as a drawer would have it.
+    pub fn snapshot(&self, window: WindowId) -> Option<Snapshot> {
+        self.pump();
+        let state = self.state();
+        let contents = state.windows.get(&window)?.shown.contents;
+        state.pages.get(&contents)?.snapshot.clone()
+    }
+
+    /// A person clicked `window`'s close button: the main process is asked, a `'close'`
+    /// listener may keep the window, and the answer closes it.
     pub fn user_close(&self, window: WindowId) {
+        self.say(FromShell::Window {
+            window,
+            event: WindowEvent::CloseRequested,
+        });
+    }
+
+    /// A person dragged `window`'s edge to `width` x `height`; a window that cannot be resized
+    /// stays as it is.
+    pub fn resize(&self, window: WindowId, width: f32, height: f32) {
+        let scale = self.primary().scale_factor;
+        let mut out = Outcome::default();
+        if let Some(found) = self.state().windows.get_mut(&window) {
+            let events = found.resize(width, height);
+            out.window(found, events, scale);
+        }
+        self.deliver(out);
+    }
+
+    /// A person clicked the first element of `window`'s page that `selector` matches.
+    pub fn click(&self, window: WindowId, selector: &str) {
+        let selector = selector.to_owned();
+        self.on_page(window, move |page| {
+            if !page.click(&selector) {
+                eprintln!("headless: no element matches {selector}");
+            }
+        });
+    }
+
+    /// A person typed `text` into whatever has the focus in `window`.
+    pub fn type_text(&self, window: WindowId, text: &str) {
+        let text = text.to_owned();
+        self.on_page(window, move |page| page.type_text(&text));
+    }
+
+    /// A person chose menu item `item`.
+    pub fn menu_click(&self, item: u32) {
+        self.say(FromShell::MenuClicked {
+            menu_item: item,
+            window: None,
+        });
+    }
+
+    /// The system theme changed.
+    pub fn set_dark(&self, dark: bool) {
+        let contents: Vec<_> = {
+            let mut state = self.state();
+            state.dark = dark;
+            state.pages.keys().copied().collect()
+        };
+        for contents in contents {
+            self.input(contents, ToRendererInput::ColorScheme { dark });
+        }
+        self.say(FromShell::App(AppEvent::ThemeChanged { dark }));
+    }
+
+    fn primary(&self) -> Display {
+        self.displays
+            .iter()
+            .find(|display| display.primary)
+            .or(self.displays.first())
+            .cloned()
+            .expect("a headless shell has a display")
+    }
+
+    fn say(&self, msg: FromShell) {
         if let Some(hub) = self.hub.upgrade() {
-            hub.from_shell(FromShell::Window {
-                window,
-                event: WindowEvent::CloseRequested,
-            });
+            hub.from_shell(msg);
+        }
+    }
+
+    fn input(&self, contents: ContentsId, msg: ToRendererInput) {
+        if let Some(hub) = self.hub.upgrade() {
+            hub.input(contents, msg);
+        }
+    }
+
+    fn deliver(&self, out: Outcome) {
+        for (contents, input) in out.inputs {
+            self.input(contents, input);
+        }
+        for event in out.events {
+            self.say(event);
+        }
+    }
+
+    /// Runs `job` on the page `window` shows, if it is open.
+    fn on_page(
+        &self,
+        window: WindowId,
+        job: impl FnOnce(&mut crate::RendererGuest) + Send + 'static,
+    ) {
+        let contents = self.state().windows.get(&window).map(|w| w.shown.contents);
+        if let (Some(hub), Some(contents)) = (self.hub.upgrade(), contents) {
+            hub.on_renderer(contents, job);
+        }
+    }
+
+    /// Takes the views the pages published and gives each page the boxes of its new document. A
+    /// layout that comes out as the last one is not sent again, which is what ends the loop of a
+    /// page that publishes a view for having been laid out.
+    fn pump(&self) {
+        let Some(hub) = self.hub.upgrade() else {
+            return;
+        };
+        let mut state = self.state();
+        let open: Vec<_> = state
+            .windows
+            .values()
+            .filter(|window| !window.shown.closed)
+            .map(|window| window.shown.contents)
+            .collect();
+        for contents in open {
+            let Some(update) = hub.renderer_view(contents).and_then(|view| view.update) else {
+                continue;
+            };
+            if let Some(boxes) = state.settle(contents, update.snapshot, self.layout) {
+                hub.input(contents, ToRendererInput::Layout(boxes));
+            }
         }
     }
 
@@ -195,17 +376,53 @@ impl HeadlessShell {
     }
 }
 
+/// Runs the app whose script is `entry` on a headless shell that traces to standard error, and
+/// answers the code it ends with: `electron --headless`.
+pub fn run(hub: &Arc<Hub>, entry: PathBuf) -> i32 {
+    let options = HeadlessOptions {
+        trace: true,
+        ..HeadlessOptions::default()
+    };
+    let shell = HeadlessShell::new(hub, options);
+    hub.start_main(entry);
+    loop {
+        if let Some(code) = shell.exit_code() {
+            return code;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A message to the shell as one line of the trace.
+fn describe(msg: &ToShell) -> String {
+    match msg {
+        ToShell::CreateWindow {
+            window, options, ..
+        } => format!(
+            "[window {window}] create {}x{} {:?}",
+            options.width, options.height, options.title
+        ),
+        ToShell::Window { window, op } => format!("[window {window}] {op:?}"),
+        ToShell::Menu(op) => format!("[menu] {op:?}"),
+        ToShell::Quit { exit_code } => format!("[app] quit {exit_code}"),
+    }
+}
+
 impl ShellPort for HeadlessShell {
     fn send(&self, msg: ToShell) {
+        if self.trace {
+            eprintln!("{}", describe(&msg));
+        }
         // Nothing is said back to the main process while the shell's own state is held: a window
         // that closed is reported once this message is done with.
-        let replies = self.state().apply(msg);
-        if let Some(hub) = self.hub.upgrade() {
-            for reply in replies {
-                hub.from_shell(reply);
-            }
-        }
+        let out = {
+            let primary = self.primary();
+            self.state().apply(msg, &primary)
+        };
+        self.deliver(out);
     }
 
-    fn wake(&self) {}
+    fn wake(&self) {
+        self.pump();
+    }
 }

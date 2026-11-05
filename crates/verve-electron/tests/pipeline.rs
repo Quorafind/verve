@@ -2,86 +2,13 @@
 //! into it, the page's own isolate parses the page, and closing every window ends the app with
 //! code 0. No display, no GPU, no GPUI.
 
-use std::path::PathBuf;
+mod support;
+
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use verve_electron::ElectronOptions;
-use verve_electron::headless::{HeadlessShell, HeadlessWindow};
-use verve_electron::hub::Hub;
+use support::{App, TIMEOUT};
 use verve_electron::msg::ToShell;
-
-/// Waits up to ten seconds for `cond` to answer something.
-fn wait<T>(mut cond: impl FnMut() -> Option<T>) -> Option<T> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if let Some(value) = cond() {
-            return Some(value);
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    None
-}
-
-static NEXT: AtomicU32 = AtomicU32::new(1);
-
-/// An app running headless: its directory, the Hub its threads share, and the shell.
-struct App {
-    dir: PathBuf,
-    hub: Arc<Hub>,
-    shell: Arc<HeadlessShell>,
-}
-
-impl App {
-    /// Writes `main.js` into a directory of its own and runs it, as `electron <dir>` does.
-    fn launch(main_js: &str) -> Self {
-        Self::launch_in(main_js, false)
-    }
-
-    /// The same, in a system theme that is dark or not — what `prefers-color-scheme` answers.
-    fn launch_in(main_js: &str, dark: bool) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "verve-electron-p02-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).expect("the app's directory is made");
-        std::fs::write(dir.join("main.js"), main_js).expect("the app's script is written");
-        let hub = Hub::new(ElectronOptions {
-            app_path: dir.clone(),
-            dark,
-        });
-        let shell = HeadlessShell::new(&hub);
-        hub.start_main(PathBuf::from("main.js"));
-        Self { dir, hub, shell }
-    }
-
-    /// The window titled `title`, once the shell has made it.
-    fn window(&self, title: &str) -> Option<HeadlessWindow> {
-        wait(|| self.shell.windows().into_iter().find(|w| w.title == title))
-    }
-
-    /// The body's text of the page `contents` shows, once it reads `want`.
-    fn body_text(&self, contents: u32, want: &str) -> Option<String> {
-        wait(|| {
-            let update = self.hub.renderer_view(contents)?.update?;
-            let dom = &update.snapshot.dom;
-            let text = dom.text_content(dom.body);
-            (text == want).then_some(text)
-        })
-    }
-
-    fn exit_code(&self) -> Option<i32> {
-        wait(|| self.shell.exit_code())
-    }
-}
-
-impl Drop for App {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
 
 const MAIN: &str = r#"
 const { BrowserWindow } = require('electron');
@@ -101,7 +28,7 @@ win.on('closed', () => {
 
 #[test]
 fn a_window_draws_its_page_and_the_app_ends_when_it_closes() {
-    let app = App::launch(MAIN);
+    let app = App::launch_script(MAIN, &[]);
     let hello = app.window("hello").expect("the main script made a window");
     assert!(
         matches!(
@@ -113,7 +40,10 @@ fn a_window_draws_its_page_and_the_app_ends_when_it_closes() {
     );
     assert_eq!(hello.bounds.width, 640.0);
     assert_eq!(hello.bounds.height, 480.0);
-    assert_eq!(app.body_text(hello.contents, "hi").as_deref(), Some("hi"));
+    assert!(app.run_until(
+        |app| app.page_text(hello.id).as_deref() == Some("hi"),
+        TIMEOUT
+    ));
 
     // A person clicks the close button: the window goes, the script hears of it and makes
     // another, and closing that one too leaves nothing running.
@@ -123,20 +53,20 @@ fn a_window_draws_its_page_and_the_app_ends_when_it_closes() {
         .expect("the script made a second window");
     assert_ne!(again.id, hello.id);
     app.shell.user_close(again.id);
-    assert_eq!(app.exit_code(), Some(0));
+    assert_eq!(app.exit_code(TIMEOUT), Some(0));
 }
 
 #[test]
 fn a_script_that_makes_no_window_ends_the_app_at_once() {
-    let app = App::launch("require('electron');");
-    assert_eq!(app.exit_code(), Some(0));
+    let app = App::launch_script("require('electron');", &[]);
+    assert_eq!(app.exit_code(TIMEOUT), Some(0));
     assert!(app.shell.windows().is_empty());
 }
 
 #[test]
 fn a_script_that_throws_ends_the_app_with_one() {
-    let app = App::launch("throw new Error('no');");
-    assert_eq!(app.exit_code(), Some(1));
+    let app = App::launch_script("throw new Error('no');", &[]);
+    assert_eq!(app.exit_code(TIMEOUT), Some(1));
 }
 
 /// `ElectronOptions::dark` is the system theme the page sees: its
@@ -144,10 +74,13 @@ fn a_script_that_throws_ends_the_app_with_one() {
 #[test]
 fn the_system_theme_reaches_the_pages_styles() {
     let page = |dark: bool| {
-        let app = App::launch_in(DARK_PAGE, dark);
+        let app = App::launch_script_in(DARK_PAGE, &[], dark);
         let window = app.window("theme").expect("the window was made");
-        let update = wait(|| app.hub.renderer_view(window.contents)?.update).expect("a view");
-        let snapshot = update.snapshot;
+        assert!(app.run_until(
+            |app| app.page_text(window.id).as_deref() == Some("hi"),
+            TIMEOUT
+        ));
+        let snapshot = app.shell.snapshot(window.id).expect("a view");
         let heading = snapshot
             .dom
             .query(snapshot.dom.body, "h1")
@@ -182,7 +115,7 @@ win.loadURL('data:text/html,<style>@media (prefers-color-scheme: dark) { h1 { co
 /// time they run — while `win.id` goes on answering.
 #[test]
 fn a_window_that_closed_is_destroyed_for_its_own_closed_listener() {
-    let app = App::launch(
+    let app = App::launch_script(
         r#"
         const { BrowserWindow } = require('electron');
         const win = new BrowserWindow({ title: 'gone' });
@@ -198,23 +131,25 @@ fn a_window_that_closed_is_destroyed_for_its_own_closed_listener() {
         });
         win.close();
         "#,
+        &[],
     );
     let report = app
         .window("TypeError: Object has been destroyed #1")
         .expect("the closed listener reported what it got");
     app.shell.user_close(report.id);
-    assert_eq!(app.exit_code(), Some(0));
+    assert_eq!(app.exit_code(TIMEOUT), Some(0));
 }
 
 /// Electron's defaults for a window made with no options, and `show: false` creating it invisible.
 #[test]
 fn a_window_takes_electrons_defaults() {
-    let app = App::launch(
+    let app = App::launch_script(
         r#"
         const { BrowserWindow } = require('electron');
         new BrowserWindow();
         new BrowserWindow({ title: 'hidden', show: false });
         "#,
+        &[],
     );
     let plain = app.window("Electron").expect("the default title");
     assert_eq!(plain.bounds.width, 800.0);
@@ -227,40 +162,42 @@ fn a_window_takes_electrons_defaults() {
 
     app.shell.user_close(plain.id);
     app.shell.user_close(hidden.id);
-    assert_eq!(app.exit_code(), Some(0));
+    assert_eq!(app.exit_code(TIMEOUT), Some(0));
 }
 
 /// `process.type` is Electron's: `browser` in the main process, whose `process.exit` is the app's.
 #[test]
 fn the_main_process_is_the_browser_process_and_its_exit_is_the_apps() {
-    let app = App::launch(
+    let app = App::launch_script(
         r#"
         const { BrowserWindow } = require('electron');
         new BrowserWindow({ title: process.type });
         setTimeout(() => process.exit(3), 20);
         "#,
+        &[],
     );
     assert!(app.window("browser").is_some(), "process.type is 'browser'");
-    assert_eq!(app.exit_code(), Some(3));
+    assert_eq!(app.exit_code(TIMEOUT), Some(3));
 }
 
 #[test]
 fn process_exit_while_the_script_loads_is_not_a_failure_to_load() {
-    let app = App::launch("process.exit(7); throw new Error('not reached');");
-    assert_eq!(app.exit_code(), Some(7));
+    let app = App::launch_script("process.exit(7); throw new Error('not reached');", &[]);
+    assert_eq!(app.exit_code(TIMEOUT), Some(7));
 }
 
 /// Electron 39.8.10 reads a constructor's options leniently: a size that is not an integer, or
 /// not a number, is the default, and the rest of the options are still read.
 #[test]
 fn options_of_the_wrong_type_are_left_at_their_defaults() {
-    let app = App::launch(
+    let app = App::launch_script(
         r#"
         const { BrowserWindow } = require('electron');
         new BrowserWindow({ title: 'abc', width: 'abc', height: 300.7 });
         new BrowserWindow({ title: 'size', width: 300, height: 200, show: 0 });
         new BrowserWindow(5);
         "#,
+        &[],
     );
     let lenient = app.window("abc").expect("the first window");
     assert_eq!((lenient.bounds.width, lenient.bounds.height), (800., 600.));
@@ -277,7 +214,7 @@ fn options_of_the_wrong_type_are_left_at_their_defaults() {
 /// hears `'closed'` on it.
 #[test]
 fn a_window_nothing_refers_to_still_closes_with_its_listener() {
-    let app = App::launch(
+    let app = App::launch_script(
         r#"
         const { BrowserWindow } = require('electron');
         (() => {
@@ -291,6 +228,7 @@ fn a_window_nothing_refers_to_still_closes_with_its_listener() {
             junk = [];
         }
         "#,
+        &[],
     );
     let window = app
         .window("unreferenced")
@@ -300,26 +238,27 @@ fn a_window_nothing_refers_to_still_closes_with_its_listener() {
         .window("heard")
         .expect("'closed' ran on the unreferenced window");
     app.shell.user_close(heard.id);
-    assert_eq!(app.exit_code(), Some(0));
+    assert_eq!(app.exit_code(TIMEOUT), Some(0));
 }
 
 /// Ending the app ends every thread the Hub started: nothing holds the Hub once it has said so,
 /// and a script that never returns is interrupted rather than waited for.
 #[test]
 fn shutdown_ends_the_main_process_and_every_page() {
-    let app = App::launch(
+    let app = App::launch_script(
         r#"
         const { BrowserWindow } = require('electron');
         new BrowserWindow({ title: 'one' });
         new BrowserWindow({ title: 'two' });
         setTimeout(() => process.exit(4), 30);
         "#,
+        &[],
     );
-    assert_eq!(app.exit_code(), Some(4));
+    assert_eq!(app.exit_code(TIMEOUT), Some(4));
     // The test's own handle is the only one left once the threads have ended.
-    let ended = wait(|| (Arc::strong_count(&app.hub) == 1).then_some(()));
+    let ended = app.run_until(|app| Arc::strong_count(&app.hub) == 1, TIMEOUT);
     assert!(
-        ended.is_some(),
+        ended,
         "{} handles on the Hub are still held by a thread",
         Arc::strong_count(&app.hub) - 1
     );
@@ -327,10 +266,10 @@ fn shutdown_ends_the_main_process_and_every_page() {
 
 #[test]
 fn a_main_script_that_never_returns_is_interrupted_by_shutdown() {
-    let app = App::launch("for (;;) {}");
+    let app = App::launch_script("for (;;) {}", &[]);
     std::thread::sleep(Duration::from_millis(100));
     app.hub.shutdown(9);
-    assert_eq!(app.exit_code(), Some(9));
-    let ended = wait(|| (Arc::strong_count(&app.hub) == 1).then_some(()));
-    assert!(ended.is_some(), "the main thread left its loop and ended");
+    assert_eq!(app.exit_code(TIMEOUT), Some(9));
+    let ended = app.run_until(|app| Arc::strong_count(&app.hub) == 1, TIMEOUT);
+    assert!(ended, "the main thread left its loop and ended");
 }

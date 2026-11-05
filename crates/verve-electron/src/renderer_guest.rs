@@ -20,6 +20,7 @@ use crate::ids::ContentsId;
 use crate::msg::{
     FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
+use crate::probe;
 
 /// One page: the runtime its scripts run in, its document, and what it has yet to tell the main
 /// process.
@@ -88,11 +89,34 @@ impl RendererGuest {
         }
     }
 
+    /// Evaluates `code` in the page's realm, answering the result as JSON.
+    pub fn eval(&mut self, code: &str) -> Result<String, String> {
+        probe::evaluate(&mut self.runtime, code)
+    }
+
+    /// A person's click on the first element `selector` matches; `false` if there is none.
+    /// P24/P32 bring the pointer itself, and this stays for shells that have no pointer.
+    pub fn click(&mut self, selector: &str) -> bool {
+        let found =
+            verve_dom::host::with_dom(self.runtime.context(), |dom| dom.query(dom.body, selector));
+        found.is_some_and(|node| {
+            self.document.press(&mut self.runtime, node);
+            true
+        })
+    }
+
+    /// A person's typing into whatever has the focus.
+    pub fn type_text(&mut self, text: &str) {
+        self.document.type_text(&mut self.runtime, text);
+    }
+
     /// What a person did to the window, to the page under it. Pointer, keys, text, scroll and
     /// focus are P24/P32's: the shell sends none of them while P02's `DomView` draws text and
-    /// nothing else.
+    /// nothing else. The boxes a shell measured are the exception, until P30 lays pages out on
+    /// the page's own thread: a headless shell still sends them.
     pub fn input(&mut self, msg: ToRendererInput) {
         match msg {
+            ToRendererInput::Layout(boxes) => self.document.set_layout(&mut self.runtime, boxes),
             ToRendererInput::Viewport { width, height, .. } => {
                 self.document.set_viewport(&mut self.runtime, width, height)
             }

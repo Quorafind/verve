@@ -53,6 +53,15 @@ pub trait ShellPort: Send + Sync {
     fn wake(&self);
 }
 
+/// A line a script wrote to its console, as [`Hub::console_lines`] keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsoleLine {
+    /// The page that wrote it; `None` is the main process.
+    pub contents: Option<ContentsId>,
+    /// The line, formatted as the console prints it.
+    pub text: String,
+}
+
 /// What the main process holds of a page: its id, and the Hub that reaches the thread it runs on.
 #[derive(Clone)]
 pub struct RendererHandle {
@@ -123,6 +132,8 @@ pub struct Hub {
     main: Mutex<Option<Isolate<MainGuest>>>,
     shell: Mutex<Option<Arc<dyn ShellPort>>>,
     exit: Mutex<Option<i32>>,
+    /// Every console line, once someone asked to keep them: a long-running app is not made to.
+    console: Mutex<Option<Vec<ConsoleLine>>>,
 }
 
 impl Hub {
@@ -136,6 +147,7 @@ impl Hub {
             main: Mutex::new(None),
             shell: Mutex::new(None),
             exit: Mutex::new(None),
+            console: Mutex::new(None),
         })
     }
 
@@ -285,6 +297,9 @@ impl Hub {
 
     /// What a page says: a lifecycle step, a request only the window can answer.
     pub fn from_renderer(&self, contents: ContentsId, event: FromRenderer) {
+        if let FromRenderer::Console { message, .. } = &event {
+            self.log_console(Some(contents), message);
+        }
         self.to_main(move |guest| guest.from_renderer(contents, event));
     }
 
@@ -299,7 +314,9 @@ impl Hub {
         self.on_renderer(contents, move |guest| guest.input(msg));
     }
 
-    fn on_renderer(
+    /// Runs `job` on page `contents`'s thread, in turn. It never waits for the page: a caller
+    /// that needs an answer has the job send it back, from a thread that may wait.
+    pub fn on_renderer(
         &self,
         contents: ContentsId,
         job: impl FnOnce(&mut RendererGuest) + Send + 'static,
@@ -350,12 +367,33 @@ impl Hub {
         self.to_shell(ToShell::Quit { exit_code });
     }
 
+    /// Starts keeping every console line the app writes, from now on.
+    pub fn record_console(&self) {
+        lock(&self.console).get_or_insert_with(Vec::new);
+    }
+
+    /// Notes a console line, if they are being kept.
+    pub(crate) fn log_console(&self, contents: Option<ContentsId>, text: &str) {
+        if let Some(lines) = lock(&self.console).as_mut() {
+            lines.push(ConsoleLine {
+                contents,
+                text: text.to_owned(),
+            });
+        }
+    }
+
+    /// The console lines kept since [`Hub::record_console`], in the order they were written.
+    pub fn console_lines(&self) -> Vec<ConsoleLine> {
+        lock(&self.console).clone().unwrap_or_default()
+    }
+
     /// The code the app is ending with, once it is.
     pub fn exit_code(&self) -> Option<i32> {
         *lock(&self.exit)
     }
 
-    fn to_main(&self, job: impl FnOnce(&mut MainGuest) + Send + 'static) {
+    /// Runs `job` on the main process's thread, in turn, as [`Hub::on_renderer`] does.
+    pub fn to_main(&self, job: impl FnOnce(&mut MainGuest) + Send + 'static) {
         if let Some(isolate) = lock(&self.main).as_ref() {
             isolate.send(move |guest, _| job(guest));
         }
@@ -408,7 +446,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::HeadlessShell;
+    use crate::{HeadlessOptions, HeadlessShell};
 
     fn wait(mut cond: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -431,7 +469,7 @@ mod tests {
             app_path: dir,
             dark: false,
         });
-        let shell = HeadlessShell::new(&hub);
+        let shell = HeadlessShell::new(&hub, HeadlessOptions::default());
         hub.start_main(main.clone());
         (hub, shell, main)
     }

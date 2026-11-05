@@ -1,0 +1,26 @@
+name: Electron headless
+
+# The end-to-end tests of the Electron work: apps run on a headless shell (crates/verve-electron),
+# so a machine with no display, no GPU and no GPUI is enough. docs/electron/packages/P00-fixtures-and-headless.md
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  headless:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+      - name: Headless tests
+        run: cargo test --locked -p verve-electron
