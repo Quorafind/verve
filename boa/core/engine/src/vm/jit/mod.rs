@@ -77,7 +77,7 @@ use crate::{
 use self::{
     compiler::CompileError,
     memory::{ExecutableCode, LiveCode},
-    runtime::EntryFn,
+    runtime::{EntryFn, may_enter},
 };
 
 /// How the JIT behaves. Set it with [`Context::jit_options_mut`].
@@ -401,17 +401,8 @@ const TINY_CALLBACK_BYTES: usize = 40;
 /// Counts the frame on top hotter and compiles it when it is hot enough. Returns its compiled
 /// code and the block that starts at its `pc`, if it has both.
 pub(crate) fn prepare(context: &mut Context) -> Option<(Rc<JitCode>, u32)> {
-    // Fuzzing counts instructions, which compiled code does not.
-    if cfg!(feature = "fuzz") {
-        return None;
-    }
-    // Tracing shows every instruction the interpreter runs.
-    #[cfg(feature = "trace")]
-    if context.vm.trace {
-        return None;
-    }
     // The dummy frame at the bottom never runs code.
-    if !context.vm.jit.options.enabled || context.vm.frames.len() <= 1 {
+    if !may_enter(&context.vm) || context.vm.frames.len() <= 1 {
         return None;
     }
     let frame = context.vm.frame();

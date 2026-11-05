@@ -763,3 +763,11 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   `error.stack` prints is unchanged. `Context::check_runtime_limits` and `runtime_limits_exceeded`
   are `#[inline]` and the `RangeError` they build is out of line; the limits and the depth at which
   the error is thrown are the same.
+- `boa_engine`, `vm/jit/call.rs`, `vm/jit/runtime.rs`, `vm/jit/compiler.rs` (P84): a compiled
+  `Call` of a compiled ordinary function runs the callee's code at once, with the code it already
+  found, instead of going through `finish` and `run_callees` and `prepare` again; the checks are
+  the ones `run_callees` makes (nesting cap, native stack share, JIT enabled, no fuzz or trace),
+  and anything else takes the old path. `Return` is compiled as `jit_return`, which pops a frame
+  that does not exit early without the `catch_unwind` and `finish` of `jit_step` (nothing it runs
+  can run JavaScript or panic) and leaves the compiled code; a frame that exits early takes
+  `jit_step`. Exceptions, interrupts, the nesting cap and the fallbacks are unchanged.

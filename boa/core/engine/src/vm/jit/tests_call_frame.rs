@@ -211,3 +211,45 @@ fn stacks_through_every_kind_of_call_match_the_interpreter() {
     assert!(out.contains("at inner"), "{out}");
     assert!(out.contains("at map (native)"), "{out}");
 }
+
+/// An interrupt that arrives while a function that compiled code called directly is running stops
+/// it, and the context runs again afterwards.
+#[test]
+fn interrupts_stop_directly_called_functions() {
+    let mut context = context(Mode::Eager);
+    let handle = context.interrupt_handle();
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        handle.interrupt();
+    });
+    let result = context.eval(Source::from_bytes(
+        "function spin(n) { let i = 0; while (true) { i = (i + 1) | 0; } }
+         function middle(n) { return spin(n) + 1; }
+         function outer(n) { return middle(n) + 1; }
+         outer(1)",
+    ));
+    stopper.join().expect("the thread ends");
+    assert!(result.is_err(), "the loop stops");
+    let value = context
+        .eval(Source::from_bytes(
+            "function add(a, b) { return a + b; } let t = 0; for (let i = 0; i < 10; i++) t = add(t, i); t",
+        ))
+        .expect("runs");
+    assert_eq!(value.as_number(), Some(45.0));
+}
+
+/// Compiled functions that call one another, deeper than compiled code nests on the native stack
+/// (`MAX_NESTED`), return the same values and throw from the same depth.
+#[test]
+fn chains_deeper_than_the_nesting_cap_match_the_interpreter() {
+    same(
+        "function down(n) { return n === 0 ? 0 : down(n - 1) + 1; }
+         function thrower(n) { if (n === 0) throw new RangeError('bottom'); return thrower(n - 1) + 1; }
+         const out = [];
+         for (let i = 0; i < 6; i++) {
+           out.push(down(10), down(100), down(3000));
+           try { thrower(200); } catch (e) { out.push(e.message); }
+         }
+         out.map(show).join(' ')",
+    );
+}
