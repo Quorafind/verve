@@ -274,6 +274,7 @@ impl Guest for MainGuest {
     type Event = ();
 
     fn tick(&mut self) {
+        self.hub.count_beat();
         beat::run(&mut self.runtime);
         if let Some(code) = self.failed {
             self.hub.shutdown(code);
