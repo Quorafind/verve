@@ -191,23 +191,27 @@ pub(super) fn fetched(
     url: &str,
     result: LoadResult,
 ) {
-    let context = runtime.context();
     let map = doc.state.borrow().load.import_map.clone();
     let mut edges = Vec::new();
     let mut ok = false;
-    if let (Ok(bytes), Ok(own)) = (result.body, Url::parse(url))
+    if let (Ok(bytes), Ok(asked)) = (result.body, Url::parse(url))
         && result.status < 400
     {
-        let source = net::text(&bytes);
-        edges = edges_of(&source, &own, &map);
-        doc.state
-            .borrow()
-            .load
-            .modules
-            .borrow_mut()
-            .insert(url.to_owned(), source.into());
+        // What it imports is relative to where it ended up, not to where it was asked for.
+        let source: std::rc::Rc<str> = net::text(&bytes).into();
+        edges = edges_of(&source, &result.url, &map);
+        let state = doc.state.borrow();
+        let mut cache = state.load.modules.borrow_mut();
+        cache.insert(url.to_owned(), source.clone());
+        if result.url != asked {
+            cache.insert(result.url.to_string(), source);
+            drop(cache);
+            drop(state);
+            redirected(doc, runtime, url, result.url);
+        }
         ok = true;
     }
+    let context = runtime.context();
     let waiters: Vec<(NodeId, bool)> = {
         let mut state = doc.state.borrow_mut();
         let found = if ok {
@@ -238,10 +242,30 @@ pub(super) fn fetched(
     }
 }
 
+/// The module asked for at `asked` was redirected to `found`: whoever imports it gets the one at
+/// `found`, so its own imports resolve against that.
+fn redirected(doc: &Document, runtime: &mut verve::Runtime, asked: &str, found: Url) {
+    let map = {
+        let mut state = doc.state.borrow_mut();
+        state.load.redirects.insert(asked.to_owned(), found);
+        let mut map = state.load.import_map.clone().unwrap_or_default();
+        for (from, to) in &state.load.redirects {
+            if let Ok(from) = Url::parse(from) {
+                map.redirect(&from, to);
+            }
+        }
+        map
+    };
+    runtime.set_import_map(Some(map));
+}
+
 /// Runs a module script whose graph is in.
 pub(super) fn run(doc: &Document, runtime: &mut verve::Runtime, script: &Script) {
     let imported = match &script.url {
-        Some(url) => runtime.import_module(url.as_str(), None),
+        Some(url) => {
+            let found = doc.state.borrow().load.redirects.get(url.as_str()).cloned();
+            runtime.import_module(found.as_ref().unwrap_or(url).as_str(), None)
+        }
         None => {
             let base = doc.state.borrow().base_url();
             let mut name = base.clone();

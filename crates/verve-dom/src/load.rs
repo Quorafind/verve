@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use boa_engine::object::builtins::JsFunction;
 use url::Url;
 use verve::ImportMap;
 
@@ -24,6 +25,7 @@ mod script;
 mod sheets;
 
 pub(crate) use handlers::attribute;
+pub(crate) use net::{claims, fetch_response, is_network, navigable};
 pub(crate) use script::{connected, install, write};
 
 /// What a page fetches as it loads: its scripts, sheets, images, fonts, icons — and what its
@@ -152,6 +154,15 @@ pub(crate) enum Wait {
     Import(crate::dom::NodeId, Vec<usize>, bool),
     Image(String),
     Font(FontFaceId),
+    /// A page's own `fetch`, answered by the loader: how to resolve and reject it.
+    Fetch(JsFunction, JsFunction),
+}
+
+impl Wait {
+    /// Whether `load` waits for it.
+    fn holds_load(&self) -> bool {
+        !matches!(self, Wait::Fetch(..))
+    }
 }
 
 /// How far the page's markup has gone.
@@ -268,11 +279,16 @@ pub(crate) struct Load {
     pending: HashMap<crate::dom::NodeId, HashSet<String>>,
     failed_graphs: HashSet<crate::dom::NodeId>,
     pub import_map: Option<ImportMap>,
+    /// Where each module that was redirected ended up, by the address it was asked for at.
+    pub redirects: HashMap<String, Url>,
     /// The runtime's `fetch` as it was before the page could replace it.
     pub original_fetch: Option<boa_engine::JsValue>,
     /// `Response.prototype.url`'s getter as it was before the page could replace it: where a
     /// response of the runtime's own `fetch` came from, whatever the page says `url` is.
     pub original_response_url: Option<boa_engine::JsValue>,
+    /// The document's own `fetch` (which asks the loader for the addresses it answers), as it was
+    /// installed: what `XMLHttpRequest` asks through, whatever the page does to `window.fetch`.
+    pub dom_fetch: Option<boa_engine::JsValue>,
     pub module_scripts_started: usize,
     pub phase: Phase,
     painted: bool,
@@ -473,6 +489,7 @@ impl Document {
                 };
                 self.settle_font(runtime, face, outcome);
             }
+            Wait::Fetch(resolve, reject) => net::answer(runtime, resolve, reject, result),
         }
     }
 
@@ -644,7 +661,7 @@ impl Document {
             load.phase >= Phase::Interactive
                 && load.ready == Ready::Interactive
                 && load.scripts.is_empty()
-                && load.waiting.is_empty()
+                && !load.waiting.values().any(Wait::holds_load)
         };
         if !done {
             return false;

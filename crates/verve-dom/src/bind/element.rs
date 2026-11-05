@@ -366,7 +366,7 @@ pub fn scroll_to(
 
 /// `value` resolved against the document's address; as written when it cannot be.
 pub(crate) fn absolute_url(context: &Context, value: String) -> String {
-    let base = shared(context).borrow().url.clone();
+    let base = shared(context).borrow().base_url();
     base.join(&value).map_or(value, |url| url.to_string())
 }
 
@@ -2540,7 +2540,7 @@ const LABEL_ACCESSORS: &[Accessor] = &[
 fn anchor_url(this: &JsValue, context: &Context) -> Option<url::Url> {
     let id = node_of(this).ok()?;
     let href = read_dom(context, |dom| dom.get_attr(id, "href"))?;
-    shared(context).borrow().url.join(href.trim()).ok()
+    shared(context).borrow().base_url().join(href.trim()).ok()
 }
 
 /// Changes one part of the anchor's URL, as setting `a.pathname` does.

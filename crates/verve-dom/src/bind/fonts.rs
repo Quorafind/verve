@@ -214,7 +214,7 @@ fn load_face(context: &mut Context, face: &JsObject) -> JsResult<JsValue> {
         if let Source::Url(url) = source {
             let state = shared(context);
             let mut state = state.borrow_mut();
-            let url = state.url.join(&url).map_or(url, String::from);
+            let url = state.base_url().join(&url).map_or(url, String::from);
             state.fonts.pending.insert(id, face.clone());
             state.requests.push(Request::LoadFont { face: id, url });
         }

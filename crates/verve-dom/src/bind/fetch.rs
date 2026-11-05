@@ -43,10 +43,14 @@ pub fn install(context: &mut Context) -> JsResult<()> {
                 };
                 let url = shared(cx)
                     .borrow()
-                    .url
+                    .base_url()
                     .join(&address)
                     .map_err(|_| type_error(format!("Failed to parse URL from {address}")))?;
-                if !matches!(url.scheme(), "http" | "https" | "data" | "blob") {
+                if crate::load::claims(cx, &url) {
+                    let method = request_method(args, &input, is_request, cx)?;
+                    return crate::load::fetch_response(cx, url, &method);
+                }
+                if !crate::load::is_network(url.scheme()) {
                     return Err(type_error("fetch 不支持此地址协议"));
                 }
                 // Request 必须原样转交，否则会丢失 body、signal 和原实现的校验。
@@ -67,6 +71,26 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         },
         (original, request),
     );
+    shared(context).borrow_mut().load.dom_fetch = Some(fetch.clone().into());
     global.set(js_string!("fetch"), fetch, true, context)?;
     Ok(())
+}
+
+/// The method a `fetch` asks for: the `Request`'s, else the init's, else `GET`.
+fn request_method(
+    args: &[boa_engine::JsValue],
+    input: &boa_engine::JsValue,
+    is_request: bool,
+    context: &mut Context,
+) -> JsResult<String> {
+    let source = if is_request {
+        input.clone()
+    } else {
+        arg(args, 1)
+    };
+    let method = get(&source, "method", context)?;
+    if method.is_undefined() {
+        return Ok("GET".to_owned());
+    }
+    Ok(string(&method, context)?.to_ascii_uppercase())
 }

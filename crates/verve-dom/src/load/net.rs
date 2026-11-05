@@ -2,17 +2,18 @@
 //! realm's own `fetch` for the network's (`http`, `https`, `data`, `blob`), and the page's own
 //! `fetch` the same way round.
 
-use boa_engine::object::builtins::JsArrayBuffer;
-use boa_engine::{Context, JsObject, JsResult, JsValue};
+use boa_engine::object::builtins::{JsArrayBuffer, JsFunction, JsPromise, JsUint8Array};
+use boa_engine::{Context, JsError, JsObject, JsResult, JsValue};
 use boa_gc::{Finalize, Trace};
 use url::Url;
-use verve::native::{closure, get, invoke, js_text};
+use verve::native::{closure, get, invoke, js_text, object};
 
 use super::{Destination, Inbox, LoadError, LoadRequest, LoadResult, Wait};
 use crate::state::shared;
 
 /// The schemes Verve's own `fetch` answers.
-fn is_network(scheme: &str) -> bool {
+/// Whether the realm's own `fetch` answers `scheme`.
+pub(crate) fn is_network(scheme: &str) -> bool {
     matches!(scheme, "http" | "https" | "data" | "blob")
 }
 
@@ -21,6 +22,38 @@ fn is_network(scheme: &str) -> bool {
 pub(crate) fn text(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Whether the loader answers `scheme`.
+fn loader_handles(context: &Context, scheme: &str) -> bool {
+    shared(context)
+        .borrow()
+        .load
+        .loader
+        .as_ref()
+        .is_some_and(|loader| loader.handles(scheme))
+}
+
+/// Whether a page's `fetch` of `url` is the loader's to answer.
+pub(crate) fn claims(context: &Context, url: &Url) -> bool {
+    loader_handles(context, url.scheme())
+}
+
+/// Whether the page may send itself to `url` besides the network's addresses: Chromium blocks
+/// a page's own navigation to `data:`, and to `file:` unless the page is one; the loader's
+/// schemes are the app's.
+pub(crate) fn navigable(context: &Context, url: &Url) -> bool {
+    let state = shared(context);
+    let (active, own) = {
+        let state = state.borrow();
+        (state.load.active, state.url.scheme().to_owned())
+    };
+    active
+        && match url.scheme() {
+            "file" => own == "file",
+            "data" | "blob" => false,
+            scheme => loader_handles(context, scheme),
+        }
 }
 
 /// Asks for `url`; the answer is taken by [`crate::Document::pump_loads`] and handed to `wait`.
@@ -231,4 +264,73 @@ fn read_body(args: &[JsValue], reply: &Reply, context: &mut Context) -> JsResult
         None => reply.fail(),
     }
     Ok(())
+}
+
+/// The page's own `fetch` of an address the loader answers: a promise for a `Response`.
+pub(crate) fn fetch_response(context: &mut Context, url: Url, method: &str) -> JsResult<JsValue> {
+    let (promise, resolvers) = JsPromise::new_pending(context);
+    let (token, inbox, loader) = {
+        let state = shared(context);
+        let mut state = state.borrow_mut();
+        let load = &mut state.load;
+        let token = load.next;
+        load.next += 1;
+        load.waiting
+            .insert(token, Wait::Fetch(resolvers.resolve, resolvers.reject));
+        (token, load.inbox.clone(), load.loader.clone())
+    };
+    let initiator = Some(shared(context).borrow().url.clone());
+    let request = LoadRequest {
+        url,
+        destination: Destination::Fetch,
+        initiator,
+        method: method.to_owned(),
+        headers: Vec::new(),
+        body: None,
+    };
+    send(context, request, inbox, token, loader);
+    Ok(promise.into())
+}
+
+/// A loader's answer to a page's `fetch`: the `Response`, or the `TypeError` fetch rejects with.
+pub(crate) fn answer(
+    runtime: &mut verve::Runtime,
+    resolve: JsFunction,
+    reject: JsFunction,
+    result: LoadResult,
+) {
+    let context = runtime.context();
+    let outcome = (|| -> JsResult<(bool, JsValue)> {
+        let Ok(body) = result.body else {
+            let error = verve::native::type_error("Failed to fetch");
+            return Ok((false, JsError::into_opaque(error, context)?));
+        };
+        let bytes = JsUint8Array::from_iter(body, context)?;
+        let init = object(context);
+        init.set(
+            boa_engine::js_string!("status"),
+            result.status,
+            false,
+            context,
+        )?;
+        if let Some(mime) = &result.mime {
+            let headers = crate::bind::plain_object(context);
+            headers.set(
+                boa_engine::js_string!("content-type"),
+                js_text(mime),
+                false,
+                context,
+            )?;
+            init.set(boa_engine::js_string!("headers"), headers, false, context)?;
+        }
+        let response =
+            verve::native::construct_global(context, "Response", &[bytes.into(), init.into()])?;
+        Ok((true, response.into()))
+    })();
+    let (ok, value) = outcome.unwrap_or((false, JsValue::undefined()));
+    let settle = if ok { resolve } else { reject };
+    if let Err(error) = settle.call(&JsValue::undefined(), &[value], runtime.context()) {
+        verve::report(runtime.context(), &error);
+    }
+    runtime.run_microtasks();
 }

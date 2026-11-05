@@ -295,6 +295,24 @@ fn a_page_in_the_document_never_runs_what_innerhtml_made() {
 }
 
 #[test]
+fn fetch_and_xhr_of_a_relative_address_go_to_the_loader() {
+    let mut page = page(&[("x.json", "{\"a\": 7}")]);
+    let html = "<script>window.__log = [];
+        fetch('x.json').then(r => r.json()).then(j => __log.push('fetch:' + j.a));
+        var x = new XMLHttpRequest(); x.open('GET', 'x.json');
+        x.onload = () => __log.push('xhr:' + JSON.parse(x.responseText).a); x.send();
+        fetch('missing.json').catch(e => __log.push('rejected:' + e.name));</script>";
+    page.document
+        .load_html(&mut page.runtime, "app://page/f.html", html);
+    page.finish_loading();
+    page.settle_for(10.);
+    page.finish_loading();
+    let mut log = page.log();
+    log.sort();
+    assert_eq!(log, ["fetch:7", "rejected:TypeError", "xhr:7"]);
+}
+
+#[test]
 fn the_title_and_icons_are_reported_once_the_head_is_read() {
     let mut page = page(&[]);
     let html = "<title> A  page </title><link rel='icon' href='/i.png'><link rel='shortcut icon' href='j.ico'><p>x";
@@ -322,6 +340,20 @@ fn a_base_element_moves_what_relative_addresses_resolve_against() {
     page.finish_loading();
     assert_eq!(page.log(), ["from-base"]);
     assert_eq!(page.eval("document.baseURI"), "app://page/sub/");
+}
+
+#[test]
+fn a_page_may_navigate_to_a_file_or_a_scheme_the_loader_answers() {
+    let mut page = page(&[]);
+    page.document
+        .load_html(&mut page.runtime, "file:///app/index.html", "<p>x");
+    page.eval("location.href = 'page2.html'");
+    let requests = page.document.take_requests();
+    let wanted = verve_dom::Request::Navigate {
+        url: Url::parse("file:///app/page2.html").unwrap().to_string(),
+        replace: false,
+    };
+    assert_eq!(requests, [wanted]);
 }
 
 #[test]
@@ -363,6 +395,40 @@ fn the_ready_state_names() {
         assert_eq!(ready.name(), name);
     }
     assert_eq!(Ready::default(), Ready::Complete);
+}
+
+#[test]
+fn a_page_may_not_send_itself_to_data_or_to_a_file_unless_it_is_one() {
+    let mut page = page(&[]);
+    page.document
+        .load_html(&mut page.runtime, "app://page/p.html", "<p>x");
+    // Chromium throws nothing: it says why on the console, and the page stays.
+    page.eval("location.href = 'file:///app/other.html'");
+    page.eval("location.href = 'data:text/html,x'");
+    assert!(page.document.take_requests().is_empty());
+    let console = page.console();
+    assert!(
+        console.contains("Not allowed to load local resource: file:///app/other.html"),
+        "{console}"
+    );
+    assert!(
+        console.contains("Not allowed to navigate top frame to data URL: data:text/html,x"),
+        "{console}"
+    );
+    page.document
+        .load_html(&mut page.runtime, "file:///app/p.html", "<p>x");
+    page.eval("location.href = 'data:text/html,x'");
+    assert!(page.document.take_requests().is_empty());
+}
+
+#[test]
+fn what_a_page_asks_for_says_which_document_asked() {
+    let mut page = page(&[("x.json", "1")]);
+    let html = "<script>fetch('x.json')</script>";
+    page.document
+        .load_html(&mut page.runtime, "app://page/f.html", html);
+    page.finish_loading();
+    assert_eq!(page.initiators(), ["app://page/f.html"]);
 }
 
 type Waiting = Vec<(LoadRequest, Box<dyn FnOnce(LoadResult)>)>;
@@ -1097,4 +1163,47 @@ fn a_page_installed_but_not_loading_cannot_import_a_local_module() {
     assert_eq!(page.eval("String(window.ran)"), "undefined");
     assert_eq!(page.eval("window.__out"), "TypeError");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_module_that_was_redirected_imports_relative_to_where_it_ended() {
+    let files = [
+        ("m.js", "import d from './dep.js'; __log.push('m:' + d)"),
+        ("dir/dep.js", "export default 'dep'"),
+    ];
+    let html = format!("{LOG}<script type=module src=go/m.js></script>");
+    let mut page = loaded(&files, &html);
+    assert_eq!(page.log(), ["m:dep"]);
+}
+
+#[test]
+fn links_and_the_history_resolve_against_the_base_element() {
+    let html = format!(
+        "{LOG}<base href=\"sub/\"><a id=a href=\"p.html\">x</a>\
+         <script>__log.push(document.getElementById('a').href); history.pushState(null, '', 'q'); __log.push(location.pathname);</script>"
+    );
+    let mut page = page(&[]);
+    page.document
+        .load_html(&mut page.runtime, "https://example.test/p.html", &html);
+    page.finish_loading();
+    assert_eq!(
+        page.log(),
+        ["https://example.test/sub/p.html", "/sub/q"],
+        "{}",
+        page.console()
+    );
+}
+
+#[test]
+fn xhr_does_not_go_through_the_fetch_the_page_replaced() {
+    let mut page = page(&[("x.json", "{\"a\": 7}")]);
+    let html = "<script>window.__log = []; window.fetch = () => { __log.push('page fetch'); return Promise.reject(new Error('no')); };
+        var x = new XMLHttpRequest(); x.open('GET', 'x.json');
+        x.onload = () => __log.push('xhr:' + JSON.parse(x.responseText).a); x.send();</script>";
+    page.document
+        .load_html(&mut page.runtime, "app://page/f.html", html);
+    page.finish_loading();
+    page.settle_for(10.);
+    page.finish_loading();
+    assert_eq!(page.log(), ["xhr:7"]);
 }

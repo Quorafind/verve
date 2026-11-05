@@ -144,6 +144,16 @@ impl ImportMap {
         self.warnings.extend(later.warnings);
     }
 
+    /// Sends `from` to `to` for every module that asks for it, unless the map says otherwise: how
+    /// a host has the module it fetched from a redirect import from the address it ended at.
+    pub fn redirect(&mut self, from: &Url, to: &Url) {
+        let key = from.to_string();
+        if !self.imports.iter().any(|(known, _)| *known == key) {
+            self.imports.push((key, Some(to.clone())));
+            self.imports.sort_by(|a, b| b.0.cmp(&a.0));
+        }
+    }
+
     /// What the map got wrong and was read without, for the console.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
