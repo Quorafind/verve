@@ -151,7 +151,7 @@ impl State {
                 self.windows.insert(*window, created);
             }
             ToShell::Window { window, op } => self.apply_op(*window, op, primary, &mut out),
-            ToShell::Menu(_) => {}
+            ToShell::Menu(_) | ToShell::ErrorBox { .. } => {}
             ToShell::Quit { exit_code } => {
                 self.exit = Some(*exit_code);
                 self.windows.values_mut().for_each(|window| {
@@ -405,6 +405,7 @@ fn describe(msg: &ToShell) -> String {
         ToShell::Window { window, op } => format!("[window {window}] {op:?}"),
         ToShell::Menu(op) => format!("[menu] {op:?}"),
         ToShell::Quit { exit_code } => format!("[app] quit {exit_code}"),
+        ToShell::ErrorBox { title, content } => format!("[app] error box {title:?} {content:?}"),
     }
 }
 

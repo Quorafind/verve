@@ -79,7 +79,8 @@ impl Shell {
             } => self.create(window, contents, options, cx),
             ToShell::Window { window, op } => self.window_op(window, op, cx),
             // Menus, trays and global shortcuts are P15's.
-            ToShell::Menu(_) => {}
+            // The error box is P14's dialog; the error is already on standard error.
+            ToShell::Menu(_) | ToShell::ErrorBox { .. } => {}
             ToShell::Quit { .. } => cx.quit(),
         }
     }
