@@ -1074,6 +1074,9 @@ pub fn report(context: &mut Context, error: &JsError) {
         process::uncaught(context, error);
         return;
     }
+    if process::heard_by_listeners(context, error) {
+        return;
+    }
     let text = describe(context, error);
     let frames = thrown_at(context, error);
     let line = if frames.is_empty() {

@@ -1159,6 +1159,35 @@ pub(crate) fn print_uncaught(context: &mut Context, error: &JsError) {
     let _ = write_fd(2, format!("{text}\n").as_bytes());
 }
 
+/// An error nobody caught in a realm whose host decides what happens to it
+/// ([`UncaughtBehavior::Report`], an Electron main process): handed to the `uncaughtException`
+/// listeners, if there are any. Answers whether they took it; the host hears of it only when
+/// they did not.
+pub(crate) fn heard_by_listeners(context: &mut Context, error: &JsError) -> bool {
+    if !matches!(
+        crate::shared(context).process.borrow().on_uncaught,
+        UncaughtBehavior::Report(_)
+    ) {
+        return false;
+    }
+    let process = crate::native::global(context, "process").unwrap_or_default();
+    let name = js_text("uncaughtException");
+    let count = invoke(
+        &process,
+        "listenerCount",
+        std::slice::from_ref(&name),
+        context,
+    );
+    if count.ok().and_then(|n| n.as_number()).unwrap_or(0.) == 0. {
+        return false;
+    }
+    let value = error.clone().into_opaque(context).unwrap_or_default();
+    if let Err(thrown) = invoke(&process, "emit", &[name.clone(), value, name], context) {
+        print_uncaught(context, &thrown);
+    }
+    true
+}
+
 /// An error nobody caught: to the `uncaughtException` listeners if there are any, or the end
 /// of the process, with 1, as Node's.
 pub(crate) fn uncaught(context: &mut Context, error: &JsError) {
