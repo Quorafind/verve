@@ -1002,6 +1002,9 @@ impl CodeBlock {
             Instruction::IteratorReturn { value, called } => {
                 format!("value:{value}, called:{called}")
             }
+            Instruction::IteratorEntry { key, value, fast } => {
+                format!("key:{key}, value:{value}, fast:{fast}")
+            }
             Instruction::PushPrivateEnvironment {
                 class,
                 name_indices,
@@ -1107,8 +1110,7 @@ impl CodeBlock {
             | Instruction::Reserved55
             | Instruction::Reserved56
             | Instruction::Reserved57
-            | Instruction::Reserved58
-            | Instruction::Reserved59 => unreachable!("Reserved opcodes are unreachable"),
+            | Instruction::Reserved58 => unreachable!("Reserved opcodes are unreachable"),
         }
     }
 }

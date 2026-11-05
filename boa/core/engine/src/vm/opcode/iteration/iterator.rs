@@ -2,7 +2,9 @@ use crate::{
     Context, JsExpect, JsResult,
     builtins::{
         Array,
-        iterable::{IteratorRecord, create_iter_result_object},
+        iterable::{
+            IteratorRecord, Step, create_iter_result_object, entry_destructuring_is_unobservable,
+        },
     },
     js_string,
     vm::{
@@ -265,8 +267,9 @@ impl IteratorValue {
             .frame()
             .iterators
             .last()
-            .and_then(|record| record.unboxed_value().cloned());
-        if let Some(iter_value) = unboxed {
+            .and_then(IteratorRecord::unboxed_step);
+        if let Some(step) = unboxed {
+            let iter_value = step.into_value(context);
             context.vm.set_register(value.into(), iter_value);
             return Ok(());
         }
@@ -291,6 +294,53 @@ impl Operation for IteratorValue {
     const NAME: &'static str = "IteratorValue";
     const INSTRUCTION: &'static str = "INST - IteratorValue";
     const COST: u8 = 5;
+}
+
+/// `IteratorEntry` implements the Opcode Operation for `Opcode::IteratorEntry`
+///
+/// Operation:
+///  - Gets the current value of the iterator record as `IteratorValue` does, or, for a built-in
+///    entry that no array was made for, its key and value when destructuring the array would run
+///    no user code.
+///
+/// Registers (out):
+///  - key: `JsValue`, the key of the entry, or the value `IteratorValue` gets.
+///  - value: `JsValue`, the value of the entry; untouched unless `fast`.
+///  - fast: `bool`, whether `key` and `value` are the two halves of the entry.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IteratorEntry;
+
+impl IteratorEntry {
+    #[inline(always)]
+    pub(crate) fn operation(
+        (key, value, fast): (RegisterOperand, RegisterOperand, RegisterOperand),
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let step = context
+            .vm
+            .frame()
+            .iterators
+            .last()
+            .and_then(IteratorRecord::unboxed_step);
+        if let Some(Step::Entry(entry_key, entry_value)) = step
+            && entry_destructuring_is_unobservable(context)
+        {
+            context.vm.set_register(key.into(), entry_key);
+            context.vm.set_register(value.into(), entry_value);
+            context.vm.set_register(fast.into(), true.into());
+            return Ok(());
+        }
+
+        IteratorValue::operation(key, context)?;
+        context.vm.set_register(fast.into(), false.into());
+        Ok(())
+    }
+}
+
+impl Operation for IteratorEntry {
+    const NAME: &'static str = "IteratorEntry";
+    const INSTRUCTION: &'static str = "INST - IteratorEntry";
+    const COST: u8 = 6;
 }
 
 /// `IteratorDone` implements the Opcode Operation for `Opcode::IteratorDone`

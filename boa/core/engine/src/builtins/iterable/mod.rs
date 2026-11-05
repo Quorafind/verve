@@ -3,7 +3,7 @@
 use crate::{
     Context, JsResult, JsValue,
     builtins::{
-        BuiltInBuilder, IntrinsicObject, array::array_iterator::ArrayIterator,
+        Array, BuiltInBuilder, IntrinsicObject, array::array_iterator::ArrayIterator,
         map::map_iterator::MapIterator, set::set_iterator::SetIterator,
         string::string_iterator::StringIterator,
     },
@@ -21,10 +21,13 @@ use crate::{
 use boa_gc::{Finalize, Trace};
 
 mod async_from_sync_iterator;
+mod entry_destructuring;
 pub(crate) mod iterator_constructor;
 pub(crate) mod iterator_helper;
 mod iterator_prototype;
 pub(crate) mod wrap_for_valid_iterator;
+
+pub(crate) use entry_destructuring::entry_destructuring_is_unobservable;
 
 #[cfg(test)]
 mod tests;
@@ -234,6 +237,27 @@ pub(crate) fn step_to_result_object(step: Option<JsValue>, context: &mut Context
     }
 }
 
+/// What one step of a built-in iterator produced.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Step {
+    /// The value of the step.
+    Value(JsValue),
+
+    /// A `[key, value]` entry that the array it stands for has not been made for. Nothing can
+    /// reach that array before it is made, so it is made only when something asks for it.
+    Entry(JsValue, JsValue),
+}
+
+impl Step {
+    /// The value the step stands for, making the entry array if it is an entry.
+    pub(crate) fn into_value(self, context: &mut Context) -> JsValue {
+        match self {
+            Self::Value(value) => value,
+            Self::Entry(key, value) => Array::create_array_from_list([key, value], context).into(),
+        }
+    }
+}
+
 /// The built-in iterators whose `next` can be run without making its result object.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Stepper {
@@ -251,7 +275,7 @@ impl Stepper {
     /// the `done` and `value` of a fresh ordinary object runs no user code, so the object can be
     /// skipped. A function from another realm is left alone: `next` would run there, creating its
     /// arrays with that realm's prototypes.
-    fn of(next_method: &JsValue, context: &Context) -> Option<Self> {
+    pub(super) fn of(next_method: &JsValue, context: &Context) -> Option<Self> {
         let function = next_method.as_object()?;
         let native = function.downcast_ref::<NativeFunctionObject>()?;
         if native.realm.as_ref() != Some(context.realm()) {
@@ -278,12 +302,12 @@ impl Stepper {
         self,
         iterator: &JsObject,
         context: &mut Context,
-    ) -> JsResult<Option<JsValue>> {
+    ) -> JsResult<Option<Step>> {
         match self {
             Self::Array => ArrayIterator::advance(iterator, context),
             Self::Map => MapIterator::advance(iterator, context),
-            Self::Set => SetIterator::advance(iterator, context),
-            Self::String => StringIterator::advance(iterator, context),
+            Self::Set => SetIterator::advance(iterator, context).map(|v| v.map(Step::Value)),
+            Self::String => StringIterator::advance(iterator, context).map(|v| v.map(Step::Value)),
         }
     }
 
@@ -294,7 +318,7 @@ impl Stepper {
         self,
         iterator: &JsObject,
         context: &mut Context,
-    ) -> Result<Option<JsValue>, Declined> {
+    ) -> Result<Option<Step>, Declined> {
         let right_type = match self {
             Self::Array => return ArrayIterator::advance_dense(iterator),
             Self::Map => iterator.is::<MapIterator>(),
@@ -508,6 +532,9 @@ enum LastResult {
     /// The value of a step made without a result object. After the last step it is `undefined`,
     /// as in the object the built-in `next` would have made.
     Value(JsValue),
+
+    /// The `[key, value]` entry of a step made without a result object or the entry array.
+    Entry(JsValue, JsValue),
 }
 
 impl IteratorRecord {
@@ -539,8 +566,9 @@ impl IteratorRecord {
     pub(crate) fn last_result_object(&self, context: &mut Context) -> JsObject {
         match &self.last_result {
             LastResult::Object(result) => result.object().clone(),
-            LastResult::Value(value) => {
-                create_iter_result_object(value.clone(), self.done, context)
+            LastResult::Value(_) | LastResult::Entry(..) => {
+                let value = self.unboxed_step_value(context);
+                create_iter_result_object(value, self.done, context)
                     .into_object()
                     .expect("an iterator result is an object")
             }
@@ -564,8 +592,16 @@ impl IteratorRecord {
     pub(crate) fn value(&mut self, context: &mut Context) -> JsResult<JsValue> {
         self.set_done_on_err(|iter| match &iter.last_result {
             LastResult::Object(result) => result.value(context),
-            LastResult::Value(value) => Ok(value.clone()),
+            LastResult::Value(_) | LastResult::Entry(..) => Ok(iter.unboxed_step_value(context)),
         })
+    }
+
+    /// The value of the last step, which was made without a result object, making the entry
+    /// array if the step was an entry.
+    fn unboxed_step_value(&self, context: &mut Context) -> JsValue {
+        self.unboxed_step()
+            .expect("the last step had no result object")
+            .into_value(context)
     }
 
     /// Get the `[[Done]]` field of the `IteratorRecord`.
@@ -641,10 +677,11 @@ impl IteratorRecord {
         self.stepper
     }
 
-    /// The value of the last step if it was made without a result object.
-    pub(crate) const fn unboxed_value(&self) -> Option<&JsValue> {
+    /// The last step if it was made without a result object.
+    pub(crate) fn unboxed_step(&self) -> Option<Step> {
         match &self.last_result {
-            LastResult::Value(value) => Some(value),
+            LastResult::Value(value) => Some(Step::Value(value.clone())),
+            LastResult::Entry(key, value) => Some(Step::Entry(key.clone(), value.clone())),
             LastResult::Object(_) => None,
         }
     }
@@ -665,14 +702,15 @@ impl IteratorRecord {
     /// Records the outcome of `advance` (the next value, `None` at the end, or an error) as the
     /// last step, and returns whether the iterator is done. The built-in `next` has no result
     /// object here for anyone to read, so the value is all there is.
-    pub(crate) fn finish_unboxed_step(
-        &mut self,
-        step: JsResult<Option<JsValue>>,
-    ) -> JsResult<bool> {
+    pub(crate) fn finish_unboxed_step(&mut self, step: JsResult<Option<Step>>) -> JsResult<bool> {
         self.set_done_on_err(|iter| {
             let step = step?;
             iter.done = step.is_none();
-            iter.last_result = LastResult::Value(step.unwrap_or_default());
+            iter.last_result = match step {
+                Some(Step::Value(value)) => LastResult::Value(value),
+                Some(Step::Entry(key, value)) => LastResult::Entry(key, value),
+                None => LastResult::Value(JsValue::undefined()),
+            };
             Ok(iter.done)
         })
     }

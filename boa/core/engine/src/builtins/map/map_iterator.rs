@@ -8,7 +8,10 @@
 use super::ordered_map::OrderedMap;
 use crate::{
     Context, JsData, JsResult,
-    builtins::{Array, BuiltInBuilder, IntrinsicObject, JsValue, iterable::step_to_result_object},
+    builtins::{
+        BuiltInBuilder, IntrinsicObject, JsValue,
+        iterable::{Step, step_to_result_object},
+    },
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
@@ -117,13 +120,13 @@ impl MapIterator {
         let object = this
             .as_object()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not a MapIterator"))?;
-        let step = Self::advance(&object, context)?;
+        let step = Self::advance(&object, context)?.map(|step| step.into_value(context));
         Ok(step_to_result_object(step, context))
     }
 
     /// The body of `next` without the result object: the next item, or `None` once the map is
-    /// exhausted.
-    pub(crate) fn advance(object: &JsObject, context: &mut Context) -> JsResult<Option<JsValue>> {
+    /// exhausted. An entry iterator answers the key and value, not the array of them.
+    pub(crate) fn advance(object: &JsObject, _: &mut Context) -> JsResult<Option<Step>> {
         let mut map_iterator = object
             .downcast_mut::<Self>()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not a MapIterator"))?;
@@ -148,11 +151,9 @@ impl MapIterator {
             };
             if let Some((key, value)) = e {
                 let item = match item_kind {
-                    PropertyNameKind::Key => key,
-                    PropertyNameKind::Value => value,
-                    PropertyNameKind::KeyAndValue => {
-                        Array::create_array_from_list([key, value], context).into()
-                    }
+                    PropertyNameKind::Key => Step::Value(key),
+                    PropertyNameKind::Value => Step::Value(value),
+                    PropertyNameKind::KeyAndValue => Step::Entry(key, value),
                 };
                 map_iterator.iterated_map = Some(obj);
                 return Ok(Some(item));

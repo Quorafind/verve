@@ -694,3 +694,19 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   read-only property or proxy that `[[Set]]` would meet can be skipped; any change gives a miss,
   and the next slow assignment records the entry again. Four shapes per site, then the site stops
   recording. Compiled code takes the same entries through `jit_set_property`.
+
+- `boa_engine`, `bytecompiler/statement/loop.rs`, `builtins/iterable`, `builtins/map/map_iterator.rs`,
+  `builtins/array/array_iterator.rs`, `vm/opcode`, `vm/jit`: `for (const [k, v] of x)` (also `let`)
+  no longer makes the `[key, value]` array of a `Map` or `Array` entry when destructuring that
+  array cannot be seen. A built-in entry step is now remembered as a key and a value
+  (`IteratorRecord` `LastResult::Entry`); the array is made only when something reads the value
+  (`IteratorValue`, the generic `for…of`, `next` itself). The new `IteratorEntry` instruction (it
+  takes the opcode `Reserved59` had) hands the two halves to a two-name pattern when
+  `%Array.prototype%[@@iterator]` is still `%Array.prototype.values%`, `%ArrayIteratorPrototype%.next`
+  is still the running realm's built-in, and no `return` is found on the chain from
+  `%ArrayIteratorPrototype%` through `%IteratorPrototype%` to `%Object.prototype%` (read afresh at
+  every element, so a rewrite between two elements counts); otherwise it makes the array and the
+  pattern runs the spec's steps. Only `const`/`let` heads qualify: binding a `var` or assigning to
+  a target can run a setter between the two elements. Compiled code takes the same decision in
+  `jit_iterator_entry`, and a value or entry iterator over a dense array no longer declines in
+  `advance_dense`.

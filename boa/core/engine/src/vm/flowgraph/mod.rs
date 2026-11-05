@@ -332,6 +332,7 @@ impl CodeBlock {
                 | Instruction::IteratorUpdateResult { .. }
                 | Instruction::IteratorFinishAsyncNext { .. }
                 | Instruction::IteratorValue { .. }
+                | Instruction::IteratorEntry { .. }
                 | Instruction::IteratorResult { .. }
                 | Instruction::IteratorDone { .. }
                 | Instruction::IteratorToArray { .. }
@@ -432,8 +433,7 @@ impl CodeBlock {
                 | Instruction::Reserved55
                 | Instruction::Reserved56
                 | Instruction::Reserved57
-                | Instruction::Reserved58
-                | Instruction::Reserved59 => unreachable!("Reserved opcodes are unreachable"),
+                | Instruction::Reserved58 => unreachable!("Reserved opcodes are unreachable"),
             }
         }
 

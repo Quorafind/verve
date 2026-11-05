@@ -145,7 +145,7 @@ mod declines_a_borrowed_object {
     #[cfg(feature = "jit")]
     #[test]
     fn array_iterator_step() {
-        use crate::builtins::array::array_iterator::ArrayIterator;
+        use crate::builtins::{array::array_iterator::ArrayIterator, iterable::Step};
 
         let context = &mut Context::default();
         let iterator = object(context, "[1, 2][Symbol.iterator]()");
@@ -155,7 +155,12 @@ mod declines_a_borrowed_object {
         }
         assert_eq!(
             ArrayIterator::advance_dense(&iterator).ok().flatten(),
-            Some(JsValue::from(1))
+            Some(Step::Value(JsValue::from(1)))
+        );
+        let entries = object(context, "['a'].entries()");
+        assert_eq!(
+            ArrayIterator::advance_dense(&entries).ok().flatten(),
+            Some(Step::Entry(JsValue::from(0), crate::js_string!("a").into()))
         );
     }
 }
