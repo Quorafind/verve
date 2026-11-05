@@ -83,3 +83,68 @@ fn the_app_exit_code_is_waited_for() {
     let app = App::launch_script("setTimeout(() => process.exit(3), 10)", &[]);
     assert_eq!(app.wait_exit(TIMEOUT), 3);
 }
+
+#[test]
+fn a_shown_window_gets_its_first_paint_once_with_the_first_snapshot() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let paints = std::sync::Arc::new(AtomicU32::new(0));
+    let app = App::launch_script(
+        "const { BrowserWindow } = require('electron');\n\
+         setTimeout(() => new BrowserWindow().loadURL('data:text/html,<p>x</p>'), 300);",
+        &[],
+    );
+    let counted = std::sync::Arc::clone(&paints);
+    app.hub.observe_shell(move |msg| {
+        let painted = matches!(
+            msg,
+            verve_electron::msg::FromShell::Window {
+                event: verve_electron::msg::WindowEvent::FirstPaint,
+                ..
+            }
+        );
+        counted.fetch_add(u32::from(painted), Ordering::SeqCst);
+    });
+    assert!(app.run_until(|_| paints.load(Ordering::SeqCst) >= 1, TIMEOUT));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(paints.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_hidden_window_whose_page_is_drawn_gets_its_first_paint_when_it_is_shown() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use verve_electron::msg::{ToShell, WindowOp};
+    let app = App::launch_script(
+        "const { BrowserWindow } = require('electron');\n\
+         new BrowserWindow({ show: false, title: 'later' }).loadURL('data:text/html,<p>x</p>');",
+        &[],
+    );
+    let window = {
+        assert!(app.run_until(|app| app.window("later").is_some(), TIMEOUT));
+        app.window("later").expect("the window").id
+    };
+    assert!(app.run_until(|app| app.page_text(window).is_some(), TIMEOUT));
+    let paints = std::sync::Arc::new(AtomicU32::new(0));
+    let counted = std::sync::Arc::clone(&paints);
+    app.hub.observe_shell(move |msg| {
+        let painted = matches!(
+            msg,
+            verve_electron::msg::FromShell::Window {
+                event: verve_electron::msg::WindowEvent::FirstPaint,
+                ..
+            }
+        );
+        counted.fetch_add(u32::from(painted), Ordering::SeqCst);
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(
+        paints.load(Ordering::SeqCst),
+        0,
+        "a hidden window has no frame"
+    );
+    let show = ToShell::Window {
+        window,
+        op: WindowOp::Show,
+    };
+    app.hub.to_shell(show);
+    assert_eq!(paints.load(Ordering::SeqCst), 1);
+}

@@ -197,3 +197,21 @@ Nothing in the list is a dependency that is not already in the Electron build: t
 crate), `serde_json`, `sha2` and `windows-sys` (all in the graph before). The glue is already `opt-level = "s"` with fat LTO, so there
 was no cheaper profile to move it to. Left in on purpose: the asar overlay (task section 2) and the registry code (protocol clients,
 login items) are the two largest pieces that are P10's own.
+
+## P34: the shell's window management
+
+`electron/p34-gpui-shell`: `cargo build --release -p verve-gpui --bin electron --features jit` is 33,385,472 bytes at the branch's last
+code commit (`270aca59`); 0.61 MB is left under the 34 MB cap. The base `docs/electron-plan` `82079241` was not built here: against P10's
+33,144,832 the figure is +240,640 bytes, which includes whatever merged between P10 and the base (P84's call frame work among it), so
+the base measurement is the one to subtract.
+
+Where P34's own code is (`cargo bloat --release --crates`, `.text`): `verve_gpui` 54.3 KiB in all (`window.rs`, `report.rs`,
+`app_region.rs`, `shell.rs`, `platform/windows.rs` and `taskbar.rs`; the pre-P34 shell was a few KiB of it), `gpui_windows` and `gpui`
+are GPUI's own and unchanged. The rest of the growth is the `windows-sys` thunks (`user32`, `shcore`, `ole32` imports and their
+`.rdata`/`.pdata`/relocation entries, about 60 imports) and the generic GPUI code that the `DomView` canvas and `observe_*`
+closures instantiate, which `cargo bloat` does not attribute to the crate that asked for it.
+
+Nothing is a new crate: `raw-window-handle` and `windows-sys` were in the graph (`raw-window-handle` through GPUI), and `objc2` is
+macOS-only. The biggest single pieces, by reasoning from the code: `Window::apply` (a match arm per `WindowOp`, about 25 calls into
+`platform::windows`), `open` with `gpui_options`, the subclassed window procedure, `displays()` and the hand-written `ITaskbarList3`
+vtable. The drag-area subtraction and `diff` are a few hundred bytes each.

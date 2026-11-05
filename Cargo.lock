@@ -6843,9 +6843,14 @@ dependencies = [
  "async-channel",
  "gpui",
  "gpui_platform",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "raw-window-handle",
  "verve",
  "verve-dom",
  "verve-electron",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

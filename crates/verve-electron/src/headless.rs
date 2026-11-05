@@ -179,6 +179,19 @@ impl State {
             _ => window.apply(op, primary),
         };
         out.window(window, events, primary.scale_factor);
+        // A window shown with its page already drawn gets its first paint now.
+        let drawn = |pages: &BTreeMap<ContentsId, Page>| {
+            pages
+                .get(&window.shown.contents)
+                .is_some_and(|page| page.snapshot.is_some())
+        };
+        if window.shown.visible && !window.painted && drawn(&self.pages) {
+            window.painted = true;
+            out.events.push(FromShell::Window {
+                window: id,
+                event: WindowEvent::FirstPaint,
+            });
+        }
     }
 
     /// Takes a view the page published and lays it out; answers the boxes if they are new.
@@ -352,6 +365,7 @@ impl HeadlessShell {
             return;
         };
         let mut state = self.state();
+        let mut painted = Vec::new();
         let open: Vec<_> = state
             .windows
             .values()
@@ -365,6 +379,21 @@ impl HeadlessShell {
             if let Some(boxes) = state.settle(contents, update.snapshot, self.layout) {
                 hub.input(contents, ToRendererInput::Layout(boxes));
             }
+            // The first snapshot of a window that is shown is its first paint.
+            let shown = state.windows.values_mut().find(|window| {
+                window.shown.contents == contents && window.shown.visible && !window.painted
+            });
+            if let Some(window) = shown {
+                window.painted = true;
+                painted.push(window.shown.id);
+            }
+        }
+        drop(state);
+        for window in painted {
+            self.say(FromShell::Window {
+                window,
+                event: WindowEvent::FirstPaint,
+            });
         }
     }
 
