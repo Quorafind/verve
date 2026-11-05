@@ -1515,3 +1515,12 @@ entirely. Background compilation on another thread fits here too, since `CodeBlo
 - **Hosts without executable memory** (Windows ACG, macOS hardened runtime without the
   entitlement, iOS, AArch64 Linux with `membarrier` denied) run interpreted after one failed
   compile. This is correct, just not faster.
+
+## Results (P82: `for (const [k, v] of map)`)
+
+`IteratorEntry` is compiled inline with a fast helper (`jit_iterator_entry`): when the record's step is a built-in entry and the array protocol is untouched, it
+writes the key, the value and `fast = true` into the three registers; anything else (a different record, or a changed protocol) is the interpreter's handler, which
+makes the array and lets the compiled spec path destructure it. A value or entry iterator over a dense array no longer declines in `advance_dense` for `entries()`.
+Per element (JIT): `Map` 677 -> 107 ns, `map.entries()` 685 -> 107, `arr.entries()` 746 -> 104. `jit_iterator_next` also steps the record in place now, as the
+interpreter does, instead of popping it off the frame's iterator stack and pushing it back.
+

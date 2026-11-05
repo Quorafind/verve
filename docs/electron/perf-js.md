@@ -593,3 +593,24 @@ Probe (`-A`, the array in a local, best of 7, the loop itself 4.0 ns), ns per it
 | a dense array, read / write | 7.5 / 6.0 | 7.5 / 5.5 |
 
 Details and the cost in compile time in `docs/jit.md` "Results (typed-array elements, P76)" and `packages/P76-jit-typed-elements.md`.
+
+### P82: `for (const [k, v] of map)` without the entry array
+
+A `const`/`let` head that is a `[key, value]` pattern of two plain names takes the two halves of a built-in `Map`/array entry without making the `[key, value]`
+array when `Array.prototype[Symbol.iterator]`, `%ArrayIteratorPrototype%.next` and the `return` lookup are untouched (`IteratorEntry`). Per element of a 20,000-entry
+loop, ns, median of 7 processes, base (2cb3f702) and after alternating in one round (load 14-27 %):
+
+| loop | before, JIT | after, JIT | before, interp | after, interp |
+|---|---|---|---|---|
+| `for (const [k, v] of map)` | 677.2 | 106.7 | 785.0 | 140.9 |
+| `for (const [k, v] of map.entries())` | 685.2 | 106.7 | 801.0 | 144.4 |
+| `for (const [i, x] of arr.entries())` | 745.8 | 103.7 | 830.2 | 172.5 |
+| references: `for (const e of map)` | 214.1 | 217.9 | 310.8 | 307.8 |
+| `for (const k of map.keys())` | 23.6 | 23.4 | 48.2 | 53.3 (best 47.6 / 49.3) |
+| `for (const x of arr)` | 20.6 | 21.1 | 80.4 | 81.9 |
+
+The first build of the change made the plain loops 3 ns slower (every step had become a 40-byte value); the final one answers an entry as its key plus a second slot,
+and compiled `IteratorNext` steps the record where it sits (the base took it off the frame's stack and put it back), which brings them back to the base.
+P60 suite, base then after (load 18-25 %), medians in ms, JIT / interp: `mapset` 22.0 / 25.3 before, 14.8 / 15.9 after; `fib` 229.3 / 362.8 against 226.7 / 360.3
+(an alternating 9-run A/B of `fib` JIT: medians 228.0 against 230.3); the others are within noise (`vdom`, `splitjoin`, `regex`, `json` move between identical runs).
+Details in `packages/P82-map-entry-destructuring.md`.
