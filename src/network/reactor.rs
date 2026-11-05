@@ -841,15 +841,17 @@ fn run(
                         p.end = true;
                     }
                 }
+                // A socket still connecting refuses these options (`WSAEINVAL`); the JS side
+                // sends them again once `Event::Connected` arrives.
                 Command::NoDelay(id, enabled) => {
-                    if let Some(c) = sockets.get(&id)
+                    if let Some(c) = sockets.get(&id).filter(|c| !c.connecting)
                         && let Err(e) = c.socket.set_nodelay(enabled)
                     {
                         error(&out, id, e);
                     }
                 }
                 Command::KeepAlive(id, enabled, delay) => {
-                    if let Some(c) = sockets.get(&id) {
+                    if let Some(c) = sockets.get(&id).filter(|c| !c.connecting) {
                         let sock = socket2::SockRef::from(&c.socket);
                         if let Err(e) = sock.set_keepalive(enabled).and_then(|_| {
                             if enabled {

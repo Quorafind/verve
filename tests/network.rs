@@ -757,3 +757,28 @@ fn a_waker_replaces_the_millisecond_poll() {
         .join()
         .unwrap();
 }
+#[test]
+fn tcp_options_set_while_connecting_do_not_fail() {
+    // Many sockets at once, so that some are still connecting when the options reach the reactor:
+    // Windows refuses a socket option on such a socket with `WSAEINVAL`, which surfaced as `EIO`.
+    assert_eq!(
+        run(
+            r#"
+        const net=require('net');const server=net.createServer(s=>s.on('error',()=>{}));
+        const N=300;let done=0;const errors=[];
+        server.listen(0,'127.0.0.1',()=>{
+            for(let i=0;i<N;i++){
+                const s=net.connect(server.address().port,'127.0.0.1');
+                s.setNoDelay(true);s.setKeepAlive(true,1000);
+                let counted=false;const finish=()=>{if(!counted){counted=true;if(++done===N)setTimeout(()=>{globalThis.result=errors;server.close()},50)}};
+                s.on('error',e=>{errors.push(e.code);finish()});
+                s.on('connect',()=>s.destroy());
+                s.on('close',finish);
+            }
+        });
+    "#,
+            granted()
+        ),
+        "[]"
+    );
+}
