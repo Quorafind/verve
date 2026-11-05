@@ -721,3 +721,22 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   path into every access; tests use it for the forced-compile mode. 400 functions of 40 element
   accesses on plain arrays at threshold 0: 19.4 to 13.5 s of CPU, the time before the typed path
   existed (13.8 s).
+
+- `boa_engine`, `bytecompiler/statement/loop.rs`, `builtins/iterable`, `builtins/map/map_iterator.rs`,
+  `builtins/array/array_iterator.rs`, `vm/opcode`, `vm/jit`: `for (const [k, v] of x)` (also `let`)
+  no longer makes the `[key, value]` array of a `Map` or `Array` entry when destructuring that
+  array cannot be seen. A built-in entry step is now remembered as a key and a value
+  (`IteratorRecord` `LastResult::Entry`); the array is made only when something reads the value
+  (`IteratorValue`, the generic `for…of`, `next` itself). The new `IteratorEntry` instruction (it
+  takes the opcode `Reserved59` had) hands the two halves to a two-name pattern when
+  `%Array.prototype%[@@iterator]` is still `%Array.prototype.values%`, `%ArrayIteratorPrototype%.next`
+  is still the running realm's built-in, and no `return` is found on the chain from
+  `%ArrayIteratorPrototype%` through `%IteratorPrototype%` to `%Object.prototype%` (read afresh at
+  every element, so a rewrite between two elements counts); otherwise it makes the array and the
+  pattern runs the spec's steps. Only `const`/`let` heads qualify: binding a `var` or assigning to
+  a target can run a setter between the two elements. Compiled code takes the same decision in
+  `jit_iterator_entry`, and a value or entry iterator over a dense array no longer declines in
+  `advance_dense`.
+  Compiled `IteratorNext` now steps the record where it sits, as the interpreter's handler does,
+  instead of taking it off the frame's iterator stack and putting it back; a step answers its key
+  and, for an entry, the value in a second slot, so the common one-value step stays one value wide.

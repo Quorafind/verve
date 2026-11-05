@@ -275,7 +275,8 @@ fn kind(instruction: &Instruction) -> Kind {
         | Instruction::SetPropertyByValue { .. }
         | Instruction::IteratorNext
         | Instruction::IteratorDone { .. }
-        | Instruction::IteratorValue { .. } => Kind::Inline,
+        | Instruction::IteratorValue { .. }
+        | Instruction::IteratorEntry { .. } => Kind::Inline,
         Instruction::Jump { address } => Kind::Jump(address.as_u32()),
         Instruction::JumpIfTrue { address, .. }
         | Instruction::JumpIfFalse { address, .. }
@@ -323,6 +324,9 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
         | Instruction::GetNameGlobal { dst, .. }
         | Instruction::IteratorDone { dst }
         | Instruction::IteratorValue { dst } => vec![dst.into()],
+        Instruction::IteratorEntry { key, value, fast } => {
+            vec![key.into(), value.into(), fast.into()]
+        }
         Instruction::PushFromRegister { src } | Instruction::SetAccumulator { src } => {
             vec![src.into()]
         }
@@ -1157,6 +1161,16 @@ impl Translator<'_> {
             Instruction::IteratorValue { dst } => {
                 let f = helpers::jit_iterator_value;
                 self.fast(f, [dst.into(), 0, 0], Fast::MaySlow, pc, next);
+            }
+            Instruction::IteratorEntry { key, value, fast } => {
+                let operands = [key.into(), value.into(), fast.into()];
+                self.fast(
+                    helpers::jit_iterator_entry,
+                    operands,
+                    Fast::MaySlow,
+                    pc,
+                    next,
+                );
             }
             Instruction::GetName { dst, binding_index } => {
                 let operands = [dst.into(), binding_index.into(), 0];

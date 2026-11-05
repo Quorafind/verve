@@ -3,7 +3,7 @@
 use crate::{
     Context, JsResult, JsValue,
     builtins::{
-        BuiltInBuilder, IntrinsicObject, array::array_iterator::ArrayIterator,
+        Array, BuiltInBuilder, IntrinsicObject, array::array_iterator::ArrayIterator,
         map::map_iterator::MapIterator, set::set_iterator::SetIterator,
         string::string_iterator::StringIterator,
     },
@@ -21,10 +21,13 @@ use crate::{
 use boa_gc::{Finalize, Trace};
 
 mod async_from_sync_iterator;
+mod entry_destructuring;
 pub(crate) mod iterator_constructor;
 pub(crate) mod iterator_helper;
 mod iterator_prototype;
 pub(crate) mod wrap_for_valid_iterator;
+
+pub(crate) use entry_destructuring::entry_destructuring_is_unobservable;
 
 #[cfg(test)]
 mod tests;
@@ -234,6 +237,36 @@ pub(crate) fn step_to_result_object(step: Option<JsValue>, context: &mut Context
     }
 }
 
+/// What one step of a built-in iterator produced.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Step {
+    /// The value of the step.
+    Value(JsValue),
+
+    /// A `[key, value]` entry that the array it stands for has not been made for. Nothing can
+    /// reach that array before it is made, so it is made only when something asks for it.
+    Entry(JsValue, JsValue),
+}
+
+/// The value of a step that [`Stepper::advance`] answered as `first` and `second`, making the
+/// entry array if it was an entry.
+pub(crate) fn join_step(first: JsValue, second: Option<JsValue>, context: &mut Context) -> JsValue {
+    match second {
+        None => first,
+        Some(second) => Array::create_array_from_list([first, second], context).into(),
+    }
+}
+
+impl Step {
+    /// The value the step stands for, making the entry array if it is an entry.
+    pub(crate) fn into_value(self, context: &mut Context) -> JsValue {
+        match self {
+            Self::Value(value) => value,
+            Self::Entry(key, value) => Array::create_array_from_list([key, value], context).into(),
+        }
+    }
+}
+
 /// The built-in iterators whose `next` can be run without making its result object.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Stepper {
@@ -251,7 +284,7 @@ impl Stepper {
     /// the `done` and `value` of a fresh ordinary object runs no user code, so the object can be
     /// skipped. A function from another realm is left alone: `next` would run there, creating its
     /// arrays with that realm's prototypes.
-    fn of(next_method: &JsValue, context: &Context) -> Option<Self> {
+    pub(super) fn of(next_method: &JsValue, context: &Context) -> Option<Self> {
         let function = next_method.as_object()?;
         let native = function.downcast_ref::<NativeFunctionObject>()?;
         if native.realm.as_ref() != Some(context.realm()) {
@@ -273,15 +306,18 @@ impl Stepper {
     }
 
     /// The body of the iterator's `next` on `iterator`: the next value, or `None` once the
-    /// iterator is exhausted.
+    /// iterator is exhausted. An entry is answered as its key, with its value in `second`
+    /// (which the caller sets to `None` first), so that a step of the other kinds, the common
+    /// ones, stays one value wide.
     pub(crate) fn advance(
         self,
         iterator: &JsObject,
         context: &mut Context,
+        second: &mut Option<JsValue>,
     ) -> JsResult<Option<JsValue>> {
         match self {
-            Self::Array => ArrayIterator::advance(iterator, context),
-            Self::Map => MapIterator::advance(iterator, context),
+            Self::Array => ArrayIterator::advance(iterator, context, second),
+            Self::Map => MapIterator::advance(iterator, second),
             Self::Set => SetIterator::advance(iterator, context),
             Self::String => StringIterator::advance(iterator, context),
         }
@@ -290,13 +326,14 @@ impl Stepper {
     /// [`advance`](Self::advance) when it is known to run no JavaScript and not to fail;
     /// [`Declined`], with nothing changed, when that cannot be known.
     #[cfg(feature = "jit")]
-    fn advance_quietly(
+    pub(crate) fn advance_quietly(
         self,
         iterator: &JsObject,
         context: &mut Context,
+        second: &mut Option<JsValue>,
     ) -> Result<Option<JsValue>, Declined> {
         let right_type = match self {
-            Self::Array => return ArrayIterator::advance_dense(iterator),
+            Self::Array => return ArrayIterator::advance_dense(iterator, second),
             Self::Map => iterator.is::<MapIterator>(),
             Self::Set => iterator.is::<SetIterator>(),
             Self::String => iterator.is::<StringIterator>(),
@@ -304,7 +341,8 @@ impl Stepper {
         // These read nothing but their own state and make arrays and substrings. An iterator
         // that is borrowed is declined, as `advance` would panic at it.
         if right_type && iterator.try_borrow_mut().is_ok() {
-            self.advance(iterator, context).map_err(|_| Declined)
+            self.advance(iterator, context, second)
+                .map_err(|_| Declined)
         } else {
             Err(Declined)
         }
@@ -508,6 +546,9 @@ enum LastResult {
     /// The value of a step made without a result object. After the last step it is `undefined`,
     /// as in the object the built-in `next` would have made.
     Value(JsValue),
+
+    /// The `[key, value]` entry of a step made without a result object or the entry array.
+    Entry(JsValue, JsValue),
 }
 
 impl IteratorRecord {
@@ -539,8 +580,9 @@ impl IteratorRecord {
     pub(crate) fn last_result_object(&self, context: &mut Context) -> JsObject {
         match &self.last_result {
             LastResult::Object(result) => result.object().clone(),
-            LastResult::Value(value) => {
-                create_iter_result_object(value.clone(), self.done, context)
+            LastResult::Value(_) | LastResult::Entry(..) => {
+                let value = self.unboxed_step_value(context);
+                create_iter_result_object(value, self.done, context)
                     .into_object()
                     .expect("an iterator result is an object")
             }
@@ -564,8 +606,16 @@ impl IteratorRecord {
     pub(crate) fn value(&mut self, context: &mut Context) -> JsResult<JsValue> {
         self.set_done_on_err(|iter| match &iter.last_result {
             LastResult::Object(result) => result.value(context),
-            LastResult::Value(value) => Ok(value.clone()),
+            LastResult::Value(_) | LastResult::Entry(..) => Ok(iter.unboxed_step_value(context)),
         })
+    }
+
+    /// The value of the last step, which was made without a result object, making the entry
+    /// array if the step was an entry.
+    fn unboxed_step_value(&self, context: &mut Context) -> JsValue {
+        self.unboxed_step()
+            .expect("the last step had no result object")
+            .into_value(context)
     }
 
     /// Get the `[[Done]]` field of the `IteratorRecord`.
@@ -641,25 +691,22 @@ impl IteratorRecord {
         self.stepper
     }
 
-    /// The value of the last step if it was made without a result object.
+    /// The value of the last step if it was made without a result object and is not an entry,
+    /// the common case that needs neither a [`Step`] nor a [`Context`].
     pub(crate) const fn unboxed_value(&self) -> Option<&JsValue> {
         match &self.last_result {
             LastResult::Value(value) => Some(value),
-            LastResult::Object(_) => None,
+            _ => None,
         }
     }
 
-    /// Steps a record that has a [`Stepper`] when that runs no JavaScript and cannot fail, as
-    /// fast helpers of compiled code need; [`Declined`], with nothing changed, for any other.
-    #[cfg(feature = "jit")]
-    pub(crate) fn step_quietly(&mut self, context: &mut Context) -> Result<(), Declined> {
-        let step = self
-            .stepper
-            .ok_or(Declined)?
-            .advance_quietly(&self.iterator, context)?;
-        self.finish_unboxed_step(Ok(step))
-            .map(|_| ())
-            .map_err(|_| Declined)
+    /// The last step if it was made without a result object.
+    pub(crate) fn unboxed_step(&self) -> Option<Step> {
+        match &self.last_result {
+            LastResult::Value(value) => Some(Step::Value(value.clone())),
+            LastResult::Entry(key, value) => Some(Step::Entry(key.clone(), value.clone())),
+            LastResult::Object(_) => None,
+        }
     }
 
     /// Records the outcome of `advance` (the next value, `None` at the end, or an error) as the
@@ -668,11 +715,15 @@ impl IteratorRecord {
     pub(crate) fn finish_unboxed_step(
         &mut self,
         step: JsResult<Option<JsValue>>,
+        second: Option<JsValue>,
     ) -> JsResult<bool> {
         self.set_done_on_err(|iter| {
             let step = step?;
             iter.done = step.is_none();
-            iter.last_result = LastResult::Value(step.unwrap_or_default());
+            iter.last_result = match (step, second) {
+                (Some(key), Some(value)) => LastResult::Entry(key, value),
+                (step, _) => LastResult::Value(step.unwrap_or_default()),
+            };
             Ok(iter.done)
         })
     }
@@ -690,8 +741,9 @@ impl IteratorRecord {
     pub(crate) fn step(&mut self, context: &mut Context) -> JsResult<bool> {
         self.set_done_on_err(|iter| {
             if let Some(stepper) = iter.stepper {
-                let step = stepper.advance(&iter.iterator, context);
-                return iter.finish_unboxed_step(step);
+                let mut second = None;
+                let step = stepper.advance(&iter.iterator, context, &mut second);
+                return iter.finish_unboxed_step(step, second);
             }
 
             // 1. Let result be ? IteratorNext(iteratorRecord).

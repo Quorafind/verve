@@ -8,7 +8,10 @@
 use super::ordered_map::OrderedMap;
 use crate::{
     Context, JsData, JsResult,
-    builtins::{Array, BuiltInBuilder, IntrinsicObject, JsValue, iterable::step_to_result_object},
+    builtins::{
+        BuiltInBuilder, IntrinsicObject, JsValue,
+        iterable::{join_step, step_to_result_object},
+    },
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
@@ -117,13 +120,18 @@ impl MapIterator {
         let object = this
             .as_object()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not a MapIterator"))?;
-        let step = Self::advance(&object, context)?;
+        let mut second = None;
+        let step =
+            Self::advance(&object, &mut second)?.map(|first| join_step(first, second, context));
         Ok(step_to_result_object(step, context))
     }
 
     /// The body of `next` without the result object: the next item, or `None` once the map is
-    /// exhausted.
-    pub(crate) fn advance(object: &JsObject, context: &mut Context) -> JsResult<Option<JsValue>> {
+    /// exhausted. An entry iterator answers the key and value, not the array of them.
+    pub(crate) fn advance(
+        object: &JsObject,
+        second: &mut Option<JsValue>,
+    ) -> JsResult<Option<JsValue>> {
         let mut map_iterator = object
             .downcast_mut::<Self>()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not a MapIterator"))?;
@@ -151,7 +159,8 @@ impl MapIterator {
                     PropertyNameKind::Key => key,
                     PropertyNameKind::Value => value,
                     PropertyNameKind::KeyAndValue => {
-                        Array::create_array_from_list([key, value], context).into()
+                        *second = Some(value);
+                        key
                     }
                 };
                 map_iterator.iterated_map = Some(obj);

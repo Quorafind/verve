@@ -620,3 +620,24 @@ read +6.5 % in the median of its re-run (2353.8 then 2507.8, best 2312.1 then 24
 (3076.5 then 2723.7): load, not the change.
 
 P81 (typed-array element path compiled only into functions that have met a typed array): 400 functions of 40 element accesses on plain arrays, threshold 0, CPU ms (min of 5): before P76 13,828, P76 19,406, now 13,484; on a `Float64Array` (200 functions, 6 calls, threshold 3) 10,234 against 10,188 (they need the path). `typed` JIT 219.5–224.3 ms (P76 build 222.2–237.9 in the same interleaved rounds); the rest of the suite inside the noise of a shared machine (load 23–56 %).
+
+### P82: `for (const [k, v] of map)` without the entry array
+
+A `const`/`let` head that is a `[key, value]` pattern of two plain names takes the two halves of a built-in `Map`/array entry without making the `[key, value]`
+array when `Array.prototype[Symbol.iterator]`, `%ArrayIteratorPrototype%.next` and the `return` lookup are untouched (`IteratorEntry`). Per element of a 20,000-entry
+loop, ns, median of 7 processes, base (2cb3f702) and after alternating in one round (load 14-27 %):
+
+| loop | before, JIT | after, JIT | before, interp | after, interp |
+|---|---|---|---|---|
+| `for (const [k, v] of map)` | 677.2 | 106.7 | 785.0 | 140.9 |
+| `for (const [k, v] of map.entries())` | 685.2 | 106.7 | 801.0 | 144.4 |
+| `for (const [i, x] of arr.entries())` | 745.8 | 103.7 | 830.2 | 172.5 |
+| references: `for (const e of map)` | 214.1 | 217.9 | 310.8 | 307.8 |
+| `for (const k of map.keys())` | 23.6 | 23.4 | 48.2 | 53.3 (best 47.6 / 49.3) |
+| `for (const x of arr)` | 20.6 | 21.1 | 80.4 | 81.9 |
+
+The first build of the change made the plain loops 3 ns slower (every step had become a 40-byte value); the final one answers an entry as its key plus a second slot,
+and compiled `IteratorNext` steps the record where it sits (the base took it off the frame's stack and put it back), which brings them back to the base.
+P60 suite, base then after (load 18-25 %), medians in ms, JIT / interp: `mapset` 22.0 / 25.3 before, 14.8 / 15.9 after; `fib` 229.3 / 362.8 against 226.7 / 360.3
+(an alternating 9-run A/B of `fib` JIT: medians 228.0 against 230.3); the others are within noise (`vdom`, `splitjoin`, `regex`, `json` move between identical runs).
+Details in `packages/P82-map-entry-destructuring.md`.

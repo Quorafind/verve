@@ -21,6 +21,7 @@ use crate::{
     Context, JsObject, JsValue,
     builtins::{
         Array,
+        iterable::{Step, entry_destructuring_is_unobservable},
         typed_array::object::{
             TypedArray, typed_array_element_get_shortcut, typed_array_element_set_shortcut,
         },
@@ -374,11 +375,20 @@ pub(crate) unsafe extern "C" fn jit_iterator_next(
     _: u32,
 ) -> u32 {
     guarded(state, |context, _, _| {
-        // The record is taken out while it is stepped, as the interpreter's handler does.
-        let mut record = context.vm.frame_mut().iterators.pop()?;
-        let stepped = record.step_quietly(context);
-        context.vm.frame_mut().iterators.push(record);
-        stepped.ok()
+        // Stepped where it sits, as the interpreter's handler does: a quiet step runs no
+        // JavaScript, so nothing can reach this frame's iterator stack meanwhile.
+        let record = context.vm.frame().iterators.last()?;
+        let stepper = record.stepper()?;
+        let iterator = record.iterator().clone();
+        let mut second = None;
+        let step = stepper
+            .advance_quietly(&iterator, context, &mut second)
+            .ok()?;
+        let record = context.vm.frame_mut().iterators.last_mut()?;
+        record
+            .finish_unboxed_step(Ok(step), second)
+            .ok()
+            .map(|_| ())
     })
 }
 
@@ -404,14 +414,37 @@ pub(crate) unsafe extern "C" fn jit_iterator_value(
     _: u32,
 ) -> u32 {
     guarded(state, |context, _, rp| {
-        let value = context
-            .vm
-            .frame()
-            .iterators
-            .last()?
-            .unboxed_value()?
-            .clone();
+        let record = context.vm.frame().iterators.last()?;
+        let value = if let Some(value) = record.unboxed_value() {
+            value.clone()
+        } else {
+            record.unboxed_step()?.into_value(context)
+        };
         set_register(context, rp, dst, value);
+        Some(())
+    })
+}
+
+/// `IteratorEntry` of an entry whose array destructuring cannot be observed; any other case is
+/// the interpreter's.
+pub(crate) unsafe extern "C" fn jit_iterator_entry(
+    state: *mut JitState,
+    key: u32,
+    value: u32,
+    fast: u32,
+) -> u32 {
+    guarded(state, |context, _, rp| {
+        let Step::Entry(entry_key, entry_value) =
+            context.vm.frame().iterators.last()?.unboxed_step()?
+        else {
+            return None;
+        };
+        if !entry_destructuring_is_unobservable(context) {
+            return None;
+        }
+        set_register(context, rp, key, entry_key);
+        set_register(context, rp, value, entry_value);
+        set_register(context, rp, fast, true.into());
         Some(())
     })
 }

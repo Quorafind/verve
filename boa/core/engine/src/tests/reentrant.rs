@@ -151,11 +151,22 @@ mod declines_a_borrowed_object {
         let iterator = object(context, "[1, 2][Symbol.iterator]()");
         {
             let _writing = iterator.borrow_mut();
-            assert!(ArrayIterator::advance_dense(&iterator).is_err());
+            assert!(ArrayIterator::advance_dense(&iterator, &mut None).is_err());
         }
         assert_eq!(
-            ArrayIterator::advance_dense(&iterator).ok().flatten(),
+            ArrayIterator::advance_dense(&iterator, &mut None)
+                .ok()
+                .flatten(),
             Some(JsValue::from(1))
         );
+        let entries = object(context, "['a'].entries()");
+        let mut second = None;
+        assert_eq!(
+            ArrayIterator::advance_dense(&entries, &mut second)
+                .ok()
+                .flatten(),
+            Some(JsValue::from(0))
+        );
+        assert_eq!(second, Some(crate::js_string!("a").into()));
     }
 }

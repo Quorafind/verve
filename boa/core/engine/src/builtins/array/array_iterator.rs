@@ -10,7 +10,8 @@ use crate::builtins::iterable::Declined;
 use crate::{
     Context, JsData, JsResult,
     builtins::{
-        Array, BuiltInBuilder, IntrinsicObject, JsValue, iterable::step_to_result_object,
+        BuiltInBuilder, IntrinsicObject, JsValue,
+        iterable::{join_step, step_to_result_object},
         typed_array::TypedArray,
     },
     context::intrinsics::Intrinsics,
@@ -99,17 +100,23 @@ impl ArrayIterator {
         let object = this
             .as_object()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
-        let step = Self::advance(&object, context)?;
+        let mut second = None;
+        let step = Self::advance(&object, context, &mut second)?
+            .map(|first| join_step(first, second, context));
         Ok(step_to_result_object(step, context))
     }
 
-    /// [`advance`](Self::advance) for the common case that needs no JavaScript: a value
+    /// [`advance`](Self::advance) for the common case that needs no JavaScript: a value or entry
     /// iterator over a plain array, whose `length` is an integer and whose next element is an
     /// ordinary dense one. [`Declined`], with nothing changed, for any other.
     #[cfg(feature = "jit")]
-    pub(crate) fn advance_dense(object: &JsObject) -> Result<Option<JsValue>, Declined> {
+    pub(crate) fn advance_dense(
+        object: &JsObject,
+        second: &mut Option<JsValue>,
+    ) -> Result<Option<JsValue>, Declined> {
         let mut iterator = object.try_downcast_mut::<Self>().ok_or(Declined)?;
-        if !matches!(iterator.kind, PropertyNameKind::Value) || !iterator.array.is_array() {
+        let kind = iterator.kind;
+        if matches!(kind, PropertyNameKind::Key) || !iterator.array.is_array() {
             return Err(Declined);
         }
         if iterator.done {
@@ -135,18 +142,27 @@ impl ArrayIterator {
             .ok_or(Declined)?;
         drop(array);
         iterator.next_index = index + 1;
+        if matches!(kind, PropertyNameKind::KeyAndValue) {
+            *second = Some(value);
+            return Ok(Some(index.into()));
+        }
         Ok(Some(value))
     }
 
     /// The body of `next` without the result object: the next value, or `None` once the
-    /// iterator is exhausted. Every read `next` makes of the array happens here.
+    /// iterator is exhausted. Every read `next` makes of the array happens here. An entry
+    /// iterator answers the index and the element, not the array of them.
     ///
     /// The iterator is not borrowed while the array is read, since reading `length` or an
     /// element may run user code (a Proxy trap, a getter) that calls `next` on this same
     /// iterator, or that iterates the iterator itself. As in V8, the index is read first, the
     /// step stores `index + 1` once `length` is known and before the element is read, and what a
     /// re-entrant call stored in between is overwritten.
-    pub(crate) fn advance(object: &JsObject, context: &mut Context) -> JsResult<Option<JsValue>> {
+    pub(crate) fn advance(
+        object: &JsObject,
+        context: &mut Context,
+        second: &mut Option<JsValue>,
+    ) -> JsResult<Option<JsValue>> {
         let (array, index, kind) = {
             let iterator = Self::borrow_mut(object)?;
             if iterator.done {
@@ -185,8 +201,8 @@ impl ArrayIterator {
             PropertyNameKind::Value => array.get(index, context).map(Some),
             PropertyNameKind::KeyAndValue => {
                 let element_value = array.get(index, context)?;
-                let result = Array::create_array_from_list([index.into(), element_value], context);
-                Ok(Some(result.into()))
+                *second = Some(element_value);
+                Ok(Some(index.into()))
             }
         }
     }
