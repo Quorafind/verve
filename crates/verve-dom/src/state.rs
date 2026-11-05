@@ -185,9 +185,13 @@ pub struct State {
     /// The history's entries: `pushState`'s states and their addresses, and where it stands.
     pub history: Vec<(JsValue, String)>,
     pub history_at: usize,
+    /// `base_url()` for the document as it was at a revision: (revision, address, base).
+    base_cache: std::cell::RefCell<Option<(u64, url::Url, url::Url)>>,
     pub next_id: u32,
     /// Moves when something outside the arena changed: a sheet, the viewport, the title.
     pub revision: u64,
+    /// The page's loading.
+    pub load: crate::load::Load,
 }
 
 impl State {
@@ -238,9 +242,28 @@ impl State {
             window_focused: true,
             fragments: HashMap::new(),
             history_at: 0,
+            base_cache: Default::default(),
             next_id: 1,
             revision: 0,
+            load: Default::default(),
         }
+    }
+
+    /// What relative addresses resolve against: the first `<base href>`, else the document's own.
+    pub fn base_url(&self) -> url::Url {
+        if let Some((revision, url, base)) = &*self.base_cache.borrow()
+            && *revision == self.dom.revision
+            && *url == self.url
+        {
+            return base.clone();
+        }
+        let base = self.dom.query(self.dom.document, "base[href]");
+        let href = base.and_then(|node| self.dom.get_attr(node, "href"));
+        let base = href
+            .and_then(|href| self.url.join(href.trim()).ok())
+            .unwrap_or_else(|| self.url.clone());
+        *self.base_cache.borrow_mut() = Some((self.dom.revision, self.url.clone(), base.clone()));
+        base
     }
 
     pub fn id(&mut self) -> u32 {

@@ -89,6 +89,13 @@ pub fn parse_into(dom: &mut Dom, parent: NodeId, markup: &str) {
     parse(dom, parent, markup, Context::Fragment);
 }
 
+/// Same, for a fragment whose scripts run when it is put in a page (a range's contextual
+/// fragment; `innerHTML`'s never do).
+pub fn parse_runnable(dom: &mut Dom, parent: NodeId, markup: &str) {
+    parse_into(dom, parent, markup);
+    dom.let_scripts_run(parent);
+}
+
 /// The three a whole document's markup goes between, when `document` has them.
 fn document_context(dom: &Dom, document: NodeId) -> Option<(Context, NodeId)> {
     let html = dom
@@ -126,6 +133,12 @@ pub struct StreamParser {
     parser: Parser,
     /// The markup given and not yet read.
     text: String,
+    /// How much of the front of `text` scripts wrote (`document.write`).
+    inserted: usize,
+    /// How many of those written bytes lie after the insertion point: the next write goes at
+    /// `inserted - tail`. HTML's "insertion point", kept as a distance from the end of what was
+    /// written, which neither the parser reading nor a write at the point changes.
+    tail: usize,
     eof: bool,
 }
 
@@ -137,6 +150,8 @@ impl StreamParser {
         Self {
             parser: Parser::new(dom, parent, context),
             text: String::new(),
+            inserted: 0,
+            tail: 0,
             eof: false,
         }
     }
@@ -151,11 +166,6 @@ impl StreamParser {
         self.eof = true;
     }
 
-    /// Whether [`StreamParser::finish`] was called.
-    pub fn is_finished(&self) -> bool {
-        self.eof
-    }
-
     /// Reads on to the next `<script>`, or as far as the markup given goes.
     pub fn step(&mut self, dom: &mut Dom) -> Step {
         let feed = Feed {
@@ -164,6 +174,8 @@ impl StreamParser {
         };
         let (used, script) = self.parser.scan(dom, &self.text, feed);
         self.text.drain(..used);
+        self.inserted = self.inserted.saturating_sub(used);
+        self.tail = self.tail.min(self.inserted);
         match script {
             Some(script) => Step::Script(script),
             None if self.eof && self.text.is_empty() => Step::Done,
@@ -171,9 +183,37 @@ impl StreamParser {
         }
     }
 
-    /// `document.write` while a script runs: the text goes in at the parser's place.
+    /// `document.write` while a script runs: the text goes in at the insertion point, after
+    /// what earlier writes put there.
     pub fn insert(&mut self, text: &str) {
-        self.text.insert_str(0, text);
+        self.text.insert_str(self.inserted - self.tail, text);
+        self.inserted += text.len();
+    }
+
+    /// A parser-inserted script is about to run: what it writes goes right after it. Answers
+    /// what to give [`StreamParser::leave_script`] when it has run.
+    pub fn enter_script(&mut self) -> usize {
+        std::mem::replace(&mut self.tail, self.inserted)
+    }
+
+    /// The script is done: writes go where they went before it.
+    pub fn leave_script(&mut self, saved: usize) {
+        self.tail = saved;
+    }
+
+    /// Reads what was [`inserted`](StreamParser::insert) up to the insertion point and no more,
+    /// as far as it goes: a script it writes runs before `document.write` returns. What lies
+    /// after the point is an outer script's text, read when that script is done.
+    pub fn step_inserted(&mut self, dom: &mut Dom) -> Step {
+        let feed = Feed {
+            pause: true,
+            eof: false,
+        };
+        let point = self.inserted - self.tail;
+        let (used, script) = self.parser.scan(dom, &self.text[..point], feed);
+        self.text.drain(..used);
+        self.inserted -= used;
+        script.map_or(Step::NeedMore, Step::Script)
     }
 }
 
@@ -500,7 +540,7 @@ fn open_element<'a>(
             dom.append(element, node);
         }
         rest = rest[end..].find('>').map_or("", |gt| &rest[end + gt + 1..]);
-        if feed.pause && name == "script" {
+        if feed.pause && name == "script" && !stack.iter().any(|o| o.tag == "template") {
             return Tag::Script(rest, element);
         }
         return Tag::Read(rest);

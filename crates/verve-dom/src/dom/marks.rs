@@ -36,8 +36,31 @@ impl Dom {
         self.started.insert(id);
     }
 
+    /// Lets the scripts under `root` run when they are put in a page, unlike those `innerHTML`
+    /// made (a contextual fragment's do).
+    pub fn let_scripts_run(&mut self, root: NodeId) {
+        for id in self.shadow_including_tree(root) {
+            if self.get(id).and_then(|n| n.tag()) == Some("script") {
+                self.started.remove(&id);
+            }
+        }
+    }
+
     /// Whether the `<script>` `id` has run or never will.
     pub fn is_started(&self, id: NodeId) -> bool {
         self.started.contains(&id)
+    }
+
+    /// Whether `id` is inside a `<template>`: its contents are inert, nothing in them runs or
+    /// loads.
+    pub fn in_template(&self, id: NodeId) -> bool {
+        let mut at = self.parent(id);
+        while let Some(node) = at {
+            if self.get(node).and_then(|n| n.tag()) == Some("template") {
+                return true;
+            }
+            at = self.parent(node);
+        }
+        false
     }
 }

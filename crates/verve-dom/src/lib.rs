@@ -33,6 +33,7 @@ pub mod field;
 pub mod html;
 mod inner_text;
 mod input;
+mod load;
 mod media;
 mod rect;
 mod snapshot;
@@ -53,6 +54,7 @@ pub use css::{Computed, Environment, Style};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
 pub use field::Draft;
 pub use input::{Key, Modifiers, Pointer};
+pub use load::{Destination, LoadError, LoadEvent, LoadRequest, LoadResult, Loader, Ready};
 pub use media::{
     MediaCommand, MediaCommandKind, MediaError, MediaSettings, MediaState, MediaUpdate,
 };
@@ -128,6 +130,8 @@ pub struct Options {
     pub storage: Option<Box<dyn StorageBackend>>,
     /// `document.title` when the page has no `<title>`.
     pub title: String,
+    /// What the page loads its scripts, sheets and images through; `None` loads nothing.
+    pub loader: Option<Box<dyn Loader>>,
 }
 
 impl Default for Options {
@@ -144,6 +148,7 @@ impl Default for Options {
             stylesheets: Vec::new(),
             storage: None,
             title: String::new(),
+            loader: None,
         }
     }
 }
@@ -152,7 +157,7 @@ impl Default for Options {
 /// and the classes and functions of the web platform (see the README for the list). Answers
 /// the handle whoever draws the document keeps. A runtime has one document; installing again
 /// answers the one it has.
-pub fn install(runtime: &mut verve::Runtime, options: Options) -> Result<Document, String> {
+pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Document, String> {
     if let Some(document) = Document::of(runtime) {
         return Ok(document);
     }
@@ -172,6 +177,8 @@ pub fn install(runtime: &mut verve::Runtime, options: Options) -> Result<Documen
         };
         s.frame_clock = options.frames;
         s.title_fallback = options.title.clone();
+        s.load.loader = options.loader.take().map(Rc::from);
+        s.load.active = s.load.loader.is_some();
         let document = s.dom.document;
         if options.user_agent_sheet {
             s.sheets.push(SheetRecord {
@@ -207,6 +214,7 @@ fn install_classes(context: &mut Context, options: &Options) -> JsResult<()> {
     bind::document::install(context)?;
     bind::window::install(context, options)?;
     bind::fetch::install(context)?;
+    load::install(context)?;
     bind::platform::install(context)?;
     bind::observers::install(context)?;
     bind::xhr::install(context)?;

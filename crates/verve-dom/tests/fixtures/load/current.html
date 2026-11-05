@@ -1,0 +1,7 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script>window.__log = [];</script>
+<script id="one">__log.push('inline:' + document.currentScript.id);</script>
+<script src="current.js" id="two"></script>
+</head><body>
+<script>window.addEventListener('load', function () { __log.push('after:' + document.currentScript); });</script>
+</body></html>

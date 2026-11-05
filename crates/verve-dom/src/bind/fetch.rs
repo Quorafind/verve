@@ -5,6 +5,20 @@ use boa_engine::{Context, JsResult, js_string};
 use super::{arg, closure, get, rejected, string, text, type_error};
 use crate::state::shared;
 
+/// The getter of `Response.prototype.url`, as the runtime made it.
+fn response_url_getter(context: &mut Context) -> Option<boa_engine::JsValue> {
+    let global = context.global_object();
+    let response = global.get(js_string!("Response"), context).ok()?;
+    let proto = get(&response, "prototype", context).ok()?;
+    let object = global.get(js_string!("Object"), context).ok()?;
+    let describe = get(&object, "getOwnPropertyDescriptor", context).ok()?;
+    let descriptor = describe
+        .as_callable()?
+        .call(&object, &[proto, text("url")], context)
+        .ok()?;
+    get(&descriptor, "get", context).ok()
+}
+
 pub fn install(context: &mut Context) -> JsResult<()> {
     let global = context.global_object();
     let original = global.get(js_string!("fetch"), context)?;
@@ -12,6 +26,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         .as_callable()
         .ok_or_else(|| type_error("DOM requires the runtime's fetch"))?;
     let request = global.get(js_string!("Request"), context)?;
+    // The page loads its own subresources through this one, whatever it makes of `window.fetch`.
+    shared(context).borrow_mut().load.original_fetch = Some(original.clone().into());
+    shared(context).borrow_mut().load.original_response_url = response_url_getter(context);
     let fetch = closure(
         context,
         "fetch",

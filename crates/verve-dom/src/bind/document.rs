@@ -240,6 +240,12 @@ const DOCUMENT_METHODS: &[Method] = &[
         for value in args {
             markup.push_str(&string(value, cx)?);
         }
+        // While the page is read, what a script writes to the page goes in where the parser is;
+        // a document of the script's own making is not the parser's.
+        let windows = read_dom(cx, |dom| dom.document) == doc;
+        if windows && crate::load::write(cx, &markup) {
+            return Ok(JsValue::undefined());
+        }
         with_dom(cx, |dom| {
             let body = child_tagged(dom, doc, "body").unwrap_or(doc);
             crate::html::parse_into(dom, body, &markup);
@@ -494,7 +500,11 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
             Ok(JsValue::undefined())
         }),
     ),
-    ("readyState", Some(|_, _, _| Ok(text("complete"))), None),
+    (
+        "readyState",
+        Some(|_, _, cx| Ok(text(shared(cx).borrow().load.ready.name()))),
+        None,
+    ),
     (
         "visibilityState",
         Some(|_, _, cx| {
@@ -523,7 +533,14 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
         Some(|_, _, _| Ok(text(""))),
         Some(|_, _, _| Ok(JsValue::undefined())),
     ),
-    ("currentScript", Some(|_, _, _| Ok(JsValue::null())), None),
+    (
+        "currentScript",
+        Some(|_, _, cx| {
+            let current = shared(cx).borrow().load.current_script;
+            Ok(current.map_or(JsValue::null(), |node| super::node::wrap(cx, node)))
+        }),
+        None,
+    ),
     ("fullscreenEnabled", Some(|_, _, _| Ok(true.into())), None),
     (
         "pictureInPictureEnabled",

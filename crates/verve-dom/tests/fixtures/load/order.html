@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>order</title>
+<script>var log = (window.__log = window.__log || []); log.push('inline-head:' + document.readyState);</script>
+<script src="mark.js?n=sync-a"></script>
+<script defer src="mark.js?n=defer-1"></script>
+<script defer src="mark.js?n=defer-2"></script>
+<script>
+document.addEventListener('readystatechange', function () { __log.push('rsc:' + document.readyState); });
+document.addEventListener('DOMContentLoaded', function () { __log.push('DCL'); });
+window.addEventListener('load', function () { __log.push('load:' + document.readyState); });
+</script>
+</head><body>
+<script>__log.push('inline-body:' + document.readyState);</script>
+<script src="mark.js?n=sync-b"></script>
+<p id="after">after</p>
+<script>__log.push('sees-after:' + !!document.getElementById('after'));</script>
+</body></html>
