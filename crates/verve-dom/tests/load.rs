@@ -194,6 +194,20 @@ fn a_script_that_throws_is_an_error_event_and_the_parse_goes_on() {
 }
 
 #[test]
+fn an_image_has_its_size_when_it_loads_and_load_waits_for_it() {
+    let mut page = page(&[]);
+    page.document
+        .navigate_initial(&mut page.runtime, "app://page/image.html");
+    page.finish_loading();
+    // The image events are tasks of their own; Chromium fires them before `load`, here they follow.
+    page.settle_for(10.);
+    let log = page.log();
+    assert!(log.contains(&"load:true".to_owned()), "{log:?}");
+    assert!(log.contains(&"img-load:3x2:true".to_owned()), "{log:?}");
+    assert!(log.contains(&"img-error".to_owned()), "{log:?}");
+}
+
+#[test]
 fn a_module_graph_loads_through_an_import_map() {
     assert_eq!(
         logged("modules.html"),
@@ -281,9 +295,9 @@ fn a_page_in_the_document_never_runs_what_innerhtml_made() {
 }
 
 #[test]
-fn the_title_is_reported_once_the_head_is_read() {
+fn the_title_and_icons_are_reported_once_the_head_is_read() {
     let mut page = page(&[]);
-    let html = "<title> A  page </title><p>x";
+    let html = "<title> A  page </title><link rel='icon' href='/i.png'><link rel='shortcut icon' href='j.ico'><p>x";
     page.document
         .load_html(&mut page.runtime, "app://page/dir/p.html", html);
     page.finish_loading();
@@ -292,6 +306,11 @@ fn the_title_is_reported_once_the_head_is_read() {
         events.contains(&LoadEvent::Title("A page".into())),
         "{events:?}"
     );
+    let icons = LoadEvent::Icons(vec![
+        "app://page/i.png".into(),
+        "app://page/dir/j.ico".into(),
+    ]);
+    assert!(events.contains(&icons), "{events:?}");
 }
 
 #[test]

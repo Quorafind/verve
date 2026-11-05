@@ -1,6 +1,6 @@
-//! `<link>` elements: stylesheets that join the cascade once fetched. A sheet the parser meets in
-//! `<head>` (and whose `media` is the screen's) holds back scripts and the first paint; one the
-//! page adds, or one in `<body>`, only holds back `load`.
+//! `<link>` elements: stylesheets that join the cascade once fetched, and the icons a page
+//! names. A sheet the parser meets in `<head>` (and whose `media` is the screen's) holds back
+//! scripts and the first paint; one the page adds, or one in `<body>`, only holds back `load`.
 
 use boa_engine::Context;
 use url::Url;
@@ -10,7 +10,7 @@ use crate::css::{MediaQuery, Sheet};
 use crate::dom::NodeId;
 use crate::state::{SheetOwner, SheetRecord, State, shared};
 
-/// A `<link>` joined the document: a stylesheet is asked for.
+/// A `<link>` joined the document: a stylesheet is asked for, an icon is noted.
 pub(super) fn discover(context: &mut Context, node: NodeId) {
     let wanted = {
         let state = shared(context);
@@ -29,6 +29,11 @@ pub(super) fn discover(context: &mut Context, node: NodeId) {
             && !tokens.contains(&"alternate")
             && state.dom.get_attr(node, "disabled").is_none()
             && MediaQuery::new(&media).matches(&state.env);
+        if tokens.iter().any(|t| t.ends_with("icon"))
+            && let Some(url) = &url
+        {
+            state.load.icons.push(url.to_string());
+        }
         let blocking = blocks(&state, node);
         match url {
             Some(url) if sheet && state.load.linked.insert(node) => {

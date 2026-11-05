@@ -14,8 +14,8 @@ use std::rc::Rc;
 use url::Url;
 use verve::ImportMap;
 
-use crate::Document;
 use crate::html::{Step, StreamParser};
+use crate::{Document, FontFaceId, FontOutcome, Request};
 
 mod handlers;
 mod modules;
@@ -112,6 +112,7 @@ pub enum LoadEvent {
         url: String,
     },
     Title(String),
+    Icons(Vec<String>),
     /// The parser reached `<body>` with every blocking sheet in: something can be drawn.
     FirstPaintable,
 }
@@ -149,6 +150,8 @@ pub(crate) enum Wait {
     Sheet(crate::dom::NodeId, bool),
     /// A sheet a `<link>`'s sheet `@import`s.
     Import(crate::dom::NodeId, Vec<usize>, bool),
+    Image(String),
+    Font(FontFaceId),
 }
 
 /// How far the page's markup has gone.
@@ -246,6 +249,7 @@ pub(crate) struct Load {
     pub ordered: HashSet<crate::dom::NodeId>,
     /// Stylesheets still coming that scripts wait for.
     pub blocking_sheets: usize,
+    pub icons: Vec<String>,
     /// Events for elements, fired once what has arrived has been dealt with: a task of their
     /// own, after the script that was waiting for the sheet.
     pub notices: Vec<(crate::dom::NodeId, &'static str)>,
@@ -385,12 +389,45 @@ impl Document {
         }
     }
 
-    /// The sheets a sheet `@import`s are asked for through the loader.
+    /// The images and fonts the page asked the embedder for are fetched through the loader.
     fn route_requests(&self, runtime: &mut verve::Runtime) -> bool {
         let wanted = std::mem::take(&mut self.state.borrow_mut().load.wanted);
-        let did = !wanted.is_empty();
+        let mut did = !wanted.is_empty();
         for (url, wait) in wanted {
             net::start(runtime.context(), url, Destination::Style, wait);
+        }
+        let asked: Vec<Request> = {
+            let mut state = self.state.borrow_mut();
+            let (asked, kept) = std::mem::take(&mut state.requests)
+                .into_iter()
+                .partition(|r| matches!(r, Request::Image(_) | Request::LoadFont { .. }));
+            state.requests = kept;
+            asked
+        };
+        did |= !asked.is_empty();
+        for request in asked {
+            let base = self.state.borrow().base_url();
+            match request {
+                Request::Image(url) => match Url::parse(&url) {
+                    Ok(parsed) => net::start(
+                        runtime.context(),
+                        parsed,
+                        Destination::Image,
+                        Wait::Image(url),
+                    ),
+                    Err(_) => self.fail_image(runtime, &url),
+                },
+                Request::LoadFont { face, url } => match base.join(&url) {
+                    Ok(parsed) => net::start(
+                        runtime.context(),
+                        parsed,
+                        Destination::Font,
+                        Wait::Font(face),
+                    ),
+                    Err(_) => self.settle_font(runtime, face, FontOutcome::Failed),
+                },
+                _ => {}
+            }
         }
         did
     }
@@ -420,6 +457,21 @@ impl Document {
             Wait::Sheet(node, blocking) => sheets::fetched(self, node, blocking, result),
             Wait::Import(node, rank, blocking) => {
                 sheets::imported(self, (node, rank, blocking), result)
+            }
+            Wait::Image(url) => match result.body {
+                Ok(bytes) if result.status < 400 => {
+                    self.set_image_bytes(runtime, &url, result.mime.as_deref(), bytes.into())
+                }
+                _ => self.fail_image(runtime, &url),
+            },
+            Wait::Font(face) => {
+                let ok = result.body.is_ok() && result.status < 400;
+                let outcome = if ok {
+                    FontOutcome::Loaded
+                } else {
+                    FontOutcome::Failed
+                };
+                self.settle_font(runtime, face, outcome);
             }
         }
     }
@@ -554,7 +606,7 @@ impl Document {
         did | self.complete(runtime)
     }
 
-    /// The title the page named, once its head is read.
+    /// The title and icons the page named, once its head is read.
     fn announce_page(&self) {
         let mut state = self.state.borrow_mut();
         let title = state
@@ -563,8 +615,12 @@ impl Document {
             .map(|node| state.dom.text_content(node))
             .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
             .unwrap_or_default();
+        let icons = std::mem::take(&mut state.load.icons);
         if !title.is_empty() {
             state.load.events.push(LoadEvent::Title(title));
+        }
+        if !icons.is_empty() {
+            state.load.events.push(LoadEvent::Icons(icons));
         }
     }
 

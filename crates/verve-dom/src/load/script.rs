@@ -92,6 +92,7 @@ pub(super) fn parsed(doc: &Document, runtime: &mut verve::Runtime, node: NodeId)
 struct Found {
     scripts: Vec<NodeId>,
     links: Vec<NodeId>,
+    images: Vec<NodeId>,
 }
 
 /// The roots none of whose ancestors is also among them: a subtree is walked once.
@@ -127,6 +128,8 @@ fn collect(state: &State, roots: &[NodeId]) -> Found {
                 found.scripts.push(id)
             }
             Some("link") if state.dom.is_connected(id) => found.links.push(id),
+            // An image in the page is asked for as it joins it.
+            Some("img") => found.images.push(id),
             _ => {}
         }
     }
@@ -139,11 +142,15 @@ pub(crate) fn connected(context: &mut Context, roots: &[NodeId]) {
     super::handlers::connected(context, roots);
     let found = {
         let state = shared(context);
-        let state = state.borrow();
+        let mut state = state.borrow_mut();
         if !state.load.active {
             return;
         }
-        collect(&state, roots)
+        let found = collect(&state, roots);
+        for image in &found.images {
+            crate::canvas::sync_image(&mut state, *image);
+        }
+        found
     };
     for node in found.scripts {
         prepare(context, node);

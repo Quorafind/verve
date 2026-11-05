@@ -21,6 +21,7 @@ mod element;
 mod fonts;
 mod image;
 mod img;
+pub(crate) use img::sync as sync_image;
 #[cfg(feature = "canvas")]
 mod install;
 #[cfg(feature = "canvas")]
