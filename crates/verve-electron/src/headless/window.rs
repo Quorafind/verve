@@ -8,25 +8,29 @@
 //! - It is created centred on the primary display's work area unless the options give a place
 //!   (the display's whole area if `fullscreen`), shown if `show`, and focused if it is shown
 //!   and focusable. Creating sends no event.
-//! - `Show` shows and focuses; `ShowInactive` shows; `Hide` takes focus away and hides. Each
-//!   sends an event only for the state that changed, `Shown` before `Focus`, `Blur` before
-//!   `Hidden`.
+//! - `Show` shows and focuses; `ShowInactive` shows; `Hide` hides and takes focus away. Each
+//!   sends an event only for the state that changed: `Shown` before `Focus`, `Hidden` before
+//!   `Blur`.
 //! - `Focus` focuses a shown, focusable window; `Blur` takes focus away.
 //! - Sizes are held between the window's `SetMinSize` and `SetMaxSize`. A change of size sends
 //!   `Resized` and a change of place `Moved`, in that order, once, with the new values.
-//! - `Maximize` and `SetFullScreen(true)` remember the bounds and fill the work area and the
-//!   display; undoing them restores the bounds. Each sends its event, then the `Resized` and
-//!   `Moved` the bounds made.
-//! - `Minimize` blurs and sends `Minimized`; `Restore` undoes a minimize (`Restored`) or else a
-//!   maximize.
+//! - `Maximize` remembers the bounds and fills the work area: `Resized`, `Moved`, then `Maximized`.
+//!   `Unmaximize` gives the bounds back: `Resized`, then `Unmaximized`, and no `Moved` even though
+//!   the place changed.
+//! - `SetFullScreen(true)` does the same with the whole display, sending `EnterFullScreen` and
+//!   then the `Resized` and `Moved` the bounds made; `false` sends `LeaveFullScreen` first.
+//! - `Minimize` sends `Minimized`, then `Blur`; `Restore` undoes a minimize (`Restored`, then
+//!   `Focus`) or else a maximize.
 //! - `Close` sends `CloseRequested` and changes nothing; the answer `CloseAnswer { prevented:
 //!   false }`, like `Destroy`, closes the window. `prevented: true` keeps it as it is.
 //!
 //! Operations not listed — progress bars, icons, opacity, taskbar and mouse flags — are recorded
 //! by the shell and change nothing here.
 //!
-//! Where Electron 39's documentation does not fix the order of two events, it is the order
-//! above; P34 confirms each against a real window.
+//! The orders of everything but `Center` and `Destroy` are what Electron 39.8.10 sent on Windows,
+//! frozen in the `window-state` fixture's `expected.json`; those two are this shell's own, for P34
+//! to confirm. Electron also sends `move` on a first `show` and on `minimize`, and `focus` twice
+//! on `restore`: the system's doing, not repeated here.
 
 use crate::ids::{ContentsId, WindowId};
 use crate::msg::{Display, Rect, WindowEvent, WindowOp, WindowOptions};
@@ -122,8 +126,8 @@ impl Window {
             }
             WindowOp::ShowInactive => self.set_visible(true, &mut events),
             WindowOp::Hide => {
-                self.set_focus(false, &mut events);
                 self.set_visible(false, &mut events);
+                self.set_focus(false, &mut events);
             }
             WindowOp::Focus => self.set_focus(true, &mut events),
             WindowOp::Blur => self.set_focus(false, &mut events),
@@ -252,9 +256,9 @@ impl Window {
 
     fn minimize(&mut self, events: &mut Vec<WindowEvent>) {
         if !self.shown.minimized {
-            self.set_focus(false, events);
             self.shown.minimized = true;
             events.push(WindowEvent::Minimized);
+            self.set_focus(false, events);
         }
     }
 
@@ -266,15 +270,18 @@ impl Window {
             self.normal = self.shown.bounds;
         }
         self.shown.maximized = true;
-        events.push(WindowEvent::Maximized);
         self.move_to(area, events);
+        events.push(WindowEvent::Maximized);
     }
 
     fn unmaximize(&mut self, events: &mut Vec<WindowEvent>) {
         if self.shown.maximized {
             self.shown.maximized = false;
+            let mut moved = Vec::new();
+            self.move_to(self.normal, &mut moved);
+            moved.retain(|event| !matches!(event, WindowEvent::Moved { .. }));
+            events.extend(moved);
             events.push(WindowEvent::Unmaximized);
-            self.move_to(self.normal, events);
         }
     }
 
@@ -282,6 +289,7 @@ impl Window {
         if self.shown.minimized {
             self.shown.minimized = false;
             events.push(WindowEvent::Restored);
+            self.set_focus(true, events);
         } else {
             self.unmaximize(events);
         }
@@ -365,7 +373,7 @@ mod tests {
         assert!(apply(&mut window, WindowOp::Show).is_empty());
         assert_eq!(
             names(apply(&mut window, WindowOp::Hide)),
-            ["Blur", "Hidden"]
+            ["Hidden", "Blur"]
         );
         assert_eq!(names(apply(&mut window, WindowOp::ShowInactive)), ["Shown"]);
         assert!(!window.shown.focused);
@@ -423,10 +431,10 @@ mod tests {
         let mut window = window(&WindowOptions::default());
         let before = window.shown.bounds;
         let events = apply(&mut window, WindowOp::Maximize);
-        assert_eq!(names(events), ["Maximized", "Resized", "Moved"]);
+        assert_eq!(names(events), ["Resized", "Moved", "Maximized"]);
         assert_eq!(window.shown.bounds.height, 1040.);
         let events = apply(&mut window, WindowOp::Restore);
-        assert_eq!(names(events), ["Unmaximized", "Resized", "Moved"]);
+        assert_eq!(names(events), ["Resized", "Unmaximized"]);
         assert_eq!(window.shown.bounds, before);
     }
 
@@ -434,8 +442,11 @@ mod tests {
     fn minimizing_blurs_and_restoring_comes_back() {
         let mut window = window(&WindowOptions::default());
         let minimized = names(apply(&mut window, WindowOp::Minimize));
-        assert_eq!(minimized, ["Blur", "Minimized"]);
-        assert_eq!(names(apply(&mut window, WindowOp::Restore)), ["Restored"]);
+        assert_eq!(minimized, ["Minimized", "Blur"]);
+        assert_eq!(
+            names(apply(&mut window, WindowOp::Restore)),
+            ["Restored", "Focus"]
+        );
         assert!(window.shown.visible && !window.shown.minimized);
     }
 
