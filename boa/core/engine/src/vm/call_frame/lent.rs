@@ -1,6 +1,11 @@
 //! [`Lent`], a handle the frame of a call can hold without having counted it.
 
-use std::{fmt, mem::ManuallyDrop, ops::Deref, ptr};
+use std::{
+    fmt,
+    mem::ManuallyDrop,
+    ops::{Deref, DerefMut},
+    ptr,
+};
 
 use boa_gc::{Finalize, Trace, Tracer};
 
@@ -90,6 +95,17 @@ impl<T: Trace> Deref for Lent<T> {
     #[inline]
     fn deref(&self) -> &T {
         &self.value
+    }
+}
+
+impl<T: Trace + Clone> DerefMut for Lent<T> {
+    /// Writing to a handle makes it the frame's own first: a lent one is shared, and read only.
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        if !self.owned {
+            self.make_owned();
+        }
+        &mut self.value
     }
 }
 

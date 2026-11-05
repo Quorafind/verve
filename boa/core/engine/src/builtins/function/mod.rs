@@ -1090,10 +1090,10 @@ pub(crate) fn function_call(
 
 /// What a frame of an ordinary function is made from: its code, its environments, its script
 /// or module and its realm. The code, the script or module and the realm are lent by the function
-/// (see [`Lent`]); the environments are the frame's own copy, which it pushes onto and pops from.
+/// and the environments are lent too, until the frame first pushes or pops one.
 pub(crate) type FunctionParts = (
     Lent<Gc<CodeBlock>>,
-    EnvironmentStack,
+    Lent<EnvironmentStack>,
     Lent<Option<ActiveRunnable>>,
     Lent<Realm>,
 );
@@ -1122,7 +1122,7 @@ pub(crate) unsafe fn lend_function_parts(function: &OrdinaryFunction) -> Functio
     unsafe {
         (
             Lent::lend(&function.code),
-            function.environments.clone(),
+            Lent::lend(&function.environments),
             Lent::lend(&function.script_or_module),
             Lent::lend(&function.realm),
         )
@@ -1133,7 +1133,7 @@ pub(crate) unsafe fn lend_function_parts(function: &OrdinaryFunction) -> Functio
 pub(crate) fn own_function_parts(function: &OrdinaryFunction) -> FunctionParts {
     (
         Lent::owned(function.code.clone()),
-        function.environments.clone(),
+        Lent::owned(function.environments.clone()),
         Lent::owned(function.script_or_module.clone()),
         Lent::owned(function.realm.clone()),
     )

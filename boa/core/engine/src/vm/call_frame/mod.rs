@@ -79,7 +79,7 @@ pub struct CallFrame {
     pub(crate) active_runnable: Lent<Option<ActiveRunnable>>,
 
     /// \[\[Environment\]\]
-    pub(crate) environments: EnvironmentStack,
+    pub(crate) environments: Lent<EnvironmentStack>,
 
     /// \[\[Realm\]\]
     pub(crate) realm: Lent<Realm>,
@@ -103,7 +103,7 @@ impl Clone for CallFrame {
             binding_stack: self.binding_stack.clone(),
             loop_iteration_count: self.loop_iteration_count,
             active_runnable: self.active_runnable.duplicate(),
-            environments: self.environments.clone(),
+            environments: self.environments.duplicate(),
             realm: self.realm.duplicate(),
             flags: self.flags,
         }
@@ -172,7 +172,7 @@ impl CallFrame {
         Self::with_handles(
             Lent::owned(code_block),
             Lent::owned(active_runnable),
-            environments,
+            Lent::owned(environments),
             Lent::owned(realm),
         )
     }
@@ -181,7 +181,7 @@ impl CallFrame {
     pub(crate) fn with_handles(
         code_block: Lent<Gc<CodeBlock>>,
         active_runnable: Lent<Option<ActiveRunnable>>,
-        environments: EnvironmentStack,
+        environments: Lent<EnvironmentStack>,
         realm: Lent<Realm>,
     ) -> Self {
         Self {
@@ -206,6 +206,7 @@ impl CallFrame {
     pub(crate) fn own_handles(&mut self) {
         self.code_block.make_owned();
         self.active_runnable.make_owned();
+        self.environments.make_owned();
         self.realm.make_owned();
     }
 

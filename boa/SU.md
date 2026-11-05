@@ -742,11 +742,13 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   and, for an entry, the value in a second slot, so the common one-value step stays one value wide.
 - `boa_engine`, `vm/call_frame`, `builtins/function`, `context`, `vm/jit/call.rs` (P84): the frame of
   an ordinary function no longer clones the handles it reaches through its callee. Its code
-  block, script or module and realm are `Lent` (a bitwise copy of the function's own, not counted
+  block, script or module, realm and environments are `Lent` (a bitwise copy of the function's own, not counted
   and not dropped) when the function is the value in the frame's function slot: the VM stack
-  keeps it alive, by a counted reference, until the frame is popped, and those three fields of
-  the function are set when it is made and replaced only by a lazy function's compile, which
-  runs before the frame exists. A call that comes through another function (a proxy without an
+  keeps it alive, by a counted reference, until the frame is popped, and those four fields of
+  the function are set when it is made, except that a lazy function's compile replaces `code`
+  before the frame exists and `PushPrivateEnvironment` adds the private environment to the
+  `environments` of the class constructor that `GetFunction` has just made (before any script can
+  reach it). The frame copies the environments on its first push or pop (`DerefMut`). A call that comes through another function (a proxy without an
   `apply`/`construct` trap, which can be revoked while its target runs; a bound function) leaves
   the forwarder in the slot, and the frame then owns its handles (`callee_parts`). Whatever can
   outlive the slot makes the handles its own first: cloning a frame counts them,
