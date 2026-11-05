@@ -8,17 +8,19 @@
 //! page may wait for the main process is what keeps the whole thing from deadlocking.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use verve::isolate::{Health, Isolate, Options as IsolateOptions};
+use verve::vfs::Overlay;
 
 use crate::ids::{ContentsId, Ids, WindowId};
+use crate::launcher::Start;
 use crate::msg::{
-    FromRenderer, FromShell, GoneReason, RendererView, ToRenderer, ToRendererInput, ToShell,
-    WebPreferences,
+    AppEvent, FromRenderer, FromShell, GoneReason, RendererView, ToRenderer, ToRendererInput,
+    ToShell, WebPreferences,
 };
 use crate::{ElectronOptions, MainGuest, RendererGuest};
 
@@ -121,6 +123,15 @@ impl RendererSlot {
     }
 }
 
+/// What the main process's isolate runs first.
+#[derive(Clone)]
+pub enum Program {
+    /// The app's own script: an absolute path, or one resolved against the app's directory.
+    Script(PathBuf),
+    /// Electron's default app: a window on `url`, or on the welcome page.
+    DefaultApp(Option<String>),
+}
+
 /// The threads of one app, and everything they say. Made once, with [`Hub::new`], and shared
 /// as an `Arc`.
 pub struct Hub {
@@ -134,6 +145,11 @@ pub struct Hub {
     exit: Mutex<Option<i32>>,
     /// Every console line, once someone asked to keep them: a long-running app is not made to.
     console: Mutex<Option<Vec<ConsoleLine>>>,
+    launch: Mutex<Option<Arc<Start>>>,
+    /// Whether [`Hub::set_launch`] was called: an app that was not launched has a profile of
+    /// its own to clean up.
+    told: AtomicBool,
+    overlay: Mutex<Option<Arc<dyn Overlay>>>,
 }
 
 impl Hub {
@@ -148,7 +164,51 @@ impl Hub {
             shell: Mutex::new(None),
             exit: Mutex::new(None),
             console: Mutex::new(None),
+            launch: Mutex::new(None),
+            told: AtomicBool::new(false),
+            overlay: Mutex::new(None),
         })
+    }
+
+    /// Says how the app was started: the command line, and the app it named. Before
+    /// [`Hub::start_main`]; an app that was not told is a development app in `options.app_path`.
+    pub fn set_launch(&self, start: Start) {
+        *lock(&self.launch) = Some(Arc::new(start));
+        self.told.store(true, Ordering::SeqCst);
+    }
+
+    /// How the app was started.
+    pub fn launch(&self) -> Arc<Start> {
+        let mut launch = lock(&self.launch);
+        Arc::clone(
+            launch
+                .get_or_insert_with(|| Arc::new(Start::development(self.options.app_path.clone()))),
+        )
+    }
+
+    /// The files packed into the app's `app.asar`, which every isolate reads through: one
+    /// overlay, so an archive is opened once. Before [`Hub::start_main`].
+    pub fn set_overlay(&self, overlay: Arc<dyn Overlay>) {
+        *lock(&self.overlay) = Some(overlay);
+    }
+
+    /// The text of the file at `path`, as the app sees it: from the overlay when it holds the
+    /// file, else from the disk.
+    ///
+    /// # Errors
+    ///
+    /// Why it could not be read.
+    pub fn read_text(&self, path: &Path) -> std::io::Result<String> {
+        let packed = self.overlay().and_then(|overlay| overlay.read(path));
+        match packed {
+            Some(bytes) => Ok(String::from_utf8_lossy(&bytes?).into_owned()),
+            None => std::fs::read_to_string(path),
+        }
+    }
+
+    /// The overlay [`Hub::set_overlay`] set, if any.
+    pub fn overlay(&self) -> Option<Arc<dyn Overlay>> {
+        lock(&self.overlay).clone()
     }
 
     /// What the app was started with.
@@ -161,13 +221,19 @@ impl Hub {
     /// a message for the main process sent while the script runs waits its turn instead of being
     /// lost, and a script that never returns can be interrupted.
     pub fn start_main(self: &Arc<Self>, entry: PathBuf) {
-        let entry = if entry.is_absolute() {
-            entry
-        } else {
-            self.options.app_path.join(entry)
+        self.start(Program::Script(entry));
+    }
+
+    /// [`Hub::start_main`] for any [`Program`]. When a shell is registered the app is ready as
+    /// soon as the program has run: its [`AppEvent::Ready`] queues behind it.
+    pub fn start(self: &Arc<Self>, program: Program) {
+        let program = match program {
+            Program::Script(entry) if !entry.is_absolute() => {
+                Program::Script(self.options.app_path.join(entry))
+            }
+            other => other,
         };
         let hub = Arc::clone(self);
-        let made = entry.clone();
         let weak = Arc::downgrade(self);
         let wake = move || {
             if let Some(hub) = weak.upgrade() {
@@ -176,15 +242,20 @@ impl Hub {
         };
         let isolate = Isolate::spawn(
             isolate_options("electron-main".into()),
-            move || MainGuest::new(hub, made),
+            move || MainGuest::new(hub),
             wake,
         );
         match isolate {
             Ok(isolate) => {
+                // The Hub holds the isolate before its first job runs: that job may send the main
+                // process a job of its own, as `app.quit()` does.
                 let poke = isolate.poker();
-                isolate.send(move |guest, _| guest.set_waker(poke));
-                isolate.send(move |guest, _| guest.run(&entry));
                 *lock(&self.main) = Some(isolate);
+                self.to_main(move |guest| guest.set_waker(poke));
+                self.to_main(move |guest| guest.run(program));
+                if lock(&self.shell).is_some() {
+                    self.from_shell(FromShell::App(AppEvent::Ready));
+                }
             }
             Err(error) => {
                 // No thread to run the app's script on: the app cannot start at all.
@@ -352,6 +423,13 @@ impl Hub {
                 return;
             }
             *exit = Some(exit_code);
+        }
+        if !self.told.load(Ordering::SeqCst)
+            && let Some(profile) = self.launch().user_data_dir()
+        {
+            // The profile of an app nobody launched (a test's) is its own, made for it by
+            // `Start::development`, and not the user's to keep. It was made, if at all, at `ready`.
+            let _ = std::fs::remove_dir_all(profile);
         }
         let main = lock(&self.main).take();
         if let Some(main) = &main {

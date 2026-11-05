@@ -11,7 +11,6 @@ mod layout;
 mod window;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
@@ -378,13 +377,13 @@ impl HeadlessShell {
 
 /// Runs the app whose script is `entry` on a headless shell that traces to standard error, and
 /// answers the code it ends with: `electron --headless`.
-pub fn run(hub: &Arc<Hub>, entry: PathBuf) -> i32 {
+pub fn run(hub: &Arc<Hub>, program: crate::hub::Program) -> i32 {
     let options = HeadlessOptions {
         trace: true,
         ..HeadlessOptions::default()
     };
     let shell = HeadlessShell::new(hub, options);
-    hub.start_main(entry);
+    hub.start(program);
     loop {
         if let Some(code) = shell.exit_code() {
             return code;

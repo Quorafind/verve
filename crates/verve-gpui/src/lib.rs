@@ -12,11 +12,11 @@
 mod dom_view;
 mod shell;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{App, AppContext as _, QuitMode};
 use verve_electron::Hub;
+use verve_electron::hub::Program;
 use verve_electron::hub::ShellPort;
 use verve_electron::msg::ToShell;
 
@@ -25,7 +25,7 @@ use crate::shell::{Messages, Shell};
 /// Runs an app: the OS thread's GPUI application, the windows the main process asks it for, and
 /// the app's script — which starts once the shell is listening. Answers the code the process
 /// leaves with.
-pub fn run(hub: Arc<Hub>, entry: PathBuf) -> i32 {
+pub fn run(hub: Arc<Hub>, program: Program) -> i32 {
     let (wake, woken) = async_channel::bounded(1);
     let messages = Messages::default();
     hub.set_shell(Arc::new(Port {
@@ -47,7 +47,7 @@ pub fn run(hub: Arc<Hub>, entry: PathBuf) -> i32 {
                 }
             })
             .detach();
-            app.start_main(entry);
+            app.start(program);
         });
     hub.exit_code().unwrap_or(0)
 }

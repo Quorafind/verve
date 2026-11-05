@@ -14,6 +14,7 @@ fn run_headless(name: &str, main_js: &str) -> (Option<i32>, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_electron"))
         .arg("--headless")
         .arg(&main)
+        .arg(format!("--user-data-dir={}", dir.join("profile").display()))
         .output()
         .expect("the electron binary runs");
     let _ = std::fs::remove_dir_all(&dir);

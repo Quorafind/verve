@@ -6828,9 +6828,12 @@ version = "0.1.0"
 dependencies = [
  "boa_engine",
  "serde_json",
+ "sha2",
  "url",
  "verve",
+ "verve-asar",
  "verve-dom",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

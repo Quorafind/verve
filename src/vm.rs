@@ -398,7 +398,9 @@ fn timeout_of(options: &JsValue, context: &mut Context) -> JsResult<Option<u64>>
     Ok(Some(ms as u64))
 }
 
-fn interrupted(error: &JsError) -> bool {
+/// Whether `error` is the host's interrupt (`InterruptHandle::interrupt`) coming back: not a
+/// failure of the script, so nothing reports it.
+pub(crate) fn interrupted(error: &JsError) -> bool {
     matches!(
         error.as_engine(),
         Some(EngineError::RuntimeLimit(RuntimeLimitError::Interrupted))

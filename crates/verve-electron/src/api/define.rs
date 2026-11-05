@@ -26,7 +26,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use boa_engine::{Context, JsError, JsObject, JsResult, JsString, JsValue, object::WeakJsObject};
+use boa_engine::{
+    Context, JsError, JsObject, JsResult, JsString, JsValue, js_string, object::WeakJsObject,
+};
 use verve::native::{self, arg, invalid_arg_type, invalid_arg_value};
 
 /// The class an Electron class extends to emit events: the realm's `EventEmitter`.
@@ -62,6 +64,36 @@ pub fn emit(
 ) -> JsResult<()> {
     verve::events::emit_event(context, &object.clone().into(), event, args)?;
     Ok(())
+}
+
+/// Emits `event` on `object` with an Electron `Event` before `args`, as most of the app's and
+/// the windows' events are heard (`(event, window)`), and answers whether a listener called
+/// `event.preventDefault()`.
+///
+/// # Errors
+///
+/// What a listener threw, or an unheard `error`.
+pub fn emit_cancelable(
+    context: &mut Context,
+    object: &JsObject,
+    event: &str,
+    args: &[JsValue],
+) -> JsResult<bool> {
+    let cancel = native::object(context);
+    native::hidden(&cancel, js_string!("defaultPrevented"), false, context)?;
+    let prevent = native::function(context, "preventDefault", 0, |this, _, cx| {
+        if let Some(event) = this.as_object() {
+            native::hidden(&event, js_string!("defaultPrevented"), true, cx)?;
+        }
+        Ok(JsValue::undefined())
+    });
+    native::hidden(&cancel, js_string!("preventDefault"), prevent, context)?;
+    let mut all = vec![JsValue::from(cancel.clone())];
+    all.extend_from_slice(args);
+    emit(context, object, event, &all)?;
+    Ok(cancel
+        .get(js_string!("defaultPrevented"), context)?
+        .to_boolean())
 }
 
 /// Marks `object` — the one a constructor's `init` was handed — as an instance of `kind`
@@ -111,6 +143,53 @@ pub fn live<T>(
         Some((_, id)) => lookup(id).map(|found| (id, found)).ok_or_else(destroyed),
         None => Err(destroyed()),
     }
+}
+
+/// What a method answers for something Verve does not do: `ERR_NOT_SUPPORTED`, as the
+/// conventions say. [`not_supported`] throws it, [`rejected`] is for the methods that answer a
+/// promise.
+pub fn unsupported(context: &mut Context, api: &str) -> JsError {
+    native::coded_error(
+        context,
+        &format!("{api} is not supported by Verve"),
+        "ERR_NOT_SUPPORTED",
+    )
+}
+
+/// Throws [`unsupported`].
+///
+/// # Errors
+///
+/// Always.
+pub fn not_supported(context: &mut Context, api: &str) -> JsResult<JsValue> {
+    Err(unsupported(context, api))
+}
+
+/// A promise rejected with [`unsupported`].
+///
+/// # Errors
+///
+/// A promise that could not be made.
+pub fn rejected(context: &mut Context, api: &str) -> JsResult<JsValue> {
+    let error = unsupported(context, api);
+    native::settled(Err(error), context)
+}
+
+/// A plain object with `fields` set in order, as the objects Electron's methods answer are.
+pub fn record(context: &mut Context, fields: &[(&str, JsValue)]) -> JsResult<JsObject> {
+    let object = native::object(context);
+    for (key, value) in fields {
+        object.set(JsString::from(*key), value.clone(), false, context)?;
+    }
+    Ok(object)
+}
+
+/// A plain `Error`: what Electron's native methods throw for a failure that is not a bad
+/// argument (`Failed to get 'x' path`).
+pub fn error(message: &str) -> JsError {
+    boa_engine::JsNativeError::error()
+        .with_message(message.to_owned())
+        .into()
 }
 
 /// `TypeError: Object has been destroyed`.

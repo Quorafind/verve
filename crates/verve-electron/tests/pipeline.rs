@@ -56,17 +56,37 @@ fn a_window_draws_its_page_and_the_app_ends_when_it_closes() {
     assert_eq!(app.exit_code(TIMEOUT), Some(0));
 }
 
+/// Electron 39.8.10: a main process with no window and nothing to run does not end; it waits for
+/// events until `app.quit()` (P10 replaced P02's "no windows, no timers" rule with this).
 #[test]
-fn a_script_that_makes_no_window_ends_the_app_at_once() {
+fn a_script_that_makes_no_window_does_not_end_the_app_until_it_quits() {
     let app = App::launch_script("require('electron');", &[]);
-    assert_eq!(app.exit_code(TIMEOUT), Some(0));
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(app.exit_code(Duration::from_millis(1)), None);
     assert!(app.shell.windows().is_empty());
+    let quits = App::launch_script("require('electron').app.quit();", &[]);
+    assert_eq!(quits.exit_code(TIMEOUT), Some(0));
 }
 
+/// Electron 39.8.10: an error thrown as the entry loads is printed with "App threw an error during
+/// load" and shown in an error box, and the process stays up; a module that cannot be found ends
+/// it with 1. P02 ended the app with 1 on any throw.
 #[test]
-fn a_script_that_throws_ends_the_app_with_one() {
+fn a_script_that_throws_stays_up_and_one_that_cannot_be_found_ends_with_one() {
     let app = App::launch_script("throw new Error('no');", &[]);
-    assert_eq!(app.exit_code(TIMEOUT), Some(1));
+    let boxed = app.run_until(
+        |app| {
+            app.shell
+                .received()
+                .iter()
+                .any(|msg| matches!(msg, ToShell::ErrorBox { content, .. } if content.contains("Error: no")))
+        },
+        TIMEOUT,
+    );
+    assert!(boxed);
+    assert_eq!(app.exit_code(Duration::from_millis(1)), None);
+    let missing = App::launch_script("require('./no-such-module-anywhere');", &[]);
+    assert_eq!(missing.exit_code(TIMEOUT), Some(1));
 }
 
 /// `ElectronOptions::dark` is the system theme the page sees: its
