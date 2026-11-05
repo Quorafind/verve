@@ -145,22 +145,28 @@ mod declines_a_borrowed_object {
     #[cfg(feature = "jit")]
     #[test]
     fn array_iterator_step() {
-        use crate::builtins::{array::array_iterator::ArrayIterator, iterable::Step};
+        use crate::builtins::array::array_iterator::ArrayIterator;
 
         let context = &mut Context::default();
         let iterator = object(context, "[1, 2][Symbol.iterator]()");
         {
             let _writing = iterator.borrow_mut();
-            assert!(ArrayIterator::advance_dense(&iterator).is_err());
+            assert!(ArrayIterator::advance_dense(&iterator, &mut None).is_err());
         }
         assert_eq!(
-            ArrayIterator::advance_dense(&iterator).ok().flatten(),
-            Some(Step::Value(JsValue::from(1)))
+            ArrayIterator::advance_dense(&iterator, &mut None)
+                .ok()
+                .flatten(),
+            Some(JsValue::from(1))
         );
         let entries = object(context, "['a'].entries()");
+        let mut second = None;
         assert_eq!(
-            ArrayIterator::advance_dense(&entries).ok().flatten(),
-            Some(Step::Entry(JsValue::from(0), crate::js_string!("a").into()))
+            ArrayIterator::advance_dense(&entries, &mut second)
+                .ok()
+                .flatten(),
+            Some(JsValue::from(0))
         );
+        assert_eq!(second, Some(crate::js_string!("a").into()));
     }
 }

@@ -11,7 +11,7 @@ use crate::{
     Context, JsData, JsResult,
     builtins::{
         BuiltInBuilder, IntrinsicObject, JsValue,
-        iterable::{Step, step_to_result_object},
+        iterable::{join_step, step_to_result_object},
         typed_array::TypedArray,
     },
     context::intrinsics::Intrinsics,
@@ -100,7 +100,9 @@ impl ArrayIterator {
         let object = this
             .as_object()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
-        let step = Self::advance(&object, context)?.map(|step| step.into_value(context));
+        let mut second = None;
+        let step = Self::advance(&object, context, &mut second)?
+            .map(|first| join_step(first, second, context));
         Ok(step_to_result_object(step, context))
     }
 
@@ -108,7 +110,10 @@ impl ArrayIterator {
     /// iterator over a plain array, whose `length` is an integer and whose next element is an
     /// ordinary dense one. [`Declined`], with nothing changed, for any other.
     #[cfg(feature = "jit")]
-    pub(crate) fn advance_dense(object: &JsObject) -> Result<Option<Step>, Declined> {
+    pub(crate) fn advance_dense(
+        object: &JsObject,
+        second: &mut Option<JsValue>,
+    ) -> Result<Option<JsValue>, Declined> {
         let mut iterator = object.try_downcast_mut::<Self>().ok_or(Declined)?;
         let kind = iterator.kind;
         if matches!(kind, PropertyNameKind::Key) || !iterator.array.is_array() {
@@ -137,10 +142,11 @@ impl ArrayIterator {
             .ok_or(Declined)?;
         drop(array);
         iterator.next_index = index + 1;
-        Ok(Some(match kind {
-            PropertyNameKind::KeyAndValue => Step::Entry(index.into(), value),
-            _ => Step::Value(value),
-        }))
+        if matches!(kind, PropertyNameKind::KeyAndValue) {
+            *second = Some(value);
+            return Ok(Some(index.into()));
+        }
+        Ok(Some(value))
     }
 
     /// The body of `next` without the result object: the next value, or `None` once the
@@ -152,7 +158,11 @@ impl ArrayIterator {
     /// iterator, or that iterates the iterator itself. As in V8, the index is read first, the
     /// step stores `index + 1` once `length` is known and before the element is read, and what a
     /// re-entrant call stored in between is overwritten.
-    pub(crate) fn advance(object: &JsObject, context: &mut Context) -> JsResult<Option<Step>> {
+    pub(crate) fn advance(
+        object: &JsObject,
+        context: &mut Context,
+        second: &mut Option<JsValue>,
+    ) -> JsResult<Option<JsValue>> {
         let (array, index, kind) = {
             let iterator = Self::borrow_mut(object)?;
             if iterator.done {
@@ -187,11 +197,12 @@ impl ArrayIterator {
             iterator.done = false;
         }
         match kind {
-            PropertyNameKind::Key => Ok(Some(Step::Value(index.into()))),
-            PropertyNameKind::Value => array.get(index, context).map(|v| Some(Step::Value(v))),
+            PropertyNameKind::Key => Ok(Some(index.into())),
+            PropertyNameKind::Value => array.get(index, context).map(Some),
             PropertyNameKind::KeyAndValue => {
                 let element_value = array.get(index, context)?;
-                Ok(Some(Step::Entry(index.into(), element_value)))
+                *second = Some(element_value);
+                Ok(Some(index.into()))
             }
         }
     }

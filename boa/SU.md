@@ -710,3 +710,6 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   a target can run a setter between the two elements. Compiled code takes the same decision in
   `jit_iterator_entry`, and a value or entry iterator over a dense array no longer declines in
   `advance_dense`.
+  Compiled `IteratorNext` now steps the record where it sits, as the interpreter's handler does,
+  instead of taking it off the frame's iterator stack and putting it back; a step answers its key
+  and, for an entry, the value in a second slot, so the common one-value step stays one value wide.

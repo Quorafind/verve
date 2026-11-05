@@ -375,11 +375,20 @@ pub(crate) unsafe extern "C" fn jit_iterator_next(
     _: u32,
 ) -> u32 {
     guarded(state, |context, _, _| {
-        // The record is taken out while it is stepped, as the interpreter's handler does.
-        let mut record = context.vm.frame_mut().iterators.pop()?;
-        let stepped = record.step_quietly(context);
-        context.vm.frame_mut().iterators.push(record);
-        stepped.ok()
+        // Stepped where it sits, as the interpreter's handler does: a quiet step runs no
+        // JavaScript, so nothing can reach this frame's iterator stack meanwhile.
+        let record = context.vm.frame().iterators.last()?;
+        let stepper = record.stepper()?;
+        let iterator = record.iterator().clone();
+        let mut second = None;
+        let step = stepper
+            .advance_quietly(&iterator, context, &mut second)
+            .ok()?;
+        let record = context.vm.frame_mut().iterators.last_mut()?;
+        record
+            .finish_unboxed_step(Ok(step), second)
+            .ok()
+            .map(|_| ())
     })
 }
 
@@ -405,8 +414,12 @@ pub(crate) unsafe extern "C" fn jit_iterator_value(
     _: u32,
 ) -> u32 {
     guarded(state, |context, _, rp| {
-        let step = context.vm.frame().iterators.last()?.unboxed_step()?;
-        let value = step.into_value(context);
+        let record = context.vm.frame().iterators.last()?;
+        let value = if let Some(value) = record.unboxed_value() {
+            value.clone()
+        } else {
+            record.unboxed_step()?.into_value(context)
+        };
         set_register(context, rp, dst, value);
         Some(())
     })

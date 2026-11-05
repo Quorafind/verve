@@ -10,7 +10,7 @@ use crate::{
     Context, JsData, JsResult,
     builtins::{
         BuiltInBuilder, IntrinsicObject, JsValue,
-        iterable::{Step, step_to_result_object},
+        iterable::{join_step, step_to_result_object},
     },
     context::intrinsics::Intrinsics,
     error::JsNativeError,
@@ -120,13 +120,18 @@ impl MapIterator {
         let object = this
             .as_object()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not a MapIterator"))?;
-        let step = Self::advance(&object, context)?.map(|step| step.into_value(context));
+        let mut second = None;
+        let step =
+            Self::advance(&object, &mut second)?.map(|first| join_step(first, second, context));
         Ok(step_to_result_object(step, context))
     }
 
     /// The body of `next` without the result object: the next item, or `None` once the map is
     /// exhausted. An entry iterator answers the key and value, not the array of them.
-    pub(crate) fn advance(object: &JsObject, _: &mut Context) -> JsResult<Option<Step>> {
+    pub(crate) fn advance(
+        object: &JsObject,
+        second: &mut Option<JsValue>,
+    ) -> JsResult<Option<JsValue>> {
         let mut map_iterator = object
             .downcast_mut::<Self>()
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not a MapIterator"))?;
@@ -151,9 +156,12 @@ impl MapIterator {
             };
             if let Some((key, value)) = e {
                 let item = match item_kind {
-                    PropertyNameKind::Key => Step::Value(key),
-                    PropertyNameKind::Value => Step::Value(value),
-                    PropertyNameKind::KeyAndValue => Step::Entry(key, value),
+                    PropertyNameKind::Key => key,
+                    PropertyNameKind::Value => value,
+                    PropertyNameKind::KeyAndValue => {
+                        *second = Some(value);
+                        key
+                    }
                 };
                 map_iterator.iterated_map = Some(obj);
                 return Ok(Some(item));

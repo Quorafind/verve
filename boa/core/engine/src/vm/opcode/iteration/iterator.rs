@@ -146,14 +146,15 @@ impl IteratorNext {
         if let Some((stepper, iterator)) =
             record.and_then(|record| Some((record.stepper()?, record.iterator().clone())))
         {
-            let step = stepper.advance(&iterator, context);
+            let mut second = None;
+            let step = stepper.advance(&iterator, context, &mut second);
             let record = context
                 .vm
                 .frame_mut()
                 .iterators
                 .last_mut()
                 .expect("iterator on the call frame must exist");
-            record.finish_unboxed_step(step)?;
+            record.finish_unboxed_step(step, second)?;
             return Ok(());
         }
 
@@ -262,13 +263,12 @@ pub(crate) struct IteratorValue;
 impl IteratorValue {
     #[inline(always)]
     pub(crate) fn operation(value: RegisterOperand, context: &mut Context) -> JsResult<()> {
-        let unboxed = context
-            .vm
-            .frame()
-            .iterators
-            .last()
-            .and_then(IteratorRecord::unboxed_step);
-        if let Some(step) = unboxed {
+        let record = context.vm.frame().iterators.last();
+        if let Some(iter_value) = record.and_then(IteratorRecord::unboxed_value).cloned() {
+            context.vm.set_register(value.into(), iter_value);
+            return Ok(());
+        }
+        if let Some(step) = record.and_then(IteratorRecord::unboxed_step) {
             let iter_value = step.into_value(context);
             context.vm.set_register(value.into(), iter_value);
             return Ok(());
