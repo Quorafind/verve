@@ -487,8 +487,8 @@ pub enum ToRendererInput {
     ColorScheme {
         dark: bool,
     },
-    /// Deprecated: layout runs on the page's own thread in `verve-layout` (P30) and the shell no
-    /// longer reports it. The variant stays so the others keep their numbers.
+    /// Deprecated: layout runs on the page's own thread in `verve-layout` (P30) and the GPUI shell
+    /// no longer reports it. The headless shell still does, from its fake layout, until P30.
     Layout(Vec<(verve_dom::NodeId, verve_dom::Rect)>),
     ScrollOffsets(Vec<(verve_dom::NodeId, [f32; 2])>),
     Frame {
