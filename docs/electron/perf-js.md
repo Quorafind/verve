@@ -593,3 +593,5 @@ Probe (`-A`, the array in a local, best of 7, the loop itself 4.0 ns), ns per it
 | a dense array, read / write | 7.5 / 6.0 | 7.5 / 5.5 |
 
 Details and the cost in compile time in `docs/jit.md` "Results (typed-array elements, P76)" and `packages/P76-jit-typed-elements.md`.
+
+P81 (typed-array element path compiled only into functions that have met a typed array): 400 functions of 40 element accesses on plain arrays, threshold 0, CPU ms (min of 5): before P76 13,828, P76 19,406, now 13,484; on a `Float64Array` (200 functions, 6 calls, threshold 3) 10,234 against 10,188 (they need the path). `typed` JIT 219.5–224.3 ms (P76 build 222.2–237.9 in the same interleaved rounds); the rest of the suite inside the noise of a shared machine (load 23–56 %).

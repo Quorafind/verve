@@ -45,4 +45,35 @@ P76 把类型化数组元素读写放进机器码后，每个元素访问站点�
 
 ## 状态
 
-未开始。
+**已完成。** 提交：`perf(jit): Inline typed-array element access only in functions that have seen one`（3fb380e1：`JitSlot` 一个标志、两个处理器的类型化数组快捷路径置位、`typed_path`、`JitOptions::typed_elements_everywhere` / `BOA_JIT_TYPED_ALL=1`、`boa/SU.md`）；
+`test(jit): Check typed-array feedback with plain-first and typed-first sites`（883621e6）；本节与 `docs/jit.md`、`perf-js.md` 的 docs 提交。
+
+**方案与取舍。** 选「见过类型化数组才编译内联路径」，反馈粒度是**函数**（`CodeBlock` 的 `JitSlot` 上一个 `Cell<bool>`），不是站点。先做了站点位图（按 pc），测出 `typed` 从 227 变成 366 ms：
+`typed` 是一个箭头函数，在第一个循环里经 OSR 编译，后面两个循环的站点解释器还没跑过，没有反馈，整段落回辅助。函数粒度没有这个问题，也更简单（一个布尔，处理器里一条 `set`）。
+未做「每函数一份共享类型化路径」：对见过类型化数组的函数仍付满额编译代价（下表），但这类函数少，且共享块要把装箱结果带回各站点的寄存器写回，改动和风险大；留给之后。
+**反馈晚到的情形：** 编译时函数还没见过类型化数组，之后才见到：该函数的元素访问留在辅助（数组路径照常内联；类型化数组在守卫处 miss 到辅助，约 11 ns 一次而不是 4 ns），**结果不变**，不重新编译。
+站点先见数组后见类型化数组、或相反，也同样正确。P76 的全部守卫一条未动（`typed.rs` 未改）。`BOA_JIT_TYPED_ALL=1` 可强制处处内联（测试的强制编译模式用它）。
+
+**编译时间**（`scratchpad\p81\`：`minct.sh`、`cpu.sh`、`compile-calls.js`；P76 的 `compile.js`；发布版 `verve`，取 5 次交错运行里**进程 CPU 时间**的最小值，机器负载 14–25 %）：
+| 400 个含 40 次元素访问的函数，阈值 0，普通数组 | CPU ms |
+|---|---|
+| P76 之前（`0cc1fa94`） | 13,828 |
+| P76（`2cb3f702`） | 19,406（+40 %） |
+| 本包 | **13,484（−2.5 % 对 P76 之前，目标 +15 % 以内）** |
+
+| 200 个函数 × 40 访问，调 6 次，阈值 3（反馈在编译前已有） | P76 前 | `2cb3f702` | 本包 |
+|---|---|---|---|
+| 接收者是 `Float64Array` | 6,781 | 10,234 | 10,188（它们需要内联路径，代价不变） |
+| 接收者是普通数组 | 6,813 | 10,219 | 6,719 |
+
+**运行时间。** `typed` JIT，交错两轮 `--runs 7`，`2cb3f702` 对本包：222.2 / 237.9 对 219.5 / 224.3 ms（≤ 220 的目标在噪声边缘：本包最优 214.7–221.2，P76 的承诺值 211 是空闲机器上的）。
+全套 `--runs 5`（两个二进制各跑一遍，机器负载 23–56 %，别的工作者在编译，所以噪声大）：`2cb3f702` 对本包 中位数 ms：fib 238.7/229.7、alloc 268.2/257.5、concat 3.0/3.0、splitjoin 11.7/11.9、regex 25.8/24.9、json 1385/1287、sort 2568/2308、mapset 27.6/25.0、oo 725.9/606.6、typed 225.6/271.6（最优 223.7/215.7，一次离群）、vdom 60.1/60.6、tokenize 203.8/182.1、template 1.8/1.8；`closure` 的行在汇总输出里被截掉，未比较。
+没有哪一项系统性变慢（本包不改任何不含类型化数组的编译产物之外的东西；改动的处理器多一次 `Cell::set`，仅在类型化数组快捷路径命中时）。较早一轮（负载 13–25 %）：fib 227.6/244.3 反向，同样是噪声量级。微探针：处理器与机器码路径未变，编译后的类型化路径逐字节同 P76，未另测。
+
+**验证**（`CARGO_BUILD_JOBS=6`，`E:` 盘中途写满一次，清了自己的 `release` 与 `incremental` 后重跑全部）：`boa_engine` 默认、`--features jit`、`BOA_JIT_THRESHOLD=0 --features jit` 全过（含新增两个测试，`only_functions_that_saw…` 验证计数 2 与 4）；
+`BOA_JIT_FUZZ_COUNT=3000` 过（1 个测试，188 s）；`boa` 里 `boa_engine` 有无 `jit` 的 clippy `-D warnings` 过（第一次有一个 `unnecessary_lazy_evaluations`，已改）；根 `cargo clippy --workspace --all-targets -D warnings` 过；
+`cargo test -p verve` 有无 `jit` 过；`cargo fmt`（boa 内与 `--all --check`）、`style-check` 过。
+test262 `built-ins/TypedArray`（1446，1438 过）、`TypedArrayConstructors`（738，736 过）、`ArrayBuffer`（221，192 过）：`BOA_JIT=0`、`BOA_JIT_THRESHOLD=0`、`BOA_JIT_THRESHOLD=0 BOA_JIT_TYPED_ALL=1` 三种，0 失败、0 panic、逐项 0 差异（`-vv` 输出比较）。
+注意：单用 `BOA_JIT_THRESHOLD=0` 不再走内联类型化路径（没有反馈），所以第三种才是检验机器码的那一遍。
+
+**留给之后。** 共享的每函数类型化路径（见上）；晚到反馈触发重新编译。
