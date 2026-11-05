@@ -757,3 +757,9 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   change; `enter_realm` and `swap_realm` had to follow the frame's field, and `swap_realm` also
   returns early when both sides are the same realm (a native function of the running realm), so
   that call no longer swaps twice. Nothing observable changes.
+- `boa_engine`, `vm/shadow_stack.rs`, `vm/mod.rs` (P84): the shadow stack's entry for a bytecode
+  frame lends the code block's `SourceInfo` (`Lent`) instead of cloning the `Rc` per call; an entry
+  that is kept in a backtrace (`take`, `capture`, `caller_position`) is cloned owned, so what
+  `error.stack` prints is unchanged. `Context::check_runtime_limits` and `runtime_limits_exceeded`
+  are `#[inline]` and the `RangeError` they build is out of line; the limits and the depth at which
+  the error is thrown are the same.

@@ -697,8 +697,10 @@ impl Vm {
         }
 
         let current_pc = self.frame().pc;
-        self.shadow_stack
-            .push_bytecode(current_pc, frame.code_block().source_info.clone());
+        // SAFETY: the frame, which keeps its code block alive (it owns it, or the callee on the
+        // stack does), is pushed below and popped together with this entry by `pop_frame`.
+        let source_info = unsafe { Lent::lend(&frame.code_block().source_info) };
+        self.shadow_stack.push_bytecode(current_pc, source_info);
 
         self.frames.push(frame);
 
@@ -1169,6 +1171,8 @@ impl Context {
     }
 
     /// The error for a call past the recursion or stack limits, as V8 words it.
+    #[cold]
+    #[inline(never)]
     fn stack_overflow() -> JsError {
         JsNativeError::range()
             .with_message("Maximum call stack size exceeded")
@@ -1176,6 +1180,7 @@ impl Context {
     }
 
     /// Checks if we haven't exceeded the defined runtime limits.
+    #[inline]
     pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
         self.check_interrupt()?;
         if self.runtime_limits_exceeded() {
@@ -1186,6 +1191,7 @@ impl Context {
 
     /// Whether a call now would pass the recursion, native stack or stack size limit, which
     /// `check_runtime_limits` throws a `RangeError` for.
+    #[inline]
     pub(crate) fn runtime_limits_exceeded(&self) -> bool {
         // Must throw if the number of recursive calls exceeds the defined limit.
         //
