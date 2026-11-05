@@ -182,6 +182,8 @@ pub enum FromRenderer {
     Lifecycle(PageEvent),
     /// verve-dom 的 Request（Navigate/Open/Title/Alert/CopyText/Fullscreen…）
     Dom(verve_dom::Request),
+    /// 页面自己重载（`location.reload()`）：主进程当作一次 `reload`，由 P13 接成 webContents 的事件
+    Reload { url: String },
     Console { level: verve::Level, message: String, line: u32, source: String },
     Gone { reason: GoneReason },                     // 'render-process-gone'
 }
