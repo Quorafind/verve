@@ -51,7 +51,7 @@ mod hooks;
 mod indexeddb;
 mod intl;
 pub mod isolate;
-mod messaging;
+pub mod messaging;
 mod module_hooks;
 mod modules;
 pub mod native;
@@ -855,6 +855,7 @@ impl Runtime {
     pub fn run_workers(&mut self) -> bool {
         let busy = network::poll(&mut self.context, None) > 0;
         let busy = worker::run_workers(&mut self.context, None) || busy;
+        let busy = messaging::poll(&mut self.context) || busy;
         self.run_microtasks();
         busy
     }
@@ -864,6 +865,7 @@ impl Runtime {
     pub fn run_workers_until(&mut self, deadline: std::time::Instant) -> bool {
         let busy = network::poll(&mut self.context, Some(deadline)) > 0;
         let busy = worker::run_workers(&mut self.context, Some(deadline)) || busy;
+        let busy = messaging::poll(&mut self.context) || busy;
         self.run_microtasks();
         busy
     }
@@ -907,7 +909,9 @@ impl Runtime {
         let woken = state.wake.is_set();
         // A worker's, on this realm's clock.
         let worker = worker::next_due(&self.context, woken).map(|wait| self.now() + wait);
-        let own = if network::active(&self.context) && (!woken || network::queued(&self.context)) {
+        let looking = network::active(&self.context) && (!woken || network::queued(&self.context))
+            || !woken && messaging::active(&self.context);
+        let own = if looking {
             Some(own.map_or(self.now() + 1., |due| due.min(self.now() + 1.)))
         } else {
             own

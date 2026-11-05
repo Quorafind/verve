@@ -70,7 +70,7 @@ pub(crate) enum Kind {
         started: bool,
         closed: bool,
         /// Messages that came before the port was started.
-        queue: Vec<JsValue>,
+        queue: Vec<(JsValue, JsValue)>,
     },
     Channel {
         name: String,
