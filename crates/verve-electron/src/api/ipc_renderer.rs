@@ -42,6 +42,8 @@ pub(crate) fn outbox(context: &Context) -> Outbox {
 pub(crate) struct IpcRenderer {
     hub: Arc<Hub>,
     contents: ContentsId,
+    /// The document the page is in: the Hub hears nothing from one that has been replaced.
+    generation: u64,
     object: JsObject,
     /// An `invoke` waits for its answer here: how to settle its promise, and the channel it asked.
     calls: RefCell<HashMap<u64, (ResolvingFunctions, String)>>,
@@ -52,7 +54,11 @@ pub(crate) struct IpcRenderer {
 }
 
 /// Gives the realm its `ipcRenderer`.
-pub(crate) fn install(context: &mut Context, hub: Arc<Hub>, contents: ContentsId) -> JsResult<()> {
+pub(crate) fn install(
+    context: &mut Context,
+    hub: Arc<Hub>,
+    (contents, generation): (ContentsId, u64),
+) -> JsResult<()> {
     let emitter = define::emitter(context)?;
     let (class, _) = native::class(
         context,
@@ -75,6 +81,7 @@ pub(crate) fn install(context: &mut Context, hub: Arc<Hub>, contents: ContentsId
     let state = IpcRenderer {
         hub,
         contents,
+        generation,
         object,
         calls: RefCell::new(HashMap::new()),
         outbox: Rc::new(RefCell::new(Vec::new())),
@@ -158,7 +165,8 @@ fn send_sync(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<J
         args: packed,
         reply,
     });
-    ipc.hub.from_renderer_batch(ipc.contents, batch);
+    ipc.hub
+        .from_renderer_batch(ipc.contents, ipc.generation, batch);
     loop {
         match wait.recv_timeout(LOOK_UP) {
             Ok(value) => return value.to_value(context),
@@ -216,7 +224,8 @@ pub(crate) fn flush(context: &Context) {
     let ipc = state(context);
     let batch = std::mem::take(&mut *ipc.outbox.borrow_mut());
     if !batch.is_empty() {
-        ipc.hub.from_renderer_batch(ipc.contents, batch);
+        ipc.hub
+            .from_renderer_batch(ipc.contents, ipc.generation, batch);
     }
 }
 

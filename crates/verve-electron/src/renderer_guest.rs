@@ -42,14 +42,24 @@ pub struct RendererGuest {
 impl RendererGuest {
     /// Page `contents` of the app `hub` routes, with an empty document, made with `prefs`, in
     /// the system theme the app started in. `about:blank` until something is loaded.
-    pub fn new(hub: &Arc<Hub>, contents: ContentsId, prefs: WebPreferences) -> Self {
+    pub fn new(
+        hub: &Arc<Hub>,
+        contents: ContentsId,
+        generation: u64,
+        prefs: WebPreferences,
+    ) -> Self {
         let dark = hub.options().dark;
         let mut runtime = Runtime::new();
         runtime.set_vfs(hub.overlay());
         // A page without Node resolves its modules as a browser does.
         runtime.set_web_modules(!prefs.node_integration);
-        api::install_page(&mut runtime, Arc::clone(hub), contents, &prefs)
-            .expect("a page's electron module installs");
+        api::install_page(
+            &mut runtime,
+            Arc::clone(hub),
+            (contents, generation),
+            &prefs,
+        )
+        .expect("a page's electron module installs");
         let outbox = api::ipc_renderer::outbox(runtime.context());
         set_up_process(&mut runtime, &outbox);
         let loader = ElectronLoader::new(hub.overlay(), hub.protocol_calls());
@@ -270,12 +280,14 @@ impl Guest for RendererGuest {
         self.collect();
         let mut outbox = self.outbox.borrow_mut();
         outbox.extend(self.loader.take_outbox());
-        outbox.extend(
-            self.document
-                .take_requests()
-                .into_iter()
-                .map(FromRenderer::Dom),
-        );
+        for request in self.document.take_requests() {
+            outbox.push(match request {
+                verve_dom::Request::Reload => FromRenderer::Reload {
+                    url: self.document.url(),
+                },
+                other => FromRenderer::Dom(other),
+            });
+        }
         drop(outbox);
         api::ipc_renderer::flush(self.runtime.context());
     }
