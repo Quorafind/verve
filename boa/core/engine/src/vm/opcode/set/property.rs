@@ -284,6 +284,8 @@ impl SetPropertyByValue {
                 if let Some(result) =
                     typed_array_element_set_shortcut(&object, index.get(), &value, context)
                 {
+                    #[cfg(feature = "jit")]
+                    context.vm.frame().code_block.jit.note_typed_element();
                     return result;
                 }
             }

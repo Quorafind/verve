@@ -94,6 +94,11 @@ pub struct JitOptions {
     pub max_total_code_bytes: usize,
     /// How many functions a context may compile in its lifetime.
     pub max_compiled_functions: u64,
+    /// Whether every element access is compiled with the inline typed-array path. Off, only the
+    /// accesses at which the interpreter has met a typed array get it (the path costs about 35
+    /// basic blocks for each access, and most code never meets one); the others go through the
+    /// helper, which gives the same results. Tests turn it on.
+    pub typed_elements_everywhere: bool,
 }
 
 impl Default for JitOptions {
@@ -105,13 +110,15 @@ impl Default for JitOptions {
             max_live_code_bytes: 64 * 1024 * 1024,
             max_total_code_bytes: 256 * 1024 * 1024,
             max_compiled_functions: 10_000,
+            typed_elements_everywhere: false,
         }
     }
 }
 
 impl JitOptions {
     /// The defaults, with what the environment overrides: `BOA_JIT=0` (or `off`, `false`)
-    /// disables the JIT, `BOA_JIT_THRESHOLD=<n>` sets [`JitOptions::threshold`].
+    /// disables the JIT, `BOA_JIT_THRESHOLD=<n>` sets [`JitOptions::threshold`],
+    /// `BOA_JIT_TYPED_ALL=1` sets [`JitOptions::typed_elements_everywhere`].
     #[must_use]
     pub fn from_env() -> Self {
         let mut options = Self::default();
@@ -123,6 +130,10 @@ impl JitOptions {
             .and_then(|value| value.trim().parse().ok())
         {
             options.threshold = threshold;
+        }
+        if let Ok(value) = std::env::var("BOA_JIT_TYPED_ALL") {
+            options.typed_elements_everywhere =
+                !matches!(value.trim(), "" | "0" | "off" | "false" | "no");
         }
         options
     }
@@ -312,6 +323,11 @@ pub(crate) struct JitSlot {
     hotness: Cell<u32>,
     tier: Cell<Tier>,
     code: OnceCell<Rc<JitCode>>,
+    /// Whether the interpreter has read or written an element of a typed array in this function:
+    /// the compiler gives its element accesses the inline typed-array path only then. (Per
+    /// function, not per site: a function that is entered in the middle of a loop has not run
+    /// the sites after the loop yet, and they would stay with the helper.)
+    saw_typed: Cell<bool>,
 }
 
 impl Default for JitSlot {
@@ -320,6 +336,7 @@ impl Default for JitSlot {
             hotness: Cell::new(0),
             tier: Cell::new(Tier::Interpreted),
             code: OnceCell::new(),
+            saw_typed: Cell::new(false),
         }
     }
 }
@@ -341,6 +358,17 @@ impl fmt::Debug for JitSlot {
 }
 
 impl JitSlot {
+    /// Records that the interpreter met a typed array at an element access of this function: a
+    /// store on a path that already did far more.
+    pub(crate) fn note_typed_element(&self) {
+        self.saw_typed.set(true);
+    }
+
+    /// Whether the interpreter has met a typed array at an element access of this function.
+    pub(crate) fn saw_typed_element(&self) -> bool {
+        self.saw_typed.get()
+    }
+
     /// Whether the loop counter should ask [`try_enter`] about this block: it may yet be
     /// compiled, or it is and could be entered.
     pub(crate) fn wants_entry(&self) -> bool {
