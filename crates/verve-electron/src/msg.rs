@@ -232,6 +232,15 @@ pub enum WindowEvent {
     EnterFullScreen,
     LeaveFullScreen,
     ScaleFactor(f32),
+    /// The first frame drawn while the window was visible, sent once: a window that is shown
+    /// gets one even if its page never changes (the headless shell sends it when a visible window
+    /// has a snapshot, at the snapshot or at the `Show`). A window created with `show: false` has none
+    /// until it is shown, so P13's `'ready-to-show'` for a hidden window comes from the
+    /// renderer's first snapshot, not from this.
+    FirstPaint,
+    /// The system's handle of the window (`HWND`, `NSView*` as Electron's is), once, after it opens: what
+    /// `getNativeWindowHandle()` answers and the dialogs and menus of P14 and P15 attach to.
+    NativeHandle(u64),
 }
 
 /// What happened to the app as a whole.
@@ -526,6 +535,8 @@ pub enum ToRendererInput {
     Composition(CompositionEvent),
     /// The window gained (`true`) or lost focus.
     Focus(bool),
+    /// The page is drawn to a screen (`true`) or not: the window was hidden or minimized.
+    Visibility(bool),
 }
 
 /// What an input method is doing with a field. Empty until P24 gives it its variants.

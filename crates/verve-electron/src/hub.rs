@@ -150,7 +150,12 @@ pub struct Hub {
     /// its own to clean up.
     told: AtomicBool,
     overlay: Mutex<Option<Arc<dyn Overlay>>>,
+    /// Told of every [`FromShell`] before the main process is: how a test watches what a shell says.
+    observer: Mutex<Option<ShellObserver>>,
 }
+
+/// What [`Hub::observe_shell`] calls.
+type ShellObserver = Arc<dyn Fn(&FromShell) + Send + Sync>;
 
 impl Hub {
     /// A Hub for one app; nothing runs until [`Hub::start_main`].
@@ -167,6 +172,7 @@ impl Hub {
             launch: Mutex::new(None),
             told: AtomicBool::new(false),
             overlay: Mutex::new(None),
+            observer: Mutex::new(None),
         })
     }
 
@@ -363,7 +369,18 @@ impl Hub {
 
     /// What the shell saw: a window shown, closed or resized, the displays changed.
     pub fn from_shell(&self, msg: FromShell) {
+        let observer = lock(&self.observer).clone();
+        if let Some(observer) = observer {
+            observer(&msg);
+        }
         self.to_main(move |guest| guest.from_shell(msg));
+    }
+
+    /// Calls `observer` with every message the shell sends the main process, on the thread that
+    /// sends it, before the main process hears it. The same tests watch the headless shell and
+    /// the GPUI shell this way; an observer must not block.
+    pub fn observe_shell(&self, observer: impl Fn(&FromShell) + Send + Sync + 'static) {
+        *lock(&self.observer) = Some(Arc::new(observer));
     }
 
     /// What a page says: a lifecycle step, a request only the window can answer.
