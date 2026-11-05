@@ -12,6 +12,9 @@
 //!
 //! Lifted from su-editor's Obsidian host.
 
+mod markup;
+use markup::{Tag, cdata, comment, declaration};
+
 use crate::dom::{Dom, Namespace, NodeId, NodeKind, ShadowMode, SlotAssignment};
 
 const VOID: &[&str] = &[
@@ -331,54 +334,18 @@ impl Parser {
             }
             rest = &rest[lt..];
             if let Some(after) = rest.strip_prefix("<!--") {
-                let (data, next) = match after.find("-->") {
-                    Some(end) => (&after[..end], &after[end + 3..]),
-                    None if !feed.eof => break,
-                    None => (after, ""),
+                let Some(next) = comment(dom, stack, after, feed.eof) else {
+                    break;
                 };
-                let comment = dom.create_comment(data);
-                dom.append(current(stack), comment);
                 rest = next;
                 continue;
             }
             if let Some(after) = rest.strip_prefix("<![CDATA[") {
-                let (data, next) = match after.find("]]>") {
-                    Some(end) => (&after[..end], &after[end + 3..]),
-                    None => (after, ""),
-                };
-                if stack.last().is_some_and(|o| o.namespace != Namespace::Html) {
-                    push_text(dom, stack, data, false, context, in_body);
-                } else {
-                    let comment = dom.create_comment(&format!("[CDATA[{data}]]"));
-                    dom.append(current(stack), comment);
-                }
-                rest = next;
+                rest = cdata(dom, stack, after, context, in_body);
                 continue;
             }
             if rest.starts_with("<!") || rest.starts_with("<?") {
-                let end = rest.find('>').unwrap_or(rest.len());
-                let inside = &rest[2..end.max(2)];
-                if let Some(name) = inside
-                    .get(..7)
-                    .filter(|d| d.eq_ignore_ascii_case("doctype"))
-                    .map(|_| inside[7..].trim())
-                {
-                    if let Context::Document { .. } = context {
-                        let document = dom.root_of(stack[0].id);
-                        if dom.children(document).iter().all(|c| {
-                            !matches!(dom.get(*c).map(|n| &n.kind), Some(NodeKind::Doctype(_)))
-                        }) {
-                            let doctype = dom
-                                .create_doctype(name.split_whitespace().next().unwrap_or("html"));
-                            let first = dom.children(document).first().copied();
-                            dom.insert_before(document, doctype, first);
-                        }
-                    }
-                } else {
-                    let comment = dom.create_comment(inside.trim_start_matches('-'));
-                    dom.append(current(stack), comment);
-                }
-                rest = rest.get(end + 1..).unwrap_or("");
+                rest = declaration(dom, stack, context, rest);
                 continue;
             }
             // `<` not followed by a tag name is text.
@@ -391,122 +358,159 @@ impl Parser {
                 rest = &rest[1..];
                 continue;
             }
-            let Some(gt) = find_tag_end(rest) else {
-                // An unclosed tag at the end is dropped, as a browser drops it; before the end it
-                // waits for the rest of the markup.
-                if feed.eof {
-                    rest = "";
+            match tag(dom, stack, in_body, context, rest, feed) {
+                Tag::Read(next) => rest = next,
+                Tag::Wait(at) => {
+                    rest = at;
+                    break;
                 }
-                break;
-            };
-            let tag_start = rest;
-            let inside = &rest[1..gt];
-            rest = &rest[gt + 1..];
-            if let Some(name) = inside.strip_prefix('/') {
-                let name = name
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                close(dom, stack, &name, context, in_body);
-                continue;
+                Tag::Script(next, element) => return (total - next.len(), Some(element)),
             }
-            let self_closing = inside.trim_end().ends_with('/');
-            let inside = inside.trim_end().trim_end_matches('/');
-            let (raw_name, attrs) = split_name(inside);
-            let name = raw_name.to_ascii_lowercase();
-            if Self::route(stack, in_body, context, dom, &name, attrs) {
-                continue;
-            }
-            let namespace = match (stack.last().map(|o| o.namespace), name.as_str()) {
-                (_, "svg") => Namespace::Svg,
-                (_, "math") => Namespace::MathMl,
-                // HTML inside SVG's `foreignObject` is HTML again.
-                (Some(Namespace::Svg), _)
-                    if stack.last().is_some_and(|o| o.tag == "foreignobject") =>
-                {
-                    Namespace::Html
-                }
-                (Some(ns @ (Namespace::Svg | Namespace::MathMl)), _) => ns,
-                _ => Namespace::Html,
-            };
-            if namespace == Namespace::Html {
-                imply_end_tags(dom, stack, &name);
-            }
-            // Rows written straight into a table are in a body of it.
-            if namespace == Namespace::Html
-                && name == "tr"
-                && stack.last().is_some_and(|o| o.tag == "table")
-            {
-                let tbody = dom.create_element("tbody");
-                dom.append(current(stack), tbody);
-                stack.push(Open {
-                    id: tbody,
-                    tag: "tbody".into(),
-                    namespace,
-                });
-            }
-            if open_shadow_template(dom, stack, context, &name, attrs) {
-                continue;
-            }
-            if namespace == Namespace::Html
-                && raw_text(&name).is_some()
-                && !feed.eof
-                && find_end_tag(rest, &name) == rest.len()
-            {
-                // The element's text has not all arrived.
-                rest = tag_start;
-                break;
-            }
-            let element = dom.create_element_ns(&name, namespace);
-            if namespace == Namespace::Html && name == "script" {
-                dom.mark_started(element);
-            }
-            set_attrs(dom, element, attrs, namespace, false);
-            dom.append(current(stack), element);
-            let closes = if namespace == Namespace::Html {
-                VOID.contains(&name.as_str())
-            } else {
-                self_closing
-            };
-            if closes {
-                continue;
-            }
-            if namespace == Namespace::Html
-                && let Some(decode_refs) = raw_text(&name)
-            {
-                // Text up to the matching end tag, whatever it holds.
-                let end = find_end_tag(rest, &name);
-                let content = &rest[..end];
-                let text = if decode_refs {
-                    decode(content)
-                } else {
-                    content.to_owned()
-                };
-                // A newline right after `<textarea>` or `<pre>` is not part of its text.
-                let text = if name == "textarea" {
-                    text.strip_prefix('\n').unwrap_or(&text).to_owned()
-                } else {
-                    text
-                };
-                if !text.is_empty() {
-                    let node = dom.create_text(&text);
-                    dom.append(element, node);
-                }
-                rest = rest[end..].find('>').map_or("", |gt| &rest[end + gt + 1..]);
-                if feed.pause && name == "script" {
-                    return (total - rest.len(), Some(element));
-                }
-                continue;
-            }
-            stack.push(Open {
-                id: element,
-                tag: name,
-                namespace,
-            });
         }
         (total - rest.len(), None)
     }
+}
+
+/// The tag at the start of `rest`, an end tag or the start of an element, with what the tag
+/// brings (a raw text element's text, a `<script>` the page runs).
+fn tag<'a>(
+    dom: &mut Dom,
+    stack: &mut Vec<Open>,
+    in_body: &mut bool,
+    context: Context,
+    mut rest: &'a str,
+    feed: Feed,
+) -> Tag<'a> {
+    let Some(gt) = find_tag_end(rest) else {
+        // An unclosed tag at the end is dropped, as a browser drops it; before the end it
+        // waits for the rest of the markup.
+        return Tag::Wait(if feed.eof { "" } else { rest });
+    };
+    let tag_start = rest;
+    let inside = &rest[1..gt];
+    rest = &rest[gt + 1..];
+    if let Some(name) = inside.strip_prefix('/') {
+        let name = name
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        close(dom, stack, &name, context, in_body);
+        return Tag::Read(rest);
+    }
+    let self_closing = inside.trim_end().ends_with('/');
+    let inside = inside.trim_end().trim_end_matches('/');
+    let (raw_name, attrs) = split_name(inside);
+    let name = raw_name.to_ascii_lowercase();
+    if Parser::route(stack, in_body, context, dom, &name, attrs) {
+        return Tag::Read(rest);
+    }
+    open_element(
+        dom,
+        stack,
+        context,
+        &name,
+        attrs,
+        (self_closing, tag_start, rest),
+        feed,
+    )
+}
+
+/// The element a start tag opens: it goes in the tree and, unless it is empty, on the stack; a
+/// raw text element takes its text with it.
+fn open_element<'a>(
+    dom: &mut Dom,
+    stack: &mut Vec<Open>,
+    context: Context,
+    name: &str,
+    attrs: &str,
+    (self_closing, tag_start, mut rest): (bool, &'a str, &'a str),
+    feed: Feed,
+) -> Tag<'a> {
+    let namespace = match (stack.last().map(|o| o.namespace), name) {
+        (_, "svg") => Namespace::Svg,
+        (_, "math") => Namespace::MathMl,
+        // HTML inside SVG's `foreignObject` is HTML again.
+        (Some(Namespace::Svg), _) if stack.last().is_some_and(|o| o.tag == "foreignobject") => {
+            Namespace::Html
+        }
+        (Some(ns @ (Namespace::Svg | Namespace::MathMl)), _) => ns,
+        _ => Namespace::Html,
+    };
+    if namespace == Namespace::Html {
+        imply_end_tags(dom, stack, name);
+    }
+    // Rows written straight into a table are in a body of it.
+    if namespace == Namespace::Html
+        && name == "tr"
+        && stack.last().is_some_and(|o| o.tag == "table")
+    {
+        let tbody = dom.create_element("tbody");
+        dom.append(current(stack), tbody);
+        stack.push(Open {
+            id: tbody,
+            tag: "tbody".into(),
+            namespace,
+        });
+    }
+    if open_shadow_template(dom, stack, context, name, attrs) {
+        return Tag::Read(rest);
+    }
+    if namespace == Namespace::Html
+        && raw_text(name).is_some()
+        && !feed.eof
+        && find_end_tag(rest, name) == rest.len()
+    {
+        // The element's text has not all arrived.
+        return Tag::Wait(tag_start);
+    }
+    let element = dom.create_element_ns(name, namespace);
+    if namespace == Namespace::Html && name == "script" {
+        dom.mark_started(element);
+    }
+    set_attrs(dom, element, attrs, namespace, false);
+    dom.append(current(stack), element);
+    let closes = if namespace == Namespace::Html {
+        VOID.contains(&name)
+    } else {
+        self_closing
+    };
+    if closes {
+        return Tag::Read(rest);
+    }
+    if namespace == Namespace::Html
+        && let Some(decode_refs) = raw_text(name)
+    {
+        // Text up to the matching end tag, whatever it holds.
+        let end = find_end_tag(rest, name);
+        let content = &rest[..end];
+        let text = if decode_refs {
+            decode(content)
+        } else {
+            content.to_owned()
+        };
+        // A newline right after `<textarea>` or `<pre>` is not part of its text.
+        let text = if name == "textarea" {
+            text.strip_prefix('\n').unwrap_or(&text).to_owned()
+        } else {
+            text
+        };
+        if !text.is_empty() {
+            let node = dom.create_text(&text);
+            dom.append(element, node);
+        }
+        rest = rest[end..].find('>').map_or("", |gt| &rest[end + gt + 1..]);
+        if feed.pause && name == "script" {
+            return Tag::Script(rest, element);
+        }
+        return Tag::Read(rest);
+    }
+    stack.push(Open {
+        id: element,
+        tag: name.to_owned(),
+        namespace,
+    });
+    Tag::Read(rest)
 }
 
 fn current(stack: &[Open]) -> NodeId {
