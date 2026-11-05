@@ -19,7 +19,7 @@ mod tree;
 use boa_engine::{Context, JsResult, JsValue};
 
 pub use bytes::CloneBytesError;
-pub(crate) use copy::entries;
+pub(crate) use copy::{entries, refused};
 use tree::Tree;
 
 /// A value out of a realm: `Send`, so it can be handed to another thread.
@@ -92,8 +92,5 @@ impl Cloned {
 }
 
 fn field(name: &str, value: &str) -> (Vec<u16>, Tree) {
-    (
-        name.encode_utf16().collect(),
-        Tree::String(value.encode_utf16().collect()),
-    )
+    (tree::utf16(name), Tree::String(tree::utf16(value)))
 }

@@ -419,7 +419,7 @@ fn flush(runtime: &mut Runtime, out: &Outbox, progress: &Progress) -> bool {
                 let _ = out.send(FromWorker::Message(cloned));
             }
             Err(error) => {
-                let text = error.to_string();
+                let text = crate::describe(runtime.context(), &error);
                 let _ = out.send(FromWorker::Console(
                     Level::Error,
                     format!("[worker] {text}"),

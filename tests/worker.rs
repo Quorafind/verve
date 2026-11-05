@@ -186,3 +186,36 @@ fn a_page_waiting_at_once_hears_the_answer() {
         js(&mut rt, "worker.terminate()");
     }
 }
+
+/// A worker that posts what cannot be cloned says so on the page's console in Node's words, not
+/// as an object.
+#[test]
+fn a_worker_that_posts_what_cannot_be_cloned_says_why() {
+    let mut rt = Runtime::new();
+    js(
+        &mut rt,
+        r#"
+        const code = `postMessage(() => 1);`;
+        const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+        globalThis.worker = new Worker(url);
+        'started'
+    "#,
+    );
+    let mut said = String::new();
+    for _ in 0..50 {
+        rt.wait_for_workers(std::time::Duration::from_millis(100));
+        rt.run_workers();
+        said = rt
+            .take_console()
+            .into_iter()
+            .map(|l| l.text)
+            .find(|l| l.starts_with("[worker] "))
+            .unwrap_or_default();
+        if !said.is_empty() {
+            break;
+        }
+    }
+    assert!(said.contains("DataCloneError"), "{said}");
+    assert!(said.contains("() => 1 could not be cloned."), "{said}");
+    assert!(!said.contains("Failed to execute"), "{said}");
+}
