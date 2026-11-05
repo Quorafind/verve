@@ -1,0 +1,59 @@
+{
+  "electron": "39.8.10",
+  "events": [
+    "app will-finish-launching",
+    "app ready",
+    "contents 1 did-start-loading",
+    "contents 1 dom-ready",
+    "contents 1 did-finish-load",
+    "contents 1 did-stop-loading",
+    "contents 4 did-start-loading",
+    "contents 4 dom-ready",
+    "contents 4 did-finish-load",
+    "contents 4 did-stop-loading",
+    "window 1 ready-to-show",
+    "window 4 ready-to-show",
+    "app before-quit",
+    "window 1 close",
+    "window 2 close",
+    "window 3 close",
+    "window 4 close",
+    "window 3 closed",
+    "window 2 closed",
+    "window 1 closed",
+    "window 4 closed",
+    "app will-quit",
+    "process exit"
+  ],
+  "console": [
+    {
+      "from": "main",
+      "text": "windows 3"
+    },
+    {
+      "from": "main",
+      "text": "child parent is parent true"
+    },
+    {
+      "from": "main",
+      "text": "children 2"
+    },
+    {
+      "from": "main",
+      "text": "modal true"
+    },
+    {
+      "from": "renderer",
+      "text": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged."
+    },
+    {
+      "from": "main",
+      "text": "windows after window.open 4"
+    },
+    {
+      "from": "renderer",
+      "text": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged."
+    }
+  ],
+  "exitCode": 0
+}

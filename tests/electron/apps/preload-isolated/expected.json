@@ -1,0 +1,31 @@
+{
+  "electron": "39.8.10",
+  "events": [
+    "app will-finish-launching",
+    "app ready",
+    "contents 1 did-start-loading",
+    "contents 1 dom-ready",
+    "contents 1 did-finish-load",
+    "contents 1 did-stop-loading",
+    "app before-quit",
+    "window 1 close",
+    "window 1 closed",
+    "app will-quit",
+    "process exit"
+  ],
+  "console": [
+    {
+      "from": "renderer",
+      "text": "page: api object require undefined process undefined"
+    },
+    {
+      "from": "renderer",
+      "text": "page: echo echo hi"
+    },
+    {
+      "from": "renderer",
+      "text": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged."
+    }
+  ],
+  "exitCode": 0
+}
