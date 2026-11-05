@@ -336,3 +336,123 @@ out.map(show).join(' ')"####;
         assert_eq!(result, node, "{mode:?}");
     }
 }
+
+/// A Map or an array from another realm, and an iterator moved to this realm's iterator prototype:
+/// the entry array a step makes belongs to the realm of the `next` that ran, and the entry
+/// destructuring may skip it only when that realm's array iteration protocol is untouched. The
+/// expected output is Node's, with `vm` contexts for the two realms.
+#[test]
+fn entries_from_another_realm_match_node() {
+    const OTHER_REALM: &str = r####"globalThis.mB = new Map([[1, 'a'], [2, 'b']]);
+globalThis.aB = ['x', 'y'];
+globalThis.patchB = function (on) {
+  if (on) {
+    patchB.orig = Array.prototype[Symbol.iterator];
+    Array.prototype[Symbol.iterator] = function () { log.push('B'); return patchB.orig.call(this); };
+  } else Array.prototype[Symbol.iterator] = patchB.orig;
+};"####;
+    const THIS_REALM: &str = r####"const patchA = (on) => {
+  if (on) {
+    patchA.orig = Array.prototype[Symbol.iterator];
+    Array.prototype[Symbol.iterator] = function () { log.push('A'); return patchA.orig.call(this); };
+  } else Array.prototype[Symbol.iterator] = patchA.orig;
+};
+const MIPA = Object.getPrototypeOf(new Map().entries());
+const AIPA = Object.getPrototypeOf([].entries());
+const mA = new Map([[3, 'c'], [4, 'd']]);
+const out = [];
+let rec = false;
+const t = (name, f) => {
+  log.length = 0;
+  let r;
+  try { r = f(); } catch (e) { r = e.name; }
+  if (rec) out.push(name + ':' + show(r) + '|' + log.join(''));
+};
+const withPatch = (patch, f) => () => { patch(true); try { return f(); } finally { patch(false); } };
+const loopMap = (it) => () => { const s = []; for (const [k, v] of it) s.push(k, v); return s; };
+const swap = (it, proto) => { Object.setPrototypeOf(it, proto); return it; };
+for (let r = 0; r < 12; r++) {
+  rec = r === 0 || r === 11;
+  t('mB-clean', loopMap(mB));
+  t('mB-patchB', withPatch(patchB, loopMap(mB)));
+  t('mB-patchA', withPatch(patchA, loopMap(mB)));
+  t('aBentries-patchB', withPatch(patchB, loopMap(aB.entries())));
+  t('aBentries-patchA', withPatch(patchA, loopMap(aB.entries())));
+  t('mBswap-patchA', withPatch(patchA, loopMap(swap(mB.entries(), MIPA))));
+  t('mBswap-patchB', withPatch(patchB, loopMap(swap(mB.entries(), MIPA))));
+  t('aBswap-patchA', withPatch(patchA, loopMap(swap(aB.entries(), AIPA))));
+  t('aBswap-patchB', withPatch(patchB, loopMap(swap(aB.entries(), AIPA))));
+  t('mA-patchB', withPatch(patchB, loopMap(mA)));
+  t('mA-patchA', withPatch(patchA, loopMap(mA)));
+}
+out.join('\n')"####;
+    let node = r####"mB-clean:[1,"a",2,"b"]|
+mB-patchB:[1,"a",2,"b"]|BB
+mB-patchA:[1,"a",2,"b"]|
+aBentries-patchB:[0,"x",1,"y"]|BB
+aBentries-patchA:[0,"x",1,"y"]|
+mBswap-patchA:[1,"a",2,"b"]|AA
+mBswap-patchB:[1,"a",2,"b"]|
+aBswap-patchA:[0,"x",1,"y"]|AA
+aBswap-patchB:[0,"x",1,"y"]|
+mA-patchB:[3,"c",4,"d"]|
+mA-patchA:[3,"c",4,"d"]|AA
+mB-clean:[1,"a",2,"b"]|
+mB-patchB:[1,"a",2,"b"]|BB
+mB-patchA:[1,"a",2,"b"]|
+aBentries-patchB:[0,"x",1,"y"]|BB
+aBentries-patchA:[0,"x",1,"y"]|
+mBswap-patchA:[1,"a",2,"b"]|AA
+mBswap-patchB:[1,"a",2,"b"]|
+aBswap-patchA:[0,"x",1,"y"]|AA
+aBswap-patchB:[0,"x",1,"y"]|
+mA-patchB:[3,"c",4,"d"]|
+mA-patchA:[3,"c",4,"d"]|AA"####;
+    for mode in [Mode::Interpreted, Mode::Eager, Mode::Hot] {
+        let mut context = context(mode);
+        let log = context
+            .eval(Source::from_bytes("globalThis.log = []; log"))
+            .expect("makes the log")
+            .as_object()
+            .expect("an array");
+        let other = context.create_realm().expect("a second realm");
+        let this_realm = context.enter_realm(other.clone());
+        context
+            .global_object()
+            .set(js_string!("log"), log, true, &mut context)
+            .expect("shares the log");
+        context
+            .eval(Source::from_bytes(OTHER_REALM))
+            .expect("sets up the other realm");
+        let global = context.global_object();
+        let exported: Vec<_> = ["mB", "aB", "patchB"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name,
+                    global
+                        .get(js_string!(name), &mut context)
+                        .expect("exported"),
+                )
+            })
+            .collect();
+        context.enter_realm(this_realm);
+        for (name, value) in exported {
+            context
+                .global_object()
+                .set(js_string!(name), value, true, &mut context)
+                .expect("imports");
+        }
+        let result = match context.eval(Source::from_bytes(&format!(
+            "{SHOW}
+{THIS_REALM}"
+        ))) {
+            Ok(value) => value.as_string().map_or_else(
+                || value.display().to_string(),
+                |s| s.to_std_string_escaped(),
+            ),
+            Err(error) => format!("uncaught {error}"),
+        };
+        assert_eq!(result, node, "{mode:?}");
+    }
+}
