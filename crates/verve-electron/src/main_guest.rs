@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use verve::isolate::{Guest, InterruptHandle, Outbox};
 use verve::native;
@@ -31,6 +31,8 @@ pub struct MainGuest {
     api: Rc<MainState>,
     /// The code the app ends with when its script could not run at all.
     failed: Option<i32>,
+    /// When the collector next looks for `sendSync` events let go without an answer.
+    sweep_at: Option<Instant>,
 }
 
 impl MainGuest {
@@ -52,11 +54,13 @@ impl MainGuest {
             hub,
             api,
             failed: None,
+            sweep_at: None,
         }
     }
 
     /// Lets work finished on another thread — a socket, a worker — wake the isolate.
     pub fn set_waker(&mut self, waker: verve::Waker) {
+        api::message_port_main::set_waker(self.runtime.context(), waker.clone());
         self.runtime.set_waker(Some(waker));
     }
 
@@ -167,10 +171,19 @@ impl MainGuest {
         }
     }
 
-    /// What a page said, told to the window that shows it. A page's messages are P12's, and what
-    /// `webContents` reports of it is P13's.
+    /// What a page said, told to the window that shows it. What `webContents` reports of a page's
+    /// lifecycle is P13's; its messages are heard as events at once, each with the microtask
+    /// checkpoint a task of Electron's main process ends with.
     pub fn from_renderer(&mut self, contents: ContentsId, event: FromRenderer) {
         match event {
+            FromRenderer::Ipc { .. }
+            | FromRenderer::Invoke { .. }
+            | FromRenderer::SendSync { .. }
+            | FromRenderer::Post { .. } => {
+                api::ipc_main::receive(self.runtime.context(), contents, event);
+                self.runtime.run_microtasks();
+                self.sweep_at = api::ipc_main::watch_unanswered(self.runtime.context());
+            }
             FromRenderer::Dom(verve_dom::Request::Title(title)) => {
                 if let Some(window) = self.hub.window_of(contents) {
                     self.hub.to_shell(ToShell::Window {
@@ -276,13 +289,25 @@ impl Guest for MainGuest {
     fn tick(&mut self) {
         self.hub.count_beat();
         beat::run(&mut self.runtime);
+        if self.sweep_at.is_some() {
+            self.sweep_at = api::ipc_main::sweep(self.runtime.context());
+        }
+        if api::message_port_main::pump(self.runtime.context()) {
+            self.runtime.run_microtasks();
+        }
         if let Some(code) = self.failed {
             self.hub.shutdown(code);
         }
     }
 
     fn next_due(&self) -> Option<Duration> {
-        beat::next_due(&self.runtime)
+        let sweep = self
+            .sweep_at
+            .map(|at| at.saturating_duration_since(Instant::now()));
+        match (beat::next_due(&self.runtime), sweep) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn drain(&mut self, _out: &mut Outbox<()>) {}

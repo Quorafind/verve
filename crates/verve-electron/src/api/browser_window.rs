@@ -9,12 +9,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
+use boa_engine::{Context, JsObject, JsResult, JsValue};
 use verve::events::emitter_init;
 use verve::native::{self, ClassSpec, NewOnly};
 
 use crate::api::define::{self, Args, Fields, Kind};
-use crate::api::{app, shared};
+use crate::api::{app, contents_ipc, shared};
 use crate::hub::RendererHandle;
 use crate::ids::WindowId;
 use crate::msg::{LoadOptions, ToRenderer, ToShell, WebPreferences, WindowOp, WindowOptions};
@@ -144,16 +144,9 @@ fn id(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue>
 }
 
 fn web_contents(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    // P13 makes this the `WebContents` class, one object per page; a P02 page is its id.
+    // P13 makes this the `WebContents` class; until then it is the object `contents_ipc` keeps.
     let (_, page) = page_of(this, context)?;
-    let contents = native::object(context);
-    contents.set(
-        js_string!("id"),
-        JsValue::new(page.contents),
-        false,
-        context,
-    )?;
-    Ok(contents.into())
+    Ok(contents_ipc::contents_object(context, page.contents)?.into())
 }
 
 /// The window `this` stands for and the page it shows: `Illegal invocation` for an instance of

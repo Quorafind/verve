@@ -328,6 +328,12 @@ pub enum ToRenderer {
         user_gesture: bool,
     },
     SetZoomFactor(f64),
+    /// `webContents.postMessage`: a message with the ports the page is given, as `MessagePort`s.
+    Post {
+        channel: String,
+        message: Cloned,
+        ports: Vec<verve::messaging::PortEnd>,
+    },
 }
 
 /// The answer to a `sendSync`, sent once.
@@ -407,6 +413,12 @@ pub enum FromRenderer {
     /// The page's thread is gone: `'render-process-gone'`.
     Gone {
         reason: GoneReason,
+    },
+    /// `ipcRenderer.postMessage`: a message with the ports the main process is given.
+    Post {
+        channel: String,
+        message: Cloned,
+        ports: Vec<verve::messaging::PortEnd>,
     },
 }
 
