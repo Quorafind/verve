@@ -11,7 +11,6 @@ mod layout;
 mod window;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
@@ -151,7 +150,7 @@ impl State {
                 self.windows.insert(*window, created);
             }
             ToShell::Window { window, op } => self.apply_op(*window, op, primary, &mut out),
-            ToShell::Menu(_) => {}
+            ToShell::Menu(_) | ToShell::ErrorBox { .. } => {}
             ToShell::Quit { exit_code } => {
                 self.exit = Some(*exit_code);
                 self.windows.values_mut().for_each(|window| {
@@ -378,13 +377,13 @@ impl HeadlessShell {
 
 /// Runs the app whose script is `entry` on a headless shell that traces to standard error, and
 /// answers the code it ends with: `electron --headless`.
-pub fn run(hub: &Arc<Hub>, entry: PathBuf) -> i32 {
+pub fn run(hub: &Arc<Hub>, program: crate::hub::Program) -> i32 {
     let options = HeadlessOptions {
         trace: true,
         ..HeadlessOptions::default()
     };
     let shell = HeadlessShell::new(hub, options);
-    hub.start_main(entry);
+    hub.start(program);
     loop {
         if let Some(code) = shell.exit_code() {
             return code;
@@ -405,6 +404,7 @@ fn describe(msg: &ToShell) -> String {
         ToShell::Window { window, op } => format!("[window {window}] {op:?}"),
         ToShell::Menu(op) => format!("[menu] {op:?}"),
         ToShell::Quit { exit_code } => format!("[app] quit {exit_code}"),
+        ToShell::ErrorBox { title, content } => format!("[app] error box {title:?} {content:?}"),
     }
 }
 

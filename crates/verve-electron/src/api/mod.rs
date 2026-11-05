@@ -2,8 +2,11 @@
 //! main isolate, the page's in a renderer's. Every class and function is a native Boa function,
 //! made the first time a script requires the module.
 
+pub(crate) mod app;
 pub(crate) mod browser_window;
+pub(crate) mod command_line;
 pub mod define;
+pub(crate) mod process;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -21,15 +24,42 @@ use crate::ids::WindowId;
 pub(crate) struct MainState {
     /// The router every method of the API sends through.
     pub(crate) hub: Arc<Hub>,
+    /// The app object's state: its name, paths, switches and where it is in ending.
+    pub(crate) app: app::AppState,
     windows: RefCell<BTreeMap<WindowId, (JsObject, RendererHandle)>>,
 }
 
 impl MainState {
-    fn new(hub: Arc<Hub>) -> Rc<Self> {
+    fn new(hub: Arc<Hub>, app: app::AppState) -> Rc<Self> {
         Rc::new(Self {
             hub,
+            app,
             windows: RefCell::new(BTreeMap::new()),
         })
+    }
+
+    /// Emits `'close'` on `window`'s object: answers whether a listener prevented the default,
+    /// which keeps the window open.
+    pub(crate) fn emit_close(&self, context: &mut Context, window: WindowId) -> bool {
+        let Some(object) = self.object(window) else {
+            return false;
+        };
+        define::emit_cancelable(context, &object, "close", &[]).unwrap_or_else(|error| {
+            verve::report(context, &error);
+            false
+        })
+    }
+
+    /// A window is gone: the Hub forgets it, its object hears `'closed'` — after the native window
+    /// is destroyed, as in Electron — and is let go. The app is then told whether it was the last.
+    pub(crate) fn window_closed(&self, context: &mut Context, window: WindowId) {
+        self.hub.remove_window(window);
+        if let Some(object) = self.object(window)
+            && let Err(error) = define::emit(context, &object, "closed", &[])
+        {
+            verve::report(context, &error);
+        }
+        self.forget(window);
     }
 
     /// Keeps `object` as the one standing for `window`, and `page` as the handle on what it shows.
@@ -69,7 +99,7 @@ pub fn install(runtime: &mut verve::Runtime, hub: Arc<Hub>) {
 
 /// [`install`], answering what the API keeps.
 pub(crate) fn install_state(runtime: &mut verve::Runtime, hub: Arc<Hub>) -> Rc<MainState> {
-    let state = MainState::new(hub);
+    let state = MainState::new(Arc::clone(&hub), app::AppState::new(&hub.launch()));
     runtime.context().insert_data(Rc::clone(&state));
     runtime.define_builtin_lazy("electron", main_module);
     state
@@ -98,6 +128,7 @@ fn main_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     let exports = native::object(context);
     let window = browser_window::make(context)?;
     exports.set(js_string!("BrowserWindow"), window, false, context)?;
+    exports.set(js_string!("app"), app::make(context)?, false, context)?;
     Ok(exports.into())
 }
 

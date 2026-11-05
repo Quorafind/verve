@@ -21,12 +21,20 @@ fn machine() -> (&'static str, &'static str) {
     }
 }
 
-/// What the user agent Electron's renderer sends.
-pub(crate) fn user_agent() -> String {
+/// What the user agent Electron's renderer sends. An app that has a name and a version puts them
+/// in front of Chrome's (`MyApp/1.0 Chrome/…`), as `app.userAgentFallback` does.
+pub fn electron_user_agent(app: Option<(&str, &str)>) -> String {
+    let app = app.map_or(String::new(), |(name, version)| {
+        format!("{name}/{version} ")
+    });
     format!(
-        "Mozilla/5.0 ({}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_VERSION} Electron/{ELECTRON_VERSION} Safari/537.36",
+        "Mozilla/5.0 ({}) AppleWebKit/537.36 (KHTML, like Gecko) {app}Chrome/{CHROME_VERSION} Electron/{ELECTRON_VERSION} Safari/537.36",
         machine().0
     )
+}
+
+pub(crate) fn user_agent() -> String {
+    electron_user_agent(None)
 }
 
 /// `navigator.appVersion`, from the whole user agent: what follows `Mozilla/`, as browsers

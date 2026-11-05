@@ -34,6 +34,9 @@ use crate::{Level, console_line};
 pub const NODE_VERSION: &str = "22.20.0";
 pub const ELECTRON_VERSION: &str = "39.2.0";
 pub const CHROME_VERSION: &str = "142.0.7444.59";
+/// `process.versions.modules`, Node's `NODE_MODULE_VERSION`: the ABI a native addon is built
+/// for. Electron 39 reports 140 (observed on 39.8.10; Node 22 proper is 127).
+pub const MODULES_VERSION: &str = "140";
 const V8_VERSION: &str = "14.2.231.17-electron.0";
 
 /// What a realm's `process` is: the process an embedder is building — Electron's main process,
@@ -676,7 +679,7 @@ fn apply_versions(context: &mut Context, process: &JsObject, info: &ProcessInfo)
         ("v8", V8_VERSION),
         ("uv", "1.51.0"),
         ("zlib", "1.3.0.1-motley"),
-        ("modules", "136"),
+        ("modules", MODULES_VERSION),
         ("napi", "10"),
         ("openssl", "0.0.0"),
         ("unicode", "16.0"),
@@ -1154,6 +1157,35 @@ pub(crate) fn print_uncaught(context: &mut Context, error: &JsError) {
     let text = crate::util::console_text(std::slice::from_ref(&value), context)
         .unwrap_or_else(|_| crate::describe(context, error));
     let _ = write_fd(2, format!("{text}\n").as_bytes());
+}
+
+/// An error nobody caught in a realm whose host decides what happens to it
+/// ([`UncaughtBehavior::Report`], an Electron main process): handed to the `uncaughtException`
+/// listeners, if there are any. Answers whether they took it; the host hears of it only when
+/// they did not.
+pub(crate) fn heard_by_listeners(context: &mut Context, error: &JsError) -> bool {
+    if !matches!(
+        crate::shared(context).process.borrow().on_uncaught,
+        UncaughtBehavior::Report(_)
+    ) {
+        return false;
+    }
+    let process = crate::native::global(context, "process").unwrap_or_default();
+    let name = js_text("uncaughtException");
+    let count = invoke(
+        &process,
+        "listenerCount",
+        std::slice::from_ref(&name),
+        context,
+    );
+    if count.ok().and_then(|n| n.as_number()).unwrap_or(0.) == 0. {
+        return false;
+    }
+    let value = error.clone().into_opaque(context).unwrap_or_default();
+    if let Err(thrown) = invoke(&process, "emit", &[name.clone(), value, name], context) {
+        print_uncaught(context, &thrown);
+    }
+    true
 }
 
 /// An error nobody caught: to the `uncaughtException` listeners if there are any, or the end

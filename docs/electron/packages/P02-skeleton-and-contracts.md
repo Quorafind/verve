@@ -94,6 +94,8 @@ pub enum ToShell {
     Menu(MenuOp),
     /// 渲染器有新快照了（Hub 收到 renderer 的 view 后转发，或 Shell 直接订阅 isolate view）。
     Quit { exit_code: i32 },
+    /// `dialog.showErrorBox`：主进程未捕获的错误弹的框（P10 加；P14 画，之前 Shell 只记录）。
+    ErrorBox { title: String, content: String },
 }
 
 pub struct WindowOptions {
@@ -145,12 +147,15 @@ pub enum WindowEvent {
 }
 
 pub enum AppEvent {
+    /// Shell 已就绪、入口已跑完：`app` 的 `ready`（P10 加；Hub 在 `start` 时若已有 Shell 就发）。
+    Ready,
     /// macOS 点 Dock 图标；Windows 无。
     Activate { has_visible_windows: bool },
     OpenFile(std::path::PathBuf), OpenUrl(String),
     ThemeChanged { dark: bool },
     /// 第二个实例启动（P10 的单实例锁）
-    SecondInstance { argv: Vec<String>, cwd: std::path::PathBuf },
+    /// `data` 是第二个实例的 `additionalData` 的 JSON 文本（它跨了进程，P10 加）。
+    SecondInstance { argv: Vec<String>, cwd: std::path::PathBuf, data: String },
 }
 
 pub struct Display { pub id: u32, pub bounds: Rect, pub work_area: Rect, pub scale_factor: f32, pub primary: bool }
@@ -239,7 +244,7 @@ pub struct RendererView {
 | `ToRenderer::SetProxy(…)` | P16 |
 | `ToRenderer::InspectorEval { call, code }`、`FromRenderer::InspectorEvalReply { call, result }`、`ToShell::Inspector(…)` | P43 |
 | Shell 提供 `native_handle(WindowId) -> Option<RawWindowHandle>`（对话框父窗口、muda 挂菜单） | P34（P14/P15 使用） |
-| `AppEvent::Ready`（Shell 启动完成，`app` 的 `ready` 依据） | P10 |
+| `AppEvent::Ready`（Shell 启动完成，`app` 的 `ready` 依据）— P10 已加，由 Hub 在 `start` 时发 | P10 |
 | `WindowEvent::FirstPaint`（`ready-to-show` 的精确依据）、`WindowEvent::NativeHandle(u64)` | P13 / P34 |
 | `ToRenderer::BeforeUnload`、`ToRenderer::Unload`、`FromRenderer::BeforeUnloadReply { prevented }` | P13 |
 | `ToRenderer::WindowMessage`、`FromRenderer::WindowProxyOp`（`window.open` 返回的代理） | P13 |

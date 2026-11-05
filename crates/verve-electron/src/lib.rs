@@ -15,10 +15,12 @@ mod beat;
 pub mod headless;
 pub mod hub;
 pub mod ids;
+pub mod launcher;
 pub mod main_guest;
 pub mod msg;
 mod probe;
 pub mod renderer_guest;
+mod single_instance;
 
 use std::path::PathBuf;
 
@@ -26,6 +28,7 @@ pub use headless::{FakeLayout, HeadlessOptions, HeadlessShell, HeadlessWindow};
 pub use hub::{ConsoleLine, Hub, RendererHandle, ShellPort};
 pub use main_guest::MainGuest;
 pub use renderer_guest::RendererGuest;
+pub use verve::{ELECTRON_VERSION, MODULES_VERSION};
 
 /// What the app is before its first script runs.
 pub struct ElectronOptions {

@@ -43,6 +43,7 @@ impl RendererGuest {
     pub fn new(hub: &Hub, contents: ContentsId, prefs: WebPreferences) -> Self {
         let dark = hub.options().dark;
         let mut runtime = Runtime::new();
+        runtime.set_vfs(hub.overlay());
         let console = set_up_process(&mut runtime);
         api::install_page(&mut runtime);
         let document = verve_dom::install(

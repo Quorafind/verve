@@ -16,6 +16,31 @@ verve-dom = { path = "../verve-dom" }
 boa_engine = { version = "=0.22.0", default-features = false, features = ["annex-b"] }
 # The address `loadURL` is given, read as the kernel's `data:` processor reads it.
 url = "2.5"
+# An app's `package.json`: its name, version and `main`.
+serde_json = "1"
+# The app's `app.asar`, which every isolate reads through.
+verve-asar = { path = "../verve-asar" }
+# The single-instance lock's key: a digest of the profile directory.
+sha2 = "0.10"
+
+# The Windows API the app object answers from: known folders, the registry, the single-instance
+# mutex and pipe, memory and CPU figures, the user's languages.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
 
 [dev-dependencies]
 # The fixtures' recordings from real Electron are JSON.

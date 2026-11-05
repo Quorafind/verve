@@ -1,6 +1,10 @@
 //! The fixture apps in `tests/electron/apps`, run headless and held to what real Electron did
 //! (`expected.json`, recorded by `tests/electron/record.cjs`). Each package turns its tests on
 //! when the API its fixture uses exists: the `#[ignore]` names who does.
+//!
+//! `lifecycle` and `single-instance` are not replayed here: their scenarios and log files are
+//! chosen by switches (`--scenario`, `--log`, `--role`), so `tests/app.rs` runs them, with a
+//! profile directory of its own each, against what Electron 39.8.10 did.
 
 mod support;
 
@@ -100,7 +104,7 @@ fn hello_shows_the_versions_in_one_window_and_ends_with_zero() {
 }
 
 #[test]
-#[ignore = "P10: needs the app module, so that the script is not ended by process.exit"]
+#[ignore = "P20: loadFile needs the page loader; the app module is there (P10)"]
 fn quick_start_opens_its_window_and_quits_when_it_closes() {
     let app = App::launch(&fixture("quick-start"));
     let window = app
@@ -108,18 +112,6 @@ fn quick_start_opens_its_window_and_quits_when_it_closes() {
         .expect("the page titled the window");
     app.shell.user_close(window.id);
     assert_eq!(app.wait_exit(ENDS_WITHIN), 0);
-}
-
-#[test]
-#[ignore = "P10: the lifecycle fixture is P10's, with the app module"]
-fn lifecycle_events_come_in_electrons_order() {
-    replays("lifecycle");
-}
-
-#[test]
-#[ignore = "P10: the single-instance fixture is P10's"]
-fn a_second_launch_reaches_the_first_instance() {
-    replays("single-instance");
 }
 
 #[test]

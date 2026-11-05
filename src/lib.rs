@@ -101,9 +101,13 @@ pub fn code_cache_user_secret() -> std::io::Result<[u8; 32]> {
     code_cache::user_secret().map(|(secret, _)| secret)
 }
 pub use embed::{ConsoleSink, SourcePos};
+pub use navigator::electron_user_agent;
 pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
-pub use process::{ExitBehavior, ProcessInfo, UncaughtBehavior};
+pub use process::{
+    CHROME_VERSION, ELECTRON_VERSION, ExitBehavior, MODULES_VERSION, NODE_VERSION, ProcessInfo,
+    UncaughtBehavior,
+};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -738,6 +742,16 @@ impl Runtime {
     /// synchronous ESM namespace. Use [`Self::load_esm`] for graphs with top-level await.
     /// A module's own `require` resolves relative names against the folder it is in.
     pub fn load_module(&mut self, filename: &Path, source: &str) -> Result<JsValue, String> {
+        self.run_module(filename, source).map_err(|error| {
+            // A module that throws as it runs is an uncaught error: on the console with where.
+            report(&mut self.context, &error);
+            describe(&mut self.context, &error)
+        })
+    }
+
+    /// [`Self::load_module`] that hands the error back instead of reporting it, for a host that
+    /// decides what a module that throws means (an Electron app's entry).
+    pub fn run_module(&mut self, filename: &Path, source: &str) -> JsResult<JsValue> {
         let path = esm::absolute(filename, &self.context);
         let result = (|| match modules::format(&path, source, &mut self.context)? {
             modules::Format::Module => {
@@ -750,11 +764,7 @@ impl Runtime {
             }
         })();
         self.run_microtasks();
-        result.map_err(|error| {
-            // A module that throws as it runs is an uncaught error: on the console with where.
-            report(&mut self.context, &error);
-            describe(&mut self.context, &error)
-        })
+        result
     }
 
     /// Loads native ESM source. The promise fulfills with its namespace; top-level await may
@@ -1067,8 +1077,14 @@ pub fn console_line(context: &Context, level: Level, text: String) {
 
 /// An error nobody caught, written where an uncaught error goes: the console.
 pub fn report(context: &mut Context, error: &JsError) {
+    if vm::interrupted(error) {
+        return;
+    }
     if shared(context).profile.borrow().is_some() {
         process::uncaught(context, error);
+        return;
+    }
+    if process::heard_by_listeners(context, error) {
         return;
     }
     let text = describe(context, error);

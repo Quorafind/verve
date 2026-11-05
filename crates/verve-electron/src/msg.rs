@@ -36,6 +36,12 @@ pub enum ToShell {
     Quit {
         exit_code: i32,
     },
+    /// `dialog.showErrorBox`: the box Electron shows for an error nobody caught in the main
+    /// process. P14 draws it; until then a shell may only record it.
+    ErrorBox {
+        title: String,
+        content: String,
+    },
 }
 
 /// `new BrowserWindow(options)`, as the shell needs it. The defaults are Electron's.
@@ -231,6 +237,9 @@ pub enum WindowEvent {
 /// What happened to the app as a whole.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
+    /// The shell is up and the app's entry has run: `app` is ready. Sent once, by the Hub, right
+    /// after it starts the main process when a shell is already registered.
+    Ready,
     /// macOS clicking the Dock icon; Windows has none.
     Activate {
         has_visible_windows: bool,
@@ -244,6 +253,8 @@ pub enum AppEvent {
     SecondInstance {
         argv: Vec<String>,
         cwd: PathBuf,
+        /// The `additionalData` the second instance gave, as JSON text: it crossed a process.
+        data: String,
     },
 }
 

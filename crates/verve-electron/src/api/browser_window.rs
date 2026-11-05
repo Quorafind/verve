@@ -14,7 +14,7 @@ use verve::events::emitter_init;
 use verve::native::{self, ClassSpec, NewOnly};
 
 use crate::api::define::{self, Args, Fields, Kind};
-use crate::api::shared;
+use crate::api::{app, shared};
 use crate::hub::RendererHandle;
 use crate::ids::WindowId;
 use crate::msg::{LoadOptions, ToRenderer, ToShell, WebPreferences, WindowOp, WindowOptions};
@@ -64,6 +64,10 @@ fn init(this: &JsObject, args: &[JsValue], context: &mut Context) -> JsResult<()
         contents,
         options,
     });
+    // The page's `webContents` is heard of first, then the window that shows it.
+    let page = web_contents(&this.clone().into(), &[], context)?;
+    app::emit(context, "web-contents-created", &[page])?;
+    app::emit(context, "browser-window-created", &[this.clone().into()])?;
     Ok(())
 }
 
