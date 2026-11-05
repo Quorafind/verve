@@ -57,7 +57,7 @@ use super::{
     memory::{ExecutableCode, LiveCode},
     runtime::{
         EXIT, FRAME_OFFSET, INTERRUPT_OFFSET, LOOP_COUNT_OFFSET, LOOP_LIMIT_OFFSET, REGS_OFFSET,
-        STEPS, jit_lookup, jit_store,
+        STEPS, StepFn, jit_lookup, jit_return, jit_store,
     },
     stack_layout::{StackLayout, stack_layout},
     typed_elements::TypedLayout,
@@ -844,9 +844,13 @@ impl Translator<'_> {
     /// Runs the instruction at `pc` with [`jit_step`], then goes on where it says: to one of
     /// `expected` (the next instruction first), or through `dispatch`.
     fn step(&mut self, pc: u32, expected: &[u32]) {
-        let pc_value = self.b.ins().iconst(I32, i64::from(pc));
         let opcode = Opcode::decode(self.bytes[pc as usize]);
-        let step = STEPS[opcode as usize];
+        self.step_with(STEPS[opcode as usize], pc, expected);
+    }
+
+    /// As [`Self::step`], with `step` in place of the helper for the instruction's opcode.
+    pub(super) fn step_with(&mut self, step: StepFn, pc: u32, expected: &[u32]) {
+        let pc_value = self.b.ins().iconst(I32, i64::from(pc));
         let next = self.call(self.step_sig, step as *const () as i64, &[pc_value]);
         let regs = self
             .b
@@ -1419,6 +1423,10 @@ impl Translator<'_> {
             }
             Instruction::Call { argument_count } => {
                 self.call_direct(pc, next, argument_count.into());
+                return true;
+            }
+            Instruction::Return => {
+                self.step_with(jit_return, pc, &[]);
                 return true;
             }
             _ => {

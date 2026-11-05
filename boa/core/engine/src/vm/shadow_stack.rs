@@ -4,7 +4,10 @@ use boa_gc::{Finalize, Trace};
 use boa_string::JsString;
 use thin_vec::ThinVec;
 
-use super::source_info::{NativeSourceInfo, SourceInfo};
+use super::{
+    Lent,
+    source_info::{NativeSourceInfo, SourceInfo},
+};
 
 #[derive(Debug, Default, Clone, Trace, Finalize)]
 pub(crate) struct Backtrace {
@@ -45,7 +48,7 @@ impl ErrorStack {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum ShadowEntry {
     Native {
         function_name: Option<JsString>,
@@ -53,8 +56,29 @@ pub(crate) enum ShadowEntry {
     },
     Bytecode {
         pc: u32,
-        source_info: SourceInfo,
+        /// Lent by the code block of the frame the entry stands for while it is on the stack
+        /// of the VM (which pops the entry with the frame), and counted in a copy that is kept.
+        source_info: Lent<SourceInfo>,
     },
+}
+
+impl Clone for ShadowEntry {
+    /// An entry that owns what it holds, as a backtrace that outlives the frames must.
+    fn clone(&self) -> Self {
+        match self {
+            Self::Native {
+                function_name,
+                source_info,
+            } => Self::Native {
+                function_name: function_name.clone(),
+                source_info: *source_info,
+            },
+            Self::Bytecode { pc, source_info } => Self::Bytecode {
+                pc: *pc,
+                source_info: source_info.duplicate(),
+            },
+        }
+    }
 }
 
 impl ShadowEntry {
@@ -160,7 +184,7 @@ impl ShadowStack {
         });
     }
 
-    pub(crate) fn push_bytecode(&mut self, last_pc: u32, source_info: SourceInfo) {
+    pub(crate) fn push_bytecode(&mut self, last_pc: u32, source_info: Lent<SourceInfo>) {
         // NOTE: pc points to the next opcode, so we offset by -1 to put it within range.
         let last_pc = last_pc.saturating_sub(1);
 
@@ -171,8 +195,9 @@ impl ShadowStack {
             .push(ShadowEntry::Bytecode { pc: 0, source_info });
     }
 
-    pub(crate) fn pop(&mut self) -> Option<ShadowEntry> {
-        self.stack.pop()
+    /// Pops the newest entry. It is not handed back: a lent entry must not leave the stack.
+    pub(crate) fn pop(&mut self) {
+        self.stack.pop();
     }
 
     pub(crate) fn take(&self, n: usize, last_pc: u32) -> Backtrace {

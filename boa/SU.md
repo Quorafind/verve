@@ -740,3 +740,36 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   Compiled `IteratorNext` now steps the record where it sits, as the interpreter's handler does,
   instead of taking it off the frame's iterator stack and putting it back; a step answers its key
   and, for an entry, the value in a second slot, so the common one-value step stays one value wide.
+- `boa_engine`, `vm/call_frame`, `builtins/function`, `context`, `vm/jit/call.rs` (P84): the frame of
+  an ordinary function no longer clones the handles it reaches through its callee. Its code
+  block, script or module, realm and environments are `Lent` (a bitwise copy of the function's own, not counted
+  and not dropped) when the function is the value in the frame's function slot: the VM stack
+  keeps it alive, by a counted reference, until the frame is popped, and those four fields of
+  the function are set when it is made, except that a lazy function's compile replaces `code`
+  before the frame exists and `PushPrivateEnvironment` adds the private environment to the
+  `environments` of the class constructor that `GetFunction` has just made (before any script can
+  reach it). The frame copies the environments on its first push or pop (`DerefMut`). A call that comes through another function (a proxy without an
+  `apply`/`construct` trap, which can be revoked while its target runs; a bound function) leaves
+  the forwarder in the slot, and the frame then owns its handles (`callee_parts`). Whatever can
+  outlive the slot makes the handles its own first: cloning a frame counts them,
+  `GeneratorContext::from_current` does it for the live frame before its stack is split off, and
+  `Context::enter_realm` and `swap_realm` replace a lent realm with an owned one. Script, module,
+  `eval` and synthetic-module frames own theirs, as before. `Lent` is `Trace` but takes no part
+  in the root counts when it is lent. `context/mod.rs` is outside the files this package was to
+  change; `enter_realm` and `swap_realm` had to follow the frame's field, and `swap_realm` also
+  returns early when both sides are the same realm (a native function of the running realm), so
+  that call no longer swaps twice. Nothing observable changes.
+- `boa_engine`, `vm/shadow_stack.rs`, `vm/mod.rs` (P84): the shadow stack's entry for a bytecode
+  frame lends the code block's `SourceInfo` (`Lent`) instead of cloning the `Rc` per call; an entry
+  that is kept in a backtrace (`take`, `capture`, `caller_position`) is cloned owned, so what
+  `error.stack` prints is unchanged. `Context::check_runtime_limits` and `runtime_limits_exceeded`
+  are `#[inline]` and the `RangeError` they build is out of line; the limits and the depth at which
+  the error is thrown are the same.
+- `boa_engine`, `vm/jit/call.rs`, `vm/jit/runtime.rs`, `vm/jit/compiler.rs` (P84): a compiled
+  `Call` of a compiled ordinary function runs the callee's code at once, with the code it already
+  found, instead of going through `finish` and `run_callees` and `prepare` again; the checks are
+  the ones `run_callees` makes (nesting cap, native stack share, JIT enabled, no fuzz or trace),
+  and anything else takes the old path. `Return` is compiled as `jit_return`, which pops a frame
+  that does not exit early without the `catch_unwind` and `finish` of `jit_step` (nothing it runs
+  can run JavaScript or panic) and leaves the compiled code; a frame that exits early takes
+  `jit_step`. Exceptions, interrupts, the nesting cap and the fallbacks are unchanged.

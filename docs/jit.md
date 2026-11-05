@@ -1432,6 +1432,8 @@ eleven runs gave -3.2 and -2.5 % (`vdom`), +0.4 and +2.7 % (`alloc`).
    cloned and dropped per call: realm, active runnable, environments), a direct call path for
    plain functions (no environment, no `arguments`) from compiled code, and keeping `this`/the
    function out of the value stack.
+   P84 did the first two in part ("Results (P84 ...)"); keeping `this` and the function out of the
+   value stack, and a calling convention that skips `execute`, are still open.
 2. **Method calls**: `o.m()` reads `m` from the prototype through the helper and the
    interpreter's cache; inline prototype reads need the check of the prototype's shape that the
    interpreter's entries now have (the object's shape does not change when its prototype's
@@ -1531,3 +1533,115 @@ makes the array and lets the compiled spec path destructure it. A value or entry
 Per element (JIT): `Map` 677 -> 107 ns, `map.entries()` 685 -> 107, `arr.entries()` 746 -> 104. `jit_iterator_next` also steps the record in place now, as the
 interpreter does, instead of popping it off the frame's iterator stack and pushing it back.
 
+## Results (P84: a leaner call frame, and compiled code calling compiled code)
+
+The frame of an ordinary function no longer clones the handles it can reach through its callee, the
+shadow stack no longer clones a `SourceInfo` per call, and a compiled `Call` of a compiled function
+enters the callee at once and returns without `jit_step`. Release `verve` with `jit`, Windows x86-64,
+`docs/electron-plan` at `824bcf70` against the branch, built from two worktrees and run alternately
+in one round, `VERVE_CODE_CACHE=0`, a throwaway profile folder. The machine was shared with two other
+workers: CPU load (five 1 s samples) was 25-30 % around the probe rounds, 41 % before and 24 % after
+the suite round, and 70-90 % in an earlier suite round that is not used. Probes: medians (best) of 7
+processes alternating, ns per call in a loop of 3M calls, the loop's own cost (1.7 compiled, 14.5
+interpreted) included.
+
+**What changed.**
+
+1. `Lent<T>` (`vm/call_frame/lent.rs`) is a handle that is either a frame's own or a bitwise copy of
+   one owned by the function on the stack; it adds no count and drops nothing. A frame lends its code
+   block, script or module, realm and (until the first push or pop of an environment) environments
+   from the callee, when the callee is the value in the frame's function slot. The slot keeps it
+   alive, by a counted reference, until the frame is popped, and its `code`, `script_or_module`,
+   `realm` and `environments` are set when it is made, with two exceptions that happen before any
+   script can call it: a lazy function's compiled code replaces `code` before its frame exists, and
+   `PushPrivateEnvironment` adds the private environment to the `environments` of the class
+   constructor that `GetFunction` has just made. A call that comes through another function, a
+   proxy without an `apply`/`construct` trap or a bound function, leaves the forwarder in the
+   slot, and the frame owns its handles then: a revoked proxy no longer refers to its target, which
+   the running call could otherwise outlive (`callee_parts` decides, with one comparison).
+   Whatever can outlive the slot makes the
+   handles its own first: `CallFrame::clone` (a generator's or async function's frame is a clone, and
+   the live frame is made owned before `split_off_frame`), `Context::enter_realm`/`swap_realm`, and
+   a write to the environments (`DerefMut` copies them). Script, module, `eval` and synthetic-module
+   frames own theirs, as before. `swap_realm` does nothing when both realms are the same, which also
+   takes the swap out of every native call in one realm. `Lent` is `Trace`, and joins the root counts
+   only when it counted.
+2. A bytecode entry of the shadow stack lends the code block's `SourceInfo`; the entries copied into
+   a backtrace are owned. `check_runtime_limits` and `runtime_limits_exceeded` are `#[inline]` and the
+   `RangeError` is built out of line. The limits, the order of the checks and the depth at which the
+   error is thrown are unchanged: there was one checkpoint per JavaScript call already (in
+   `function_call`/`function_construct`), and the recursion and stack limits cannot be checked less
+   often without moving the depth.
+3. `jit_call` runs the callee with the compiled code `compiled_callee` already found (no second
+   `prepare`, no `finish`/`run_callees` round in the common case), under the checks `run_callees`
+   makes (nesting cap 64, a quarter of the native stack limit, JIT enabled, no `fuzz` or `trace`);
+   anything else takes the old path. `Return` is compiled as `jit_return`: a frame that does not exit
+   early is popped without the `catch_unwind` and the frame checks of `jit_step`, and compiled code
+   leaves, which is what `finish` answered for it; a frame that exits early takes `jit_step`.
+
+**Per step**, `zero()`, compiled, best of 7 (medians were 2-3 ns higher): base 71.7, step 2 (code
+block, realm, script) 68.6, step 3 (shadow stack, limits) 67.1, step 4 (direct call, `Return`) 66.1;
+interpreted, steps 2 and 3: 99.7 to about 90. The environments (a fifth commit) did not move `zero()`
+and took `oo` from 636 to 561 ms in an alternating round of 9 (compiled). The 5-6 ns that are left of
+the 12-15 the isolated clone costs of "Where a call goes" added up to are what that section said
+overlapped: in a real call the pieces hide each other.
+
+| body, ns per iteration | base, compiled | after, compiled | base, interp | after, interp |
+|---|---|---|---|---|
+| `zero()` | 74.5 (72.2) | 66.0 (65.2) | 102.4 (99.7) | 94.9 (90.7) |
+| `id(i)` (stores the result in a global) | 102.5 (100.7) | 93.8 (91.0) | 160.1 (154.5) | 147.1 (134.1) |
+| `obj.m()` | 76.6 (76.0) | 72.9 (69.7) | 123.3 (116.8) | 111.6 (108.5) |
+| `pinst.get()` (method on the prototype) | 163.4 (158.8) | 120.4 (117.5) | 218.4 (207.4) | 173.7 (167.6) |
+| `bound()` | 104.0 (103.4) | 100.5 (99.9) | 121.2 (117.3) | 112.5 (109.1) |
+| `Math.abs(i)` | 101.3 (99.2) | 99.5 (97.8) | 133.6 (129.1) | 129.1 (124.8) |
+| `arr.forEach(zero)`, per element | 96.7 (93.7) | 90.9 (88.6) | 95.2 (93.9) | 90.0 (89.6) |
+| `arr.filter(zero)` | 109.1 (107.0) | 100.5 (99.0) | 111.1 (104.8) | 103.1 (100.0) |
+| `arr.map(zero)` | 215.8 (204.9) | 204.9 (196.4) | 216.2 (213.0) | 206.4 (204.3) |
+| `arr.map((v) => v * sc + 1)` | 263.6 (253.4) | 250.3 (241.5) | 278.6 (271.0) | 265.9 (256.7) |
+| `sort((a, b) => a - b)`, relative | 171.7 (160.6) | 162.5 (152.3) | 162.4 (158.6) | 155.5 (151.8) |
+| `new E()` (`function E() {}`), 15 processes | 233.3 (219.3) | 223.9 (210.9) | 275.7 (229.2) | 256.0 (235.9) |
+
+On the P69 rule for small callbacks (compiled not slower than interpreted, within 2 %): `forEach`
+90.9 against 90.0 holds; `filter` and `map` are faster compiled; the `sort` comparator is 4.5 %
+slower compiled than interpreted, as it was before (5.7 %), so that part of the rule is still not met.
+The `sort` row divides by a fixed count, so it is comparable between columns, not an absolute.
+
+**The P60 suite**, JIT / interpreter, median (best) of 5 processes alternating, base then branch,
+load 41 % before and 24 % after; the three tests of the package:
+
+| test | base | after | change (JIT / interp) |
+|---|---|---|---|
+| `fib` | 247.2 (238.9) / 388.7 (380.0) | 216.1 (206.8) / 358.7 (340.5) | -12.6 % / -7.7 % |
+| `oo` | 682.8 (631.9) / 847.6 (787.6) | 594.2 (589.0) / 685.0 (679.4) | -13.0 % / -19.2 % |
+| `closure` | 468.8 (460.5) / 695.7 (687.5) | 442.7 (420.9) / 652.6 (645.8) | -5.6 % / -6.2 % |
+
+Nine-process A/B rounds of the same three at 14-36 % load agree: `fib` 243 -> 212 (before the
+environments commit; 261 -> 224 with it in a later, busier round), `oo` 689 -> 647 -> 561 (base, before
+and after the environments), `closure` 455 -> 419 -> 437. The other eleven rows are within the noise of
+the round (`vdom`'s median reads +9 % with identical bests, 53.2 against 52.7; `regex`'s interpreter
+median reads +35 % with bests 24.4 against 23.6; nothing else moves more than 4 %). Targets:
+`fib` <= 210 is 216 (best 207), `oo` <= 520 is 594, `closure` <= 400 is 443; none of the ambitious
+values is reached, and `fib` is a few ms short of the committed one. Where the rest is:
+
+- `oo` is two method calls and a `new CX(i)` of a class constructor, whose function environment
+  (188 ns in "Where a call goes") is built and copied per call; the frame can lend nothing there.
+- `closure` pays the callback from native code, where compiled code still enters and leaves with a
+  fresh `JitState` per callback.
+- The environments commit costs `closure` about 18 ms (437 against 419 without it; the arrow with a
+  captured variable reads 8 ns slower per call): the arrow pushes a function scope, which copies the
+  lent environments as the clone did, so the copy is not new; the extra comparison and the frame
+  growing by eight bytes are all that was found. It gains `oo` 75 ms, and `oo` is the worst ratio in
+  the suite, so it stays.
+
+**What is left of a call.** `zero()` compiled is 65 ns: the pending call, the pushes and pops of
+`this`, the function and the registers, `downcast_ref`, the limits check, the stack truncation of
+`Return`, and entering and leaving compiled code (`execute` builds a 14-field `JitState` per call, an
+`Rc<JitCode>` is cloned, the Cranelift prologue and epilogue). That last block is the largest still
+there, and removing it needs a calling convention between compiled functions that skips `execute`:
+the helpers read the register and frame pointers from the `JitState` of the frame on top, so a callee
+needs its own state, and a deopt from inside it must leave a frame the interpreter can continue at.
+That is a redesign of the entry protocol, and this package did not build it. A direct call that only
+skips `prepare` and the `finish` round, and a `Return` that skips `jit_step`, are what is here: 3.3 ns
+of the call. They keep the nesting cap, the exception path (the callee's `Throw` is `jit_step`, as
+before), the interrupt check (before the call, and at the loop heads of the callee) and the deopt
+fallback (anything the checks refuse is the old path).

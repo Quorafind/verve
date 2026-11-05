@@ -4,18 +4,28 @@
 //! left to do and is resolved: for an ordinary function that ends in
 //! [`enter_ordinary_function`], which pushes the frame. Here compiled code asks for that
 //! directly, when the callee is such a function with compiled code: the frame, `this`, the
-//! environments and the shadow stack are the interpreter's own. Anything else (a native or a
+//! environments and the shadow stack are the interpreter's own. Then it runs the callee's
+//! compiled code at once ([`run_callee`]), nested on the native stack, instead of returning to
+//! `finish` and `run_callees` to look the code up again. Anything else (a native or a
 //! bound function, a proxy, a class constructor, code not compiled yet, a limit about to be
 //! passed, an interrupt) is left to `jit_step`, which does what the interpreter does.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    rc::Rc,
+};
 
 use crate::{
     Context, JsObject,
-    builtins::function::{FunctionParts, OrdinaryFunction, enter_ordinary_function},
+    builtins::function::{
+        FunctionParts, OrdinaryFunction, enter_ordinary_function, lend_function_parts,
+    },
 };
 
-use super::runtime::{EXIT, JitState, finish};
+use super::{
+    JitCode,
+    runtime::{EXIT, JitState, Nesting, execute, finish, may_enter, may_run_nested},
+};
 
 /// What [`jit_call`] answers when it did nothing: compiled code runs the instruction with
 /// `jit_step`.
@@ -48,21 +58,48 @@ pub(crate) unsafe extern "C" fn jit_call(
 fn call(state: &mut JitState, next: u32, argument_count: usize) -> u32 {
     // SAFETY: the context outlives compiled code, which uses it only through helpers.
     let context = unsafe { &mut *state.context };
-    let Some((function, parts)) = compiled_callee(context, argument_count) else {
+    let Some((function, parts, code)) = compiled_callee(context, argument_count) else {
         return NOT_HANDLED;
     };
     // What the interpreter's handler does first: the `pc` the frame goes on at.
     context.vm.frame_mut().pc = next;
-    let flow = match enter_ordinary_function(context, &function, parts, argument_count) {
-        Ok(()) => std::ops::ControlFlow::Continue(()),
-        Err(error) => context.handle_error(error),
+    if let Err(error) = enter_ordinary_function(context, &function, parts, argument_count) {
+        let flow = context.handle_error(error);
+        return finish(state, flow);
+    }
+    if run_callee(state, context, &code) {
+        return EXIT;
+    }
+    finish(state, std::ops::ControlFlow::Continue(()))
+}
+
+/// Runs the callee whose frame `enter_ordinary_function` pushed, in its compiled code `code`, as
+/// `run_callees` would after asking `prepare` for the same code. Answers whether the run ended
+/// (`state` has the outcome); if it did not, or if the callee cannot be run nested (see
+/// [`may_enter`] and [`may_run_nested`]), `finish` goes on from the frames as they are.
+fn run_callee(state: &mut JitState, context: &mut Context, code: &Rc<JitCode>) -> bool {
+    let vm = &context.vm;
+    if vm.frames.len() != state.frames_len + 1 || !may_enter(vm) || !may_run_nested(vm) {
+        return false;
+    }
+    let flow = {
+        let _depth = Nesting::enter(&raw mut context.vm.jit.nested);
+        // A panic in the callee is resumed by `execute`, and caught by this helper's caller.
+        execute(context, code, 0)
     };
-    finish(state, flow)
+    if let std::ops::ControlFlow::Break(record) = flow {
+        state.outcome = Some(std::ops::ControlFlow::Break(record));
+        return true;
+    }
+    false
 }
 
 /// The callee of a `Call` with `argument_count` arguments, and what its frame is made from, if
 /// it is an ordinary function that may be called and its code is compiled. Changes nothing.
-fn compiled_callee(context: &Context, argument_count: usize) -> Option<(JsObject, FunctionParts)> {
+fn compiled_callee(
+    context: &Context,
+    argument_count: usize,
+) -> Option<(JsObject, FunctionParts, Rc<JitCode>)> {
     let vm = &context.vm;
     let callee = vm.stack.calling_convention_get_function(argument_count);
     let object = callee.as_object()?;
@@ -81,11 +118,9 @@ fn compiled_callee(context: &Context, argument_count: usize) -> Option<(JsObject
     {
         return None;
     }
-    let parts = (
-        code.clone(),
-        function.environments.clone(),
-        function.script_or_module.clone(),
-        function.realm().clone(),
-    );
-    Some((object.clone(), parts))
+    // SAFETY: the callee is the value in the call's function slot, taken from the stack just
+    // above, and the slot keeps it until the frame this makes is popped.
+    let parts = unsafe { lend_function_parts(&function) };
+    let jit_code = code.jit.code.get()?.clone();
+    Some((object.clone(), parts, jit_code))
 }
