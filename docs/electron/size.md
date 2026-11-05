@@ -175,3 +175,25 @@ branches in `function_construct`, `prepare` and the class compiler, and one fiel
 26,759,680 bytes against 26,756,608 for `docs/electron-plan` `2cb3f702` built the same way, +3,072 bytes (+0.011 %): the `AppendedWide`
 state and the widening path in `RopeString::append_short`. A rope node keeps its size (the new state holds the same two fields as
 `Appended`).
+
+## P10: the launcher and the `app` lifecycle
+
+`electron/p10-split`: `cargo build --release -p verve-gpui --bin electron --features jit` is 33,144,832 bytes against 32,822,272 for
+`docs/electron-plan` `4250aaa1` built the same way, +322,560 bytes (+0.98 %); 0.86 MB is left under the 34 MB cap. The first
+measurement of the package, before the review's fixes, was 33,238,016 (+415,744); deduplicating the registry, command-line and
+user-agent code and moving the manifest reading into one place took 93 KB of it.
+
+Where it is (`cargo bloat --release --crates`, `.text`; the rest of the growth is `.rdata`, `.pdata` and relocations, which
+`cargo bloat` does not attribute):
+
+| | .text |
+|---|---|
+| `verve_electron`'s P10 modules (`api::app` 54.5 KiB with the single-instance lock inlined into `request_single_instance_lock`, `launcher` 4.2, `command_line` 3.0, `process` 2.2) | ~66 KiB |
+| `verve_asar` (new in the binary: the overlay P10 installs in every isolate) | 26 KiB |
+| `serde_json` (59.5 KiB) and `sha2`/`digest` (37 KiB): already linked through `boa_engine` and `scrypt`; P10 adds the `package.json` and single-instance message parsing, and `verve_asar`'s header and integrity code | shared, part of the delta |
+| `windows` / `windows_registry` / `windows-sys` thunks for Known Folders, the registry, the mutex and pipe, memory figures | small, not attributed |
+
+Nothing in the list is a dependency that is not already in the Electron build: the new crate edges are `verve-asar` (a workspace
+crate), `serde_json`, `sha2` and `windows-sys` (all in the graph before). The glue is already `opt-level = "s"` with fat LTO, so there
+was no cheaper profile to move it to. Left in on purpose: the asar overlay (task section 2) and the registry code (protocol clients,
+login items) are the two largest pieces that are P10's own.

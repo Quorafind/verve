@@ -48,19 +48,19 @@ pub fn parse(args: Vec<OsString>, exe: &Path, env: &Env) -> Result<Launch, Strin
 
 | 输入 | 结果 |
 |---|---|
-| `ELECTRON_RUN_AS_NODE` 非空且不为 `0` | `RunAsNode`，其余参数原样交给 Verve CLI（前面补 `-A`） |
+| `ELECTRON_RUN_AS_NODE` 非空（`0` 也算，Electron 的 `IsEnvSet`；39.8.10 观测） | `RunAsNode`，其余参数原样交给 Verve CLI（前面补 `-A`） |
 | exe 所在目录有 `resources/app.asar`（macOS：`../Resources/app.asar`），否则 `resources/app/` | `Packaged`；**忽略**命令行上的路径参数，全部算 `args` |
 | `-v` / `--version` | 打印 `v39.2.0`，退出 0 |
 | `-a` / `--abi` | 打印 `136`（与 `process.versions.modules` 一致），退出 0 |
 | `-h` / `--help` | 打印用法，退出 0 |
 | `-i` / `--interactive` | 打印 "REPL is not supported by Verve"，退出 1 |
 | `-r <module>` / `--require <module>` | 主进程入口执行前先 `require` 它（可多次） |
-| 第一个非开关参数是目录 | 读 `<dir>/package.json`：`main` 字段（缺省 `index.js`），按 Node 规则解析（无扩展名补 `.js`、目录取 `index.js`）；没有 package.json 时报错 `Unable to find Electron app at <dir>` 退出 1 |
+| 第一个非开关参数是目录 | 读 `<dir>/package.json`：`main` 字段（缺省 `index.js`），按 Node 规则解析（无扩展名补 `.js`、目录取 `index.js`）；没有 package.json 但有 `index.js` 照样运行（名字是 `Electron`；39.8.10 观测）；两者都没有才报错 `Unable to find Electron app at <dir>` 退出 1 |
 | 是 `.js`/`.cjs`/`.mjs` 文件 | 直接作入口，`app_path` = 文件所在目录（与 Electron 一致：`app.getAppPath()` 是该目录） |
 | 是 `http(s):`/`file:` URL 或 `.html` 文件 | `OpenUrl` |
 | 无参数 | `DefaultApp` |
 | Chromium/Node 开关：`--inspect[=…]`、`--inspect-brk`、`--remote-debugging-port=…`、`--enable-logging`、`--no-sandbox`、`--disable-gpu`、`--disable-gpu-sandbox`、`--js-flags=…`、`--trace-warnings`、`--lang=…`、`--force-device-scale-factor=…`、`--high-dpi-support=…`、`--user-data-dir=…`、`--proxy-server=…` 等任何 `--x[=y]` | **不报错**，保留在 `process.argv` 里，并记入 `app.commandLine`（`hasSwitch`/`getSwitchValue` 能读到）。其中真正生效的：`--user-data-dir`（改 `userData`）、`--lang`（`app.getLocale`）、`--force-device-scale-factor`（交给 Shell）、`--proxy-server`（交给 P16 的 session） |
-| `--` | 之后的参数一律原样进 `process.argv`，不再当开关解析 |
+| `--`、单独的 `-` | 跳过，不当路径也不当开关：`electron -- --version` 照样打印版本、`electron -- app.js` 照样运行 `app.js`（39.8.10 观测）；`-r` 后没有模块则当没写（默认应用） |
 
 `process.argv`：开发形态 `[execPath, app_path_as_given, ...args]`；打包形态 `[execPath, ...args]`。
 `process.execPath` = `std::env::current_exe()`；`process.argv0` = 启动时的 argv[0]。
@@ -134,7 +134,7 @@ Verve 发行目录自己的 `resources`，P40 保证它存在，里面可以没�
 | 方法 | 说明 |
 |---|---|
 | `quit()` | 见"退出流程" |
-| `exit(exitCode = 0)` | **不发任何事件**（无 `before-quit`/`will-quit`/`quit`/`close`），直接销毁所有窗口，以 exitCode 结束进程 |
+| `exit(exitCode = 0)` | 不发 `before-quit`/`will-quit`/`close`；窗口发 `closed`，随后进程 `exit`、`quit(event, code)`，同步在调用里发完，脚本继续跑完这一轮（39.8.10 观测）。主进程的 `process.exit` 就是它（`lib/browser/init.ts`） |
 | `relaunch({ args, execPath })` | 记下，`exit`/`quit` 后用 `std::process::Command` 以相同（或给定）参数重新启动自己 |
 | `isReady()` / `whenReady()` | `whenReady` 返回 Promise，ready 后 resolve；ready 之后调用立即 resolve |
 | `focus({ steal })` / `hide()` / `show()` / `isHidden()` | focus 发 `ToShell` 让最近窗口获焦；hide/show 仅 macOS，其他平台 no-op |
@@ -208,8 +208,8 @@ Verve 发行目录自己的 `resources`，P40 保证它存在，里面可以没�
 4. 发 `quit` `(event, exitCode)`，然后 `ToShell::Quit { exit_code }`，Shell 结束 GPUI，进程以该码退出。
 5. `before-quit` 在一次退出尝试中只发一次；再次调用 `quit()` 重新从 1 开始。
 
-**C. `app.exit(code)` / 主进程 `process.exit(code)`**：不发任何事件，销毁所有窗口和渲染器 isolate，
-刷新 stdout/stderr（`process.rs` 的 `write_fd` 已经是无缓冲写），以 `code` 退出。
+**C. `app.exit(code)` / 主进程 `process.exit(code)`**（同一个函数）：不问窗口——窗口发 `closed`（没有 `close`），然后进程 `exit`、`quit(event, code)`，
+之后销毁渲染器 isolate，以 `code` 退出（`process.rs` 的 `write_fd` 已经是无缓冲写）。
 
 **D. 系统关机 / 会话结束（Windows `WM_QUERYENDSESSION`）**：窗口发 `query-session-end`/`session-end`（P13/P34），
 然后按 B 处理但不可阻止。
@@ -284,4 +284,108 @@ Verve 发行目录自己的 `resources`，P40 保证它存在，里面可以没�
 
 ## 状态
 
-（实现者完成后填写）
+### 完成了什么
+
+- **`launcher.rs`**（§1、§2）：`Env`、`parse`、`Launch`/`Start`/`Target`、`Manifest`、`boot`、`run_as_node`、`USAGE`、欢迎页 `data:` URL。
+  与契约的差别：`Launch` 里只留四个即答的变体（`Version`/`Abi`/`Help`/`Interactive`）、`RunAsNode` 和 `Start(Box<Start>)`；
+  `Start { target, argv, switches, requires, resources_path, manifest }`（`manifest` 只有目录或打包形态才有；脚本形态的应用叫 `Electron`，39.8.10 观测），`Target::{App, Packaged, OpenUrl, DefaultApp}`
+  （`Packaged` 不带 entry：入口要读 asar 里的 package.json，由 `boot` 经 overlay 解析）。`argv` 是命令行原样（含开关与 `--`，
+  Electron 观测如此）。`electron <目录>`：有 package.json 按 `main`，没有则 `index.js`，都没有 → `Unable to find Electron app at …`，退出 1。
+  `-r/--require`、`--` 与 `-` 被跳过、打包形态忽略所有参数（`--version` 也交给应用）、`ELECTRON_RUN_AS_NODE=0` 仍是 Node 模式（观测）都有单测。`boot` 装一个共享的
+  `AsarOverlay`（所有形态；打包形态且无 `--verve-skip-asar-integrity` 时校验，失败打印 FATAL 并退出 1），
+  `--inspect`/`--inspect-brk`/`--remote-debugging-port` 打一次警告。
+- **bin**：`--version` → `v39.2.0`，`--abi` → `140`，`--help`、`-i`（"REPL is not supported by Verve"，1）；
+  `ELECTRON_RUN_AS_NODE` 在碰 GPUI 之前转 `verve::cli::main_node`；`--headless`（P00）并入。`verve_gpui::run(hub, Program)`、
+  `Hub::start(Program)`（`Script` / `DefaultApp(Option<url>)`）；`Hub::read_text` 是"先 overlay 后磁盘"读文件的唯一入口；默认应用/`OpenUrl` 在 Rust 里构造 `BrowserWindow` 加载 URL。
+- **ABI**：真实 Electron 39.8.10 的 `process.versions.modules` 是 **140**（不是 136），已改 `src/process.rs`（`MODULES_VERSION`，
+  并公开版本常量）。P50 文档里仍写着 136，需要改。
+- **`process.*`**（§3，`api/process.rs`）：`getCreationTime/getCPUUsage/getHeapStatistics/getBlinkMemoryInfo/getProcessMemoryInfo/
+  getSystemMemoryInfo/getSystemVersion/takeHeapSnapshot/crash/hang`；`type`、`resourcesPath`、`defaultApp`（打包形态不存在）、
+  `process.on('loaded')`。`process.title` 观测是 `'node'`（不是应用名，契约有误），`mas`/`windowsStore` 在 Windows 上是 undefined，
+  **Electron 39 没有 `getIOCounters`**（未实现），`setFdLimit` 只在非 Windows。`getHeapStatistics` 的值是估算（Boa 不报堆）。
+  主进程未捕获异常：先给 `process.on('uncaughtException')` 监听者（`src/process.rs` 的 `heard_by_listeners`，经 `verve::report`），
+  否则打到 stderr 并发 `ToShell::ErrorBox`，进程不退出；入口里抛错同理（"App threw an error during load"），
+  找不到模块（含入口文件）→ 退出 1。
+- **`app`**（§4，`api/app/`）：事件 `will-finish-launching`、`ready(event, {})`、`window-all-closed`、`before-quit`、`will-quit`、`quit`、
+  `browser-window-created`、`web-contents-created`（先于前者）、`second-instance`、`activate`/`open-file`/`open-url`；方法：`quit/exit/relaunch/isReady/
+  whenReady/focus/getAppPath/getPath/setPath/getVersion/getName/setName/getLocale/getSystemLocale/getPreferredSystemLanguages/
+  getLocaleCountryCode/addRecentDocument/clearRecentDocuments/getRecentDocuments/(set|remove|is)DefaultProtocolClient/
+  getApplicationNameForProtocol/getApplicationInfoForProtocol/setUserTasks/getJumpListSettings/setJumpList/setAppUserModelId/
+  getAppMetrics/getGPUFeatureStatus/getGPUInfo/badgeCount/(get|set)LoginItemSettings/accessibility/about/emoji/硬件加速/enableSandbox/
+  单实例三件套/userAgentFallback/isPackaged/commandLine`；`getFileIcon/setProxy/resolveProxy` 拒绝 `ERR_NOT_SUPPORTED`，
+  `setClientCertRequestPasswordHandler/importCertificate` 抛 `ERR_NOT_SUPPORTED`。`getPath` 全部名字（含观测到的 `assets`、`cache`）；
+  Windows 用 `SHGetKnownFolderPath`（Electron 也忽略 `%APPDATA%`，所以测试一律传 `--user-data-dir`）；`userData` 在启动时按
+  productName/name 定下，之后 `setName` 不移动它；`ready` 时建 userData/sessionData/logs/crashDumps。`getLocale()` ready 前是 `''`，
+  之后 `--lang` 或系统首选语言映射到 Chromium 语言包（`de-DE` → `de`，`zh-SG` → `zh-CN`）。`Event` 对象（`preventDefault`、不可枚举）
+  在 `define::emit_cancelable`。`app.commandLine` 在 `api/command_line.rs`（名字不带 `-`，无值读 `''`，后来的同名开关生效）。
+- **退出流程**（§5，`api/app/quit.rs`，`Quit::{Running, ClosingWindows, Exiting}`）：与观测一致——`quit()` 同步发 `before-quit`、逐窗口同步发 `close`
+  （被 `preventDefault` 则取消，已关的不恢复）、全关后 `will-quit`（可阻止）、进程 `exit`、`quit(event, 0)`，退出码恒 0
+  （`process.exitCode` 不影响）；没窗口时全部同步在 `quit()` 里；退出中再 `quit()` 无事发生。`window-all-closed` 只在 ready 之后、非退出中、
+  且有监听者时发（无监听者则 `quit()`；协调者注：真实 Electron 里 `app.quit()` 不发它）。
+  **`app.exit(code)` 不是"不发任何事件"**（契约有误）：窗口 `closed`（无 `close`）、`process.exit` 事件、`quit(event, code)`，脚本在调用后继续跑完这一轮；
+  主进程的 `process.exit` 被换成同一个函数（Electron 的 `process.exit = app.exit`），次序同为 `closed`、`exit`、`quit`，不再靠内核的 interrupt。
+  空闲且无窗口的主进程不再退出（§5.E）。
+- **单实例**（§6，`single_instance.rs`）：键为 userData 规范路径 SHA-256 前 16 hex；Windows 命名互斥体 + 命名管道，Unix `flock`（`File::try_lock`）+ Unix 域套接字
+  （Unix 部分只过了 clippy/类型检查，没跑过）；消息是一行 JSON，`additionalData` 经 JSON（`Date` 变 ISO 字符串，与 Electron 一致）；
+  `second-instance` 的 argv 是"exe、开关、其余"（Chromium 的顺序），cwd、data 往返相等。`AppEvent::SecondInstance` 多了 `data: String`。
+- **消息契约**（已写入 P02 文档）：`AppEvent::Ready`（由 Hub 在 `start` 时若已有 Shell 就排在入口之后发，不需要各 Shell 自己发）、
+  `ToShell::ErrorBox`、`SecondInstance.data`。
+- **P00 的合并**：因改动与 P00 的 `headless`/`hub`/`pipeline` 逐文件冲突，我把 P10 的 8 个提交 squash 成一个再叠到 4250aaa1 上
+  （提交里的 fix(process) 与 `src/` 改动因此也在里面）。
+
+### Electron 39.8.10（Windows）冻结的观测
+
+退出顺序、`app.exit`/`process.exit` 的事件、`quit` 码、`getPath` 全部名字与值（含 `cache`=appData、`assets`=exe 目录、未知名/大小写不符的
+`Error: Failed to get '<name>' path`、相对路径 `Path must be absolute`）、`ready` 前后 `getLocale`、`disableHardwareAcceleration/enableSandbox`
+的时机错误信息、`process.*` 字段、`setBadgeCount` 返回 true、登录项/跳转列表/GPU 状态的形状、单实例的 argv/data 形态、入口抛错的行为。
+都在 `crates/verve-electron/tests/app.rs`（24 个）里，注释写明版本。
+
+### 改动的既有测试
+
+- `tests/pipeline.rs`：`a_script_that_makes_no_window_ends_the_app_at_once` → "不退出，直到 quit"；`a_script_that_throws_ends_the_app_with_one` →
+  "抛错留在原地并发错误框；找不到模块退出 1"。
+- `crates/verve-gpui/tests/electron_bin.rs`："no window → 0 / throws → 1" 换成"空闲不退出（被杀）/ `app.quit()` → 0 / 缺模块 → 1"；
+  每个进程带 `--user-data-dir`。
+
+### 没做 / 已知问题
+
+- **§5.D**（`WM_QUERYENDSESSION`）、**fuses**（P40）、`ELECTRON_NO_ASAR`（只对非 browser/renderer 进程有效，主进程用不上）、
+  `ElectronAsarIntegrity` 与 `header_hash` 的比对（P40/fuse）、`--force-device-scale-factor`、`--proxy-server`（P16）、`--remote-debugging-port`（P43）只记不生效。
+- 事件：`browser-window-focus/blur`、`render-process-gone`、`child-process-gone`、`session-created`（Electron 里先于 `web-contents-created`）未发（P13/P16/P17）。
+- `app.getFileIcon/setProxy/resolveProxy` 等拒绝；`showAboutPanel`、跳转列表、`setUserTasks` 是空操作；`applicationMenu`、`dock` 未定义（P15；`dock` 在 Windows 上本来就是 undefined）。
+- 窗口 `close` 事件现在带 Event 对象，是为了让退出可测；P13 接手时保持 `emit_cancelable`。
+- `getHeapStatistics` 为估算；`getPreferredSystemLanguages` 返回系统首选语言原样（`zh-CN`），Chromium 给 `zh-Hans-CN`。
+- Windows 的单实例等待第一个实例的管道最多 5 秒。`ELECTRON_RUN_AS_NODE` 的 fuse 未接。
+- 新增依赖：`serde_json`、`sha2`（均已在依赖图中，来自 verve-asar）、`verve-asar`、`windows-sys`（仅 Windows，特性见 Cargo.toml）。没测 release 体积。
+- fixtures 里 `lifecycle`/`single-instance` 的 `expected.json` 没录（P00 的 `record.cjs` 可录；本包的冻结测试是内联的）。
+  P00 的 `tests/support` 的 `entry_of`（带 `// P10`）还没改成 `launcher::parse`，我的 `tests/app.rs` 用自己的小夹具。
+- 版本：P00 的录制是 39.8.10，Verve 的 `ELECTRON_VERSION` 是 39.2.0（未改）。
+- 评审后补的观测与修正：`process.exit` 在主进程就是 `app.exit`（`quit::finish`，不再用内核的 interrupt；`verve::report` 过滤 interrupt）；
+  `quit()` 先进入非 `Running` 状态再发事件、发完重读状态，监听者抛错按"未阻止"处理，嵌套 `quit()`/`exit()` 是 no-op/赢；
+  所有窗口都被问 `close`，一个拒绝只取消退出（双窗口观测）；`relaunch` 前先放锁；`removeAsDefaultProtocolClient` 只删 `<protocol>\shell`
+  （`browser_win.cc`），空协议返回 `false`；登录项的 `Run` 值名是 `name` 或 AppUserModelID（默认 `electron.app.<名字>`），测试从不写 `Run`；
+  `setPath` 不建目录、未知名 `Failed to set path`；脚本形态的应用叫 `Electron`；`ELECTRON_RUN_AS_NODE=0` 仍是 Node；`-- --version` 打印版本；
+  入口抛错经 `verve::report` 交给 `uncaughtException` 监听者（Electron 传给监听者的 origin 是 `undefined`，Verve 是 `'uncaughtException'`，未模仿），找不到模块靠 `err.code`。
+- 第二轮评审后：每个 `support::App` 启动都有临时目录里的 `--user-data-dir`（`launch`、`launch_script`、`launch_with` 一视同仁，启动时断言它在临时目录，随 App 删除），
+  测试前后 `%APPDATA%` 没有新目录；没 `set_launch` 的 Hub 各有自己的临时 profile，只删自己的。单实例：Unix 的 socket 放在 `$XDG_RUNTIME_DIR`（须是自己的、0700）
+  或 `/tmp` 下名字不可猜的 0700 目录里，profile 里的 `SingletonSocket` 符号链接指向它，第二个实例连之前检查目录属主与权限，释放时删 socket、链接和目录；
+  拿不到锁（文件打不开、非 `WouldBlock` 的锁错误、没有互斥体）答 `false`（Electron 的 `LOCK_ERROR`）；锁已拿到而 bind/线程失败则保留锁、无人监听，后来的实例等满 5 秒后结束。
+  Windows 的命名管道对整台机器可见，所以：服务端用 `FILE_FLAG_FIRST_PIPE_INSTANCE` 与只授权当前用户 SID 的 DACL 建管道（名字被占则保留互斥体、无人监听，同 Unix 的 bind 失败）；
+  客户端写任何字节之前用 `GetNamedPipeServerProcessId` + 令牌 `TokenUser` + `EqualSid` 确认服务端是同一用户，否则不发并在 stderr 说明。
+  单测里无法造出别的用户的服务端进程，所以"不信任则不发"用 `tell_first_if` 的参数缝测（生产路径固定传 `served_by_this_user`）。
+  `removeAsDefaultProtocolClient` 照 `browser_win.cc`：删 `shell`、`URL Protocol` 与默认值，键空了才删键。
+  观测（39.8.10）：入口里 `app.quit()` 事件同步发完、脚本继续，随后仍发 `will-finish-launching`、`ready`、`whenReady` 才结束（Verve 一致，退出推迟到 `ready` 之后）；
+  `ready` 前 `app.exit()`/`process.exit()` 立即结束进程，不发任何事件、不再跑一行脚本（Verve 一致）；
+  Electron 只在 Squirrel 安装时显式设 AppUserModelID（`init.ts`），否则只在登录项等处按 `electron.app.<名字>` 算默认值——Verve 不再在启动时设。
+  `fixtures.rs`：`quick-start` 的忽略原因改成 P20（`loadFile`）；`lifecycle`、`single-instance` 靠开关选场景，由 `tests/app.rs` 回放，删掉了它们的占位测试。
+- 未处理的 promise 拒绝在主进程**会**打印（`Uncaught (in promise) …`，`hooks.rs` 的宿主分支，不弹框、不退出），有测试；Electron 的措辞是 `UnhandledPromiseRejectionWarning`，未模仿。
+- Unix 的单实例（`flock` + `/tmp/verve-electron-<key>.sock`，5 秒重试，其他锁错误只警告）只过了 `linux-check`，没跑过；`-` 单独出现时 Electron 还会打印用法，Verve 只是跳过。
+
+
+### 给其他包的备注
+
+- **P00**：`Hub::start(Program)`；`headless::run(&hub, Program)`；`Start::development` 的 profile 在临时目录，没调用 `set_launch` 的 Hub 不会碰用户目录。
+- **P13**：`MainState::emit_close`/`window_closed` 是窗口关闭的入口；`'close'` 用 `define::emit_cancelable`；`browser-window-created`/`web-contents-created` 在 `browser_window.rs` 的 `init` 末尾发，P13 做 `WebContents` 类后传真对象。
+- **P14**：`ToShell::ErrorBox` 要画框；`app.showAboutPanel`/`dialog` 接这里。**P16**：`app.setProxy/resolveProxy/session-created`。
+- **P40**：`launcher::boot` 是装 overlay、读 fuse 的地方；`--verve-skip-asar-integrity` 已有。**P41**：`app.getPath` 在 Linux/macOS 上的路径未在真机验证。
+- **P43**：`--inspect*` 开关已被接受并警告一次。**P50**：`modules` 现在是 `'140'`。
