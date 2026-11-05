@@ -181,6 +181,13 @@ impl<'a> Rig<'a> {
     }
 }
 
+/// The names of a real window's events without its `Focus` and `Blur`, which it does not promise.
+pub fn without_focus(events: &[(WindowId, WindowEvent)]) -> Vec<String> {
+    let all = events.iter().map(|(_, event)| name(event));
+    all.filter(|name| name != "Focus" && name != "Blur")
+        .collect()
+}
+
 /// `value` is within a pixel of `wanted`.
 fn near(value: f32, wanted: f32) -> bool {
     (value - wanted).abs() <= 1.
