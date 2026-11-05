@@ -740,3 +740,20 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   Compiled `IteratorNext` now steps the record where it sits, as the interpreter's handler does,
   instead of taking it off the frame's iterator stack and putting it back; a step answers its key
   and, for an entry, the value in a second slot, so the common one-value step stays one value wide.
+- `boa_engine`, `vm/call_frame`, `builtins/function`, `context`, `vm/jit/call.rs` (P84): the frame of
+  an ordinary function no longer clones the handles it reaches through its callee. Its code
+  block, script or module and realm are `Lent` (a bitwise copy of the function's own, not counted
+  and not dropped) when the function is the value in the frame's function slot: the VM stack
+  keeps it alive, by a counted reference, until the frame is popped, and those three fields of
+  the function are set when it is made and replaced only by a lazy function's compile, which
+  runs before the frame exists. A call that comes through another function (a proxy without an
+  `apply`/`construct` trap, which can be revoked while its target runs; a bound function) leaves
+  the forwarder in the slot, and the frame then owns its handles (`callee_parts`). Whatever can
+  outlive the slot makes the handles its own first: cloning a frame counts them,
+  `GeneratorContext::from_current` does it for the live frame before its stack is split off, and
+  `Context::enter_realm` and `swap_realm` replace a lent realm with an owned one. Script, module,
+  `eval` and synthetic-module frames own theirs, as before. `Lent` is `Trace` but takes no part
+  in the root counts when it is lent. `context/mod.rs` is outside the files this package was to
+  change; `enter_realm` and `swap_realm` had to follow the frame's field, and `swap_realm` also
+  returns early when both sides are the same realm (a native function of the running realm), so
+  that call no longer swaps twice. Nothing observable changes.

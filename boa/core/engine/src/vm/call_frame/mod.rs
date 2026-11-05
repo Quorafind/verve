@@ -2,6 +2,12 @@
 //!
 //! This module will provides everything needed to implement the `CallFrame`
 
+mod lent;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use lent::Lent;
+
 use super::ActiveRunnable;
 use crate::{
     JsValue,
@@ -44,9 +50,10 @@ pub struct CallFrameLocation {
 }
 
 /// A `CallFrame` holds the state of a function call.
-#[derive(Clone, Debug, Finalize, Trace)]
+#[derive(Debug, Finalize, Trace)]
 pub struct CallFrame {
-    pub(crate) code_block: Gc<CodeBlock>,
+    /// The code this frame runs. Lent by the callee for the frame of an ordinary function.
+    pub(crate) code_block: Lent<Gc<CodeBlock>>,
     pub(crate) pc: u32,
     /// The frame pointer, points to the start of this frame's data in the stack
     /// (i.e., the `this` value position).
@@ -69,17 +76,38 @@ pub struct CallFrame {
     pub(crate) loop_iteration_count: u64,
 
     /// `[[ScriptOrModule]]`
-    pub(crate) active_runnable: Option<ActiveRunnable>,
+    pub(crate) active_runnable: Lent<Option<ActiveRunnable>>,
 
     /// \[\[Environment\]\]
     pub(crate) environments: EnvironmentStack,
 
     /// \[\[Realm\]\]
-    pub(crate) realm: Realm,
+    pub(crate) realm: Lent<Realm>,
 
     // SAFETY: Nothing in `CallFrameFlags` requires tracing, so this is safe.
     #[unsafe_ignore_trace]
     pub(crate) flags: CallFrameFlags,
+}
+
+impl Clone for CallFrame {
+    /// A frame whose handles are all its own, lent ones counted.
+    fn clone(&self) -> Self {
+        Self {
+            code_block: self.code_block.duplicate(),
+            pc: self.pc,
+            fp: self.fp,
+            argument_count: self.argument_count,
+            env_fp: self.env_fp,
+            rp: self.rp,
+            iterators: self.iterators.clone(),
+            binding_stack: self.binding_stack.clone(),
+            loop_iteration_count: self.loop_iteration_count,
+            active_runnable: self.active_runnable.duplicate(),
+            environments: self.environments.clone(),
+            realm: self.realm.duplicate(),
+            flags: self.flags,
+        }
+    }
 }
 
 /// ---- `CallFrame` public API ----
@@ -87,7 +115,7 @@ impl CallFrame {
     /// Retrieves the [`CodeBlock`] of this call frame.
     #[inline]
     #[must_use]
-    pub const fn code_block(&self) -> &Gc<CodeBlock> {
+    pub fn code_block(&self) -> &Gc<CodeBlock> {
         &self.code_block
     }
 
@@ -141,6 +169,21 @@ impl CallFrame {
         environments: EnvironmentStack,
         realm: Realm,
     ) -> Self {
+        Self::with_handles(
+            Lent::owned(code_block),
+            Lent::owned(active_runnable),
+            environments,
+            Lent::owned(realm),
+        )
+    }
+
+    /// Creates a new `CallFrame` from handles that may be lent by the callee.
+    pub(crate) fn with_handles(
+        code_block: Lent<Gc<CodeBlock>>,
+        active_runnable: Lent<Option<ActiveRunnable>>,
+        environments: EnvironmentStack,
+        realm: Lent<Realm>,
+    ) -> Self {
         Self {
             pc: 0,
             fp: 0,
@@ -156,6 +199,14 @@ impl CallFrame {
             realm,
             flags: CallFrameFlags::empty(),
         }
+    }
+
+    /// Makes the frame count the handles it was lent, so that it no longer depends on its callee
+    /// staying on the stack.
+    pub(crate) fn own_handles(&mut self) {
+        self.code_block.make_owned();
+        self.active_runnable.make_owned();
+        self.realm.make_owned();
     }
 
     /// Updates a `CallFrame`'s `argument_count` field with the value provided.

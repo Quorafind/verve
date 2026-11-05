@@ -39,6 +39,8 @@ mod typed_length;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_call_frame;
+#[cfg(test)]
 mod tests_calls;
 #[cfg(test)]
 mod tests_constructor_shape;

@@ -12,7 +12,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::{
     Context, JsObject,
-    builtins::function::{FunctionParts, OrdinaryFunction, enter_ordinary_function},
+    builtins::function::{
+        FunctionParts, OrdinaryFunction, enter_ordinary_function, lend_function_parts,
+    },
 };
 
 use super::runtime::{EXIT, JitState, finish};
@@ -81,11 +83,8 @@ fn compiled_callee(context: &Context, argument_count: usize) -> Option<(JsObject
     {
         return None;
     }
-    let parts = (
-        code.clone(),
-        function.environments.clone(),
-        function.script_or_module.clone(),
-        function.realm().clone(),
-    );
+    // SAFETY: the callee is the value in the call's function slot, taken from the stack just
+    // above, and the slot keeps it until the frame this makes is popped.
+    let parts = unsafe { lend_function_parts(&function) };
     Some((object.clone(), parts))
 }

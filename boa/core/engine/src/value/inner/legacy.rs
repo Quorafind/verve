@@ -247,6 +247,15 @@ impl EnumBasedValue {
         }
     }
 
+    /// Runs `f` with the object the value holds, if it holds one, without cloning it.
+    #[inline]
+    pub(crate) fn with_object<R>(&self, f: impl FnOnce(&JsObject) -> R) -> Option<R> {
+        match self {
+            Self::Object(value) => Some(f(value)),
+            _ => None,
+        }
+    }
+
     /// Returns the value as a boxed `[JsSymbol]`.
     #[must_use]
     #[inline]

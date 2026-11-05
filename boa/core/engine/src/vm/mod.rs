@@ -43,6 +43,7 @@ pub use {
     source_info::{NativeSourceInfo, SourcePath},
 };
 
+pub(crate) use call_frame::Lent;
 pub(crate) use code_block::GlobalFunctionBinding;
 
 mod call_frame;
@@ -304,6 +305,14 @@ impl Stack {
     /// This will push the given values onto the stack.
     pub(crate) fn calling_convention_push_arguments(&mut self, values: &[JsValue]) {
         self.stack.extend_from_slice(values);
+    }
+
+    /// The value `n` places below the top of the stack (0 is the top).
+    pub(crate) fn nth_from_top(&self, n: usize) -> Option<&JsValue> {
+        self.stack
+            .len()
+            .checked_sub(n + 1)
+            .and_then(|i| self.stack.get(i))
     }
 
     /// Get the function object at the top of the stack according to the calling convention.
@@ -684,7 +693,7 @@ impl Vm {
         // yields.
         if frame.active_runnable.is_none() {
             let current = self.frame();
-            frame.active_runnable.clone_from(&current.active_runnable);
+            frame.active_runnable = Lent::owned((*current.active_runnable).clone());
         }
 
         let current_pc = self.frame().pc;

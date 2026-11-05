@@ -23,7 +23,7 @@ use crate::{
     js_error, js_string,
     native_function::NativeFunctionObject,
     object::{
-        JsData, JsFunction, JsObject, PrivateElement, PrivateName,
+        JsData, JsFunction, JsObject, PrivateElement, PrivateName, Ref,
         internal_methods::{
             CallValue, InternalMethodCallContext, InternalObjectMethods, ORDINARY_INTERNAL_METHODS,
             get_prototype_from_constructor,
@@ -34,7 +34,7 @@ use crate::{
     string::StaticJsStrings,
     symbol::JsSymbol,
     value::IntegerOrInfinity,
-    vm::{ActiveRunnable, CallFrame, CallFrameFlags, CodeBlock},
+    vm::{ActiveRunnable, CallFrame, CallFrameFlags, CodeBlock, Lent},
 };
 use boa_ast::{
     Position, Span, Spanned, StatementList,
@@ -1007,15 +1007,18 @@ pub(crate) fn set_function_name(
 }
 
 /// Compiles the body of a function whose code is compiled when it is first called, and gives
-/// the function object the compiled code, so its later calls go straight to it.
+/// the function object the compiled code, so its later calls go straight to it. Answers the
+/// function again, borrowed anew.
 #[cold]
-fn compile_lazy_function(
-    function_object: &JsObject,
-    code: &Gc<CodeBlock>,
-    realm: &Realm,
+fn compile_lazy_function<'a>(
+    function_object: &'a JsObject,
+    function: Ref<'a, OrdinaryFunction>,
     context: &mut Context,
-) -> JsResult<Gc<CodeBlock>> {
-    let compiled = CodeBlock::compiled(code, context.interner_mut()).map_err(|reason| {
+) -> JsResult<Ref<'a, OrdinaryFunction>> {
+    let code = function.code.clone();
+    let realm = function.realm().clone();
+    drop(function);
+    let compiled = CodeBlock::compiled(&code, context.interner_mut()).map_err(|reason| {
         JsNativeError::typ()
             .with_message(reason)
             .with_realm(realm.clone())
@@ -1024,9 +1027,11 @@ fn compile_lazy_function(
     // parsed since declared, before that script has run and made room for it: make room.
     realm.resize_global_env();
     if let Some(mut function) = function_object.downcast_mut::<OrdinaryFunction>() {
-        function.code = compiled.clone();
+        function.code = compiled;
     }
-    Ok(compiled)
+    Ok(function_object
+        .downcast_ref::<OrdinaryFunction>()
+        .js_expect("not a function")?)
 }
 
 /// Call this object.
@@ -1050,7 +1055,6 @@ pub(crate) fn function_call(
     let function = function_object
         .downcast_ref::<OrdinaryFunction>()
         .js_expect("not a function")?;
-    let realm = function.realm().clone();
 
     if function.code.is_class_constructor() {
         debug_assert!(
@@ -1059,21 +1063,17 @@ pub(crate) fn function_call(
         );
         return Err(JsNativeError::typ()
             .with_message("class constructor cannot be invoked without 'new'")
-            .with_realm(realm)
+            .with_realm(function.realm().clone())
             .into());
     }
 
-    let code = function.code.clone();
-    let environments = function.environments.clone();
-    let script_or_module = function.script_or_module.clone();
-
-    drop(function);
-
-    let code = if code.is_lazy() {
-        compile_lazy_function(function_object, &code, &realm, context)?
-    } else {
-        code
-    };
+    let parts = callee_parts(
+        function_object,
+        function,
+        1,
+        argument_count,
+        context.context(),
+    )?;
 
     #[cfg(feature = "native-backtrace")]
     {
@@ -1084,23 +1084,90 @@ pub(crate) fn function_call(
             .patch_last_native(native_source_info);
     }
 
-    enter_ordinary_function(
-        context.context(),
-        function_object,
-        (code, environments, script_or_module, realm),
-        argument_count,
-    )?;
+    enter_ordinary_function(context.context(), function_object, parts, argument_count)?;
     Ok(CallValue::Ready)
 }
 
 /// What a frame of an ordinary function is made from: its code, its environments, its script
-/// or module and its realm.
+/// or module and its realm. The code, the script or module and the realm are lent by the function
+/// (see [`Lent`]); the environments are the frame's own copy, which it pushes onto and pops from.
 pub(crate) type FunctionParts = (
-    Gc<CodeBlock>,
+    Lent<Gc<CodeBlock>>,
     EnvironmentStack,
-    Option<ActiveRunnable>,
-    Realm,
+    Lent<Option<ActiveRunnable>>,
+    Lent<Realm>,
 );
+
+/// The parts of a frame for a call of `function`, lent by it.
+///
+/// A frame of an ordinary function used to clone its code block, script or module, realm and
+/// environments out of the function and drop them at return. When the function object is what
+/// the frame's function slot holds, the VM stack keeps it alive, by a counted reference, for as
+/// long as the frame lives, and the fields are not replaced in that time: they are set when the
+/// function is made, except that a lazy function's code is replaced by its compiled code before
+/// its first call, and that `PushPrivateEnvironment` adds the private environment to the
+/// environments of the class constructor that `GetFunction` has just made, before any script can
+/// reach it. So the frame can read them where they are.
+///
+/// # Safety
+///
+/// The function object `function` belongs to must be the value in the function slot of the frame
+/// made from the parts, until that frame is popped. A call that forwards to another function (a
+/// proxy's or a bound function's target) leaves the forwarder in the slot, and the target is not
+/// certain to be kept alive by it (a proxy can be revoked): it must use [`own_function_parts`].
+/// The frame must not outlive the slot without being made owned ([`CallFrame::own_handles`]), as
+/// a generator's or an async function's frame is when its stack is split off.
+pub(crate) unsafe fn lend_function_parts(function: &OrdinaryFunction) -> FunctionParts {
+    // SAFETY: as the caller promises.
+    unsafe {
+        (
+            Lent::lend(&function.code),
+            function.environments.clone(),
+            Lent::lend(&function.script_or_module),
+            Lent::lend(&function.realm),
+        )
+    }
+}
+
+/// The parts of a frame for a call of `function`, which the frame owns.
+pub(crate) fn own_function_parts(function: &OrdinaryFunction) -> FunctionParts {
+    (
+        Lent::owned(function.code.clone()),
+        function.environments.clone(),
+        Lent::owned(function.script_or_module.clone()),
+        Lent::owned(function.realm.clone()),
+    )
+}
+
+/// The parts of a frame for a call of `function_object` (`function`, borrowed), compiling its
+/// code first if it is lazy: lent if the function slot of the frame, which is `trailing` values
+/// and `argument_count` arguments below the top of the stack, holds `function_object` itself,
+/// and owned if the call comes through another function (a proxy or a bound function).
+pub(crate) fn callee_parts<'a>(
+    function_object: &'a JsObject,
+    function: Ref<'a, OrdinaryFunction>,
+    trailing: usize,
+    argument_count: usize,
+    context: &mut Context,
+) -> JsResult<FunctionParts> {
+    let function = if function.code.is_lazy() {
+        compile_lazy_function(function_object, function, context)?
+    } else {
+        function
+    };
+    let in_slot = context
+        .vm
+        .stack
+        .nth_from_top(trailing + argument_count - 1)
+        .and_then(|callee| callee.with_object(|callee| callee == function_object))
+        .unwrap_or(false);
+    if in_slot {
+        // SAFETY: the slot holds the function, as just checked.
+        Ok(unsafe { lend_function_parts(&function) })
+    } else {
+        Ok(own_function_parts(&function))
+    }
+}
 
 /// Pushes the frame of a call of `function_object`, whose arguments are on the stack, and sets
 /// up its `this` and its environments: what a call does once the function is known to be an
@@ -1113,7 +1180,7 @@ pub(crate) fn enter_ordinary_function(
 ) -> JsResult<()> {
     let env_fp = environments.len() as u32;
 
-    let frame = CallFrame::new(code, script_or_module, environments, realm)
+    let frame = CallFrame::with_handles(code, script_or_module, environments, realm)
         .with_argument_count(argument_count as u32)
         .with_env_fp(env_fp);
 
@@ -1213,55 +1280,25 @@ fn own_prototype_object(new_target: &JsValue, context: &mut Context) -> Option<J
     properties.storage[slot.index as usize].as_object()
 }
 
-/// Construct an instance of this object with the specified arguments.
-///
-/// # Panics
-///
-/// Panics if the object is currently mutably borrowed.
-// <https://tc39.es/ecma262/#sec-ecmascript-function-objects-construct-argumentslist-newtarget>
-fn function_construct(
+/// The `this` of a construct call of `this_function_object` with `new_target`: the new object of
+/// a base constructor, or none for a derived one, which gets it from `super()`.
+fn construct_this(
+    code: &CodeBlock,
+    new_target: &JsValue,
     this_function_object: &JsObject,
-    argument_count: usize,
-    context: &mut InternalMethodCallContext<'_>,
-) -> JsResult<CallValue> {
-    context.check_runtime_limits()?;
-
-    let function = this_function_object
-        .downcast_ref::<OrdinaryFunction>()
-        .js_expect("not a function")?;
-    let realm = function.realm().clone();
-
-    debug_assert!(
-        function.is_ordinary(),
-        "only ordinary functions can be constructed"
-    );
-
-    let code = function.code.clone();
-    let environments = function.environments.clone();
-    let script_or_module = function.script_or_module.clone();
-    drop(function);
-
-    let code = if code.is_lazy() {
-        compile_lazy_function(this_function_object, &code, &realm, context)?
-    } else {
-        code
-    };
-
-    let env_fp = environments.len() as u32;
-
-    let new_target = context.vm.stack.pop();
-
-    let this = if code.is_derived_constructor() {
+    context: &mut Context,
+) -> JsResult<Option<JsObject>> {
+    Ok(if code.is_derived_constructor() {
         None
     } else {
         // If the prototype of the constructor is not an object, then use the default object
         // prototype as prototype for the new object
         // see <https://tc39.es/ecma262/#sec-ordinarycreatefromconstructor>
         // see <https://tc39.es/ecma262/#sec-getprototypefromconstructor>
-        let prototype = match own_prototype_object(&new_target, context) {
+        let prototype = match own_prototype_object(new_target, context) {
             Some(prototype) => prototype,
             None => {
-                get_prototype_from_constructor(&new_target, StandardConstructors::object, context)?
+                get_prototype_from_constructor(new_target, StandardConstructors::object, context)?
             }
         };
         let this = JsObject::from_proto_and_data_with_shared_shape(
@@ -1274,30 +1311,17 @@ fn function_construct(
         this.initialize_instance_elements(this_function_object, context)?;
 
         Some(this)
-    };
+    })
+}
 
-    let mut frame = CallFrame::new(code, script_or_module, environments, realm)
-        .with_argument_count(argument_count as u32)
-        .with_env_fp(env_fp)
-        .with_flags(CallFrameFlags::CONSTRUCT);
-
-    // We push the `this` below so we can mark this function as having the this value
-    // cached if it's initialized.
-    frame
-        .flags
-        .set(CallFrameFlags::THIS_VALUE_CACHED, this.is_some());
-
-    #[cfg(feature = "native-backtrace")]
-    {
-        let native_source_info = context.native_source_info();
-        context
-            .vm
-            .shadow_stack
-            .patch_last_native(native_source_info);
-    }
-
-    context.vm.push_frame(frame);
-
+/// Pushes the environments a construct call's frame, which is on top, starts with: that of the
+/// function's own name, and its function scope with `this` and `new.target`.
+fn push_construct_scopes(
+    this_function_object: &JsObject,
+    new_target: &JsValue,
+    this: Option<&JsObject>,
+    context: &mut Context,
+) -> JsResult<()> {
     let mut last_env = 0;
 
     let has_binding_identifier = context.vm.frame().code_block().has_binding_identifier();
@@ -1323,7 +1347,7 @@ fn function_construct(
         frame.environments.push_function(
             scope,
             FunctionSlots::new(
-                this.clone().map_or(ThisBindingStatus::Uninitialized, |o| {
+                this.cloned().map_or(ThisBindingStatus::Uninitialized, |o| {
                     ThisBindingStatus::Initialized(o.into())
                 }),
                 this_function_object.clone(),
@@ -1337,6 +1361,69 @@ fn function_construct(
             global,
         );
     }
+    Ok(())
+}
+
+/// Construct an instance of this object with the specified arguments.
+///
+/// # Panics
+///
+/// Panics if the object is currently mutably borrowed.
+// <https://tc39.es/ecma262/#sec-ecmascript-function-objects-construct-argumentslist-newtarget>
+fn function_construct(
+    this_function_object: &JsObject,
+    argument_count: usize,
+    context: &mut InternalMethodCallContext<'_>,
+) -> JsResult<CallValue> {
+    context.check_runtime_limits()?;
+
+    let function = this_function_object
+        .downcast_ref::<OrdinaryFunction>()
+        .js_expect("not a function")?;
+
+    debug_assert!(
+        function.is_ordinary(),
+        "only ordinary functions can be constructed"
+    );
+
+    // The new target is on top of the callee's arguments.
+    let (code, environments, script_or_module, realm) = callee_parts(
+        this_function_object,
+        function,
+        2,
+        argument_count,
+        context.context(),
+    )?;
+
+    let env_fp = environments.len() as u32;
+
+    let new_target = context.vm.stack.pop();
+
+    let this = construct_this(&code, &new_target, this_function_object, context)?;
+
+    let mut frame = CallFrame::with_handles(code, script_or_module, environments, realm)
+        .with_argument_count(argument_count as u32)
+        .with_env_fp(env_fp)
+        .with_flags(CallFrameFlags::CONSTRUCT);
+
+    // We push the `this` below so we can mark this function as having the this value
+    // cached if it's initialized.
+    frame
+        .flags
+        .set(CallFrameFlags::THIS_VALUE_CACHED, this.is_some());
+
+    #[cfg(feature = "native-backtrace")]
+    {
+        let native_source_info = context.native_source_info();
+        context
+            .vm
+            .shadow_stack
+            .patch_last_native(native_source_info);
+    }
+
+    context.vm.push_frame(frame);
+
+    push_construct_scopes(this_function_object, &new_target, this.as_ref(), context)?;
 
     let context = context.context();
     context.vm.stack.set_this(
