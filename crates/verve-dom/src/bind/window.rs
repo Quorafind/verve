@@ -751,10 +751,13 @@ const WINDOW_FUNCTIONS: &[Method] = &[
     ("open", 3, |_, args, cx| {
         let url = opt_string(args, 0, cx)?.unwrap_or_default();
         let resolved = http_url(cx, &url)?.to_string();
-        shared(cx)
-            .borrow_mut()
-            .requests
-            .push(crate::Request::Open(resolved));
+        let name = opt_string(args, 1, cx)?.unwrap_or_default();
+        let features = opt_string(args, 2, cx)?.unwrap_or_default();
+        shared(cx).borrow_mut().requests.push(crate::Request::Open {
+            url: resolved,
+            name,
+            features,
+        });
         Ok(JsValue::null())
     }),
     ("close", 0, |_, _, _| Ok(JsValue::undefined())),

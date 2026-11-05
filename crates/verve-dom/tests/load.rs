@@ -295,6 +295,22 @@ fn what_the_loader_does_not_claim_goes_through_the_realms_own_fetch() {
 }
 
 #[test]
+fn window_open_asks_the_embedder_with_its_name_and_features() {
+    let mut page = page(&[]);
+    page.document
+        .load_html(&mut page.runtime, "https://example.test/", "<p>x");
+    page.eval("window.open('/other', 'side', 'width=300')");
+    assert_eq!(
+        page.document.take_requests(),
+        [verve_dom::Request::Open {
+            url: "https://example.test/other".into(),
+            name: "side".into(),
+            features: "width=300".into()
+        }]
+    );
+}
+
+#[test]
 fn the_ready_state_names() {
     let names = [
         (Ready::Loading, "loading"),

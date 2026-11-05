@@ -32,7 +32,7 @@ fn review_navigation_and_forms_only_queue_http_urls() {
             matches!(&requests[0], verve_dom::Request::Navigate { url, .. } if url == "https://example.test/next")
         );
         assert!(
-            matches!(&requests[1], verve_dom::Request::Open(url) if url == "https://example.test/ok")
+            matches!(&requests[1], verve_dom::Request::Open { url, name, features } if url == "https://example.test/ok" && name.is_empty() && features.is_empty())
         );
         assert!(matches!(&requests[2], verve_dom::Request::Submit(_)));
         page.eval("f.submit(); f.action = 'file:///C:/Windows/win.ini'");

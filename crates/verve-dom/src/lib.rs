@@ -79,8 +79,12 @@ pub enum Request {
     },
     /// `location.reload()`.
     Reload,
-    /// `window.open(url)`.
-    Open(String),
+    /// `window.open(url, name, features)`, the address resolved.
+    Open {
+        url: String,
+        name: String,
+        features: String,
+    },
     /// `navigator.clipboard.writeText`, `document.execCommand('copy')`.
     CopyText(String),
     /// `alert`, `confirm` and `prompt`'s message (they answer as a browser that blocked them).
