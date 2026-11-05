@@ -699,3 +699,14 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   `ToInt32` of the number instead of casting to `i64` first, which saturated at 2^63: a float of 2^63
   or more (`new Int8Array(1)[0] = 3.4e38`, `new Uint16Array(1)[0] = 2 ** 64 + 4096`) gave the wrong
   element, `-1` or `65535` where the specification and Node give `0` or `4096`.
+
+- `boa_string`, `vtable/rope.rs`: the shared append buffer of a rope (`s += x`) also takes short
+  UTF-16 pieces. A buffer holds Latin-1 bytes while everything in the rope is Latin-1 and UTF-16
+  code units from the first piece that is not (`RopeState::AppendedWide`); a rope that is already
+  not Latin-1 starts one from its short right half. A byte buffer is never rewritten in place,
+  since ropes made earlier still read it as bytes: the first wide append copies the part of it
+  that rope sees (at most 1024 bytes, or the append gets a node of its own) into a new unit buffer,
+  so the earlier ropes keep their content and their own appendable end. The rules of the byte
+  buffer are unchanged: only the rope whose length ends the buffer appends in place, others get a
+  plain node, and flattening and dropping use the heap stack of the existing code. Appending
+  `'中' + i` 320000 times no longer costs a node per step.

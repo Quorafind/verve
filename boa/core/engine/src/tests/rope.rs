@@ -171,3 +171,42 @@ fn numbers_join_strings_as_their_decimal_text() {
         "'\\u20ac' + 42 === '\\u20ac42' && 42 + '\\u20ac' === '42\\u20ac' && ('\\u20ac'.repeat(300) + 42).endsWith('\\u20ac42')",
     );
 }
+
+/// Strings built by appending wide text read as they do in Node: the expected lines are the
+/// output of the same script under Node 22.
+#[test]
+fn wide_appends_read_as_node_does() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+        function build(kind) {
+          let s = 'a'.repeat(300);
+          if (kind === 'wide') for (let i = 0; i < 40; i++) s += '\u4e2d' + (i % 10);
+          else if (kind === 'mixed') { for (let i = 0; i < 20; i++) s += 'x' + i; s += '\u20ac'; for (let i = 0; i < 20; i++) s += 'y' + i; }
+          else if (kind === 'pair') { for (let i = 0; i < 10; i++) s += 'k'; s += '\ud83d'; s += '\ude00'; s += 'z'; s += '\ud83d'; }
+          else if (kind === 'fork') { s += 'p'; s += 'q'; const s1 = s; s += 'a'; s1 + ''; const t = s1 + '\u4e2d'; s += '\u20ac'; return s + '|' + t + '|' + s1; }
+          return s;
+        }
+        function digest(s) {
+          let h = 0;
+          for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+          let cp = 0;
+          for (let i = 0; i < s.length; i++) cp = (cp * 17 + s.codePointAt(i)) | 0;
+          let n = 0, hi = 0;
+          for (const c of s) { n++; hi = (hi * 13 + c.codePointAt(0)) | 0; }
+          return [s.length, h, cp, n, hi, s.indexOf('\u4e2d'), s.indexOf('\u20ac'), s.lastIndexOf('y1'), s.indexOf('\ud83d'), s.indexOf('\u{1f600}')].join(',');
+        }
+        const out = [];
+        for (const k of ['wide', 'mixed', 'pair', 'fork', 'plain']) {
+          const a = build(k), b = build(k);
+          const flat = [...a].join('');
+          out.push(k + ':' + digest(a) + ':' + (a === b) + ':' + (a === flat) + ':' + (a == b + '') + ':' + (a + 'q' === b + 'q'));
+        }
+        "#}),
+        TestAction::assert_eq(
+            "out.join('|')",
+            js_str!(
+                "wide:380,1869803756,934533512,380,1045900256,300,-1,-1,-1,-1:true:true:true:true|mixed:401,1878395778,-283335452,401,-32383352,-1,350,398,-1,-1:true:true:true:true|pair:314,530062662,-1738228671,313,-1811701267,-1,-1,-1,310,310:true:true:true:true|fork:911,-1889981887,367975417,911,-31499871,607,303,-1,-1,-1:true:true:true:true|plain:300,-1671404864,-1428538164,300,1421339140,-1,-1,-1,-1,-1:true:true:true:true"
+            ),
+        ),
+    ]);
+}
