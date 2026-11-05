@@ -19,7 +19,7 @@
 //!   the place changed.
 //! - `SetFullScreen(true)` does the same with the whole display, sending `EnterFullScreen` and
 //!   then the `Resized` and `Moved` the bounds made; `false` sends `LeaveFullScreen` first.
-//! - `Minimize` sends `Minimized`, then `Blur`; `Restore` undoes a minimize (`Restored`, then
+//! - `Minimize` sends `Minimized`, then `Blur` if the window had the focus; `Restore` undoes a minimize (`Restored`, then
 //!   `Focus`) or else a maximize.
 //! - `Close` sends `CloseRequested` and changes nothing; the answer `CloseAnswer { prevented:
 //!   false }`, like `Destroy`, closes the window. `prevented: true` keeps it as it is.
@@ -69,6 +69,8 @@ pub(super) struct Window {
     max_size: Option<(f32, f32)>,
     /// The bounds `Unmaximize` and leaving full screen go back to.
     normal: Rect,
+    /// Whether `FirstPaint` was sent.
+    pub(super) painted: bool,
 }
 
 impl Window {
@@ -110,6 +112,7 @@ impl Window {
             min_size: options.min_size,
             max_size: options.max_size,
             normal: bounds,
+            painted: false,
         }
     }
 
