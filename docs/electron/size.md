@@ -215,3 +215,26 @@ Nothing is a new crate: `raw-window-handle` and `windows-sys` were in the graph 
 macOS-only. The biggest single pieces, by reasoning from the code: `Window::apply` (a match arm per `WindowOp`, about 25 calls into
 `platform::windows`), `open` with `gpui_options`, the subclassed window procedure, `displays()` and the hand-written `ITaskbarList3`
 vtable. The drag-area subtraction and `diff` are a few hundred bytes each.
+
+## P12: IPC
+
+`electron/p12-ipc`: `cargo build --release -p verve-gpui --bin electron --features jit` is 33,557,504 bytes against 33,302,016 for
+`docs/electron-plan` `82079241` built the same way, +255,488 bytes (+0.77 %); 0.44 MB is left under the 34 MB cap. No dependency was
+added to the build (`boa_gc` was already linked through `verve`; `verve-electron` only names it for `#[derive(Trace)]`).
+
+Where the package's own code is (`cargo bloat --release --filter verve_electron`, `.text`; `verve_electron` is 226.7 KiB in all, P10's
+~66 KiB of it):
+
+| | .text |
+|---|---|
+| `MainGuest::from_renderer` (the dispatch of `Ipc`/`Invoke`/`SendSync`/`Post`, with `ipc_main::receive` and the event builders inlined into it) | 16.4 KiB |
+| `RendererGuest::new` (now also installs `ipcRenderer`; the `IpcRenderer` class and its method table are inlined, the rest was there) | share of 16.6 KiB |
+| `ipc_main` (`IpcMainImpl` class and handle table, `sendSync` reply, `invoke` answers) | ~20 KiB |
+| `ipc_renderer` (`send`, `invoke`, `sendSync`, `postMessage`, hearing) | ~14 KiB |
+| `message_port_main` (`MessageChannelMain`, `MessagePortMain`, the beat that hears them) | ~12 KiB |
+| `contents_ipc`, `web_frame_main` | ~7 KiB |
+| `verve::messaging` remote ports and `verve::clone`'s error and "alive" checks | ~12 KiB |
+
+The rest of the growth is `.rdata`, `.pdata` and relocations, which `cargo bloat` does not attribute. The per-module figures are
+sums of the symbols `cargo bloat` lists, rounded; the dispatch in `MainGuest::from_renderer` is the biggest single piece and was not
+shrunk.
