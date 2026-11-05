@@ -37,13 +37,13 @@ mod media;
 mod rect;
 mod snapshot;
 mod state;
+mod storage;
 mod window_state;
 
 pub use window_state::{Align, FontFaceId, FontOutcome, ScrollRequest};
 
 use std::cell::{Ref, RefCell};
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -59,6 +59,7 @@ pub use media::{
 pub use rect::Rect;
 pub use snapshot::{Snapshot, SnapshotData};
 pub use state::FrameClock;
+pub use storage::{FileStorage, StorageBackend};
 
 use state::{Shared, SheetOwner, SheetRecord, State, shared};
 
@@ -100,33 +101,6 @@ pub enum Request {
     /// An `<img src>` needs its bytes: the embedder fetches them and calls
     /// [`Document::set_image_bytes`] — or [`Document::fail_image`] when there are none.
     Image(String),
-}
-
-/// Where `localStorage` lives between runs.
-pub trait StorageBackend {
-    fn load(&self) -> std::collections::BTreeMap<String, String>;
-    fn save(&self, items: &std::collections::BTreeMap<String, String>);
-}
-
-/// `localStorage` kept as one JSON file.
-pub struct FileStorage(pub PathBuf);
-
-impl StorageBackend for FileStorage {
-    fn load(&self) -> std::collections::BTreeMap<String, String> {
-        std::fs::read_to_string(&self.0)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    }
-
-    fn save(&self, items: &std::collections::BTreeMap<String, String>) {
-        if let Some(parent) = self.0.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(text) = serde_json::to_string(items) {
-            let _ = std::fs::write(&self.0, text);
-        }
-    }
 }
 
 /// What the window is.
