@@ -53,6 +53,7 @@ pub(super) fn context(mode: Mode) -> Context {
         Mode::Eager => JitOptions {
             enabled: true,
             threshold: 0,
+            typed_elements_everywhere: true,
             ..JitOptions::default()
         },
         Mode::Hot => JitOptions {
