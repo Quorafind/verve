@@ -68,6 +68,7 @@ mod path;
 mod permission;
 mod process;
 mod querystring;
+pub use querystring::query_string;
 mod readline;
 mod sockets;
 mod stream;

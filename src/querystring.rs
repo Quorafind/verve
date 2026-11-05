@@ -160,6 +160,13 @@ fn encode_part(text: &str, encoder: &JsValue, context: &mut Context) -> JsResult
     Ok(escape(text))
 }
 
+/// `querystring.stringify(object)`, for a host that writes a query: arrays repeat their key
+/// (`a=1&a=2`), values are escaped as `encodeURIComponent` does.
+pub fn query_string(object: &JsValue, context: &mut Context) -> JsResult<String> {
+    let text = stringify(&JsValue::undefined(), std::slice::from_ref(object), context)?;
+    crate::native::text_of(&text, context)
+}
+
 fn stringify(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let input = arg(args, 0);
     let Some(source) = input.as_object() else {
