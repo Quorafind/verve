@@ -109,6 +109,7 @@ fn web_preferences(fields: &Fields, context: &mut Context) -> JsResult<WebPrefer
     prefs.allow_running_insecure_content =
         fields.bool("allowRunningInsecureContent", !prefs.web_security, context)?;
     prefs.images = fields.bool("images", prefs.images, context)?;
+    prefs.context_isolation = fields.bool("contextIsolation", prefs.context_isolation, context)?;
     Ok(prefs)
 }
 

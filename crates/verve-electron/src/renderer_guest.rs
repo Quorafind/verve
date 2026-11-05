@@ -45,7 +45,7 @@ impl RendererGuest {
         let dark = hub.options().dark;
         let mut runtime = Runtime::new();
         runtime.set_vfs(hub.overlay());
-        api::install_page(&mut runtime, Arc::clone(hub), contents)
+        api::install_page(&mut runtime, Arc::clone(hub), contents, &prefs)
             .expect("a page's electron module installs");
         let outbox = api::ipc_renderer::outbox(runtime.context());
         set_up_process(&mut runtime, &outbox);

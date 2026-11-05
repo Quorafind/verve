@@ -450,6 +450,9 @@ pub struct WebPreferences {
     pub allow_running_insecure_content: bool,
     /// `images`: whether the page loads images.
     pub images: bool,
+    /// `contextIsolation`: whether the page's scripts run in a world of their own, apart from
+    /// the preload's. With it (the default) the page has no `require`, `nodeIntegration` or not.
+    pub context_isolation: bool,
 }
 
 impl Default for WebPreferences {
@@ -467,6 +470,7 @@ impl Default for WebPreferences {
             web_security: true,
             allow_running_insecure_content: false,
             images: true,
+            context_isolation: true,
         }
     }
 }

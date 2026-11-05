@@ -23,6 +23,7 @@ use verve::native;
 
 use crate::hub::{Hub, RendererHandle};
 use crate::ids::{ContentsId, WindowId};
+use crate::msg::WebPreferences;
 
 /// What the browser process's API keeps between calls: the [`Hub`] every method goes through, and
 /// for each window it made, the object standing for it and the page it shows.
@@ -114,14 +115,21 @@ pub(crate) fn install_state(runtime: &mut verve::Runtime, hub: Arc<Hub>) -> Rc<M
     state
 }
 
-/// Gives a page's runtime its `require('electron')`. `contextBridge` is P21's.
+/// Gives a page's runtime its `require('electron')`, and, for a page with `nodeIntegration`, no sandbox and no
+/// context isolation, the `require` to ask for it with. A page with isolation gets its API through
+/// a preload and `contextBridge`, and its worlds are P21's.
 pub(crate) fn install_page(
     runtime: &mut verve::Runtime,
     hub: Arc<Hub>,
     contents: ContentsId,
+    prefs: &WebPreferences,
 ) -> JsResult<()> {
     ipc_renderer::install(runtime.context(), hub, contents)?;
     runtime.define_builtin_lazy("electron", renderer_module);
+    if prefs.node_integration && !prefs.context_isolation && !prefs.sandbox {
+        let require = runtime.global_require();
+        native::define_global(runtime.context(), "require", require)?;
+    }
     Ok(())
 }
 
