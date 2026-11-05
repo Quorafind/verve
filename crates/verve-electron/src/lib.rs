@@ -15,6 +15,7 @@ mod beat;
 pub mod headless;
 pub mod hub;
 pub mod ids;
+mod ipc;
 pub mod launcher;
 pub mod main_guest;
 pub mod msg;

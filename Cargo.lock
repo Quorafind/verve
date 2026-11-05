@@ -6827,6 +6827,7 @@ name = "verve-electron"
 version = "0.1.0"
 dependencies = [
  "boa_engine",
+ "boa_gc",
  "serde_json",
  "sha2",
  "url",

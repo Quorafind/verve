@@ -179,7 +179,7 @@ pub(crate) fn structured_clone(
     Ok(copy)
 }
 
-fn clone_error_at(context: &mut Context, message: &str) -> JsError {
+pub(crate) fn clone_error_at(context: &mut Context, message: &str) -> JsError {
     crate::dom_events::dom_exception_error(
         context,
         &format!("Failed to execute 'structuredClone' on 'Window': {message}"),
@@ -188,12 +188,31 @@ fn clone_error_at(context: &mut Context, message: &str) -> JsError {
 }
 
 /// What could not be cloned, as the error names it: `function f() {} could not be cloned.`
-fn clone_error(context: &mut Context, value: &JsValue) -> JsError {
-    let mut shown = crate::print(value);
+pub(crate) fn clone_error(context: &mut Context, value: &JsValue) -> JsError {
+    let text = clone_text(context, value);
+    clone_error_at(context, &text)
+}
+
+/// What is said of `value` when it cannot be cloned: `() => 1 could not be cloned.`, as Node
+/// words it (the text of a function, `#<Promise>` for an object).
+pub(crate) fn clone_text(context: &mut Context, value: &JsValue) -> String {
+    let mut shown = match value.as_object() {
+        Some(object) if object.is_callable() => {
+            crate::native::text_of(value, context).unwrap_or_else(|_| crate::print(value))
+        }
+        Some(_) => {
+            let class = crate::native::get(value, "constructor", context)
+                .and_then(|c| crate::native::get(&c, "name", context))
+                .map(|name| crate::print(&name))
+                .unwrap_or_default();
+            format!("#<{}>", if class.is_empty() { "Object" } else { &class })
+        }
+        None => crate::print(value),
+    };
     if shown.chars().count() > 60 {
         shown = shown.chars().take(57).collect::<String>() + "...";
     }
-    clone_error_at(context, &format!("{shown} could not be cloned."))
+    format!("{shown} could not be cloned.")
 }
 
 /// `Object.prototype.toString.call(value)`: `[object Uint8Array]`, `[object Number]`.
@@ -250,7 +269,10 @@ fn clone_value(
     {
         return Ok(copy.clone().into());
     }
-    if source.is_callable() || crate::dom_events::is_platform_object(&source) {
+    if source.is_callable()
+        || crate::clone::refused(&source, context)
+        || crate::dom_events::is_platform_object(&source)
+    {
         return Err(clone_error(context, value));
     }
     if let Ok(date) = JsDate::from_object(source.clone()) {
@@ -272,9 +294,6 @@ fn clone_value(
         let copy = copy.as_object().ok_or_else(|| type_error("not a buffer"))?;
         seen.push((source.clone(), copy.clone()));
         return Ok(copy.into());
-    }
-    if JsPromise::from_object(source.clone()).is_ok() {
-        return Err(clone_error(context, value));
     }
     let exception = source
         .downcast_ref::<crate::dom_events::DomExceptionData>()
@@ -312,15 +331,7 @@ fn clone_value(
         return Ok(copy.into());
     }
     match kind.as_str() {
-        "WeakMap"
-        | "WeakSet"
-        | "WeakRef"
-        | "FinalizationRegistry"
-        | "Generator"
-        | "AsyncGenerator"
-        | "Symbol" => {
-            return Err(clone_error(context, value));
-        }
+        "Symbol" => return Err(clone_error(context, value)),
         // A wrapper: its primitive, wrapped again — if it really is one (a `toStringTag` can
         // claim anything).
         "Boolean" | "Number" | "String" | "BigInt" => {

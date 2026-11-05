@@ -6,19 +6,24 @@ use std::collections::HashMap;
 use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, js_string,
     object::builtins::{
-        JsArray, JsArrayBuffer, JsDataView, JsDate, JsMap, JsRegExp, JsSet, JsTypedArray,
-        JsUint8Array, js_typed_array_from_kind,
+        JsArray, JsArrayBuffer, JsAsyncGenerator, JsDataView, JsDate, JsGenerator, JsMap,
+        JsPromise, JsProxy, JsRegExp, JsSet, JsTypedArray, JsUint8Array, JsWeakMap, JsWeakSet,
+        js_typed_array_from_kind,
     },
 };
 
-use super::tree::{Tree, ViewKind};
+use super::tree::{Tree, ViewKind, utf16};
 use crate::native::type_error;
+use crate::web::clone_text;
 
 /// What has been copied so far, numbered in the order it was met.
 type Seen = HashMap<JsObject, usize>;
 
-fn data_clone_error(what: &str) -> JsError {
-    type_error(format!("DataCloneError: {what} could not be cloned"))
+/// The error a value that cannot be cloned is refused with, in Node's words: a `DOMException`
+/// named `DataCloneError`, without the page-API prefix `structuredClone` puts on its own.
+fn clone_error(context: &mut Context, value: &JsValue) -> JsError {
+    let message = clone_text(context, value);
+    crate::dom_events::dom_exception_error(context, &message, "DataCloneError")
 }
 
 /// `value`, out of `context`'s realm, as `structuredClone` copies it.
@@ -33,8 +38,8 @@ fn copy(value: &JsValue, from: &mut Context, seen: &mut Seen) -> JsResult<Tree> 
     if let Some(at) = seen.get(&source) {
         return Ok(Tree::Seen(*at));
     }
-    if source.is_callable() {
-        return Err(data_clone_error("a function"));
+    if source.is_callable() || refused(&source, from) {
+        return Err(clone_error(from, value));
     }
     // Numbered before what is inside it, so what refers back to it finds it.
     let number = seen.len();
@@ -48,12 +53,46 @@ fn copy(value: &JsValue, from: &mut Context, seen: &mut Seen) -> JsResult<Tree> 
     fields(value, &source, from, seen)
 }
 
+/// Whether `source` stands for something alive — a promise, a generator, a proxy, a weak
+/// collection or reference, a finalization registry — which no structured clone can copy,
+/// whichever way it is asked for (`structuredClone`, a message to a worker, a message to
+/// another process).
+pub(crate) fn refused(source: &JsObject, context: &mut Context) -> bool {
+    if JsProxy::from_object(source.clone()).is_ok() {
+        return !is_env(source, context);
+    }
+    let constructors = context.intrinsics().constructors();
+    let weak = [
+        constructors.weak_ref().prototype(),
+        constructors.finalization_registry().prototype(),
+    ];
+    JsPromise::from_object(source.clone()).is_ok()
+        || JsWeakMap::from_object(source.clone()).is_ok()
+        || JsWeakSet::from_object(source.clone()).is_ok()
+        || JsGenerator::from_object(source.clone()).is_ok()
+        || JsAsyncGenerator::from_object(source.clone()).is_ok()
+        || source.prototype().is_some_and(|proto| {
+            weak.iter()
+                .any(|class| crate::native::inherits(&proto, class))
+        })
+}
+
+/// Whether `source` is `process.env`, which is a proxy on Windows (names found whatever their
+/// case) and which Node clones as the plain object of strings it stands for.
+fn is_env(source: &JsObject, context: &mut Context) -> bool {
+    let env = crate::native::global(context, "process")
+        .and_then(|process| crate::native::get(&process, "env", context));
+    env.ok()
+        .and_then(|env| env.as_object())
+        .is_some_and(|env| JsObject::equals(&env, source))
+}
+
 fn primitive(value: &JsValue, from: &mut Context) -> JsResult<Tree> {
     if let Some(text) = value.as_string() {
         return Ok(Tree::String(text.iter().collect()));
     }
     if value.is_symbol() {
-        return Err(data_clone_error("a Symbol"));
+        return Err(clone_error(from, value));
     }
     if value.is_bigint() {
         return Ok(Tree::BigInt(value.to_string(from)?.to_std_string_escaped()));
@@ -118,10 +157,8 @@ fn copy_blob(value: &JsValue, source: &JsObject, from: &mut Context) -> JsResult
 fn copy_view(value: &JsValue, source: &JsObject, from: &mut Context) -> JsResult<Option<Tree>> {
     let kind = if let Ok(array) = JsTypedArray::from_object(source.clone()) {
         // A detached array has no kind to cross as.
-        let kind = array
-            .kind()
-            .ok_or_else(|| data_clone_error("a detached typed array"))?;
-        ViewKind::of(kind).ok_or_else(|| data_clone_error("a typed array of this kind"))?
+        let kind = array.kind().ok_or_else(|| clone_error(from, value))?;
+        ViewKind::of(kind).ok_or_else(|| clone_error(from, value))?
     } else if JsDataView::from_object(source.clone()).is_ok() {
         ViewKind::DataView
     } else {
@@ -181,7 +218,9 @@ fn fields(
         &JsValue::undefined(),
         std::slice::from_ref(value),
     )?;
-    let error = source.is::<boa_engine::builtins::error::Error>();
+    if source.is::<boa_engine::builtins::error::Error>() {
+        return copy_error(source, from, seen);
+    }
     let mut names: Vec<JsString> = Vec::new();
     if let Some(keys) = keys.as_object() {
         let keys = JsArray::from_object(keys.clone())?;
@@ -189,24 +228,49 @@ fn fields(
             names.push(keys.get(at, from)?.to_string(from)?);
         }
     }
-    // An error keeps its name and message, which are not its own enumerable properties.
-    if error {
-        for key in [js_string!("name"), js_string!("message")] {
-            if !names.contains(&key) {
-                names.push(key);
-            }
-        }
-    }
     let mut fields = Vec::with_capacity(names.len());
     for name in names {
         let item = source.get(name.clone(), from)?;
         fields.push((name.iter().collect(), copy(&item, from, seen)?));
     }
-    Ok(if error {
-        Tree::Error(fields)
+    Ok(Tree::Object(fields))
+}
+
+/// The names of the errors the structured clone keeps; any other becomes `Error`.
+const ERROR_NAMES: [&str; 7] = [
+    "Error",
+    "EvalError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
+];
+
+/// An error as the HTML structured clone carries it: its name when it is one of the standard
+/// ones, its `stack` text, and its own `message` and `cause`. Anything else it has — `code`, a custom name —
+/// stays behind.
+fn copy_error(source: &JsObject, from: &mut Context, seen: &mut Seen) -> JsResult<Tree> {
+    let name = source.get(js_string!("name"), from)?.to_string(from)?;
+    let name = name.to_std_string_escaped();
+    let name = if ERROR_NAMES.contains(&name.as_str()) {
+        name
     } else {
-        Tree::Object(fields)
-    })
+        "Error".to_owned()
+    };
+    let mut fields = vec![(utf16("name"), Tree::String(utf16(&name)))];
+    // The stack is text made when the error was, wherever the engine keeps it.
+    let stack = source.get(js_string!("stack"), from)?;
+    if let Some(stack) = stack.as_string() {
+        fields.push((utf16("stack"), Tree::String(stack.iter().collect())));
+    }
+    for key in ["message", "cause"] {
+        if source.has_own_property(JsString::from(key), from)? {
+            let item = source.get(JsString::from(key), from)?;
+            fields.push((utf16(key), copy(&item, from, seen)?));
+        }
+    }
+    Ok(Tree::Error(fields))
 }
 
 /// The items of an array or an iterator, as a list.
@@ -277,11 +341,8 @@ fn make(tree: &Tree, to: &mut Context, made: &mut Made) -> JsResult<JsValue> {
         }
         Tree::View { kind, bytes } => make_view(*kind, bytes, to, made)?,
         Tree::Map(_) | Tree::Set(_) | Tree::Array(_) => make_collection(tree, to, made)?,
-        Tree::Object(fields) | Tree::Error(fields) => {
-            let object = match tree {
-                Tree::Error(_) => JsNativeError::error().into_opaque(to),
-                _ => JsObject::with_object_proto(to.intrinsics()),
-            };
+        Tree::Object(fields) => {
+            let object = JsObject::with_object_proto(to.intrinsics());
             made.push(object.clone());
             for (name, item) in fields {
                 let item = make(item, to, made)?;
@@ -289,7 +350,40 @@ fn make(tree: &Tree, to: &mut Context, made: &mut Made) -> JsResult<JsValue> {
             }
             object.into()
         }
+        Tree::Error(fields) => make_error(fields, to, made)?,
     })
+}
+
+/// An error of the class its name says, with the fields it was cloned with as the properties an
+/// error has: not listed. A name that is not a standard one — only a clone made by hand has such a
+/// name — stays as the error's own.
+fn make_error(fields: &[(Vec<u16>, Tree)], to: &mut Context, made: &mut Made) -> JsResult<JsValue> {
+    let name = fields.iter().find_map(|(key, item)| match item {
+        Tree::String(text) if *key == utf16("name") => Some(String::from_utf16_lossy(text)),
+        _ => None,
+    });
+    let native = match name.as_deref() {
+        Some("EvalError") => JsNativeError::eval(),
+        Some("RangeError") => JsNativeError::range(),
+        Some("ReferenceError") => JsNativeError::reference(),
+        Some("SyntaxError") => JsNativeError::syntax(),
+        Some("TypeError") => JsNativeError::typ(),
+        Some("URIError") => JsNativeError::uri(),
+        _ => JsNativeError::error(),
+    };
+    let object = native.into_opaque(to);
+    made.push(object.clone());
+    let standard = name
+        .as_deref()
+        .is_none_or(|name| ERROR_NAMES.contains(&name));
+    for (key, item) in fields {
+        if standard && *key == utf16("name") {
+            continue;
+        }
+        let item = make(item, to, made)?;
+        crate::native::hidden(&object, JsString::from(key.as_slice()), item, to)?;
+    }
+    Ok(object.into())
 }
 
 /// Records `object` as made, and answers it as a value.

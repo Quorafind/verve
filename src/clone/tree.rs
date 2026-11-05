@@ -39,6 +39,11 @@ pub(crate) enum Tree {
     Seen(usize),
 }
 
+/// `text` as the UTF-16 units JavaScript keeps it in.
+pub(super) fn utf16(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
+}
+
 /// Which of JavaScript's views a [`Tree::View`] came from. The discriminants are the numbers
 /// the byte format writes, so they are fixed here and [`ViewKind::ALL`] reads them back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

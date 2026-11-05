@@ -8,59 +8,12 @@
 
 mod support;
 
-use std::path::PathBuf;
 use std::time::Duration;
 
-use serde_json::Value;
-use support::{App, TIMEOUT};
+use support::{App, TIMEOUT, console_of, fixture, recorded_console, written_by};
 
 /// How long a fixture may take to end by itself.
 const ENDS_WITHIN: Duration = Duration::from_secs(30);
-
-fn fixture(name: &str) -> PathBuf {
-    let apps = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/electron/apps");
-    apps.join(name)
-}
-
-/// The console lines of real Electron, `(from, text)`, without the development-mode security
-/// warning every page without a content security policy gets.
-fn recorded_console(name: &str) -> Vec<(String, String)> {
-    let text = std::fs::read_to_string(fixture(name).join("expected.json")).expect("a recording");
-    let recording: Value = serde_json::from_str(&text).expect("expected.json is JSON");
-    let lines = recording["console"].as_array().expect("a console list");
-    let text = |line: &Value, key: &str| line[key].as_str().expect("a string").to_owned();
-    let lines = lines
-        .iter()
-        .map(|line| (text(line, "from"), text(line, "text")));
-    lines
-        .filter(|(_, text)| !text.contains("Electron Security Warning"))
-        .collect()
-}
-
-fn console_of(app: &App) -> Vec<(String, String)> {
-    let lines = app.hub.console_lines();
-    let from = |contents: Option<u32>| {
-        if contents.is_none() {
-            "main"
-        } else {
-            "renderer"
-        }
-    };
-    lines
-        .into_iter()
-        .map(|l| (from(l.contents).to_owned(), l.text))
-        .collect()
-}
-
-/// What one process wrote, in order. Real Electron's two processes run at the same time, so the
-/// order of a line of the main process against one of a page is not part of what it recorded.
-fn written_by(lines: &[(String, String)], from: &str) -> Vec<String> {
-    lines
-        .iter()
-        .filter(|(who, _)| who == from)
-        .map(|(_, text)| text.clone())
-        .collect()
-}
 
 /// Runs the fixture to its end and holds it to the recording: the same lines from each process,
 /// and exit code 0.
@@ -115,7 +68,7 @@ fn quick_start_opens_its_window_and_quits_when_it_closes() {
 }
 
 #[test]
-#[ignore = "P12: ipcMain and ipcRenderer"]
+#[ignore = "P13/P20: webContents events, loadFile and <script src>; its conversation runs in tests/ipc.rs"]
 fn ipc_messages_travel_both_ways() {
     replays("ipc");
 }

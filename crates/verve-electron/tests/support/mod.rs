@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
 use verve_electron::ids::{ContentsId, WindowId};
 use verve_electron::launcher::{self, Env, Launch, Start, Target};
 use verve_electron::{ElectronOptions, HeadlessOptions, HeadlessShell, HeadlessWindow, Hub};
@@ -190,6 +191,32 @@ impl App {
         lines.into_iter().map(|line| line.text).collect()
     }
 
+    /// Runs `body`, the body of an async function, in the page `contents` and waits up to
+    /// `timeout` for it to finish: `{ "value": v }` for what it returned, `{ "threw": message }`
+    /// for what it threw.
+    pub fn run_page(&self, contents: ContentsId, body: &str, timeout: Duration) -> Value {
+        self.eval_renderer(
+            contents,
+            &format!(
+                "globalThis.out = undefined; (async () => {{ {body} }})().then( value => {{ globalThis.out = {{ value }}; }}, error => {{ globalThis.out = {{ threw: String(error && error.message) }}; }}); 1"
+            ),
+        );
+        let deadline = Instant::now() + timeout;
+        loop {
+            let out = serde_json::from_str(&self.eval_renderer(contents, "globalThis.out"))
+                .unwrap_or(Value::Null);
+            if !out.is_null() {
+                return out;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the page's script did not finish; console: {:?}",
+                self.console()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// The code the app ended with, if it does within `timeout`.
     pub fn exit_code(&self, timeout: Duration) -> Option<i32> {
         self.run_until(|app| app.shell.exit_code().is_some(), timeout);
@@ -212,4 +239,51 @@ impl Drop for App {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+}
+
+// ---------- The fixture apps, and what real Electron printed for them ----------
+
+pub fn fixture(name: &str) -> PathBuf {
+    let apps = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/electron/apps");
+    apps.join(name)
+}
+
+/// The console lines of real Electron, `(from, text)`, without the development-mode security
+/// warning every page without a content security policy gets.
+pub fn recorded_console(name: &str) -> Vec<(String, String)> {
+    let text = std::fs::read_to_string(fixture(name).join("expected.json")).expect("a recording");
+    let recording: Value = serde_json::from_str(&text).expect("expected.json is JSON");
+    let lines = recording["console"].as_array().expect("a console list");
+    let text = |line: &Value, key: &str| line[key].as_str().expect("a string").to_owned();
+    let lines = lines
+        .iter()
+        .map(|line| (text(line, "from"), text(line, "text")));
+    lines
+        .filter(|(_, text)| !text.contains("Electron Security Warning"))
+        .collect()
+}
+
+pub fn console_of(app: &App) -> Vec<(String, String)> {
+    let lines = app.hub.console_lines();
+    let from = |contents: Option<u32>| {
+        if contents.is_none() {
+            "main"
+        } else {
+            "renderer"
+        }
+    };
+    lines
+        .into_iter()
+        .map(|l| (from(l.contents).to_owned(), l.text))
+        .collect()
+}
+
+/// What one process wrote, in order. Real Electron's two processes run at the same time, so the
+/// order of a line of the main process against one of a page is not part of what it recorded.
+pub fn written_by(lines: &[(String, String)], from: &str) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|(who, _)| who == from)
+        .map(|(_, text)| text.clone())
+        .collect()
 }

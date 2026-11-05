@@ -66,9 +66,28 @@ pub fn emit(
     Ok(())
 }
 
-/// Emits `event` on `object` with an Electron `Event` before `args`, as most of the app's and
-/// the windows' events are heard (`(event, window)`), and answers whether a listener called
-/// `event.preventDefault()`.
+/// An Electron `Event`: an object whose `preventDefault()` sets `defaultPrevented`, which
+/// neither shows when the event is listed. Most events of the app and the windows are heard as
+/// `(event, ...)`; the IPC events add their own fields to this one.
+///
+/// # Errors
+///
+/// A property that could not be defined.
+pub fn event(context: &mut Context) -> JsResult<JsObject> {
+    let event = native::object(context);
+    native::hidden(&event, js_string!("defaultPrevented"), false, context)?;
+    let prevent = native::function(context, "preventDefault", 0, |this, _, cx| {
+        if let Some(event) = this.as_object() {
+            native::hidden(&event, js_string!("defaultPrevented"), true, cx)?;
+        }
+        Ok(JsValue::undefined())
+    });
+    native::hidden(&event, js_string!("preventDefault"), prevent, context)?;
+    Ok(event)
+}
+
+/// Emits `event` on `object` with an Electron `Event` before `args`, and answers whether a
+/// listener called `event.preventDefault()`.
 ///
 /// # Errors
 ///
@@ -76,21 +95,13 @@ pub fn emit(
 pub fn emit_cancelable(
     context: &mut Context,
     object: &JsObject,
-    event: &str,
+    event_name: &str,
     args: &[JsValue],
 ) -> JsResult<bool> {
-    let cancel = native::object(context);
-    native::hidden(&cancel, js_string!("defaultPrevented"), false, context)?;
-    let prevent = native::function(context, "preventDefault", 0, |this, _, cx| {
-        if let Some(event) = this.as_object() {
-            native::hidden(&event, js_string!("defaultPrevented"), true, cx)?;
-        }
-        Ok(JsValue::undefined())
-    });
-    native::hidden(&cancel, js_string!("preventDefault"), prevent, context)?;
+    let cancel = event(context)?;
     let mut all = vec![JsValue::from(cancel.clone())];
     all.extend_from_slice(args);
-    emit(context, object, event, &all)?;
+    emit(context, object, event_name, &all)?;
     Ok(cancel
         .get(js_string!("defaultPrevented"), context)?
         .to_boolean())

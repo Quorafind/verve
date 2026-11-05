@@ -5,15 +5,15 @@
 //! Nothing here calls the shell or the main process; what a page wants of them leaves as events
 //! through the Hub, which is what keeps the page from ever holding anyone else up.
 
-use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
-use verve::isolate::{Guest, InterruptHandle, Outbox};
+use verve::isolate::{Guest, InterruptHandle, Outbox as IsolateOutbox};
 use verve::{Level, ProcessInfo, Runtime};
 use verve_dom::{Document, FrameClock, Options};
 
-use crate::api;
+use crate::api::{self, ipc_renderer::Outbox};
 use crate::beat;
 use crate::hub::Hub;
 use crate::ids::ContentsId;
@@ -29,8 +29,9 @@ pub struct RendererGuest {
     document: Document,
     /// What the page's lifecycle still has to tell the main process.
     lifecycle: Vec<PageEvent>,
-    /// The console lines the page wrote since the last turn.
-    console: Rc<RefCell<Vec<FromRenderer>>>,
+    /// Everything the page has to tell the main process, in the order it happened: console lines,
+    /// lifecycle, requests and IPC. It leaves as one job after each job the page runs.
+    outbox: Outbox,
     contents: ContentsId,
     /// What the page was made with; P20 makes the isolate anew with the same ones.
     prefs: WebPreferences,
@@ -40,12 +41,14 @@ impl RendererGuest {
     /// Page `contents` of the app `hub` routes, with an empty document, made with `prefs`, in
     /// the system theme the app started in. `about:blank` until something is loaded: the
     /// address and the history it brings are P20's.
-    pub fn new(hub: &Hub, contents: ContentsId, prefs: WebPreferences) -> Self {
+    pub fn new(hub: &Arc<Hub>, contents: ContentsId, prefs: WebPreferences) -> Self {
         let dark = hub.options().dark;
         let mut runtime = Runtime::new();
         runtime.set_vfs(hub.overlay());
-        let console = set_up_process(&mut runtime);
-        api::install_page(&mut runtime);
+        api::install_page(&mut runtime, Arc::clone(hub), contents, &prefs)
+            .expect("a page's electron module installs");
+        let outbox = api::ipc_renderer::outbox(runtime.context());
+        set_up_process(&mut runtime, &outbox);
         let document = verve_dom::install(
             &mut runtime,
             Options {
@@ -61,7 +64,7 @@ impl RendererGuest {
             runtime,
             document,
             lifecycle: Vec::new(),
-            console,
+            outbox,
             contents,
             prefs,
         }
@@ -85,8 +88,13 @@ impl RendererGuest {
     /// What the main process asks of the page. A page's messages, evaluation and the zoom factor
     /// are P12/P13's.
     pub fn apply(&mut self, msg: ToRenderer) {
-        if let ToRenderer::Load { url, .. } = msg {
-            self.load(&url);
+        match msg {
+            ToRenderer::Load { url, .. } => self.load(&url),
+            ToRenderer::Ipc { .. } | ToRenderer::Post { .. } | ToRenderer::InvokeReply { .. } => {
+                api::ipc_renderer::receive(self.runtime.context(), msg);
+                self.runtime.run_microtasks();
+            }
+            _ => {}
         }
     }
 
@@ -153,9 +161,9 @@ impl RendererGuest {
     }
 }
 
-/// Makes the realm's `process` a renderer's, and answers where its console lines collect: the
-/// main process hears of them as [`FromRenderer::Console`] events.
-fn set_up_process(runtime: &mut Runtime) -> Rc<RefCell<Vec<FromRenderer>>> {
+/// Makes the realm's `process` a renderer's, and sends its console lines to `outbox`: the main
+/// process hears of them as [`FromRenderer::Console`] events.
+fn set_up_process(runtime: &mut Runtime, outbox: &Outbox) {
     let info = ProcessInfo {
         title: "electron".into(),
         process_type: Some("renderer".into()),
@@ -164,8 +172,7 @@ fn set_up_process(runtime: &mut Runtime) -> Rc<RefCell<Vec<FromRenderer>>> {
     if let Err(error) = runtime.set_process_info(info) {
         eprintln!("electron: process could not be set up: {error}");
     }
-    let lines = Rc::new(RefCell::new(Vec::new()));
-    let sink = Rc::clone(&lines);
+    let sink = Rc::clone(outbox);
     runtime.set_console_sink(Some(Box::new(move |level: Level, text, at| {
         sink.borrow_mut().push(FromRenderer::Console {
             level,
@@ -174,7 +181,6 @@ fn set_up_process(runtime: &mut Runtime) -> Rc<RefCell<Vec<FromRenderer>>> {
             source: at.map(|at| at.file.clone()).unwrap_or_default(),
         });
     })));
-    lines
 }
 
 impl Guest for RendererGuest {
@@ -189,16 +195,21 @@ impl Guest for RendererGuest {
         beat::next_due(&self.runtime)
     }
 
-    fn drain(&mut self, out: &mut Outbox<FromRenderer>) {
-        for event in std::mem::take(&mut self.lifecycle) {
-            out.push(FromRenderer::Lifecycle(event));
-        }
-        for line in self.console.take() {
-            out.push(line);
-        }
-        for request in self.document.take_requests() {
-            out.push(FromRenderer::Dom(request));
-        }
+    fn drain(&mut self, _out: &mut IsolateOutbox<FromRenderer>) {
+        let mut outbox = self.outbox.borrow_mut();
+        outbox.extend(
+            std::mem::take(&mut self.lifecycle)
+                .into_iter()
+                .map(FromRenderer::Lifecycle),
+        );
+        outbox.extend(
+            self.document
+                .take_requests()
+                .into_iter()
+                .map(FromRenderer::Dom),
+        );
+        drop(outbox);
+        api::ipc_renderer::flush(self.runtime.context());
     }
 
     fn publish(&mut self, applied: u64, ran: bool) -> Option<RendererView> {

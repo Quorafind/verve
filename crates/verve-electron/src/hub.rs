@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
@@ -30,6 +30,9 @@ const STACK: usize = 16 * 1024 * 1024;
 
 /// The longest an isolate with nothing due sleeps, so a guest's slow work still gets its beat.
 const IDLE: Duration = Duration::from_millis(500);
+
+/// The most messages of a page the main process hears in one job.
+const PER_JOB: usize = 1000;
 
 /// A mutex of the Hub's, read even after a panic elsewhere poisoned it: what it guards is a
 /// registry of ids, still true after someone else's job threw.
@@ -106,8 +109,8 @@ impl RendererSlot {
         if let Some(view) = view {
             *lock(&self.view) = Some(view);
         }
-        for event in events {
-            hub.from_renderer(self.contents, event);
+        if !events.is_empty() {
+            hub.from_renderer_batch(self.contents, events);
         }
         if let Health::Dead(message) = health
             && !self.gone.swap(true, Ordering::SeqCst)
@@ -149,6 +152,8 @@ pub struct Hub {
     /// Whether [`Hub::set_launch`] was called: an app that was not launched has a profile of
     /// its own to clean up.
     told: AtomicBool,
+    /// How many times the main process's thread has run a beat.
+    beats: AtomicU64,
     overlay: Mutex<Option<Arc<dyn Overlay>>>,
     /// Told of every [`FromShell`] before the main process is: how a test watches what a shell says.
     observer: Mutex<Option<ShellObserver>>,
@@ -171,6 +176,7 @@ impl Hub {
             console: Mutex::new(None),
             launch: Mutex::new(None),
             told: AtomicBool::new(false),
+            beats: AtomicU64::new(0),
             overlay: Mutex::new(None),
             observer: Mutex::new(None),
         })
@@ -385,10 +391,28 @@ impl Hub {
 
     /// What a page says: a lifecycle step, a request only the window can answer.
     pub fn from_renderer(&self, contents: ContentsId, event: FromRenderer) {
-        if let FromRenderer::Console { message, .. } = &event {
-            self.log_console(Some(contents), message);
+        self.from_renderer_batch(contents, vec![event]);
+    }
+
+    /// What a page says in one turn, as one job of the main process: its thread is woken once
+    /// for all of it, and hears it in order.
+    pub fn from_renderer_batch(&self, contents: ContentsId, events: Vec<FromRenderer>) {
+        for event in &events {
+            if let FromRenderer::Console { message, .. } = event {
+                self.log_console(Some(contents), message);
+            }
         }
-        self.to_main(move |guest| guest.from_renderer(contents, event));
+        // At most `PER_JOB` to a job, so what the shell or another page says in the meantime is
+        // heard between them.
+        let mut events = events.into_iter().peekable();
+        while events.peek().is_some() {
+            let chunk: Vec<_> = events.by_ref().take(PER_JOB).collect();
+            self.to_main(move |guest| {
+                for event in chunk {
+                    guest.from_renderer(contents, event);
+                }
+            });
+        }
     }
 
     /// Sends `msg` to page `contents`, to run as a job of its isolate.
@@ -485,6 +509,16 @@ impl Hub {
     /// The code the app is ending with, once it is.
     pub fn exit_code(&self) -> Option<i32> {
         *lock(&self.exit)
+    }
+
+    /// How many times the main process's thread has run a beat — taken a turn of jobs, timers and
+    /// ports — since the app began: what a benchmark counts wake-ups with.
+    pub fn main_beats(&self) -> u64 {
+        self.beats.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn count_beat(&self) {
+        self.beats.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Runs `job` on the main process's thread, in turn, as [`Hub::on_renderer`] does.

@@ -175,6 +175,103 @@ fn what_cannot_be_cloned_is_a_data_clone_error() {
     assert!(Cloned::from_value(&symbol, rt.context()).is_err());
 }
 
+#[test]
+fn a_clone_of_an_error_keeps_what_the_html_algorithm_keeps() {
+    let mut from = Runtime::new();
+    let value = from
+        .eval(
+            r#"
+            class MyError extends Error {
+                constructor(message) { super(message); this.name = 'MyError'; this.code = 'E_MINE'; }
+            }
+            const ranged = new RangeError('ranged', { cause: new TypeError('inner') });
+            ranged.code = 'E_RANGE';
+            [ranged, new MyError('mine')]
+        "#,
+        )
+        .unwrap();
+    let cloned = Cloned::from_value(&value, from.context()).unwrap();
+    let mut to = Runtime::new();
+    let describe = to
+        .eval(
+            r#"(list => list.map(e => [
+                e.constructor.name, e.name, e.message,
+                Object.getOwnPropertyNames(e).filter(k => k !== 'stack').sort().join(),
+                'code' in e, typeof e.stack, e.cause && e.cause.constructor.name, Object.keys(e).length,
+            ].join('|')).join(';'))"#,
+        )
+        .unwrap();
+    let made = cloned.to_value(to.context()).unwrap();
+    let seen = to.call(&describe, &JsValue::undefined(), &[made]).unwrap();
+    // A standard name keeps its class, any other is `Error`; `code` stays behind; nothing is listed.
+    assert_eq!(
+        verve::print(&seen),
+        concat!(
+            "RangeError|RangeError|ranged|cause,message|false|string|TypeError|0;",
+            "Error|Error|mine|message|false|string||0"
+        )
+    );
+}
+
+#[test]
+fn what_stands_for_something_alive_cannot_be_cloned_whichever_way_it_is_asked() {
+    let mut rt = Runtime::new();
+    for script in [
+        "Promise.resolve(1)",
+        "(function* () {})()",
+        "(async function* () {})()",
+        "new Proxy({}, {})",
+        "new WeakMap()",
+        "new WeakSet()",
+        "new WeakRef({})",
+        "new FinalizationRegistry(() => {})",
+        "({ nested: [new WeakMap()] })",
+    ] {
+        let value = rt.eval(script).unwrap();
+        let denied = Cloned::from_value(&value, rt.context()).expect_err(script);
+        // The error a page's `postMessage` throws: a `DOMException` named `DataCloneError`.
+        let described = verve::describe(rt.context(), &denied);
+        assert!(
+            described.contains("DataCloneError"),
+            "{script}: {described}"
+        );
+        let asked = rt
+            .eval(&format!(
+                "try {{ structuredClone({script}); 'cloned' }} catch (e) {{ e.name }}"
+            ))
+            .unwrap();
+        assert_eq!(verve::print(&asked), "DataCloneError", "{script}");
+    }
+}
+
+#[test]
+fn process_env_is_cloned_as_the_plain_object_node_clones() {
+    let mut rt = Runtime::new();
+    rt.eval("process.env.P12_CLONE = 'yes'").unwrap();
+    let env = rt.eval("process.env").unwrap();
+    let cloned = Cloned::from_value(&env, rt.context()).expect("process.env clones");
+    let mut to = Runtime::new();
+    let made = cloned.to_value(to.context()).unwrap();
+    let describe = to
+        .eval("(v) => [Object.getPrototypeOf(v) === Object.prototype, v.P12_CLONE].join()")
+        .unwrap();
+    let seen = to.call(&describe, &JsValue::undefined(), &[made]).unwrap();
+    assert_eq!(verve::print(&seen), "true,yes");
+    let direct = rt.eval("structuredClone(process.env).P12_CLONE").unwrap();
+    assert_eq!(verve::print(&direct), "yes");
+}
+
+#[test]
+fn what_cannot_be_cloned_is_refused_in_nodes_words_by_a_message() {
+    let mut rt = Runtime::new();
+    let function = rt.eval("(() => 1)").unwrap();
+    let denied = Cloned::from_value(&function, rt.context()).unwrap_err();
+    let described = verve::describe(rt.context(), &denied);
+    assert!(described.contains("DataCloneError"), "{described}");
+    assert!(described.contains("could not be cloned."), "{described}");
+    assert!(!described.contains("Failed to execute"), "{described}");
+}
+
 // ─── The process a realm is ─────────────────────────────────────────────────────────────────
 
 #[test]

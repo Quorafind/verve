@@ -328,6 +328,12 @@ pub enum ToRenderer {
         user_gesture: bool,
     },
     SetZoomFactor(f64),
+    /// `webContents.postMessage`: a message with the ports the page is given, as `MessagePort`s.
+    Post {
+        channel: String,
+        message: Cloned,
+        ports: Vec<verve::messaging::PortEnd>,
+    },
 }
 
 /// The answer to a `sendSync`, sent once.
@@ -408,6 +414,12 @@ pub enum FromRenderer {
     Gone {
         reason: GoneReason,
     },
+    /// `ipcRenderer.postMessage`: a message with the ports the main process is given.
+    Post {
+        channel: String,
+        message: Cloned,
+        ports: Vec<verve::messaging::PortEnd>,
+    },
 }
 
 /// What `webPreferences` says of a page, the part P02 reads; P13 adds the rest. A page is made
@@ -438,6 +450,9 @@ pub struct WebPreferences {
     pub allow_running_insecure_content: bool,
     /// `images`: whether the page loads images.
     pub images: bool,
+    /// `contextIsolation`: whether the page's scripts run in a world of their own, apart from
+    /// the preload's. With it (the default) the page has no `require`, `nodeIntegration` or not.
+    pub context_isolation: bool,
 }
 
 impl Default for WebPreferences {
@@ -455,6 +470,7 @@ impl Default for WebPreferences {
             web_security: true,
             allow_running_insecure_content: false,
             images: true,
+            context_isolation: true,
         }
     }
 }
