@@ -143,6 +143,14 @@ fn an_async_script_does_not_hold_the_parser_and_runs_before_load() {
 }
 
 #[test]
+fn a_script_waits_for_the_sheet_before_it_and_the_sheets_load_comes_after_it() {
+    assert_eq!(
+        logged("styles.html"),
+        ["script-sees:rgb(1, 2, 3)", "link-load"]
+    );
+}
+
+#[test]
 fn document_write_goes_in_where_the_parser_is() {
     assert_eq!(
         logged("write.html"),
@@ -181,6 +189,11 @@ fn a_script_that_throws_is_an_error_event_and_the_parse_goes_on() {
         logged("onerror.html"),
         ["error-event:Uncaught Error: boom", "after-error"]
     );
+}
+
+#[test]
+fn an_imported_sheet_comes_before_the_sheet_that_imports_it() {
+    assert_eq!(logged("cascade.html"), ["p:rgb(255, 0, 0):rgb(0, 128, 0)"]);
 }
 
 #[test]
@@ -901,4 +914,21 @@ fn a_script_in_a_template_runs_when_its_content_is_put_in_the_page() {
     );
     let mut page = loaded(&[], &copy);
     assert_eq!(page.log(), ["1"]);
+}
+
+#[test]
+fn nested_imports_come_before_their_importer_and_the_links_load_waits_for_them() {
+    let files = [
+        ("s.css", "@import \"a.css\";"),
+        ("a.css", "@import \"c.css\"; p { margin-top: 2px }"),
+        ("c.css", "p { margin-top: 1px }"),
+    ];
+    let html = format!(
+        "{LOG}<p id=p>x</p><link rel=stylesheet href=s.css \
+         onload=\"__log.push(getComputedStyle(document.getElementById('p')).marginTop)\">"
+    );
+    let (mut page, held) = held_page(&files, &html);
+    settle_reversed(&mut page, &held);
+    assert_eq!(margin(&mut page), "2px");
+    assert_eq!(page.log(), ["2px"]);
 }

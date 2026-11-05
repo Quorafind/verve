@@ -445,29 +445,28 @@ fn tag<'a>(
     if Parser::route(stack, in_body, context, dom, &name, attrs) {
         return Tag::Read(rest);
     }
-    open_element(
-        dom,
-        stack,
-        context,
-        &name,
+    let start = Start {
+        name: &name,
         attrs,
-        (self_closing, tag_start, rest),
-        feed,
-    )
+        self_closing,
+        tag_start,
+        rest,
+    };
+    open_element(dom, stack, context, &start, feed)
 }
 
-/// The element a start tag opens: it goes in the tree and, unless it is empty, on the stack; a
-/// raw text element takes its text with it.
-fn open_element<'a>(
-    dom: &mut Dom,
-    stack: &mut Vec<Open>,
-    context: Context,
-    name: &str,
-    attrs: &str,
-    (self_closing, tag_start, mut rest): (bool, &'a str, &'a str),
-    feed: Feed,
-) -> Tag<'a> {
-    let namespace = match (stack.last().map(|o| o.namespace), name) {
+/// A start tag, read: its name and attributes, and the markup from its `<` and after it.
+struct Start<'n, 'a> {
+    name: &'n str,
+    attrs: &'a str,
+    self_closing: bool,
+    tag_start: &'a str,
+    rest: &'a str,
+}
+
+/// The namespace a start tag's element is in, from the element it is put in.
+fn namespace_of(stack: &[Open], name: &str) -> Namespace {
+    match (stack.last().map(|o| o.namespace), name) {
         (_, "svg") => Namespace::Svg,
         (_, "math") => Namespace::MathMl,
         // HTML inside SVG's `foreignObject` is HTML again.
@@ -476,7 +475,20 @@ fn open_element<'a>(
         }
         (Some(ns @ (Namespace::Svg | Namespace::MathMl)), _) => ns,
         _ => Namespace::Html,
-    };
+    }
+}
+
+/// The element a start tag opens: it goes in the tree and, unless it is empty, on the stack; a
+/// raw text element takes its text with it.
+fn open_element<'a>(
+    dom: &mut Dom,
+    stack: &mut Vec<Open>,
+    context: Context,
+    start: &Start<'_, 'a>,
+    feed: Feed,
+) -> Tag<'a> {
+    let (name, attrs, rest) = (start.name, start.attrs, start.rest);
+    let namespace = namespace_of(stack, name);
     if namespace == Namespace::Html {
         imply_end_tags(dom, stack, name);
     }
@@ -502,18 +514,16 @@ fn open_element<'a>(
         && find_end_tag(rest, name) == rest.len()
     {
         // The element's text has not all arrived.
-        return Tag::Wait(tag_start);
+        return Tag::Wait(start.tag_start);
     }
     let element = dom.create_element_ns(name, namespace);
-    if namespace == Namespace::Html && name == "script" {
-        dom.mark_started(element);
-    }
+    mark_made_by_parser(dom, stack, element, name, namespace, feed);
     set_attrs(dom, element, attrs, namespace, false);
     dom.append(current(stack), element);
     let closes = if namespace == Namespace::Html {
         VOID.contains(&name)
     } else {
-        self_closing
+        start.self_closing
     };
     if closes {
         return Tag::Read(rest);
@@ -521,25 +531,7 @@ fn open_element<'a>(
     if namespace == Namespace::Html
         && let Some(decode_refs) = raw_text(name)
     {
-        // Text up to the matching end tag, whatever it holds.
-        let end = find_end_tag(rest, name);
-        let content = &rest[..end];
-        let text = if decode_refs {
-            decode(content)
-        } else {
-            content.to_owned()
-        };
-        // A newline right after `<textarea>` or `<pre>` is not part of its text.
-        let text = if name == "textarea" {
-            text.strip_prefix('\n').unwrap_or(&text).to_owned()
-        } else {
-            text
-        };
-        if !text.is_empty() {
-            let node = dom.create_text(&text);
-            dom.append(element, node);
-        }
-        rest = rest[end..].find('>').map_or("", |gt| &rest[end + gt + 1..]);
+        let rest = fill_raw_text(dom, element, name, decode_refs, rest);
         if feed.pause && name == "script" && !stack.iter().any(|o| o.tag == "template") {
             return Tag::Script(rest, element);
         }
@@ -551,6 +543,59 @@ fn open_element<'a>(
         namespace,
     });
     Tag::Read(rest)
+}
+
+/// What the parser notes of the element it made. A script of the page's own parse has its
+/// "already started" flag set, for the parser runs it itself, except in a template: there it
+/// never runs, and runs when put in a page, as it does in a browser. A `<link>` the page's
+/// parser made may hold back scripts.
+fn mark_made_by_parser(
+    dom: &mut Dom,
+    stack: &[Open],
+    element: NodeId,
+    name: &str,
+    namespace: Namespace,
+    feed: Feed,
+) {
+    if namespace != Namespace::Html {
+        return;
+    }
+    let in_template = stack.iter().any(|o| o.tag == "template");
+    if name == "script" && !(feed.pause && in_template) {
+        dom.mark_started(element);
+    }
+    if name == "link" && feed.pause {
+        dom.mark_parser_made(element);
+    }
+}
+
+/// Puts the text of a raw text element (up to its end tag, whatever it holds) in `element`, and
+/// answers the markup after the end tag.
+fn fill_raw_text<'a>(
+    dom: &mut Dom,
+    element: NodeId,
+    name: &str,
+    decode_refs: bool,
+    rest: &'a str,
+) -> &'a str {
+    let end = find_end_tag(rest, name);
+    let content = &rest[..end];
+    let text = if decode_refs {
+        decode(content)
+    } else {
+        content.to_owned()
+    };
+    // A newline right after `<textarea>` or `<pre>` is not part of its text.
+    let text = if name == "textarea" {
+        text.strip_prefix('\n').unwrap_or(&text).to_owned()
+    } else {
+        text
+    };
+    if !text.is_empty() {
+        let node = dom.create_text(&text);
+        dom.append(element, node);
+    }
+    rest[end..].find('>').map_or("", |gt| &rest[end + gt + 1..])
 }
 
 fn current(stack: &[Open]) -> NodeId {
@@ -1427,5 +1472,25 @@ mod tests {
         parse_into(&mut dom, div, "<script>x</script>");
         let script = dom.query(div, "script").unwrap();
         assert!(dom.is_started(script));
+    }
+
+    #[test]
+    fn a_copy_of_a_script_that_has_run_has_run_and_a_template_script_has_not() {
+        let (mut dom, mut parser, body) = streamed(&[
+            "<script>one</script><template><script>two</script></template><link rel=x><p>c</p>",
+        ]);
+        parser.finish();
+        let Step::Script(first) = parser.step(&mut dom) else {
+            panic!("a script")
+        };
+        let copy = dom.clone_node(first, true).unwrap();
+        assert!(dom.is_started(copy));
+        assert_eq!(parser.step(&mut dom), Step::Done);
+        let inert = dom.query(body, "template script").unwrap();
+        assert!(!dom.is_started(inert));
+        let again = dom.clone_node(inert, true).unwrap();
+        assert!(!dom.is_started(again));
+        let link = dom.query(body, "link").unwrap();
+        assert!(dom.is_parser_made(link));
     }
 }

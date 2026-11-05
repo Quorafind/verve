@@ -76,6 +76,7 @@ pub(super) fn parsed(doc: &Document, runtime: &mut verve::Runtime, node: NodeId)
 #[derive(Default)]
 struct Found {
     scripts: Vec<NodeId>,
+    links: Vec<NodeId>,
 }
 
 /// The roots none of whose ancestors is also among them: a subtree is walked once.
@@ -110,14 +111,15 @@ fn collect(state: &State, roots: &[NodeId]) -> Found {
             Some("script") if !state.dom.is_started(id) && state.dom.is_connected(id) => {
                 found.scripts.push(id)
             }
+            Some("link") if state.dom.is_connected(id) => found.links.push(id),
             _ => {}
         }
     }
     found
 }
 
-/// Subtrees that joined the document: the `<script>`s in them that no parser read are the page's
-/// to load now.
+/// Subtrees that joined the document: the `<script>`s and `<link>`s in them that no parser read
+/// are the page's to load now.
 pub(crate) fn connected(context: &mut Context, roots: &[NodeId]) {
     super::handlers::connected(context, roots);
     let found = {
@@ -130,6 +132,9 @@ pub(crate) fn connected(context: &mut Context, roots: &[NodeId]) {
     };
     for node in found.scripts {
         prepare(context, node);
+    }
+    for node in found.links {
+        super::sheets::discover(context, node);
     }
 }
 
@@ -167,9 +172,24 @@ fn schedule(context: &mut Context, node: NodeId, prepared: Prepared, parser: boo
         if prepared.text.is_empty() {
             return;
         }
-        // An inline script runs where it stands: as it is put in, or where the parser is.
-        let name = shared(context).borrow().url.to_string();
-        return run_classic(context, node, &prepared.text, &name, parser);
+        if !parser {
+            // A script put in the page runs as it is put in.
+            let name = shared(context).borrow().url.to_string();
+            return run_classic(context, node, &prepared.text, &name, false);
+        }
+        if shared(context).borrow().load.blocking_sheets == 0 {
+            // The parser runs an inline script where it stands.
+            let name = shared(context).borrow().url.to_string();
+            return run_classic(context, node, &prepared.text, &name, true);
+        }
+        return push(
+            context,
+            node,
+            Flow::Blocking,
+            None,
+            prepared.text,
+            Status::Ready,
+        );
     };
     let flow = match (parser, prepared.is_async, prepared.defer) {
         (_, true, _) => Flow::Async,
@@ -178,17 +198,31 @@ fn schedule(context: &mut Context, node: NodeId, prepared: Prepared, parser: boo
         (false, ..) if shared(context).borrow().load.ordered.contains(&node) => Flow::Ordered,
         (false, ..) => Flow::Async,
     };
-    push(context, node, flow, url.clone());
+    push(
+        context,
+        node,
+        flow,
+        Some(url.clone()),
+        String::new(),
+        Status::Fetching,
+    );
     net::start(context, url, Destination::Script, Wait::Script(node));
 }
 
-fn push(context: &mut Context, node: NodeId, flow: Flow, url: Url) {
+fn push(
+    context: &mut Context,
+    node: NodeId,
+    flow: Flow,
+    url: Option<Url>,
+    text: String,
+    status: Status,
+) {
     shared(context).borrow_mut().load.scripts.push(Script {
         node,
         flow,
-        url: Some(url),
-        text: String::new(),
-        status: Status::Fetching,
+        url,
+        text,
+        status,
     });
 }
 

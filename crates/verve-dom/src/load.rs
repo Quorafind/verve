@@ -19,6 +19,7 @@ use crate::html::{Step, StreamParser};
 mod handlers;
 mod net;
 mod script;
+mod sheets;
 
 pub(crate) use handlers::attribute;
 pub(crate) use script::{connected, install, write};
@@ -138,6 +139,10 @@ type Inbox = Rc<RefCell<Vec<(u64, LoadResult)>>>;
 pub(crate) enum Wait {
     Document,
     Script(crate::dom::NodeId),
+    /// A `<link>`'s sheet, and whether scripts and the first paint wait for it.
+    Sheet(crate::dom::NodeId, bool),
+    /// A sheet a `<link>`'s sheet `@import`s.
+    Import(crate::dom::NodeId, Vec<usize>, bool),
 }
 
 /// How far the page's markup has gone.
@@ -181,6 +186,20 @@ pub(crate) struct Script {
     pub status: Status,
 }
 
+impl Load {
+    /// Lets go of what is kept for nodes that were freed.
+    pub(crate) fn forget(&mut self, gone: &HashSet<crate::dom::NodeId>) {
+        self.handled.retain(|(node, _)| !gone.contains(node));
+        self.forced.retain(|node| !gone.contains(node));
+        self.ordered.retain(|node| !gone.contains(node));
+        self.linked.retain(|node| !gone.contains(node));
+        self.import_ranks
+            .retain(|(node, _), _| !gone.contains(node));
+        self.imports_coming.retain(|node, _| !gone.contains(node));
+        self.link_events.retain(|node, _| !gone.contains(node));
+    }
+}
+
 /// The state of the page's loading, kept on [`crate::state::State`].
 #[derive(Default)]
 pub(crate) struct Load {
@@ -205,8 +224,26 @@ pub(crate) struct Load {
     next: u64,
     waiting: HashMap<u64, Wait>,
     pub scripts: Vec<Script>,
+    /// How many `@import`s each sheet of a `<link>` (by its path) has asked for: the order their
+    /// sheets go in.
+    import_ranks: HashMap<(crate::dom::NodeId, Vec<usize>), usize>,
+    /// How many `@import`s of each `<link>` are still coming.
+    imports_coming: HashMap<crate::dom::NodeId, usize>,
+    /// The `<link>`s whose own sheet is in and whose event waits for the imports: which event.
+    link_events: HashMap<crate::dom::NodeId, &'static str>,
+    /// The `<link>`s already asked for.
+    linked: HashSet<crate::dom::NodeId>,
     /// Dynamic scripts that asked to run in order (`script.async = false`).
     pub ordered: HashSet<crate::dom::NodeId>,
+    /// Stylesheets still coming that scripts wait for.
+    pub blocking_sheets: usize,
+    /// Events for elements, fired once what has arrived has been dealt with: a task of their
+    /// own, after the script that was waiting for the sheet.
+    pub notices: Vec<(crate::dom::NodeId, &'static str)>,
+    /// What was asked for.
+    requested: HashSet<String>,
+    /// Sheets to ask for once the state is free of the borrow that found them.
+    wanted: Vec<(Url, Wait)>,
     /// The runtime's `fetch` as it was before the page could replace it.
     pub original_fetch: Option<boa_engine::JsValue>,
     /// `Response.prototype.url`'s getter as it was before the page could replace it: where a
@@ -311,13 +348,24 @@ impl Document {
         let mut did = false;
         loop {
             runtime.run_microtasks();
-            let mut moved = self.deliver();
+            let mut moved = self.route_requests(runtime);
+            moved |= self.deliver();
             moved |= self.advance(runtime);
             if !moved {
                 return did;
             }
             did = true;
         }
+    }
+
+    /// The sheets a sheet `@import`s are asked for through the loader.
+    fn route_requests(&self, runtime: &mut verve::Runtime) -> bool {
+        let wanted = std::mem::take(&mut self.state.borrow_mut().load.wanted);
+        let did = !wanted.is_empty();
+        for (url, wait) in wanted {
+            net::start(runtime.context(), url, Destination::Style, wait);
+        }
+        did
     }
 
     /// Takes the results that came back.
@@ -341,6 +389,10 @@ impl Document {
         match wait {
             Wait::Document => self.document_arrived(result),
             Wait::Script(node) => script::fetched(self, node, result),
+            Wait::Sheet(node, blocking) => sheets::fetched(self, node, blocking, result),
+            Wait::Import(node, rank, blocking) => {
+                sheets::imported(self, (node, rank, blocking), result)
+            }
         }
     }
 
@@ -371,6 +423,11 @@ impl Document {
         }
         did |= self.parse(runtime);
         did |= self.phases(runtime);
+        let notices = std::mem::take(&mut self.state.borrow_mut().load.notices);
+        for (node, kind) in notices {
+            script::fire_on(runtime.context(), node, kind);
+            did = true;
+        }
         did
     }
 
@@ -378,15 +435,15 @@ impl Document {
     fn next_script(&self) -> Option<Script> {
         let mut state = self.state.borrow_mut();
         let load = &mut state.load;
-        let parsed = load.phase >= Phase::Read;
+        let (parsed, sheets) = (load.phase >= Phase::Read, load.blocking_sheets);
         let (mut deferred_waits, mut ordered_waits) = (false, false);
         let mut found = None;
         for (at, script) in load.scripts.iter().enumerate() {
             let here = script.status != Status::Fetching;
             let may = match script.flow {
                 Flow::Async => here,
-                Flow::Blocking => here,
-                Flow::Defer => parsed && here && !deferred_waits,
+                Flow::Blocking => here && sheets == 0,
+                Flow::Defer => parsed && sheets == 0 && here && !deferred_waits,
                 Flow::Ordered => here && !ordered_waits,
             };
             deferred_waits |= script.flow == Flow::Defer && !here;
@@ -435,7 +492,9 @@ impl Document {
 
     /// `interactive`, `DOMContentLoaded`, `complete` and `load`, each when it is time.
     fn phases(&self, runtime: &mut verve::Runtime) -> bool {
-        let mut did = self.first_paintable();
+        // What the parse asked for is on its way before `load` is thought of.
+        let mut did = self.route_requests(runtime);
+        did |= self.first_paintable();
         let (parsed, ready, deferred, dcl) = {
             let state = self.state.borrow();
             let load = &state.load;
@@ -485,7 +544,7 @@ impl Document {
         let mut state = self.state.borrow_mut();
         let started =
             !state.dom.children(state.dom.body).is_empty() || state.load.phase >= Phase::Read;
-        if state.load.painted || !started {
+        if state.load.painted || !started || state.load.blocking_sheets > 0 {
             return false;
         }
         state.load.painted = true;

@@ -254,6 +254,8 @@ pub struct Dom {
     pub document: NodeId,
     /// The `<script>`s that have run or never will: see `marks.rs`.
     started: HashSet<NodeId>,
+    /// The `<link>`s the page's own parser made.
+    parser_made: HashSet<NodeId>,
     pub html: NodeId,
     pub head: NodeId,
     pub body: NodeId,
@@ -325,6 +327,7 @@ impl Dom {
             live: 0,
             document: 0,
             started: HashSet::new(),
+            parser_made: HashSet::new(),
             html: 0,
             head: 0,
             body: 0,
@@ -1557,6 +1560,10 @@ impl Dom {
         let copy = self.insert(node);
         if style {
             self.styles.insert(copy);
+        }
+        // A script that has run has run: so does its copy (HTML's "already started").
+        if self.started.contains(&id) {
+            self.started.insert(copy);
         }
         Some(copy)
     }

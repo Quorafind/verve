@@ -36,6 +36,16 @@ impl Dom {
         self.started.insert(id);
     }
 
+    /// Marks the `<link>` `id` as one the page's own parser made.
+    pub fn mark_parser_made(&mut self, id: NodeId) {
+        self.parser_made.insert(id);
+    }
+
+    /// Whether the page's own parser made `id`.
+    pub fn is_parser_made(&self, id: NodeId) -> bool {
+        self.parser_made.contains(&id)
+    }
+
     /// Lets the scripts under `root` run when they are put in a page, unlike those `innerHTML`
     /// made (a contextual fragment's do).
     pub fn let_scripts_run(&mut self, root: NodeId) {
