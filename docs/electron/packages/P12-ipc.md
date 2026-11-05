@@ -19,6 +19,44 @@
 
 ## 接口契约
 
+### 0. 对真实 Electron 39.8.10 观测后的修订（以本节为准，与下文冲突处以本节为准）
+
+观测程序在 `tests/electron/ipc/observe/`（`npx electron --js-flags=--expose-gc .`），结果冻结在 `crates/verve-electron/tests/ipc.rs`。
+
+- **事件对象**：`IpcMainEvent`（`send`）的可枚举键依次为 `type, sender, senderFrame, frameId, processId, frameTreeNodeId, reply`；
+  **没有 `ports`**（只有 `postMessage` 来的消息才有 `ports`，其余无此键，不是 `[]`）。`sendSync` 的事件另有不可枚举的 `returnValue` 访问器。
+  `IpcMainInvokeEvent` 没有 `reply`。`frameTreeNodeId` 数字，主框架为 `1`；`senderFrame` 就是 `webContents.mainFrame`（同一个对象），
+  发送者销毁后 `event.senderFrame` 为 `null`、`event.reply` 静默。`IpcRendererEvent` 的键为 `sender, ports`，`ports` 恒为数组。
+  Electron 把 `_replyChannel` 也漏成了可枚举键，Verve 不模仿。
+- **分发**：`invoke` 不发 `ipc-message`；`ipc-message` → `webFrameMain.ipc` → `webContents.ipc` → `ipcMain`（`sendSync` 同，事件名 `ipc-message-sync`）；`ipcRenderer.postMessage` 的消息**不发**contents 的 `ipc-message`，只有后三者。
+- **注册**：`ipcMain.handle('x', 5)` → `TypeError: Expected handler to be a function, but found type 'number'`；channel 不是字符串不检查；
+  `handle` / `removeHandler` 返回 `undefined`；`ipcMain.on` 返回 `ipcMain`。
+- **渲染器参数错误**是 gin 形态：`ipcRenderer.send()` 抛 `TypeError: Error processing argument at index 1, conversion failure from undefined`
+  （channel 在索引 1；数字/对象则 `from ` 后为空）；`postMessage()` 在索引 0；`invoke(...)` 同形态但**拒绝**而不是同步抛。
+  参数不可克隆：`Error: An object could not be cloned.`（`send`/`sendSync` 同步抛，`invoke` 拒绝）。`postMessage` 的 transfer 不是端口数组 →
+  `TypeError: Invalid value for transfer`。`sendToHost` 在没有宿主 `<webview>` 时**静默无操作**（不抛 `ERR_NOT_SUPPORTED`）。
+- **主进程发往渲染器**：`webContents.send()` 没有 channel → `TypeError: Missing required channel argument`；参数不可克隆**不抛**，
+  只 `console.error('Error sending from webFrameMain: ', new Error('Failed to serialize arguments'))`；`sendToFrame` 返回布尔
+  （`1`、`[processId, 1]` 为 `true` 并投递，其余 `false`）；`postMessage` 的 transfer 无效 → `Error: Invalid value for transfer`；
+  已销毁 → `TypeError: Object has been destroyed`（`send`/`sendToFrame`/`postMessage`/`mainFrame`），`id` 与 `ipc` 仍可读。
+- **`invoke` 错误**：`String(e)` 的形态与下文一致；抛 `null` 时 Electron 自己的实现出错，渲染器得到 `reply was never sent`（Verve 照此给出，不打 `UnhandledPromiseRejectionWarning`）。
+  主进程 `console.error("Error occurred in handler for '<channel>':", e)`；返回值不可克隆则处理器视为失败，`String(e)` 为 `Error: An object could not be cloned.`。
+- **`sendSync` 无人答复**：Electron 不抛错也不返回 `undefined`——事件对象被回收后，渲染器得到 **`{ error: 'reply was never sent' }`**（这是它的 `ReplyChannel` 析构时的默认应答；
+  未回收前一直阻塞）。无监听者时先 `console.warn("WebContents #<id> called ipcRenderer.sendSync() with '<channel>' channel without listeners.")`，之后同样如此。
+  Verve 的差别只有时机：没有监听者时立刻给出这个值；有监听者而事件已不可达时，在下一次回收检查（约 100 ms 内）给出，不等 GC；仍在被持有（异步赋值）则继续等。
+  `returnValue` 只认第一次赋值；赋不可克隆的值抛 `Error: An object could not be cloned.` 且视为未答复。上文「`sendSync reply was dropped`」与「立即回 `undefined`」作废。
+- **克隆**与 HTML 结构化克隆一致，具体：`Buffer` 到达为 `Uint8Array`；`Error` 只保留标准名（其余变 `Error`，`stack` 仍是原文）、`message`、`stack`、`cause`，自定义属性丢失；
+  类实例、`null` 原型对象变普通对象；`Symbol` 键丢；`RegExp.lastIndex` 归零。DOM 节点、`Blob`/`File`、`URL` 在 Electron 里变成 `{}`，`Event` 变 `{ isTrusted: false }`，`el.style`/`classList`/`dataset`/`children`/`attributes` 抛 `An object could not be cloned.`（用户的 `new Proxy({}, {})` 同）；Verve 的 `Blob`/`File` 仍整体克隆
+  （比 Electron 有用，且无应用依赖 `{}`）。视图（如池里的 `Buffer`）Electron 带着整个底层 `ArrayBuffer` 与 `byteOffset`；Verve 只带视图的字节。
+- **端口**：`MessagePortMain` 用 `on('message')` 不会自动开始，须 `start()`；`'message'` 事件键为 `data, ports`；`close()` 之后 `postMessage`/`start`/`close` 静默，
+  本端立即发 `'close'`，对端只有已 `start()` 的才收到 `'close'`；端口被转移后 `postMessage`/`start`/`close` 静默，再转移 →
+  主进程 `Error: Port at index 0 is already neutered.`、渲染器 `TypeError: Invalid value for transfer`；`port.postMessage(x, [非端口])` →
+  `TypeError: Port at index 0 is not a valid port`，transfer 不是数组 → `TypeError: transferables must be an array of MessagePorts`；
+  `MessageChannelMain()` 不带 `new` → `TypeError: Class constructor MessageChannelMain cannot be invoked without 'new'`；`MessagePortMain` 的原型方法只有 `postMessage/start/close`。
+  转移名单里同一个端口两次 → `Error: Port at index 1 is a duplicate.`（`webContents.postMessage` 同）；名单含发送端口自己 → `Error: Port at index 0 contains the source port.`；已关闭或已转移的端口调 `postMessage`：什么都不做，不克隆消息、不动名单里的端口（坏名单也不抛）。
+- **`require`**：页面只有在 `nodeIntegration: true`、`contextIsolation: false` 且未沙箱时有全局 `require`（`sandbox: true` 时没有；`nodeIntegration` 为真时 `sandbox` 默认假；只有 `nodeIntegration` 而默认隔离，或只有 `sandbox: false`，都没有）。
+
+
 ### 1. 主进程：`ipcMain`（EventEmitter 单例）
 
 | 成员 | 行为 |

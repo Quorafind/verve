@@ -257,6 +257,7 @@ pub struct RendererView {
 | `FromRenderer::{ProtocolRequest, ZoomChanged, PreloadError}`、`ToRenderer::ProtocolResponse` | P20 / P21 |
 | `ToRendererInput::{Drag, Paste, ClipboardContents}` | P24 |
 | `CompositionEvent` 具体化为 `Update { text, selection } \| Commit \| Cancel` | P24 |
+| `ToRenderer::Post { channel, message, ports }`、`FromRenderer::Post { channel, message, ports }`（`ipcRenderer.postMessage` / `webContents.postMessage`：带端口的消息；端口是 `verve::messaging::PortEnd`） | P12 |
 | 内核：`verve::isolate::Isolate::poker`（唤醒 isolate 线程）、`ClassSpec::new_only`、`verve::events::{emitter_class, emitter_init}` 公开 | P02 |
 
 verve-dom 侧的配套改动（由 P20/P23/P24 在 verve-dom 内完成）：`Request::Open(String)` → `Open { url, name, features }`；
@@ -271,7 +272,7 @@ verve-dom 侧的配套改动（由 P20/P23/P24 在 verve-dom 内完成）：`Req
 - `FromRenderer::SendTo`：Electron 28 起已移除 `ipcRenderer.sendTo`，此变体保留给 `sendToHost`/内部用途，`ipcRenderer` 不再产生它。
 - 文中 `oneshot::Sender` 是 `SyncReply`（`msg.rs`）：包着容量 1 的 `std::sync::mpsc::SyncSender<Cloned>`，
   只有 `send(self, value)`——消耗自己、用 `try_send`，所以"只答一次、主进程永不阻塞"由类型保证；
-  不答就丢掉它，等着的页面会因为发送端被丢而收到错误（主进程退出时同理）。
+  不答就丢掉它，等着的页面会因为发送端被丢而被放开：主进程已在退出则抛 `Main process exited`，否则得到 `{ error: 'reply was never sent' }`（Electron 事件被回收时的答复，P12 观测）。
 - `ToRenderer::Stop` 已删：P02 的加载是同步的，没有可停的东西；`webContents.stop()` 由 P13/P20 追加。
 - `WebPreferences`（`msg.rs`）P02 给出能解析的子集（`devTools`/`nodeIntegration*`/`preload`/`sandbox`/`partition`/
   `zoomFactor`/`javascript`/`webSecurity`/`allowRunningInsecureContent`/`images`，默认值同 Electron），P13 补全；

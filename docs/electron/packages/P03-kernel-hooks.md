@@ -175,7 +175,8 @@ pub fn fetch_internal(context: &mut Context, head: RequestHead, body: Option<Bod
   缺什么在 `worker.rs` 里补（Worker 也受益）。
 - **跨 isolate 的 `MessagePort`**：`src/messaging.rs` 新增 `RemotePort`——一端在本 realm、另一端由别的 isolate 通过通道驱动，
   给 P12 的 `MessageChannelMain` / `postMessage` 传端口和 P17 的 `utilityProcess` 用。公开构造：
-  `verve::messaging::remote_port_pair() -> (PortEnd, PortEnd)`，`PortEnd: Send`，`Runtime::adopt_port(PortEnd) -> JsValue`。
+  `verve::messaging::remote_port_pair() -> (PortEnd, PortEnd)`，`PortEnd: Send`，`verve::messaging::adopt_port(end, context) -> JsResult<JsValue>`
+  （在 realm 里造出由它驱动的 `MessagePort`；没有 `Runtime` 上的同名方法），`release_port(port, context) -> JsResult<PortEnd>` 把一个端口交出去。**P12 已实现**（见 P12 的「状态」）。
 - **未捕获异常交给宿主**：`process.rs` 里 `uncaught` 无监听者时的分支改为可配置
   （`ProcessInfo::on_uncaught: UncaughtBehavior { Log, Exit, Report(Arc<dyn Fn(&str) + Send + Sync>) }`，默认 `Log`）。Electron 主进程默认不退出、弹错误框（P10）。
 - **overlay 的错误文本**：`Overlay` 增加 `fn error_message(&self, err: &io::Error, path: &Path) -> Option<String>`，
@@ -284,7 +285,7 @@ asar 解析本身（P11）；子进程执行（P17）；Electron 模块（P10+�
 
 ### 没完成（任务书里有，本包范围外）
 
-- **`verve::browser_net`（契约 4b）**、**跨 isolate 的 `MessagePort`**、**`ModuleSource`/`ImportMap`**、**`create_world`/`enter_world`**、
+- **`verve::browser_net`（契约 4b）**、**`ModuleSource`/`ImportMap`**、**`create_world`/`enter_world`**、
   **`web::file_with_path`/`path_of_file`**：未实现。P21 的 contextIsolation 依赖 `create_world`，P20 需要 `ModuleSource`，P16 需要 `browser_net`。
 - **`Overlay::cache_key` 只到定义处**：代码缓存仍按 `global_scope_fingerprint` 取键，接上会改变现有缓存行为，留 P11 决定。
 - **`watch`/`watchFile` 仍是「永不触发」的 watcher**，没有改成 `ENOTSUP`：会破坏现有插件行为与测试。
@@ -302,7 +303,7 @@ asar 解析本身（P11）；子进程执行（P17）；Electron 模块（P10+�
 - **P11（asar）**：实现 `vfs::Overlay`；路径一律是绝对、干净的。只读用 `write_denied` 返回 `io::ErrorKind::Unsupported`（`ENOTSUP`）；
   Electron 文案用 `error_message`；`child_process`/原生模块要真实路径时用 `Runtime::materialize`。`process.noAsar` 在设置 overlay 后可用。
   `Metadata`/`DirEntry` 是 `#[non_exhaustive]`，用 `new` 构造。
-- **P12/P17**：`Cloned` 是 `Send`，`to_bytes`/`from_bytes` 可跨进程；跨 isolate 的 `MessagePort` 未做。
+- **P12/P17**：`Cloned` 是 `Send`，`to_bytes`/`from_bytes` 可跨进程；跨 isolate 的 `MessagePort` 由 P12 做了（`verve::messaging::{PortEnd, remote_port_pair, adopt_port, release_port}`）。
 - **P13/P20/P21**：`set_process_info`、`set_console_sink`（`SourcePos` 目前总是 `None`）、`set_user_agent`、`define_builtin_lazy` 可用；
   P20 还需要 `ModuleSource`，P21 还需要 `create_world`/`enter_world`。
 - **P16**：`browser_net` 未实现。
