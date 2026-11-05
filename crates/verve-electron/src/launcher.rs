@@ -112,7 +112,7 @@ impl Start {
 fn scratch_profile() -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!("verve-electron-{}-{n}", std::process::id()))
+    std::env::temp_dir().join(format!("verve-electron-start-{}-{n}", std::process::id()))
 }
 
 impl Start {
