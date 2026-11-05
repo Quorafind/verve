@@ -134,7 +134,9 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
                │
              P76 JIT 类型化数组元素   P77 vm/object 借用重入   P78 构造器初始形状   P79 两处小修
                │
-             P80 整数转换与 TCP 测试   P81 JIT 类型化数组编译时间   P82 Map 条目解构   P83 UTF-16 rope 追加 ─ RP 性能复盘
+             P80 整数转换与 TCP 测试   P81 JIT 类型化数组编译时间   P82 Map 条目解构   P83 UTF-16 rope 追加
+               │
+             P84 调用帧瘦身与编译代码直接调用 ─ RP 性能复盘
 ```
 
 | 包 | 名称 | 依赖 | 可并行 | 规模 |
@@ -192,6 +194,7 @@ M4 交付      P40 npm 包与发行布局   P41 兼容矩阵与真实应用   P4
 | [P81](packages/P81-jit-typed-compile-time.md) | JIT：类型化数组元素内联的编译时间 | P76 | ✓ | S–M |
 | [P82](packages/P82-map-entry-destructuring.md) | `for (const [k, v] of map)` 不再为每个条目新建数组 | P70 | ✓ | M |
 | [P83](packages/P83-utf16-rope-appends.md) | rope 的 UTF-16 追加也走缓冲 | P74 | ✓ | S |
+| [P84](packages/P84-call-frame.md) | 更瘦的调用帧与编译代码之间的直接调用 | P69 P75 P78 | ✓ | L |
 
 ### 重构关卡
 

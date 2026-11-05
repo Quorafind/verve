@@ -42,6 +42,7 @@
 | 性能 C（P64–P67 合并后） | P68、P69、P70、P71、P72，之后 P73、P74、P75（P69 与 P70 都碰 `vm/call_frame/` 与 `vm/jit/`，P72 也碰 `vm/jit/`：按文件分开，冲突时后合并者 rebase） |
 | 性能 D（P69、P75 合并后） | P76、P77、P78、P79（P76 与 P78 都碰 `vm/jit/` 与 `object/`：按文件分开，冲突时后合并者 rebase；P77 碰 `vm/opcode/`，在 P78 之前合并为宜） |
 | 性能 E（P76–P79 合并后） | P80、P81、P82、P83（P81 与 P82 都可能碰 `vm/jit/compiler.rs`：按文件分开，冲突时后合并者 rebase） |
+| 批次 2 续 + 性能 F（P80–P83 合并后，2026-11-05） | P00、P10、P84（P00 与 P10 都碰 `crates/verve-electron` 与 `electron` 二进制的参数：`--headless` 由 P00 先加最小的一处，P10 并进 `Launch`；冲突时后合并者 rebase。P84 只碰 `boa/`）；P41 等 P00、P10、P12、P13、P20、P21 合并后再开（L1 才有应用可跑） |
 | **R2** | M2 重构关卡 |
 | 4 | P31、P32、P33、P35、P15、P16 |
 | **R3** | M3 重构关卡 |
