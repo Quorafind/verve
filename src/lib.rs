@@ -48,6 +48,7 @@ mod fetch;
 mod fs;
 mod globals;
 mod hooks;
+mod import_map;
 mod indexeddb;
 mod intl;
 pub mod isolate;
@@ -100,7 +101,9 @@ pub use code_cache::CodeCacheStats;
 pub fn code_cache_user_secret() -> std::io::Result<[u8; 32]> {
     code_cache::user_secret().map(|(secret, _)| secret)
 }
-pub use embed::{ConsoleSink, SourcePos};
+pub use embed::{ConsoleSink, ModuleSource, SourcePos};
+pub use esm::is_parse_failure;
+pub use import_map::{ImportMap, is_relative, url_like};
 pub use navigator::electron_user_agent;
 pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
