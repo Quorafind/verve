@@ -97,7 +97,7 @@ crates/
   verve-layout/       新：布局引擎（taffy + 行内排版 + 层叠上下文 → DisplayList），不依赖 GPUI（P30/P31）
   verve-gpui/         新：`electron` 二进制（src/bin/electron.rs）、GPUI Shell、DomView（回放 DisplayList）、TextMeasurer 的 GPUI 实现、输入桥接、菜单托盘
   verve-electron-npm/ 新：npm 包模板与平台包脚本（P40，非 Rust）
-src/                  Verve 内核：只允许 P03、P11、P17、P42、P62、P67、P68 修改（P42 还可改 boa/core/gc；性能线 P61、P62、P64–P66、P68–P75 可改 boa/core 的 engine 与 string；都需记入 boa/SU.md）
+src/                  Verve 内核：只允许 P03、P11、P12、P17、P20、P42、P62、P67、P68 修改（P12、P20 只补 P03 留下的跨 isolate `MessagePort` 与 `ModuleSource`/`ImportMap`）（P42 还可改 boa/core/gc；性能线 P61、P62、P64–P66、P68–P75 可改 boa/core 的 engine 与 string；都需记入 boa/SU.md）
 docs/electron/        本方案
 tests/electron/       夹具应用与无头验收（P00）
 ```

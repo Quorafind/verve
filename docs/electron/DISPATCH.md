@@ -43,6 +43,7 @@
 | 性能 D（P69、P75 合并后） | P76、P77、P78、P79（P76 与 P78 都碰 `vm/jit/` 与 `object/`：按文件分开，冲突时后合并者 rebase；P77 碰 `vm/opcode/`，在 P78 之前合并为宜） |
 | 性能 E（P76–P79 合并后） | P80、P81、P82、P83（P81 与 P82 都可能碰 `vm/jit/compiler.rs`：按文件分开，冲突时后合并者 rebase） |
 | 批次 2 续 + 性能 F（P80–P83 合并后，2026-11-05） | P00、P10、P84（P00 与 P10 都碰 `crates/verve-electron` 与 `electron` 二进制的参数：`--headless` 由 P00 先加最小的一处，P10 并进 `Launch`；冲突时后合并者 rebase。P84 只碰 `boa/`）；P41 等 P00、P10、P12、P13、P20、P21 合并后再开（L1 才有应用可跑） |
+| 批次 2 续二（P00、P10、P84 合并后，2026-11-05） | P12、P20、P34（P12 与 P20 都碰 `renderer_guest.rs`，P34 与 P12、P20 都可能往 `msg.rs` 追加变体：按函数分开，冲突时后合并者 rebase。P03 没做的两个内核钩子由用到的包补：P12 补跨 isolate 的 `MessagePort`（`src/messaging.rs`），P20 补 `ModuleSource`/`ImportMap`（`src/esm.rs`），各自单独提交）；P13 在 P12 合并后，P21 在 P12、P20 合并后，P14 与 P34 都改 `verve-gpui/src/shell.rs`，P34 合并后再派 |
 | **R2** | M2 重构关卡 |
 | 4 | P31、P32、P33、P35、P15、P16 |
 | **R3** | M3 重构关卡 |
