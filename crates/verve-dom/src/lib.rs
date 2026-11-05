@@ -168,6 +168,8 @@ pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Doc
     let url = url::Url::parse(&options.url)
         .or_else(|_| url::Url::parse("about:blank"))
         .map_err(|e| e.to_string())?;
+    // A page reads no local file until a `file:` document has started loading.
+    runtime.set_local_modules(false);
     let context = runtime.context();
     let state: Shared = Rc::new(RefCell::new(State::new(url)));
     {

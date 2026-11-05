@@ -12,11 +12,13 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use url::Url;
+use verve::ImportMap;
 
 use crate::Document;
 use crate::html::{Step, StreamParser};
 
 mod handlers;
+mod modules;
 mod net;
 mod script;
 mod sheets;
@@ -139,6 +141,10 @@ type Inbox = Rc<RefCell<Vec<(u64, LoadResult)>>>;
 pub(crate) enum Wait {
     Document,
     Script(crate::dom::NodeId),
+    Module {
+        script: crate::dom::NodeId,
+        url: String,
+    },
     /// A `<link>`'s sheet, and whether scripts and the first paint wait for it.
     Sheet(crate::dom::NodeId, bool),
     /// A sheet a `<link>`'s sheet `@import`s.
@@ -181,6 +187,7 @@ pub(crate) enum Status {
 pub(crate) struct Script {
     pub node: crate::dom::NodeId,
     pub flow: Flow,
+    pub module: bool,
     pub url: Option<Url>,
     pub text: String,
     pub status: Status,
@@ -197,6 +204,8 @@ impl Load {
             .retain(|(node, _), _| !gone.contains(node));
         self.imports_coming.retain(|node, _| !gone.contains(node));
         self.link_events.retain(|node, _| !gone.contains(node));
+        self.pending.retain(|node, _| !gone.contains(node));
+        self.failed_graphs.retain(|node| !gone.contains(node));
     }
 }
 
@@ -240,15 +249,27 @@ pub(crate) struct Load {
     /// Events for elements, fired once what has arrived has been dealt with: a task of their
     /// own, after the script that was waiting for the sheet.
     pub notices: Vec<(crate::dom::NodeId, &'static str)>,
-    /// What was asked for.
+    pub modules: Rc<RefCell<HashMap<String, Rc<str>>>>,
+    /// What was asked for that is not a module.
     requested: HashSet<String>,
     /// Sheets to ask for once the state is free of the borrow that found them.
     wanted: Vec<(Url, Wait)>,
+    /// The modules asked for, so one that several graphs import is fetched once.
+    mods: HashMap<String, modules::Mod>,
+    /// The module scripts waiting for each module still coming.
+    /// Each with whether the module is one its graph cannot do without: a literal `import()` is
+    /// only fetched ahead, and fails when it runs, where the page can catch it.
+    waiters: HashMap<String, HashMap<crate::dom::NodeId, bool>>,
+    /// The modules each module script's graph still waits for.
+    pending: HashMap<crate::dom::NodeId, HashSet<String>>,
+    failed_graphs: HashSet<crate::dom::NodeId>,
+    pub import_map: Option<ImportMap>,
     /// The runtime's `fetch` as it was before the page could replace it.
     pub original_fetch: Option<boa_engine::JsValue>,
     /// `Response.prototype.url`'s getter as it was before the page could replace it: where a
     /// response of the runtime's own `fetch` came from, whatever the page says `url` is.
     pub original_response_url: Option<boa_engine::JsValue>,
+    pub module_scripts_started: usize,
     pub phase: Phase,
     painted: bool,
 }
@@ -261,7 +282,7 @@ impl Document {
         let Ok(parsed) = Url::parse(url) else {
             return self.fail(url, -300, "ERR_INVALID_URL");
         };
-        self.start_load(&parsed);
+        self.start_load(runtime, &parsed);
         net::start(
             runtime.context(),
             parsed,
@@ -274,7 +295,7 @@ impl Document {
     /// Same, with the markup already in hand (`loadURL('data:…')`, tests).
     pub fn load_html(&self, runtime: &mut verve::Runtime, url: &str, html: &str) {
         let parsed = Url::parse(url).unwrap_or_else(|_| Url::parse("about:blank").expect("a URL"));
-        self.start_load(&parsed);
+        self.start_load(runtime, &parsed);
         self.state
             .borrow_mut()
             .load
@@ -305,7 +326,7 @@ impl Document {
         state.load.active && (state.load.ready != Ready::Complete || !state.load.waiting.is_empty())
     }
 
-    fn start_load(&self, url: &Url) {
+    fn start_load(&self, runtime: &mut verve::Runtime, url: &Url) {
         {
             let mut state = self.state.borrow_mut();
             state.url = url.clone();
@@ -318,6 +339,12 @@ impl Document {
             state.load.events.push(LoadEvent::Started);
             state.touch();
         }
+        // Electron's rule: only a page that is a local file may read local files.
+        runtime.set_local_modules(url.scheme() == "file");
+        let cache = Rc::clone(&self.state.borrow().load.modules);
+        runtime.set_module_source(Some(Rc::new(move |url: &Url| {
+            cache.borrow().get(url.as_str()).cloned()
+        })));
     }
 
     fn fail(&self, url: &str, code: i32, description: &str) {
@@ -349,7 +376,7 @@ impl Document {
         loop {
             runtime.run_microtasks();
             let mut moved = self.route_requests(runtime);
-            moved |= self.deliver();
+            moved |= self.deliver(runtime);
             moved |= self.advance(runtime);
             if !moved {
                 return did;
@@ -369,7 +396,7 @@ impl Document {
     }
 
     /// Takes the results that came back.
-    fn deliver(&self) -> bool {
+    fn deliver(&self, runtime: &mut verve::Runtime) -> bool {
         let items = {
             let state = self.state.borrow();
             let mut inbox = state.load.inbox.borrow_mut();
@@ -379,16 +406,17 @@ impl Document {
         for (token, result) in items {
             let wait = self.state.borrow_mut().load.waiting.remove(&token);
             if let Some(wait) = wait {
-                self.arrived(wait, result);
+                self.arrived(runtime, wait, result);
             }
         }
         did
     }
 
-    fn arrived(&self, wait: Wait, result: LoadResult) {
+    fn arrived(&self, runtime: &mut verve::Runtime, wait: Wait, result: LoadResult) {
         match wait {
             Wait::Document => self.document_arrived(result),
             Wait::Script(node) => script::fetched(self, node, result),
+            Wait::Module { script, url } => modules::fetched(self, runtime, script, &url, result),
             Wait::Sheet(node, blocking) => sheets::fetched(self, node, blocking, result),
             Wait::Import(node, rank, blocking) => {
                 sheets::imported(self, (node, rank, blocking), result)

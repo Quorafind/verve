@@ -126,7 +126,9 @@ fn scripts_run_in_the_order_chromium_runs_them() {
             "sees-after:true",
             "rsc:interactive",
             "defer-1:interactive",
+            "module-1:interactive",
             "defer-2:interactive",
+            "inline-module:interactive",
             "DCL",
             "rsc:complete",
             "load:complete"
@@ -162,7 +164,7 @@ fn document_write_goes_in_where_the_parser_is() {
 fn current_script_is_the_running_classic_script() {
     assert_eq!(
         logged("current.html"),
-        ["inline:one", "external:two", "after:null"]
+        ["inline:one", "external:two", "module:null", "after:null"]
     );
 }
 
@@ -188,6 +190,14 @@ fn a_script_that_throws_is_an_error_event_and_the_parse_goes_on() {
     assert_eq!(
         logged("onerror.html"),
         ["error-event:Uncaught Error: boom", "after-error"]
+    );
+}
+
+#[test]
+fn a_module_graph_loads_through_an_import_map() {
+    assert_eq!(
+        logged("modules.html"),
+        ["classic", "module:xy:modules.html"]
     );
 }
 
@@ -423,6 +433,31 @@ fn settle_reversed(page: &mut Page, held: &Held) {
 }
 
 #[test]
+fn module_scripts_that_share_modules_load_when_answers_come_in_any_order() {
+    let files = [
+        (
+            "app.js",
+            "import './lib.js'; (window.__log ||= []).push('app');",
+        ),
+        (
+            "lib.js",
+            "import './deep.js'; (window.__log ||= []).push('lib');",
+        ),
+        ("deep.js", "(window.__log ||= []).push('deep');"),
+        (
+            "other.js",
+            "import './deep.js'; (window.__log ||= []).push('other');",
+        ),
+    ];
+    let html = "<script type=module src=app.js></script><script type=module src=lib.js></script>
+        <script type=module src=app.js></script><script type=module src=other.js></script>";
+    let (mut page, held) = held_page(&files, html);
+    settle_reversed(&mut page, &held);
+    assert_eq!(page.log(), ["deep", "lib", "app", "other"]);
+    assert_eq!(page.eval("document.readyState"), "complete");
+}
+
+#[test]
 fn defer_scripts_keep_their_order_when_they_arrive_out_of_order() {
     let files = [
         ("a.js", "(window.__log ||= []).push('a')"),
@@ -596,6 +631,16 @@ fn a_script_a_page_makes_is_async_until_it_says_otherwise() {
         page.eval("var s = document.createElement('script'); s.async = false; String(s.async)"),
         "false"
     );
+}
+
+#[test]
+fn nomodule_only_drops_classic_scripts() {
+    let html = format!(
+        "{LOG}<script nomodule>__log.push('classic')</script>\
+         <script type=module nomodule>__log.push('module')</script>"
+    );
+    let mut page = loaded(&[], &html);
+    assert_eq!(page.log(), ["module"]);
 }
 
 #[test]
@@ -931,4 +976,106 @@ fn nested_imports_come_before_their_importer_and_the_links_load_waits_for_them()
     settle_reversed(&mut page, &held);
     assert_eq!(margin(&mut page), "2px");
     assert_eq!(page.log(), ["2px"]);
+}
+
+#[test]
+fn a_module_that_throws_when_it_runs_is_loaded_and_one_that_cannot_be_parsed_is_not() {
+    let files = [
+        ("throws.js", "JSON.parse('{')"),
+        ("plain.js", "throw new Error('x')"),
+        ("broken.js", "export const = ;"),
+    ];
+    let html = format!(
+        "{LOG}<script type=module src=throws.js onload=\"__log.push('throws:load')\" onerror=\"__log.push('throws:error')\"></script>\
+         <script type=module src=plain.js onload=\"__log.push('plain:load')\" onerror=\"__log.push('plain:error')\"></script>\
+         <script type=module src=broken.js onload=\"__log.push('broken:load')\" onerror=\"__log.push('broken:error')\"></script>"
+    );
+    let mut page = loaded(&files, &html);
+    assert_eq!(page.log(), ["throws:load", "plain:load", "broken:error"]);
+}
+
+#[test]
+fn two_import_maps_are_both_in_force() {
+    let files = [
+        ("a.js", "export default 'a'"),
+        ("b.js", "export default 'b'"),
+    ];
+    let html = format!(
+        "{LOG}<script type=importmap>{{\"imports\": {{\"a\": \"/a.js\"}}}}</script>\
+         <script type=importmap>{{\"imports\": {{\"b\": \"/b.js\"}}}}</script>\
+         <script type=module>import a from 'a'; import b from 'b'; __log.push(a + b);</script>"
+    );
+    let mut page = loaded(&files, &html);
+    assert_eq!(page.log(), ["ab"]);
+}
+
+/// A module on disk that sets `window.ran`, and its `file:` address.
+fn local_module(name: &str) -> (PathBuf, String) {
+    let dir = std::env::temp_dir().join(format!("verve-dom-local-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("m.mjs");
+    std::fs::write(&path, "window.ran = 'yes'; export default 1;").unwrap();
+    (dir, Url::from_file_path(&path).unwrap().to_string())
+}
+
+/// What a page at `page_url` makes of a module script at `target`: whether it ran, and the log.
+fn module_from_disk(page_url: &str, target: &str) -> (String, Vec<String>) {
+    let html = format!(
+        "{LOG}<script type=module src=\"{target}\" onload=\"__log.push('load')\" onerror=\"__log.push('error')\"></script>"
+    );
+    let mut page = page(&[]);
+    page.document.load_html(&mut page.runtime, page_url, &html);
+    page.finish_loading();
+    (page.eval("String(window.ran)"), page.log())
+}
+
+#[test]
+fn a_page_that_is_not_a_local_file_cannot_run_a_module_from_disk() {
+    let (dir, target) = local_module("refused");
+    for page_url in [
+        "app://page/p.html",
+        "https://example.test/p.html",
+        "data:text/html,x",
+    ] {
+        let (ran, log) = module_from_disk(page_url, &target);
+        assert_eq!(ran, "undefined", "{page_url}");
+        assert_eq!(log, ["error"], "{page_url}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_local_page_runs_a_module_from_disk() {
+    let (dir, target) = local_module("allowed");
+    let (ran, log) = module_from_disk("file:///app/p.html", &target);
+    assert_eq!((ran.as_str(), log), ("yes", vec!["load".to_owned()]));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_page_that_was_local_and_navigates_away_loses_the_disk() {
+    let (dir, target) = local_module("navigated");
+    let mut page = page(&[]);
+    page.document
+        .load_html(&mut page.runtime, "file:///app/p.html", "<p>x");
+    page.finish_loading();
+    let html = format!("<script type=module src=\"{target}\"></script>");
+    page.document
+        .load_html(&mut page.runtime, "app://page/q.html", &html);
+    page.finish_loading();
+    assert_eq!(page.eval("String(window.ran)"), "undefined");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_page_installed_but_not_loading_cannot_import_a_local_module() {
+    let (dir, target) = local_module("fresh");
+    let mut page = page(&[]);
+    page.eval(&format!(
+        "window.__out = 'pending'; import('{target}').then(() => {{ window.__out = 'imported' }}, e => {{ window.__out = e.name }})"
+    ));
+    page.runtime.run_microtasks();
+    assert_eq!(page.eval("String(window.ran)"), "undefined");
+    assert_eq!(page.eval("window.__out"), "TypeError");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -7,15 +7,23 @@ use boa_engine::{Context, JsError, JsValue, Source};
 use url::Url;
 use verve::native::js_text;
 
-use super::{Destination, Document, Flow, LoadResult, Script, Status, Wait, net};
+use super::{Destination, Document, Flow, LoadResult, Script, Status, Wait, modules, net};
 use crate::bind::node::with_dom;
 use crate::bind::{Accessor, events, extend_prototype, node_of};
 use crate::dom::NodeId;
 use crate::html::Step;
 use crate::state::{State, shared};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Classic,
+    Module,
+    ImportMap,
+}
+
 /// What a `<script>` says of itself.
 struct Prepared {
+    kind: Kind,
     src: Option<Url>,
     /// `src` was given and is no address.
     bad_src: bool,
@@ -24,27 +32,30 @@ struct Prepared {
     defer: bool,
 }
 
-/// Whether `type` makes the `<script>` a classic script: the others are data blocks.
-fn is_classic(state: &State, node: NodeId) -> bool {
+/// The kind of script `type` names, `None` for those that are data blocks (and classic
+/// `nomodule` ones, since modules are supported).
+fn kind_of(state: &State, node: NodeId) -> Option<Kind> {
     let kind = state.dom.get_attr(node, "type").unwrap_or_default();
-    matches!(
-        kind.trim().to_ascii_lowercase().as_str(),
-        "" | "text/javascript"
-            | "application/javascript"
-            | "text/ecmascript"
-            | "application/ecmascript"
-            | "application/x-javascript"
-            | "text/x-javascript"
-            | "text/jscript"
-            | "text/livescript"
-            | "text/x-ecmascript"
-    )
+    let classic = state.dom.get_attr(node, "nomodule").is_none();
+    match kind.trim().to_ascii_lowercase().as_str() {
+        ""
+        | "text/javascript"
+        | "application/javascript"
+        | "text/ecmascript"
+        | "application/ecmascript"
+        | "application/x-javascript"
+        | "text/x-javascript"
+        | "text/jscript"
+        | "text/livescript"
+        | "text/x-ecmascript" => classic.then_some(Kind::Classic),
+        "module" => Some(Kind::Module),
+        "importmap" => Some(Kind::ImportMap),
+        _ => None,
+    }
 }
 
 fn read(state: &State, node: NodeId) -> Option<Prepared> {
-    if !is_classic(state, node) {
-        return None;
-    }
+    let kind = kind_of(state, node)?;
     let src = state
         .dom
         .get_attr(node, "src")
@@ -54,6 +65,7 @@ fn read(state: &State, node: NodeId) -> Option<Prepared> {
         .and_then(|s| state.base_url().join(s.trim()).ok());
     let has = |name: &str| state.dom.get_attr(node, name).is_some();
     Some(Prepared {
+        kind,
         bad_src: src.is_some() && resolved.is_none(),
         src: resolved,
         text: state.dom.text_content(node),
@@ -66,6 +78,9 @@ fn read(state: &State, node: NodeId) -> Option<Prepared> {
 pub(super) fn parsed(doc: &Document, runtime: &mut verve::Runtime, node: NodeId) {
     let prepared = read(&doc.state.borrow(), node);
     let Some(prepared) = prepared else { return };
+    if prepared.kind == Kind::ImportMap {
+        return import_map(doc, runtime, &prepared.text);
+    }
     schedule(runtime.context(), node, prepared, true);
     // HTML's "clean up after running script": the microtasks of a script the parser ran are done
     // before the next one starts.
@@ -148,9 +163,9 @@ fn prepare(context: &mut Context, node: NodeId) {
             return;
         }
         let prepared = read(&state, node);
-        let runs = prepared
-            .as_ref()
-            .is_some_and(|p| p.src.is_some() || p.bad_src || !p.text.is_empty());
+        let runs = prepared.as_ref().is_some_and(|p| {
+            p.kind != Kind::ImportMap && (p.src.is_some() || p.bad_src || !p.text.is_empty())
+        });
         if !runs {
             return;
         }
@@ -165,6 +180,7 @@ fn prepare(context: &mut Context, node: NodeId) {
 
 /// Puts a script where it runs: now, after the parse, or when it has arrived.
 fn schedule(context: &mut Context, node: NodeId, prepared: Prepared, parser: bool) {
+    let module = prepared.kind == Kind::Module;
     let Some(url) = prepared.src else {
         if prepared.bad_src {
             return fire_on(context, node, "error");
@@ -172,28 +188,34 @@ fn schedule(context: &mut Context, node: NodeId, prepared: Prepared, parser: boo
         if prepared.text.is_empty() {
             return;
         }
-        if !parser {
+        if !module && !parser {
             // A script put in the page runs as it is put in.
             let name = shared(context).borrow().url.to_string();
             return run_classic(context, node, &prepared.text, &name, false);
         }
-        if shared(context).borrow().load.blocking_sheets == 0 {
+        if !module && parser && shared(context).borrow().load.blocking_sheets == 0 {
             // The parser runs an inline script where it stands.
             let name = shared(context).borrow().url.to_string();
             return run_classic(context, node, &prepared.text, &name, true);
         }
+        let flow = match (module, prepared.is_async) {
+            (false, _) => Flow::Blocking,
+            (true, true) => Flow::Async,
+            (true, false) => Flow::Defer,
+        };
         return push(
             context,
             node,
-            Flow::Blocking,
+            flow,
+            module,
             None,
             prepared.text,
             Status::Ready,
         );
     };
-    let flow = match (parser, prepared.is_async, prepared.defer) {
-        (_, true, _) => Flow::Async,
-        (true, false, false) => Flow::Blocking,
+    let flow = match (parser, module, prepared.is_async, prepared.defer) {
+        (_, _, true, _) => Flow::Async,
+        (true, false, false, false) => Flow::Blocking,
         (true, ..) => Flow::Defer,
         (false, ..) if shared(context).borrow().load.ordered.contains(&node) => Flow::Ordered,
         (false, ..) => Flow::Async,
@@ -202,17 +224,21 @@ fn schedule(context: &mut Context, node: NodeId, prepared: Prepared, parser: boo
         context,
         node,
         flow,
+        module,
         Some(url.clone()),
         String::new(),
         Status::Fetching,
     );
-    net::start(context, url, Destination::Script, Wait::Script(node));
+    if !module {
+        net::start(context, url, Destination::Script, Wait::Script(node));
+    }
 }
 
 fn push(
     context: &mut Context,
     node: NodeId,
     flow: Flow,
+    module: bool,
     url: Option<Url>,
     text: String,
     status: Status,
@@ -220,10 +246,14 @@ fn push(
     shared(context).borrow_mut().load.scripts.push(Script {
         node,
         flow,
+        module,
         url,
         text,
         status,
     });
+    if module {
+        modules::begin(context, node);
+    }
 }
 
 /// A classic script's source has come, or has not.
@@ -247,19 +277,25 @@ pub(super) fn execute(doc: &Document, runtime: &mut verve::Runtime, script: Scri
     if script.status == Status::Failed {
         return fire_on(context, script.node, "error");
     }
-    let name = script
-        .url
-        .as_ref()
-        .map_or_else(|| doc.state.borrow().url.to_string(), |url| url.to_string());
-    let parser = script.flow == Flow::Blocking;
-    let apart = std::mem::replace(&mut shared(context).borrow_mut().load.apart, !parser);
-    run_classic(context, script.node, &script.text, &name, parser);
-    shared(context).borrow_mut().load.apart = apart;
-    // Its microtasks are done before `load` is heard.
-    runtime.run_microtasks();
-    let context = runtime.context();
-    if script.url.is_some() {
-        fire_on(context, script.node, "load");
+    if script.module {
+        let apart = std::mem::replace(&mut doc.state.borrow_mut().load.apart, true);
+        modules::run(doc, runtime, &script);
+        doc.state.borrow_mut().load.apart = apart;
+    } else {
+        let name = script
+            .url
+            .as_ref()
+            .map_or_else(|| doc.state.borrow().url.to_string(), |url| url.to_string());
+        let parser = script.flow == Flow::Blocking;
+        let apart = std::mem::replace(&mut shared(context).borrow_mut().load.apart, !parser);
+        run_classic(context, script.node, &script.text, &name, parser);
+        shared(context).borrow_mut().load.apart = apart;
+        // Its microtasks are done before `load` is heard.
+        runtime.run_microtasks();
+        let context = runtime.context();
+        if script.url.is_some() {
+            fire_on(context, script.node, "load");
+        }
     }
     runtime.run_microtasks();
 }
@@ -311,6 +347,41 @@ pub(super) fn uncaught(context: &mut Context, error: &JsError, file: &str) {
     let allowed = heard(context, outcome);
     if allowed {
         verve::report(context, error);
+    }
+}
+
+fn import_map(doc: &Document, runtime: &mut verve::Runtime, text: &str) {
+    let (base, late) = {
+        let state = doc.state.borrow();
+        (state.base_url(), state.load.module_scripts_started > 0)
+    };
+    // A map after the first module script has nothing to rewrite.
+    if late {
+        return;
+    }
+    match verve::ImportMap::parse(text, &base) {
+        Ok(map) => {
+            for warning in map.warnings() {
+                let message = format!("Ignored an import map entry: {warning}");
+                verve::console_line(runtime.context(), verve::Level::Warn, message);
+            }
+            // A second map adds to the first.
+            let mut state = doc.state.borrow_mut();
+            let map = match state.load.import_map.take() {
+                Some(mut first) => {
+                    first.merge(map);
+                    first
+                }
+                None => map,
+            };
+            state.load.import_map = Some(map.clone());
+            drop(state);
+            runtime.set_import_map(Some(map));
+        }
+        Err(message) => {
+            let error = verve::native::type_error(format!("Invalid import map: {message}"));
+            verve::report(runtime.context(), &error);
+        }
     }
 }
 
@@ -424,7 +495,7 @@ fn write_now(context: &mut Context) {
         shared(context).borrow_mut().load.parser = Some(parser);
         let Step::Script(node) = step else { return };
         let prepared = read(&shared(context).borrow(), node);
-        if let Some(prepared) = prepared {
+        if let Some(prepared) = prepared.filter(|p| p.kind != Kind::ImportMap) {
             schedule(context, node, prepared, true);
         }
     }
