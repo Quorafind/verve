@@ -223,7 +223,28 @@ fn a_modal_child_blocks_its_parent_until_it_goes(rig: &Rig, _: &Control) {
     assert!(!enabled(parent), "shown again, it blocks again");
     op(rig, 24, WindowOp::Destroy);
     assert!(enabled(parent), "and destroyed, gives it back");
-    op(rig, 21, WindowOp::Destroy);
+    let plain = WindowOptions {
+        parent: Some(21),
+        ..hidden()
+    };
+    open(rig, 23, plain);
+    let destroy = ToShell::Window {
+        window: 21,
+        op: WindowOp::Destroy,
+    };
+    rig.hub.to_shell(destroy);
+    let said = rig
+        .said
+        .settle(Duration::from_millis(300), Duration::from_secs(5));
+    let closed: Vec<_> = (said.iter())
+        .filter(|(_, event)| matches!(event, WindowEvent::Closed))
+        .map(|(window, _)| *window)
+        .collect();
+    assert_eq!(
+        closed,
+        [23, 21],
+        "a parent takes its children with it, and says so"
+    );
 }
 
 /// One scenario of the real-display test.

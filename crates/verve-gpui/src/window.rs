@@ -34,6 +34,8 @@ const UNRESPONSIVE: Duration = Duration::from_secs(5);
 pub(crate) struct Window {
     handle: WindowHandle<DomView>,
     pub contents: ContentsId,
+    /// The window this one is a child of: it goes when its parent does.
+    pub parent: Option<WindowId>,
     native: Rc<Native>,
     reporter: Rc<Reporter>,
     asked: Rc<Cell<Option<Instant>>>,
@@ -157,6 +159,7 @@ pub(crate) fn open(opening: Opening, display: &Display, cx: &mut AsyncApp) -> Op
     let window = Window {
         handle,
         contents,
+        parent: options.parent,
         native,
         reporter,
         asked,

@@ -206,8 +206,16 @@ impl Shell {
         }
     }
 
-    /// The window goes, and the main process is told once.
+    /// The window goes, and the main process is told once. Its children go first: the system
+    /// would take them with it without a word.
     fn destroy(&mut self, id: WindowId, cx: &mut AsyncApp) {
+        let children: Vec<_> = (self.windows.iter())
+            .filter(|(_, window)| window.parent == Some(id))
+            .map(|(child, _)| *child)
+            .collect();
+        for child in children {
+            self.destroy(child, cx);
+        }
         if let Some(window) = self.windows.remove(&id) {
             window.destroy(cx);
         }
