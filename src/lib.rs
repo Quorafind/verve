@@ -103,7 +103,10 @@ pub fn code_cache_user_secret() -> std::io::Result<[u8; 32]> {
 pub use embed::{ConsoleSink, SourcePos};
 pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
-pub use process::{ExitBehavior, ProcessInfo, UncaughtBehavior};
+pub use process::{
+    CHROME_VERSION, ELECTRON_VERSION, ExitBehavior, MODULES_VERSION, NODE_VERSION, ProcessInfo,
+    UncaughtBehavior,
+};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};

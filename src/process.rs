@@ -34,6 +34,9 @@ use crate::{Level, console_line};
 pub const NODE_VERSION: &str = "22.20.0";
 pub const ELECTRON_VERSION: &str = "39.2.0";
 pub const CHROME_VERSION: &str = "142.0.7444.59";
+/// `process.versions.modules`, Node's `NODE_MODULE_VERSION`: the ABI a native addon is built
+/// for. Electron 39 reports 140 (observed on 39.8.10; Node 22 proper is 127).
+pub const MODULES_VERSION: &str = "140";
 const V8_VERSION: &str = "14.2.231.17-electron.0";
 
 /// What a realm's `process` is: the process an embedder is building — Electron's main process,
@@ -676,7 +679,7 @@ fn apply_versions(context: &mut Context, process: &JsObject, info: &ProcessInfo)
         ("v8", V8_VERSION),
         ("uv", "1.51.0"),
         ("zlib", "1.3.0.1-motley"),
-        ("modules", "136"),
+        ("modules", MODULES_VERSION),
         ("napi", "10"),
         ("openssl", "0.0.0"),
         ("unicode", "16.0"),
