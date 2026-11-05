@@ -38,6 +38,13 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 
+# What macOS has of a window that GPUI does not give: `NSWindow`, as `gpui_macos` has it, so
+# cargo resolves one copy of each.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSButton", "NSControl", "NSGraphics", "NSResponder", "NSView", "NSWindow", "objc2-core-foundation"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSGeometry", "NSObject", "NSString", "objc2-core-foundation", "std"] }
+
 [features]
 # The `electron` binary with Boa's JIT in its isolates (`crates/verve-electron`'s `jit`); see
 # `docs/jit.md`. Off by default.

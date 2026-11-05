@@ -12,6 +12,8 @@ mod windows;
 #[cfg(windows)]
 pub(crate) use windows::{Native, displays};
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(not(windows))]
 mod other;
 #[cfg(not(windows))]
