@@ -641,3 +641,25 @@ and compiled `IteratorNext` steps the record where it sits (the base took it off
 P60 suite, base then after (load 18-25 %), medians in ms, JIT / interp: `mapset` 22.0 / 25.3 before, 14.8 / 15.9 after; `fib` 229.3 / 362.8 against 226.7 / 360.3
 (an alternating 9-run A/B of `fib` JIT: medians 228.0 against 230.3); the others are within noise (`vdom`, `splitjoin`, `regex`, `json` move between identical runs).
 Details in `packages/P82-map-entry-destructuring.md`.
+
+### P84: a leaner call frame, and compiled code calling compiled code
+
+The frame of an ordinary function lends its code block, script or module, realm and environments from the callee instead of cloning them (`Lent`), the shadow stack lends
+the code block's `SourceInfo`, and a compiled `Call` of a compiled function enters the callee at once and returns through `jit_return`. `electron/p84-call-frame` against
+`docs/electron-plan` `824bcf70`, both `cargo build --release --features jit --bin verve`, `CARGO_BUILD_JOBS=6`, `VERVE_CODE_CACHE=0`, a throwaway profile folder. Machine shared
+with two other workers; CPU load (five 1 s samples) 41 % before and 24 % after the suite round, 25-30 % around the probe rounds. Base and after alternate, JIT / interpreter.
+
+P60 suite (`run.sh --runs 5`, median (best) ms), base then after:
+
+| test | JIT before | JIT after | interp before | interp after |
+|---|---|---|---|---|
+| `fib` | 247.2 (238.9) | 216.1 (206.8) | 388.7 (380.0) | 358.7 (340.5) |
+| `oo` | 682.8 (631.9) | 594.2 (589.0) | 847.6 (787.6) | 685.0 (679.4) |
+| `closure` | 468.8 (460.5) | 442.7 (420.9) | 695.7 (687.5) | 652.6 (645.8) |
+
+The other eleven rows are within the noise of the round. Nine-process A/B rounds at 14-36 % load of the same three: `fib` JIT 243 -> 224, interpreter 384 -> 366; `oo` 689 -> 561 /
+818 -> 660; `closure` 455 -> 437 / 666 -> 644. Targets: `fib` <= 210 (216), `oo` <= 520 (594), `closure` <= 400 (443): the committed values are not reached, the numbers and
+what the rest is are in `docs/jit.md` "Results (P84 ...)". Micro-probes (compiled / interpreted, ns): `zero()` 74.5 -> 66.0 / 102.4 -> 94.9, `obj.m()` 76.6 -> 72.9 / 123.3 -> 111.6,
+`pinst.get()` 163.4 -> 120.4 / 218.4 -> 173.7, `bound()` 104.0 -> 100.5 / 121.2 -> 112.5, `forEach(zero)` 96.7 -> 90.9 / 95.2 -> 90.0. `error.stack` and `Error.captureStackTrace`
+output of a 21 KB script is byte-identical between the base and the branch, interpreted and forced. Release `verve.exe` grows from 26,787,328 to 26,838,016 bytes (+50,688, +0.19 %), release `electron` from 32,781,312 to 32,833,024 (+51,712, +0.16 %). After review the lend is taken only when the frame's function slot holds the callee (one pointer comparison; a proxy or bound function forwarding to its target gets owned handles): `zero()` 73.2 -> 66.4, `fib` JIT 237 -> 209, `oo` 617 -> 543 in an alternating round at load 15-30 %.
+Details in `packages/P84-call-frame.md`.
