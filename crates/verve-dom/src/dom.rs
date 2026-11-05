@@ -252,6 +252,8 @@ pub struct Dom {
     free: Vec<u32>,
     live: usize,
     pub document: NodeId,
+    /// The `<script>`s that have run or never will: see `marks.rs`.
+    started: HashSet<NodeId>,
     pub html: NodeId,
     pub head: NodeId,
     pub body: NodeId,
@@ -322,6 +324,7 @@ impl Dom {
             free: Vec::new(),
             live: 0,
             document: 0,
+            started: HashSet::new(),
             html: 0,
             head: 0,
             body: 0,

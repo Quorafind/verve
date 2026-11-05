@@ -47,6 +47,7 @@ impl Dom {
                 self.partitions.remove(&at);
                 self.styles.remove(&at);
                 self.pinned.remove(&at);
+                self.started.remove(&at);
                 self.note_slot_input(None);
                 freed.push(at);
             }

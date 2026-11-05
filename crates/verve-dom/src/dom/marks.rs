@@ -1,4 +1,5 @@
-//! What the host marks on nodes: those it holds itself, and those drawn as views of their own.
+//! What the host marks on nodes: those it holds itself, those drawn as views of their own, and
+//! the `<script>`s that have run or never will.
 
 use super::{Dom, NodeId};
 
@@ -27,5 +28,16 @@ impl Dom {
 
     pub fn is_partition(&self, id: NodeId) -> bool {
         self.partitions.contains(&id)
+    }
+
+    /// Marks the `<script>` `id` as one that has run or never will (HTML's "already started"):
+    /// the parser's own, and those `innerHTML` made.
+    pub fn mark_started(&mut self, id: NodeId) {
+        self.started.insert(id);
+    }
+
+    /// Whether the `<script>` `id` has run or never will.
+    pub fn is_started(&self, id: NodeId) -> bool {
+        self.started.contains(&id)
     }
 }
