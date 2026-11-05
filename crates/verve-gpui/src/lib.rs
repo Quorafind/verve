@@ -2,71 +2,173 @@
 //!
 //! The Hub is what the app's JavaScript threads use; this side owns none of them. A message
 //! lands in a queue from whichever thread asked for it, the queue's owner is woken through a
-//! channel of its own, and the OS thread turns what it finds into GPUI windows — so a script
+//! channel of its own, and the OS thread turns what it finds into GPUI windows: so a script
 //! that never returns holds its own thread and nothing else.
 //!
-//! P02 draws a page's text nodes and nothing else; P30 replaces [`DomView`]'s drawing with the
-//! display list `verve-layout` makes on the page's own thread, and P34 fills in the rest of the
-//! window operations.
+//! The windows are [`window`]'s (one per `BrowserWindow`: frame, limits, drag areas, owner and
+//! modal windows, what they report), the system's part of them [`platform`]'s, and
+//! [`shell`] only says which window a message is for. P30 replaces [`DomView`]'s drawing with
+//! the display list `verve-layout` makes on the page's own thread and hands the window its
+//! [`AppRegion`]s.
 
+mod app_region;
 mod dom_view;
+mod platform;
+mod report;
 mod shell;
+mod window;
 
 use std::sync::Arc;
 
-use gpui::{App, AppContext as _, QuitMode};
+use gpui::{App, QuitMode};
 use verve_electron::Hub;
-use verve_electron::hub::Program;
-use verve_electron::hub::ShellPort;
-use verve_electron::msg::ToShell;
+use verve_electron::hub::{Program, ShellPort};
+use verve_electron::ids::WindowId;
+use verve_electron::msg::{AppEvent, ToShell};
 
-use crate::shell::{Messages, Shell};
+pub use app_region::{AppRegion, drag_area};
+
+use crate::shell::{Inbox, Item, Shell};
+
+/// What an embedder can do to the shell besides what the Hub sends it.
+#[derive(Clone)]
+pub struct Control(Inbox);
+
+impl Control {
+    /// The page of `window` has these `-webkit-app-region` boxes now.
+    pub fn set_app_regions(&self, window: WindowId, regions: Vec<AppRegion>) {
+        self.0.push_item(Item::Regions(window, regions));
+    }
+}
 
 /// Runs an app: the OS thread's GPUI application, the windows the main process asks it for, and
-/// the app's script — which starts once the shell is listening. Answers the code the process
+/// the app's script, which starts once the shell is listening. Answers the code the process
 /// leaves with.
 pub fn run(hub: Arc<Hub>, program: Program) -> i32 {
+    run_with(hub, move |hub, _| hub.start(program))
+}
+
+/// [`run`] with `start` in place of the app's script: it is called once, on the OS thread, when
+/// the shell is listening, and may start threads that talk to the Hub.
+pub fn run_with(hub: Arc<Hub>, start: impl FnOnce(&Arc<Hub>, Control) + 'static) -> i32 {
     let (wake, woken) = async_channel::bounded(1);
-    let messages = Messages::default();
+    let inbox = Inbox::new(wake);
     hub.set_shell(Arc::new(Port {
-        messages: messages.clone(),
-        wake,
+        inbox: inbox.clone(),
     }));
     let app = Arc::clone(&hub);
     // The app ends when the main process says so (`ToShell::Quit`, or the Hub's exit code), never
     // because the last window closed: GPUI's default quits then on Windows and Linux, and that
     // would end an app whose `'closed'` listener is about to open another window, with code 0.
-    gpui_platform::application()
-        .with_quit_mode(QuitMode::Explicit)
-        .run(move |cx: &mut App| {
-            let shell = cx.new(|_| Shell::new(Arc::clone(&app), messages.clone()));
-            let pump = shell.clone();
-            cx.spawn(async move |cx| {
-                while woken.recv().await.is_ok() {
-                    pump.update(cx, |shell, cx| shell.process(cx));
-                }
-            })
+    let application = gpui_platform::application().with_quit_mode(QuitMode::Explicit);
+    let reopened = Arc::clone(&hub);
+    application.on_reopen(move |cx| {
+        let has_visible_windows = !cx.windows().is_empty();
+        let event = AppEvent::Activate {
+            has_visible_windows,
+        };
+        reopened.from_shell(verve_electron::msg::FromShell::App(event));
+    });
+    let opened = Arc::clone(&hub);
+    application.on_open_urls(move |urls| {
+        for url in urls {
+            let event = match file_of(&url) {
+                Some(path) => AppEvent::OpenFile(path),
+                None => AppEvent::OpenUrl(url),
+            };
+            opened.from_shell(verve_electron::msg::FromShell::App(event));
+        }
+    });
+    application.run(move |cx: &mut App| {
+        let mut shell = Shell::new(Arc::clone(&app), inbox.clone());
+        let pump = inbox.clone();
+        cx.spawn(async move |cx| {
+            let mut cx = cx.clone();
+            while woken.recv().await.is_ok() {
+                shell.process(&mut cx);
+            }
+        })
+        .detach();
+        let displays = inbox.clone();
+        cx.observe_displays(move |_, _| displays.push_item(Item::Displays))
             .detach();
-            app.start(program);
-        });
+        quit_through_the_main_process(&app, cx);
+        pump.push_item(Item::Displays);
+        start(&app, Control(inbox));
+    });
     hub.exit_code().unwrap_or(0)
+}
+
+/// A system that asks the app to quit (a shutdown, a Cmd+Q the menu did not take) is told to the
+/// main process as `app.quit()`, which asks the windows and says `will-quit`.
+///
+/// GPUI calls this observer, then drops every window, then waits `SHUTDOWN_TIMEOUT` (200 ms) for
+/// the futures it returned without ever polling this shell's pump, and on Windows leaves with
+/// code 0 after `WM_ENDSESSION`. So the message is sent at once and nothing waits. GPUI's
+/// `WindowsWindow::drop` only hides a window and leaves its destruction to a task that never
+/// runs, so no window says `Closed` on this path either: the main process hears of the quit and
+/// of nothing after it, and what it would do in answer (a `before-quit` veto, an exit code) is
+/// lost. Catching `WM_QUERYENDSESSION` before GPUI shuts down is the way to more, and is not done.
+fn quit_through_the_main_process(hub: &Arc<Hub>, cx: &mut App) {
+    let hub = Arc::clone(hub);
+    cx.on_app_quit(move |_| {
+        if hub.exit_code().is_none() {
+            hub.from_shell(verve_electron::msg::FromShell::App(AppEvent::QuitRequested));
+        }
+        std::future::ready(())
+    })
+    .detach();
+}
+
+/// The path a `file://` URL names, or `None` for any other address (and for a host that is not
+/// this machine, off Windows, where it is a UNC share).
+fn file_of(url: &str) -> Option<std::path::PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let (host, path) = rest.split_at(rest.find('/')?);
+    let path = String::from_utf8(verve::encoding::percent_decode(path)).ok()?;
+    match host {
+        "" | "localhost" => {
+            // A drive letter's path begins `/C:/`: the slash is the URL's.
+            let drive = path.as_bytes().get(2) == Some(&b':') && cfg!(windows);
+            Some(
+                path.strip_prefix('/')
+                    .filter(|_| drive)
+                    .unwrap_or(&path)
+                    .into(),
+            )
+        }
+        _ if cfg!(windows) => Some(format!("//{host}{path}").into()),
+        _ => None,
+    }
 }
 
 /// The Hub's end of the shell: messages land in the shell's queue from whichever thread sent
 /// them, and the OS thread is woken to take them.
 struct Port {
-    messages: Messages,
-    wake: async_channel::Sender<()>,
+    inbox: Inbox,
 }
 
 impl ShellPort for Port {
     fn send(&self, msg: ToShell) {
-        self.messages.push(msg);
+        self.inbox.queue(msg);
     }
 
     fn wake(&self) {
-        // One pending wake is all the pump needs: it takes everything queued when it runs, so a
-        // wake that finds the slot full has been coalesced into the one waiting.
-        let _ = self.wake.try_send(());
+        self.inbox.wake();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_of;
+
+    #[test]
+    fn a_file_url_names_its_decoded_path_and_other_urls_name_none() {
+        let path = file_of("file:///tmp/a%20b.txt").expect("a path");
+        assert!(path.ends_with("a b.txt"));
+        assert!(file_of("https://example.com/").is_none());
+        let share = file_of("file://server/share/x");
+        assert_eq!(share.is_some(), cfg!(windows));
+        assert!(share.is_none_or(|path| path.to_string_lossy().ends_with("share/x")));
     }
 }

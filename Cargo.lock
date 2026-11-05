@@ -6843,9 +6843,11 @@ dependencies = [
  "async-channel",
  "gpui",
  "gpui_platform",
+ "raw-window-handle",
  "verve",
  "verve-dom",
  "verve-electron",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
