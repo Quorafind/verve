@@ -11,7 +11,9 @@ mod layout;
 mod window;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::Duration;
 
 use verve_dom::{NodeId, Snapshot};
 
@@ -34,6 +36,9 @@ pub struct HeadlessOptions {
     pub displays: Vec<Display>,
     /// Whether the system theme is dark: what each page's `prefers-color-scheme` is told.
     pub dark: bool,
+    /// Whether each message to the shell is also written to standard error as a line, like
+    /// `[window 1] create 800x600 "title"`, for a person watching an app run.
+    pub trace: bool,
 }
 
 impl Default for HeadlessOptions {
@@ -55,6 +60,7 @@ impl Default for HeadlessOptions {
                 primary: true,
             }],
             dark: false,
+            trace: false,
         }
     }
 }
@@ -65,6 +71,7 @@ pub struct HeadlessShell {
     hub: Weak<Hub>,
     layout: FakeLayout,
     displays: Vec<Display>,
+    trace: bool,
     state: Mutex<State>,
 }
 
@@ -200,6 +207,7 @@ impl HeadlessShell {
             hub: Arc::downgrade(hub),
             layout: options.layout,
             displays: options.displays,
+            trace: options.trace,
             state: Mutex::new(State {
                 dark: options.dark,
                 ..State::default()
@@ -368,8 +376,43 @@ impl HeadlessShell {
     }
 }
 
+/// Runs the app whose script is `entry` on a headless shell that traces to standard error, and
+/// answers the code it ends with: `electron --headless`.
+pub fn run(hub: &Arc<Hub>, entry: PathBuf) -> i32 {
+    let options = HeadlessOptions {
+        trace: true,
+        ..HeadlessOptions::default()
+    };
+    let shell = HeadlessShell::new(hub, options);
+    hub.start_main(entry);
+    loop {
+        if let Some(code) = shell.exit_code() {
+            return code;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A message to the shell as one line of the trace.
+fn describe(msg: &ToShell) -> String {
+    match msg {
+        ToShell::CreateWindow {
+            window, options, ..
+        } => format!(
+            "[window {window}] create {}x{} {:?}",
+            options.width, options.height, options.title
+        ),
+        ToShell::Window { window, op } => format!("[window {window}] {op:?}"),
+        ToShell::Menu(op) => format!("[menu] {op:?}"),
+        ToShell::Quit { exit_code } => format!("[app] quit {exit_code}"),
+    }
+}
+
 impl ShellPort for HeadlessShell {
     fn send(&self, msg: ToShell) {
+        if self.trace {
+            eprintln!("{}", describe(&msg));
+        }
         // Nothing is said back to the main process while the shell's own state is held: a window
         // that closed is reported once this message is done with.
         let out = {

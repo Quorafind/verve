@@ -1,5 +1,5 @@
-//! `electron [app-directory | main.js]`: the app's processes on Verve, in one process of their
-//! own.
+//! `electron [--headless] [app-directory | main.js]`: the app's processes on Verve, in one process
+//! of their own. `--headless` runs them on a shell with no display that prints what the windows do.
 //!
 //! What an app directory means — its `package.json`'s `main`, the flags Electron accepts, single
 //! instances — is P10's; P02 takes the directory's `main.js` or `index.js`, or the file named.
@@ -10,10 +10,15 @@ use std::process::ExitCode;
 
 use verve_electron::{ElectronOptions, Hub};
 
-const USAGE: &str = "usage: electron [app-directory | main.js]";
+const USAGE: &str = "usage: electron [--headless] [app-directory | main.js]";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // P10: `--headless` becomes a field of its `Launch`.
+    let headless = args.first().is_some_and(|arg| arg == "--headless");
+    if headless {
+        args.remove(0);
+    }
     let (app_path, entry) = match app(&args) {
         Ok(app) => app,
         Err(message) => {
@@ -25,7 +30,11 @@ fn main() -> ExitCode {
         app_path,
         dark: false,
     });
-    let code = verve_gpui::run(hub, entry);
+    let code = if headless {
+        verve_electron::headless::run(&hub, entry)
+    } else {
+        verve_gpui::run(hub, entry)
+    };
     // The process ends with the app's code, whole: Windows takes 32 bits, and GPUI's own quit
     // would have ended a macOS process with 0.
     let _ = (std::io::stdout().flush(), std::io::stderr().flush());
