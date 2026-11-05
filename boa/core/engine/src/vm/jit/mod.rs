@@ -45,6 +45,8 @@ mod tests_constructor_shape;
 #[cfg(test)]
 mod tests_elements;
 #[cfg(test)]
+mod tests_entries;
+#[cfg(test)]
 mod tests_iterators;
 #[cfg(test)]
 mod tests_prototype_cache;
