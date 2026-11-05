@@ -259,9 +259,8 @@ impl StreamParser {
 
 ## 给其他包的备注
 
-- **P03**：需要内核新增"宿主提供的 ESM 取源回调"——`Runtime::set_module_source(Box<dyn Fn(&Url) -> Option<ModuleSource>>)`
-  之类，让 `src/esm.rs` 在遇到非 `file/data/blob/node` 方案时向宿主要源码（同步、命中缓存），并让
-  `import()` 对这些方案不再抛 `ERR_UNSUPPORTED_ESM_URL_SCHEME`。还需要 Rust 侧的 resolve 钩子用于 import map。
+- **P03**：内核钩子由本包实现，形状见 P03 §4c-3：`Runtime::set_module_source(Option<ModuleSource>)`（`ModuleSource = Rc<dyn Fn(&Url) -> Option<String>>`，
+  同步、命中预取缓存）与 `Runtime::set_import_map(Option<ImportMap>)`（Rust 侧解析，不写 JS）。本包在执行模块脚本前预取整个静态依赖图。
 - **P02**：`FromRenderer` 追加 `ProtocolRequest`，`ToRenderer` 追加 `ProtocolResponse`；
   `verve_dom::Request::Open` 由单字段改为 `{ url, name, features }`。
 - **P25**：提供 `fn image_size(bytes) -> Option<(u32, u32)>`（只读头部，不解码全图），本包调用。本包必须应答 `verve_dom::Request::Image(url)`：取回后 `Document::set_image_bytes(runtime, url, mime, bytes)`，失败 `Document::fail_image(runtime, url)`；样式中的 `url()` 图片（`background-image`、`content`、`mask` 等）同样走 `set_image_bytes`。

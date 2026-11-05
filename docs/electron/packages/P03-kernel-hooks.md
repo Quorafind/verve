@@ -185,9 +185,16 @@ pub fn fetch_internal(context: &mut Context, head: RequestHead, body: Option<Bod
 
 ### 4c-3. 渲染器需要的内核入口（P20/P21/P24 登记）
 
-- **非 file: URL 的 ESM 源钩子**：`src/esm.rs` 目前对 `app://`、`http(s)://`、自定义 scheme 抛 `ERR_UNSUPPORTED_ESM_URL_SCHEME`。
-  新增 `Runtime::set_module_source(Option<Arc<dyn ModuleSource>>)`，`ModuleSource::load(url) -> Pending<(String /*源码*/, String /*最终 URL*/)>`，
-  异步完成；以及 import map 的解析钩子 `Runtime::set_import_map(ImportMap)`（`imports` + `scopes`，按 HTML 规范解析）。
+- **非 file: URL 的 ESM 源钩子**（P20 实现，契约以此为准）：`src/esm.rs` 目前对 `app://`、`http(s)://`、自定义 scheme 抛
+  `ERR_UNSUPPORTED_ESM_URL_SCHEME`。新增 `Runtime::set_module_source(Option<ModuleSource>)`，
+  `ModuleSource = Rc<dyn Fn(&Url) -> Option<String>>`：**同步**回调，宿主从自己已预取的缓存里按 URL 回答源码（`None` = 这个宿主不管该地址）。
+  同步而非 `Pending`，因为宿主（P20）在执行 `<script type=module>` 前已把静态依赖图预取完；动态 `import()` 命中未预取的地址时报
+  `ERR_MODULE_NOT_FOUND`。回调返回 `Some` 的地址被当作可加载（相对说明符按引用者 URL 解析，`import.meta.url` 是该 URL）。
+  以及 import map 的解析钩子 `Runtime::set_import_map(Option<ImportMap>)`：`ImportMap::parse(json, base_url)` 按 HTML 规范解析
+  `imports` + `scopes`，解析 `import`/`import()` 的说明符时先于 Node 解析应用（有 import map 的 realm 才生效）。
+- **`file:` 模块的开关**：`Runtime::set_local_modules(bool)`（默认 `true`，`verve run` 不变）。`false` 时内核拒绝每一个 `file:` 模块地址——入口、静态
+  `import`、动态 `import()`、import map 的目标——**不论引用者是谁**（含没有 parent 的入口），抛 `TypeError: Failed to fetch dynamically imported module: <url>`
+  （`code` 为 `ERR_MODULE_NOT_FOUND`）。这是 Electron 的默认规则：自身地址不是 `file:` 的页面读不到本地文件；由宿主按**文档的 URL** 在装页面时设置（verve-dom 在 `start_load` 里按 scheme 设）。
 - **在新 Realm 里装 Verve 全局**：`Context::create_realm()` 只有 ECMAScript 内建。新增
   `Runtime::create_world(&mut self) -> WorldId` / `Runtime::enter_world(WorldId)`：建 Realm 并装上 `console`、定时器、`fetch`、
   `URL`、`TextEncoder` 等 Verve 全局（共享同一个事件循环与定时器队列）。P21 的 contextIsolation 依赖它。
