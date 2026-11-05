@@ -33,18 +33,43 @@ pub fn node_of_host(id: u64) -> Option<NodeId> {
     (id & NODE_TAG != 0).then_some((id & !NODE_TAG) as NodeId)
 }
 
+/// Runs `f` on the tree and settles what it changed. Only the borrow and `f` are generic: the
+/// settling is [`settle`], one function for the hundreds of callers.
 pub fn with_dom<R>(context: &mut Context, f: impl FnOnce(&mut Dom) -> R) -> R {
-    let state = shared(context);
-    let (result, relink_due, mutated, reactions) = {
+    let result = {
+        let state = shared(context);
         let mut state = state.borrow_mut();
-        let result = f(&mut state.dom);
+        f(&mut state.dom)
+    };
+    settle(context);
+    result
+}
+
+/// What a change to the tree sets going: the observers, the layout, the custom elements, the page
+/// loading.
+#[inline(never)]
+fn settle(context: &mut Context) {
+    let state = shared(context);
+    let (relink_due, mutated, reactions, joined) = {
+        let mut state = state.borrow_mut();
         let mutated = state.dom.has_mutations() && !state.mutation_queued;
         let moved = state.dom.take_moved();
         // Only custom elements hear what happens to them.
         let attrs = state.dom.take_attr_changes();
+        let (joined, written) = if state.load.active {
+            page_changes(&state.dom, &moved, &attrs)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let reactions = (!state.custom.is_empty()).then_some((attrs, moved));
-        (result, state.dom.has_relinked(), mutated, reactions)
+        (
+            state.dom.has_relinked(),
+            mutated,
+            reactions,
+            (joined, written),
+        )
     };
+    let (joined, written) = joined;
     if let Err(error) = crate::media::sync(context) {
         verve::report(context, &error);
     }
@@ -60,7 +85,38 @@ pub fn with_dom<R>(context: &mut Context, f: impl FnOnce(&mut Dom) -> R) -> R {
     if let Some((attrs, moved)) = reactions {
         super::custom::react(context, attrs, moved);
     }
-    result
+    for (node, name) in written {
+        crate::load::attribute(context, node, &name);
+    }
+    if !joined.is_empty() {
+        crate::load::connected(context, &joined);
+    }
+}
+
+/// What a change made means to the page's loading: the subtrees that joined the document (and a
+/// `<script>` that got a `src` or text meanwhile), and the attributes set.
+fn page_changes(
+    dom: &Dom,
+    moved: &[(NodeId, bool)],
+    attrs: &[crate::dom::AttrChange],
+) -> (Vec<NodeId>, Vec<(NodeId, String)>) {
+    let is_script = |id: NodeId| dom.get(id).and_then(|n| n.tag()) == Some("script");
+    let mut joined: Vec<NodeId> = moved.iter().filter(|(_, c)| *c).map(|(n, _)| *n).collect();
+    // Text put into a script that is in the page is the script's to run.
+    let holders: Vec<NodeId> = joined
+        .iter()
+        .filter_map(|id| dom.parent(*id))
+        .filter(|id| is_script(*id))
+        .collect();
+    joined.extend(holders);
+    joined.extend(
+        attrs
+            .iter()
+            .filter(|a| a.name == "src" && is_script(a.node))
+            .map(|a| a.node),
+    );
+    let written = attrs.iter().map(|a| (a.node, a.name.clone())).collect();
+    (joined, written)
 }
 
 pub fn read_dom<R>(context: &Context, f: impl FnOnce(&Dom) -> R) -> R {
@@ -543,7 +599,7 @@ const NODE_ACCESSORS: &[Accessor] = &[
     ),
     (
         "baseURI",
-        Some(|_, _, cx| Ok(text(shared(cx).borrow().url.as_str()))),
+        Some(|_, _, cx| Ok(text(shared(cx).borrow().base_url().as_str()))),
         None,
     ),
 ];

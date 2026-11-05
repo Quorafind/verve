@@ -959,7 +959,7 @@ const RANGE_METHODS: &[Method] = &[
         let markup = arg_string(args, 0, cx)?;
         let fragment = with_dom(cx, |dom| {
             let fragment = dom.create_fragment();
-            crate::html::parse_into(dom, fragment, &markup);
+            crate::html::parse_runnable(dom, fragment, &markup);
             fragment
         });
         Ok(wrap(cx, fragment))

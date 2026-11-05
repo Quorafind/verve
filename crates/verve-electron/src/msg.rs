@@ -334,6 +334,11 @@ pub enum ToRenderer {
         message: Cloned,
         ports: Vec<verve::messaging::PortEnd>,
     },
+    /// The main process's answer to a [`FromRenderer::ProtocolRequest`].
+    ProtocolResponse {
+        call: u64,
+        response: ProtocolResponse,
+    },
 }
 
 /// The answer to a `sendSync`, sent once.
@@ -419,6 +424,16 @@ pub enum FromRenderer {
         channel: String,
         message: Cloned,
         ports: Vec<verve::messaging::PortEnd>,
+    },
+    /// The page needs something at a custom scheme (`protocol.handle`, P16): the main process
+    /// runs the handler and answers with [`ToRenderer::ProtocolResponse`].
+    ProtocolRequest {
+        call: u64,
+        request: ProtocolRequest,
+    },
+    /// `location.reload()`: the page asks for itself again, at `url`.
+    Reload {
+        url: String,
     },
 }
 
@@ -581,6 +596,28 @@ pub struct RendererView {
     pub cursor: Option<String>,
     /// Where a candidate window goes: the caret's box (P24/P32).
     pub ime_rect: Option<verve_dom::Rect>,
+}
+
+/// What a page asks of a custom scheme's handler in the main process.
+#[derive(Clone, Debug)]
+pub struct ProtocolRequest {
+    pub url: String,
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    /// What the page wants it for, by the names of Fetch's `destination`: `document`, `script`
+    /// (a module too), `style`, `image` (an icon too) or `font`; empty for a page's own `fetch()`.
+    pub destination: String,
+}
+
+/// A handler's answer to a [`ProtocolRequest`].
+#[derive(Clone, Debug)]
+pub struct ProtocolResponse {
+    pub status: u16,
+    pub mime: Option<String>,
+    pub headers: Vec<(String, String)>,
+    /// The body, or a Chromium net error (`-6`, `ERR_FILE_NOT_FOUND`) for a handler that failed.
+    pub body: Result<Vec<u8>, (i32, String)>,
 }
 
 #[cfg(test)]

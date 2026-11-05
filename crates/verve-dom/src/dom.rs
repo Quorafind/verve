@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::field::Draft;
 
+mod marks;
 mod reclaim;
 mod shadow;
 
@@ -251,6 +252,10 @@ pub struct Dom {
     free: Vec<u32>,
     live: usize,
     pub document: NodeId,
+    /// The `<script>`s that have run or never will: see `marks.rs`.
+    started: HashSet<NodeId>,
+    /// The `<link>`s the page's own parser made.
+    parser_made: HashSet<NodeId>,
     pub html: NodeId,
     pub head: NodeId,
     pub body: NodeId,
@@ -321,6 +326,8 @@ impl Dom {
             free: Vec::new(),
             live: 0,
             document: 0,
+            started: HashSet::new(),
+            parser_made: HashSet::new(),
             html: 0,
             head: 0,
             body: 0,
@@ -781,32 +788,6 @@ impl Dom {
         if style {
             self.styles_revision = self.styles_revision.wrapping_add(1);
         }
-    }
-
-    /// The host holds `id` itself: it is never reclaimed.
-    pub fn pin(&mut self, id: NodeId) {
-        self.pinned.insert(id);
-    }
-
-    pub fn unpin(&mut self, id: NodeId) {
-        self.pinned.remove(&id);
-    }
-
-    pub fn is_pinned(&self, id: NodeId) -> bool {
-        self.pinned.contains(&id)
-    }
-
-    /// Draws `id`'s subtree as a view of its own, redrawn only when something in it changes.
-    pub fn set_partition(&mut self, id: NodeId, on: bool) {
-        if on {
-            self.partitions.insert(id);
-        } else {
-            self.partitions.remove(&id);
-        }
-    }
-
-    pub fn is_partition(&self, id: NodeId) -> bool {
-        self.partitions.contains(&id)
     }
 
     /// The nearest partition `id` is in, itself included; the root of its tree when there is
@@ -1579,6 +1560,10 @@ impl Dom {
         let copy = self.insert(node);
         if style {
             self.styles.insert(copy);
+        }
+        // A script that has run has run: so does its copy (HTML's "already started").
+        if self.started.contains(&id) {
+            self.started.insert(copy);
         }
         Some(copy)
     }

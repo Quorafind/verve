@@ -19,8 +19,8 @@ use verve::vfs::Overlay;
 use crate::ids::{ContentsId, Ids, WindowId};
 use crate::launcher::Start;
 use crate::msg::{
-    AppEvent, FromRenderer, FromShell, GoneReason, RendererView, ToRenderer, ToRendererInput,
-    ToShell, WebPreferences,
+    AppEvent, FromRenderer, FromShell, GoneReason, PageEvent, RendererView, ToRenderer,
+    ToRendererInput, ToShell, WebPreferences,
 };
 use crate::{ElectronOptions, MainGuest, RendererGuest};
 
@@ -88,6 +88,11 @@ struct RendererSlot {
     contents: ContentsId,
     /// What the page was made with: the isolate P20 makes anew on a navigation is made with these.
     prefs: WebPreferences,
+    /// Whether a document has been asked of the page: the next one gets an isolate of its own.
+    loaded: AtomicBool,
+    /// Which document's isolate is the page's now: it counts up with each one. What an isolate
+    /// says, and what is said in its name, is heard only while its number is this one.
+    generation: Arc<AtomicU64>,
     isolate: Mutex<Option<Isolate<RendererGuest>>>,
     view: Mutex<Option<RendererView>>,
     /// Whether the main process was told the page's process is gone.
@@ -98,10 +103,13 @@ impl RendererSlot {
     /// Called on the page's own thread, by its isolate, when it has a view, events, or died:
     /// the view waits for the shell, the events go to the main process's thread, and a page
     /// that died is reported to it — once — as `render-process-gone`.
-    fn published(&self) {
+    fn published(&self, generation: u64) {
         let Some(hub) = self.hub.upgrade() else {
             return;
         };
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
         let (view, events, health) = match lock(&self.isolate).as_ref() {
             Some(isolate) => (isolate.take_view(), isolate.take_events(), isolate.health()),
             None => (None, Vec::new(), Health::Alive),
@@ -110,7 +118,7 @@ impl RendererSlot {
             *lock(&self.view) = Some(view);
         }
         if !events.is_empty() {
-            hub.from_renderer_batch(self.contents, events);
+            hub.from_renderer_batch(self.contents, generation, events);
         }
         if let Health::Dead(message) = health
             && !self.gone.swap(true, Ordering::SeqCst)
@@ -118,6 +126,7 @@ impl RendererSlot {
             eprintln!("electron: page {} crashed: {message}", self.contents);
             hub.from_renderer(
                 self.contents,
+                generation,
                 FromRenderer::Gone {
                     reason: GoneReason::Crashed,
                 },
@@ -148,6 +157,10 @@ pub struct Hub {
     exit: Mutex<Option<i32>>,
     /// Every console line, once someone asked to keep them: a long-running app is not made to.
     console: Mutex<Option<Vec<ConsoleLine>>>,
+    /// Every lifecycle event of every page, once someone asked to keep them.
+    page_events: Mutex<Option<Vec<(ContentsId, PageEvent)>>>,
+    /// Numbers the asks of every page's loader for the main process.
+    protocol_calls: Arc<AtomicU64>,
     launch: Mutex<Option<Arc<Start>>>,
     /// Whether [`Hub::set_launch`] was called: an app that was not launched has a profile of
     /// its own to clean up.
@@ -174,6 +187,8 @@ impl Hub {
             shell: Mutex::new(None),
             exit: Mutex::new(None),
             console: Mutex::new(None),
+            page_events: Mutex::new(None),
+            protocol_calls: Arc::default(),
             launch: Mutex::new(None),
             told: AtomicBool::new(false),
             beats: AtomicU64::new(0),
@@ -289,18 +304,33 @@ impl Hub {
         let slot = Arc::new(RendererSlot {
             hub: Arc::downgrade(self),
             contents,
-            prefs: prefs.clone(),
+            prefs,
             isolate: Mutex::new(None),
             view: Mutex::new(None),
             gone: AtomicBool::new(false),
+            loaded: AtomicBool::new(false),
+            generation: Arc::new(AtomicU64::new(0)),
         });
+        // Registered first: what the page says while its isolate is made is heard.
+        lock(&self.renderers).insert(contents, Arc::clone(&slot));
+        self.spawn_renderer(&slot);
+        RendererHandle {
+            contents,
+            hub: Arc::clone(self),
+        }
+    }
+
+    /// Makes the isolate that renders `slot`'s page, with the preferences the page was made with.
+    fn spawn_renderer(self: &Arc<Self>, slot: &Arc<RendererSlot>) {
+        let (contents, prefs) = (slot.contents, slot.prefs.clone());
+        let generation = slot.generation.load(Ordering::SeqCst);
         let hub = Arc::clone(self);
-        let make = move || RendererGuest::new(&hub, contents, prefs);
-        let published = Arc::downgrade(&slot);
+        let make = move || RendererGuest::new(&hub, contents, generation, prefs);
+        let published = Arc::downgrade(slot);
         let weak = Arc::downgrade(self);
         let wake = move || {
             if let Some(slot) = published.upgrade() {
-                slot.published();
+                slot.published(generation);
             }
             if let Some(hub) = weak.upgrade() {
                 hub.wake();
@@ -317,17 +347,33 @@ impl Hub {
                 slot.gone.store(true, Ordering::SeqCst);
                 self.from_renderer(
                     contents,
+                    generation,
                     FromRenderer::Gone {
                         reason: GoneReason::LaunchFailed,
                     },
                 );
             }
         }
-        lock(&self.renderers).insert(contents, slot);
-        RendererHandle {
-            contents,
-            hub: Arc::clone(self),
+    }
+
+    /// A page that has loaded something navigates to another document in an isolate of its own,
+    /// as Chromium gives a new document a new world: the old one is retired (the one place a
+    /// page's isolate is torn down) and the new one is made with the same preferences. The first
+    /// load of a page uses the isolate it was made with.
+    fn renew_for_navigation(self: &Arc<Self>, contents: ContentsId) {
+        let Some(slot) = lock(&self.renderers).get(&contents).cloned() else {
+            return;
+        };
+        if !slot.loaded.swap(true, Ordering::SeqCst) {
+            return;
         }
+        stop(&slot);
+        // Nothing the old document said from here on is heard, nor what is said for it.
+        slot.generation.fetch_add(1, Ordering::SeqCst);
+        *lock(&slot.view) = None;
+        // The new page's process may be gone in its turn, and the main process hears of that.
+        slot.gone.store(false, Ordering::SeqCst);
+        self.spawn_renderer(&slot);
     }
 
     /// The preferences page `contents` was made with, while it exists.
@@ -389,17 +435,37 @@ impl Hub {
         *lock(&self.observer) = Some(Arc::new(observer));
     }
 
-    /// What a page says: a lifecycle step, a request only the window can answer.
-    pub fn from_renderer(&self, contents: ContentsId, event: FromRenderer) {
-        self.from_renderer_batch(contents, vec![event]);
+    /// What a page says: a lifecycle step, a request only the window can answer. `generation`
+    /// is the document's: what a page that was replaced says is not heard.
+    pub fn from_renderer(&self, contents: ContentsId, generation: u64, event: FromRenderer) {
+        self.from_renderer_batch(contents, generation, vec![event]);
     }
 
     /// What a page says in one turn, as one job of the main process: its thread is woken once
     /// for all of it, and hears it in order.
-    pub fn from_renderer_batch(&self, contents: ContentsId, events: Vec<FromRenderer>) {
+    pub fn from_renderer_batch(
+        &self,
+        contents: ContentsId,
+        generation: u64,
+        events: Vec<FromRenderer>,
+    ) {
+        let Some(current) = lock(&self.renderers)
+            .get(&contents)
+            .map(|slot| Arc::clone(&slot.generation))
+        else {
+            return;
+        };
+        if current.load(Ordering::SeqCst) != generation {
+            return;
+        }
         for event in &events {
             if let FromRenderer::Console { message, .. } = event {
                 self.log_console(Some(contents), message);
+            }
+            if let FromRenderer::Lifecycle(page_event) = event
+                && let Some(kept) = lock(&self.page_events).as_mut()
+            {
+                kept.push((contents, page_event.clone()));
             }
         }
         // At most `PER_JOB` to a job, so what the shell or another page says in the meantime is
@@ -407,8 +473,13 @@ impl Hub {
         let mut events = events.into_iter().peekable();
         while events.peek().is_some() {
             let chunk: Vec<_> = events.by_ref().take(PER_JOB).collect();
+            let current = Arc::clone(&current);
             self.to_main(move |guest| {
                 for event in chunk {
+                    // The document may have been replaced since this was queued.
+                    if current.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
                     guest.from_renderer(contents, event);
                 }
             });
@@ -416,7 +487,10 @@ impl Hub {
     }
 
     /// Sends `msg` to page `contents`, to run as a job of its isolate.
-    pub fn to_renderer(&self, contents: ContentsId, msg: ToRenderer) {
+    pub fn to_renderer(self: &Arc<Self>, contents: ContentsId, msg: ToRenderer) {
+        if matches!(msg, ToRenderer::Load { .. }) {
+            self.renew_for_navigation(contents);
+        }
         self.on_renderer(contents, move |guest| guest.apply(msg));
     }
 
@@ -489,6 +563,26 @@ impl Hub {
     /// Starts keeping every console line the app writes, from now on.
     pub fn record_console(&self) {
         lock(&self.console).get_or_insert_with(Vec::new);
+    }
+
+    /// The counter a page's loader numbers its asks of the main process from: one for the app,
+    /// so a page's ask is never mistaken for the one the page before it made.
+    pub fn protocol_calls(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.protocol_calls)
+    }
+
+    /// Starts keeping every lifecycle event the pages report, from now on.
+    pub fn record_page_events(&self) {
+        lock(&self.page_events).get_or_insert_with(Vec::new);
+    }
+
+    /// The lifecycle events page `contents` reported since [`Hub::record_page_events`], in order.
+    pub fn page_events(&self, contents: ContentsId) -> Vec<PageEvent> {
+        let kept = lock(&self.page_events);
+        let all = kept.iter().flatten();
+        all.filter(|(page, _)| *page == contents)
+            .map(|(_, event)| event.clone())
+            .collect()
     }
 
     /// Notes a console line, if they are being kept.
@@ -566,7 +660,7 @@ impl Hub {
 fn stop(page: &RendererSlot) {
     let isolate = lock(&page.isolate).take();
     if let Some(isolate) = &isolate {
-        isolate.interrupt();
+        isolate.retire();
     }
 }
 
@@ -575,6 +669,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::msg::LoadOptions;
     use crate::{HeadlessOptions, HeadlessShell};
 
     fn wait(mut cond: impl FnMut() -> bool) -> bool {
@@ -622,8 +717,61 @@ mod tests {
         assert!(wait(|| slot.gone.load(Ordering::SeqCst)));
         // The app is still up, and a second wake does not say it again.
         assert_eq!(shell.exit_code(), None);
-        slot.published();
+        slot.published(0);
         assert!(slot.gone.load(Ordering::SeqCst));
+        hub.shutdown(0);
+    }
+
+    #[test]
+    fn a_document_that_was_replaced_runs_and_says_nothing_more() {
+        let (hub, shell, _) = app();
+        hub.record_console();
+        assert!(wait(|| !shell.windows().is_empty()));
+        let page = shell.windows()[0].contents;
+        let load = || ToRenderer::Load {
+            url: "data:text/html,x".into(),
+            options: LoadOptions::default(),
+        };
+        let say = |text: &'static str| {
+            move |guest: &mut RendererGuest| {
+                let _ = guest.eval(text);
+            }
+        };
+        hub.to_renderer(page, load());
+        // The old document's thread is busy while the page is replaced: what it was sent is
+        // still queued, and a timer it set is due.
+        hub.on_renderer(page, |_| std::thread::sleep(Duration::from_millis(300)));
+        hub.on_renderer(page, say("console.log('OLD-queued')"));
+        hub.on_renderer(page, say("setTimeout(() => console.log('OLD-timer'), 10)"));
+        hub.to_renderer(page, load());
+        hub.on_renderer(page, say("console.log('NEW')"));
+        let lines = || -> Vec<String> { hub.console_lines().into_iter().map(|l| l.text).collect() };
+        assert!(wait(|| lines().iter().any(|l| l.contains("NEW"))));
+        std::thread::sleep(Duration::from_millis(600));
+        let lines = lines();
+        assert!(!lines.iter().any(|l| l.contains("OLD")), "{lines:?}");
+        hub.shutdown(0);
+    }
+
+    #[test]
+    fn a_page_that_is_loaded_again_is_reported_gone_again() {
+        let (hub, shell, _) = app();
+        assert!(wait(|| !shell.windows().is_empty()));
+        let page = shell.windows()[0].contents;
+        let slot = lock(&hub.renderers).get(&page).cloned().expect("the page");
+        let load = || ToRenderer::Load {
+            url: "data:text/html,x".into(),
+            options: LoadOptions::default(),
+        };
+        // The first load keeps the page's first isolate; the second gives it a new one.
+        hub.to_renderer(page, load());
+        hub.to_renderer(page, load());
+        hub.on_renderer(page, |_| panic!("the page broke"));
+        assert!(wait(|| slot.gone.load(Ordering::SeqCst)));
+        hub.to_renderer(page, load());
+        assert!(!slot.gone.load(Ordering::SeqCst));
+        hub.on_renderer(page, |_| panic!("the page broke again"));
+        assert!(wait(|| slot.gone.load(Ordering::SeqCst)));
         hub.shutdown(0);
     }
 }

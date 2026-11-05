@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use boa_engine::JsResult;
 
+use crate::ImportMap;
 use crate::vfs;
 use crate::{Level, ModuleMaker, ProcessInfo, Runtime, native, navigator, process, shared};
 
@@ -27,6 +28,11 @@ pub struct SourcePos {
 /// [`Runtime::set_console_sink`]. The third argument is the line's position, when there is one;
 /// the runtime does not work it out yet, so it is `None` today.
 pub type ConsoleSink = Box<dyn Fn(Level, &str, Option<&SourcePos>)>;
+
+/// The source of a module at one of the host's own addresses (`app://`, `https://`), from what
+/// the host has fetched already; `None` when it has none for that address. See
+/// [`Runtime::set_module_source`].
+pub type ModuleSource = Rc<dyn Fn(&url::Url) -> Option<Rc<str>>>;
 
 impl Runtime {
     /// Makes `process` what this realm is: an Electron main process, a renderer, a utility —
@@ -101,5 +107,39 @@ impl Runtime {
     /// before the navigator is first read or after; either way it answers this from now on.
     pub fn set_user_agent(&mut self, agent: String) {
         navigator::set_user_agent(&mut self.context, agent);
+    }
+
+    /// Lets modules come from the host's own addresses. `source` answers, from the host's own
+    /// cache (the host fetches a module graph before it runs, a browser tab's way), the text of
+    /// the module at an address that is none of `file:`, `data:`, `blob:` or `node:`; an
+    /// address it answers for is loadable by `import` and `import()`, its relative imports
+    /// resolve against it as a page's do, and `import.meta.url` is that address. An address it
+    /// has nothing for is `ERR_MODULE_NOT_FOUND`. `None` takes the hook away.
+    pub fn set_module_source(&mut self, source: Option<ModuleSource>) {
+        shared(&self.context).esm.set_source_hook(source);
+    }
+
+    /// Says whether the page this realm runs may load local files as modules. With `false`,
+    /// every `file:` module address is refused — an entry, a static `import`, an `import()`, an
+    /// import map's target — whoever the importer is, with Chromium's `TypeError`: Electron's
+    /// rule that a page whose own address is not a `file:` one cannot read the disk. The
+    /// default is `true`, and `verve run` is untouched.
+    pub fn set_local_modules(&mut self, allowed: bool) {
+        shared(&self.context).esm.refuse_local(!allowed);
+    }
+
+    /// Applies an import map to every `import` and `import()` of this realm, before its own
+    /// resolution; `None` takes it away. See [`ImportMap::parse`].
+    pub fn set_import_map(&mut self, map: Option<ImportMap>) {
+        shared(&self.context).esm.set_import_map(map);
+    }
+
+    /// Makes every `import` and `import()` of this realm resolve the web's way, whoever the
+    /// importer is — a `file:`, `data:` or `blob:` module as much as a hosted one: addresses
+    /// relative to the importer or whole, bare specifiers only through the import map, no
+    /// Node builtins, no `node_modules`, no CommonJS. A page without `nodeIntegration` has
+    /// no Node; the default is off, and `verve run` is untouched.
+    pub fn set_web_modules(&mut self, on: bool) {
+        shared(&self.context).esm.set_web_only(on);
     }
 }

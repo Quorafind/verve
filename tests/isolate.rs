@@ -277,3 +277,120 @@ fn a_poke_runs_the_beat_at_once_and_does_not_keep_the_isolate_alive() {
     assert_eq!(ended.load(Ordering::SeqCst), 1);
     poke();
 }
+
+/// A guest that keeps a record of what ran in it, and a flag its thread sets as it ends.
+struct Probe {
+    record: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    ended: Arc<std::sync::atomic::AtomicBool>,
+    /// How long after it is made its beat is due; it is due again each time.
+    due: Option<Duration>,
+}
+
+impl Guest for Probe {
+    type View = ();
+    type Event = &'static str;
+
+    fn tick(&mut self) {
+        self.record.lock().unwrap().push("tick");
+    }
+
+    fn next_due(&self) -> Option<Duration> {
+        self.due
+    }
+
+    fn drain(&mut self, _: &mut Outbox<&'static str>) {}
+
+    fn publish(&mut self, _: u64, _: bool) -> Option<()> {
+        None
+    }
+
+    fn shutdown(&mut self) {
+        self.ended.store(true, Ordering::SeqCst);
+    }
+}
+
+type Record = Arc<std::sync::Mutex<Vec<&'static str>>>;
+type Ended = Arc<std::sync::atomic::AtomicBool>;
+
+fn probe_isolate(
+    due: Option<Duration>,
+    gate: Option<std::sync::mpsc::Receiver<()>>,
+) -> (Isolate<Probe>, Record, Ended) {
+    let record = Record::default();
+    let ended = Ended::default();
+    let (made_record, made_ended) = (Arc::clone(&record), Arc::clone(&ended));
+    let isolate = Isolate::spawn(
+        Options::default(),
+        move || {
+            if let Some(gate) = gate {
+                let _ = gate.recv();
+            }
+            Probe {
+                record: made_record,
+                ended: made_ended,
+                due,
+            }
+        },
+        || {},
+    )
+    .unwrap();
+    (isolate, record, ended)
+}
+
+fn ends_within_ten_seconds(ended: &Ended) -> bool {
+    let started = Instant::now();
+    while !ended.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    ended.load(Ordering::SeqCst)
+}
+
+#[test]
+fn a_retired_isolate_runs_no_job_already_queued_and_says_nothing_more() {
+    let (isolate, record, ended) = probe_isolate(None, None);
+    let (started, hold) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let (started_tx, started_rx) = started;
+    let (hold_tx, hold_rx) = hold;
+    isolate.send(move |_, _| {
+        started_tx.send(()).unwrap();
+        let _ = hold_rx.recv();
+    });
+    started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    // Queued behind the job that runs now.
+    let rec = Arc::clone(&record);
+    isolate.send(move |_, out| {
+        rec.lock().unwrap().push("queued");
+        out.push("queued");
+    });
+    isolate.retire();
+    hold_tx.send(()).unwrap();
+    assert!(ends_within_ten_seconds(&ended), "the thread ends");
+    assert_eq!(record.lock().unwrap().as_slice(), [] as [&str; 0]);
+    assert!(isolate.take_events().is_empty());
+}
+
+#[test]
+fn a_retired_isolate_fires_no_timer_that_falls_due() {
+    let (isolate, record, ended) = probe_isolate(Some(Duration::from_millis(400)), None);
+    // Long enough for the guest to be made and waiting; the timer falls due at 400 ms.
+    std::thread::sleep(Duration::from_millis(100));
+    isolate.retire();
+    assert!(ends_within_ten_seconds(&ended), "the thread ends");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(record.lock().unwrap().is_empty(), "no tick ran");
+    assert!(isolate.take_events().is_empty());
+}
+
+#[test]
+fn an_isolate_retired_while_its_guest_is_made_runs_nothing_after() {
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel();
+    let (isolate, record, ended) = probe_isolate(Some(Duration::from_millis(1)), Some(gate_rx));
+    let rec = Arc::clone(&record);
+    isolate.send(move |_, _| rec.lock().unwrap().push("job"));
+    isolate.retire();
+    gate_tx.send(()).unwrap();
+    assert!(ends_within_ten_seconds(&ended), "the thread ends");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(record.lock().unwrap().is_empty(), "nothing ran");
+    assert!(isolate.take_events().is_empty());
+}

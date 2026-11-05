@@ -1,6 +1,6 @@
 //! Native ECMAScript modules: URL identities, Node packages and synthetic CJS/builtin bridges.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::ready;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,48 @@ fn coded_error(context: &mut Context, message: &str, code: &str) -> JsError {
     }
 }
 
+/// The `TypeError` a browser throws for a module it cannot find, with Node's code on it.
+fn coded_type_error(context: &mut Context, message: &str) -> JsError {
+    crate::events::coded_type_error(context, message, "ERR_MODULE_NOT_FOUND")
+}
+
+/// The property that marks the error of a module that could not be parsed: the fetch of a
+/// module graph failed, where an error thrown by a module that ran did not.
+const UNPARSED: &str = "verve:unparsed";
+
+/// Whether `error` says a module could not be parsed (and so never ran).
+pub fn is_parse_failure(error: &JsError, context: &mut Context) -> bool {
+    let Ok(value) = error.clone().into_opaque(context) else {
+        return false;
+    };
+    value.as_object().is_some_and(|object| {
+        object
+            .has_own_property(JsString::from(UNPARSED), context)
+            .unwrap_or(false)
+    })
+}
+
+/// A parse error, marked as one.
+fn unparsed(error: JsError, context: &mut Context) -> JsError {
+    let Ok(value) = error.clone().into_opaque(context) else {
+        return error;
+    };
+    if let Some(object) = value.as_object() {
+        // The error is as it was but for a property nobody lists; if it cannot be set the
+        // error is thrown unmarked, and reads as one the module threw.
+        let _ = crate::native::hidden(&object, JsString::from(UNPARSED), true, context);
+    }
+    JsError::from_opaque(value)
+}
+
+/// What the web's rules make of an import under a host's address.
+enum Web {
+    /// The address to load.
+    Url(Url),
+    /// The specifier, left for the runtime's own resolution.
+    Left(String),
+}
+
 #[derive(Default)]
 pub(crate) struct Loader {
     /// Full serialized URLs, including query and fragment, are the ESM cache keys.
@@ -64,6 +106,15 @@ pub(crate) struct Loader {
     /// graph that fails to link leaves the wrapper behind — and a file written since must not
     /// run from it.
     cjs_wrappers: RefCell<HashMap<PathBuf, (u64, Script)>>,
+    /// Where the host's own addresses (`app://`, `https://`) get their source, when it set one.
+    source_hook: RefCell<Option<crate::ModuleSource>>,
+    /// The page's import map, when it set one.
+    import_map: RefCell<Option<Rc<crate::ImportMap>>>,
+    /// Whether every `import` resolves the web's way, whoever asks (a page without Node).
+    web_only: Cell<bool>,
+    /// Whether every `file:` module is refused, whoever imports it (a page that is not a local
+    /// one). Off by default.
+    local_refused: Cell<bool>,
 }
 
 /// A resolution failure as the error Node throws: `ERR_ACCESS_DENIED` names the file refused.
@@ -111,6 +162,111 @@ impl Loader {
         (digest == source_digest(source)).then_some(script)
     }
 
+    pub(crate) fn set_source_hook(&self, hook: Option<crate::ModuleSource>) {
+        *self.source_hook.borrow_mut() = hook;
+    }
+
+    pub(crate) fn set_web_only(&self, on: bool) {
+        self.web_only.set(on);
+    }
+
+    pub(crate) fn refuse_local(&self, refuse: bool) {
+        self.local_refused.set(refuse);
+    }
+
+    pub(crate) fn set_import_map(&self, map: Option<crate::ImportMap>) {
+        *self.import_map.borrow_mut() = map.map(Rc::new);
+    }
+
+    /// Whether `url` is one of the host's: none of the runtime's own kinds, and a hook is set.
+    fn is_hosted(&self, url: &Url) -> bool {
+        self.source_hook.borrow().is_some()
+            && url.scheme().len() > 1
+            && !matches!(url.scheme(), "file" | "data" | "blob" | "node")
+    }
+
+    /// The import map's say on `specifier`, then the web's rules for the host's addresses.
+    /// Answers the address when the host's hook has its source, and otherwise the specifier
+    /// the map left for the runtime's own resolution.
+    fn web_resolve(
+        &self,
+        specifier: &str,
+        parent: Option<&Path>,
+        context: &mut Context,
+    ) -> JsResult<Web> {
+        let map = self.import_map.borrow().clone();
+        let hooked = self.source_hook.borrow().clone();
+        let web = self.web_only.get();
+        let refused = self.local_refused.get();
+        if map.is_none() && hooked.is_none() && !web && !refused {
+            return Ok(Web::Left(specifier.to_owned()));
+        }
+        let referrer = self.parent(parent, context)?;
+        let mut specifier = specifier.to_owned();
+        if let Some(map) = map {
+            match map.resolve(&specifier, &referrer) {
+                Ok(Some(url)) => specifier = url.to_string(),
+                Ok(None) => {}
+                Err(message) => {
+                    return Err(coded_error(context, &message, "ERR_MODULE_NOT_FOUND"));
+                }
+            }
+        }
+        // An address the specifier is (a path against the importer, or a whole one), if it is.
+        let found = crate::url_like(&specifier, &referrer);
+        // A page that is not a local one may not read a local file, whoever imports it:
+        // Electron's default rule, Chromium's error and all.
+        if let Some(url) = found
+            .as_ref()
+            .filter(|url| url.scheme() == "file" && refused)
+        {
+            return Err(coded_type_error(
+                context,
+                &format!("Failed to fetch dynamically imported module: {url}"),
+            ));
+        }
+        let target = found.clone().filter(|url| self.is_hosted(url));
+        if web && target.is_none() {
+            return self.web_target(&specifier, found, context);
+        }
+        match (target, hooked) {
+            (Some(url), Some(hook)) if hook(&url).is_some() => Ok(Web::Url(url)),
+            (Some(url), _) => Err(coded_error(
+                context,
+                &format!("Cannot find module '{url}'"),
+                "ERR_MODULE_NOT_FOUND",
+            )),
+            // A bare name under a host's address has no Node to find it.
+            (None, _) if found.is_none() && self.is_hosted(&referrer) => Err(coded_error(
+                context,
+                &format!("Failed to resolve module specifier '{specifier}'"),
+                "ERR_MODULE_NOT_FOUND",
+            )),
+            _ => Ok(Web::Left(specifier)),
+        }
+    }
+
+    /// What a page's `specifier` is when Node is not in the page: an address (`found`) the
+    /// runtime reads itself, or an error with the browser's words.
+    fn web_target(
+        &self,
+        specifier: &str,
+        found: Option<Url>,
+        context: &mut Context,
+    ) -> JsResult<Web> {
+        match found {
+            Some(url) if matches!(url.scheme(), "file" | "data" | "blob") => Ok(Web::Url(url)),
+            Some(_) => Err(coded_type_error(
+                context,
+                &format!("Failed to fetch dynamically imported module: {specifier}"),
+            )),
+            None => Err(coded_type_error(
+                context,
+                &format!("Failed to resolve module specifier '{specifier}'"),
+            )),
+        }
+    }
+
     pub(crate) fn conditions(&self, conditions: Vec<String>) {
         *self.conditions.borrow_mut() = conditions;
     }
@@ -126,7 +282,8 @@ impl Loader {
         if let Some(parent) = parent {
             let text = parent.to_string_lossy();
             if let Ok(url) = Url::parse(&text)
-                && matches!(url.scheme(), "file" | "data" | "blob" | "node")
+                && (matches!(url.scheme(), "file" | "data" | "blob" | "node")
+                    || self.is_hosted(&url))
             {
                 return Ok(url);
             }
@@ -163,6 +320,18 @@ impl Loader {
         check_file: bool,
         context: &mut Context,
     ) -> JsResult<Url> {
+        let mapped;
+        let specifier = if mode == Mode::Import {
+            match self.web_resolve(specifier, parent, context)? {
+                Web::Url(url) => return Ok(url),
+                Web::Left(left) => {
+                    mapped = left;
+                    mapped.as_str()
+                }
+            }
+        } else {
+            specifier
+        };
         if (!specifier.ends_with('/') || mode == Mode::Require)
             && crate::modules::is_builtin(context, specifier)
         {
@@ -290,7 +459,9 @@ impl Loader {
     ) -> JsResult<Url> {
         let text = filename.to_string_lossy();
         let url = match Url::parse(&text) {
-            Ok(url) if matches!(url.scheme(), "file" | "data" | "blob") => url,
+            Ok(url) if matches!(url.scheme(), "file" | "data" | "blob") || self.is_hosted(&url) => {
+                url
+            }
             _ => resolve::file_url(&absolute(filename, context))
                 .map_err(|e| resolve_error(context, e))?,
         };
@@ -366,11 +537,17 @@ impl Loader {
                 })?;
                 Ok((text, false))
             }
-            _ => Err(coded_error(
-                context,
-                "Unsupported ESM URL",
-                "ERR_UNSUPPORTED_ESM_URL_SCHEME",
-            )),
+            _ => {
+                let hook = self.source_hook.borrow().clone();
+                match hook.and_then(|hook| hook(url)) {
+                    Some(text) => Ok((text.to_string(), false)),
+                    None => Err(coded_error(
+                        context,
+                        "Unsupported ESM URL",
+                        "ERR_UNSUPPORTED_ESM_URL_SCHEME",
+                    )),
+                }
+            }
         }
     }
 
@@ -445,7 +622,8 @@ impl Loader {
                     source.trim_start_matches('\u{feff}'),
                     &path,
                     context,
-                )?
+                )
+                .map_err(|error| unparsed(error, context))?
             }
             format => {
                 return Err(coded_error(
@@ -480,7 +658,10 @@ impl Loader {
         let format = match format {
             Some(format) => format,
             None if json => "json".to_owned(),
-            None if url.scheme() == "file" && !self.sources.borrow().contains_key(url.as_str()) => {
+            None if url.scheme() == "file"
+                && !self.web_only.get()
+                && !self.sources.borrow().contains_key(url.as_str()) =>
+            {
                 let path = resolve::file_path(url).map_err(|e| resolve_error(context, e))?;
                 match crate::modules::format(&path, &source, context)? {
                     crate::modules::Format::Module => "module".to_owned(),

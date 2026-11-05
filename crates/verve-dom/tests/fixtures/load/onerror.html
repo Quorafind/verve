@@ -1,0 +1,5 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script>window.__log = []; window.addEventListener('error', function (e) { __log.push('error-event:' + e.message); });</script></head><body>
+<script>throw new Error('boom');</script>
+<script>__log.push('after-error');</script>
+</body></html>

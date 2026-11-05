@@ -151,7 +151,7 @@ const XHR_METHODS: &[Method] = &[
         let url = arg_string(args, 1, cx)?;
         let resolved = shared(cx)
             .borrow()
-            .url
+            .base_url()
             .join(&url)
             .map(|u| u.to_string())
             .unwrap_or(url);
@@ -197,7 +197,11 @@ const XHR_METHODS: &[Method] = &[
             set(&init, "body", body, cx)?;
         }
         fire(this, "loadstart", cx)?;
-        let fetch = cx.global_object().get(js_string!("fetch"), cx)?;
+        let dom_fetch = shared(cx).borrow().load.dom_fetch.clone();
+        let fetch = match dom_fetch {
+            Some(fetch) => fetch,
+            None => cx.global_object().get(js_string!("fetch"), cx)?,
+        };
         let promise = verve::call(cx, &fetch, &JsValue::undefined(), &[url, init.into()])?;
         let on_response = closure(
             cx,

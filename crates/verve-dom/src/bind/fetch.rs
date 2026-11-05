@@ -5,6 +5,20 @@ use boa_engine::{Context, JsResult, js_string};
 use super::{arg, closure, get, rejected, string, text, type_error};
 use crate::state::shared;
 
+/// The getter of `Response.prototype.url`, as the runtime made it.
+fn response_url_getter(context: &mut Context) -> Option<boa_engine::JsValue> {
+    let global = context.global_object();
+    let response = global.get(js_string!("Response"), context).ok()?;
+    let proto = get(&response, "prototype", context).ok()?;
+    let object = global.get(js_string!("Object"), context).ok()?;
+    let describe = get(&object, "getOwnPropertyDescriptor", context).ok()?;
+    let descriptor = describe
+        .as_callable()?
+        .call(&object, &[proto, text("url")], context)
+        .ok()?;
+    get(&descriptor, "get", context).ok()
+}
+
 pub fn install(context: &mut Context) -> JsResult<()> {
     let global = context.global_object();
     let original = global.get(js_string!("fetch"), context)?;
@@ -12,6 +26,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         .as_callable()
         .ok_or_else(|| type_error("DOM requires the runtime's fetch"))?;
     let request = global.get(js_string!("Request"), context)?;
+    // The page loads its own subresources through this one, whatever it makes of `window.fetch`.
+    shared(context).borrow_mut().load.original_fetch = Some(original.clone().into());
+    shared(context).borrow_mut().load.original_response_url = response_url_getter(context);
     let fetch = closure(
         context,
         "fetch",
@@ -26,10 +43,14 @@ pub fn install(context: &mut Context) -> JsResult<()> {
                 };
                 let url = shared(cx)
                     .borrow()
-                    .url
+                    .base_url()
                     .join(&address)
                     .map_err(|_| type_error(format!("Failed to parse URL from {address}")))?;
-                if !matches!(url.scheme(), "http" | "https" | "data" | "blob") {
+                if crate::load::claims(cx, &url) {
+                    let method = request_method(args, &input, is_request, cx)?;
+                    return crate::load::fetch_response(cx, url, &method);
+                }
+                if !crate::load::is_network(url.scheme()) {
                     return Err(type_error("fetch 不支持此地址协议"));
                 }
                 // Request 必须原样转交，否则会丢失 body、signal 和原实现的校验。
@@ -50,6 +71,26 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         },
         (original, request),
     );
+    shared(context).borrow_mut().load.dom_fetch = Some(fetch.clone().into());
     global.set(js_string!("fetch"), fetch, true, context)?;
     Ok(())
+}
+
+/// The method a `fetch` asks for: the `Request`'s, else the init's, else `GET`.
+fn request_method(
+    args: &[boa_engine::JsValue],
+    input: &boa_engine::JsValue,
+    is_request: bool,
+    context: &mut Context,
+) -> JsResult<String> {
+    let source = if is_request {
+        input.clone()
+    } else {
+        arg(args, 1)
+    };
+    let method = get(&source, "method", context)?;
+    if method.is_undefined() {
+        return Ok("GET".to_owned());
+    }
+    Ok(string(&method, context)?.to_ascii_uppercase())
 }

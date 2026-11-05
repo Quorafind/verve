@@ -48,6 +48,7 @@ mod fetch;
 mod fs;
 mod globals;
 mod hooks;
+mod import_map;
 mod indexeddb;
 mod intl;
 pub mod isolate;
@@ -67,6 +68,7 @@ mod path;
 mod permission;
 mod process;
 mod querystring;
+pub use querystring::query_string;
 mod readline;
 mod sockets;
 mod stream;
@@ -100,7 +102,9 @@ pub use code_cache::CodeCacheStats;
 pub fn code_cache_user_secret() -> std::io::Result<[u8; 32]> {
     code_cache::user_secret().map(|(secret, _)| secret)
 }
-pub use embed::{ConsoleSink, SourcePos};
+pub use embed::{ConsoleSink, ModuleSource, SourcePos};
+pub use esm::is_parse_failure;
+pub use import_map::{ImportMap, is_relative, url_like};
 pub use navigator::electron_user_agent;
 pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
@@ -734,8 +738,13 @@ impl Runtime {
     /// host puts it on `window` itself, if it has one.
     pub fn global_require(&mut self) -> JsValue {
         let cwd = PathBuf::from(shared(&self.context).cwd.borrow().clone());
-        modules::require_function(&mut self.context, &cwd, None)
-            .expect("a require function is made")
+        self.global_require_in(&cwd)
+    }
+
+    /// [`Self::global_require`] resolving relative names against `dir`: a page's `require`
+    /// resolves against the folder of the page.
+    pub fn global_require_in(&mut self, dir: &Path) -> JsValue {
+        modules::require_function(&mut self.context, dir, None).expect("a require function is made")
     }
 
     /// Runs `source` in the Node-selected format at `filename`: CommonJS exports or the

@@ -12,6 +12,9 @@
 //!
 //! Lifted from su-editor's Obsidian host.
 
+mod markup;
+use markup::{Tag, cdata, comment, declaration};
+
 use crate::dom::{Dom, Namespace, NodeId, NodeKind, ShadowMode, SlotAssignment};
 
 const VOID: &[&str] = &[
@@ -86,19 +89,132 @@ pub fn parse_into(dom: &mut Dom, parent: NodeId, markup: &str) {
     parse(dom, parent, markup, Context::Fragment);
 }
 
-/// Reads a whole page into a document made with [`Dom::create_html_document`].
-pub fn parse_document(dom: &mut Dom, document: NodeId, markup: &str) {
-    let Some(html) = dom
+/// Same, for a fragment whose scripts run when it is put in a page (a range's contextual
+/// fragment; `innerHTML`'s never do).
+pub fn parse_runnable(dom: &mut Dom, parent: NodeId, markup: &str) {
+    parse_into(dom, parent, markup);
+    dom.let_scripts_run(parent);
+}
+
+/// The three a whole document's markup goes between, when `document` has them.
+fn document_context(dom: &Dom, document: NodeId) -> Option<(Context, NodeId)> {
+    let html = dom
         .children(document)
         .iter()
         .copied()
-        .find(|c| dom.get(*c).and_then(|n| n.tag()) == Some("html"))
-    else {
-        return parse_into(dom, document, markup);
-    };
+        .find(|c| dom.get(*c).and_then(|n| n.tag()) == Some("html"))?;
     let head = dom.first_tag(html, "head").unwrap_or(html);
     let body = dom.first_tag(html, "body").unwrap_or(html);
-    parse(dom, body, markup, Context::Document { html, head, body });
+    Some((Context::Document { html, head, body }, body))
+}
+
+/// Reads a whole page into a document made with [`Dom::create_html_document`].
+pub fn parse_document(dom: &mut Dom, document: NodeId, markup: &str) {
+    let Some((context, body)) = document_context(dom, document) else {
+        return parse_into(dom, document, markup);
+    };
+    parse(dom, body, markup, context);
+}
+
+/// What a [`StreamParser`] needs of its caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// All the markup given has been read; more may come, or [`StreamParser::finish`].
+    NeedMore,
+    /// A `<script>` is complete and in the tree: the page runs it, then steps again.
+    Script(NodeId),
+    /// The markup has ended and been read to the end.
+    Done,
+}
+
+/// A whole page read as it arrives, stopping at each `<script>` so the page can run it before the
+/// markup after it is read — and so what it `document.write`s goes in at that point.
+pub struct StreamParser {
+    parser: Parser,
+    /// The markup given and not yet read.
+    text: String,
+    /// How much of the front of `text` scripts wrote (`document.write`).
+    inserted: usize,
+    /// How many of those written bytes lie after the insertion point: the next write goes at
+    /// `inserted - tail`. HTML's "insertion point", kept as a distance from the end of what was
+    /// written, which neither the parser reading nor a write at the point changes.
+    tail: usize,
+    eof: bool,
+}
+
+impl StreamParser {
+    /// A parse into `document`'s `<html>` (a document made with [`Dom::create_html_document`]).
+    pub fn new(dom: &Dom, document: NodeId) -> Self {
+        let (context, parent) =
+            document_context(dom, document).unwrap_or((Context::Fragment, document));
+        Self {
+            parser: Parser::new(dom, parent, context),
+            text: String::new(),
+            inserted: 0,
+            tail: 0,
+            eof: false,
+        }
+    }
+
+    /// More of the markup has arrived.
+    pub fn feed(&mut self, chunk: &str) {
+        self.text.push_str(chunk);
+    }
+
+    /// The markup has ended.
+    pub fn finish(&mut self) {
+        self.eof = true;
+    }
+
+    /// Reads on to the next `<script>`, or as far as the markup given goes.
+    pub fn step(&mut self, dom: &mut Dom) -> Step {
+        let feed = Feed {
+            pause: true,
+            eof: self.eof,
+        };
+        let (used, script) = self.parser.scan(dom, &self.text, feed);
+        self.text.drain(..used);
+        self.inserted = self.inserted.saturating_sub(used);
+        self.tail = self.tail.min(self.inserted);
+        match script {
+            Some(script) => Step::Script(script),
+            None if self.eof && self.text.is_empty() => Step::Done,
+            None => Step::NeedMore,
+        }
+    }
+
+    /// `document.write` while a script runs: the text goes in at the insertion point, after
+    /// what earlier writes put there.
+    pub fn insert(&mut self, text: &str) {
+        self.text.insert_str(self.inserted - self.tail, text);
+        self.inserted += text.len();
+    }
+
+    /// A parser-inserted script is about to run: what it writes goes right after it. Answers
+    /// what to give [`StreamParser::leave_script`] when it has run.
+    pub fn enter_script(&mut self) -> usize {
+        std::mem::replace(&mut self.tail, self.inserted)
+    }
+
+    /// The script is done: writes go where they went before it.
+    pub fn leave_script(&mut self, saved: usize) {
+        self.tail = saved;
+    }
+
+    /// Reads what was [`inserted`](StreamParser::insert) up to the insertion point and no more,
+    /// as far as it goes: a script it writes runs before `document.write` returns. What lies
+    /// after the point is an outer script's text, read when that script is done.
+    pub fn step_inserted(&mut self, dom: &mut Dom) -> Step {
+        let feed = Feed {
+            pause: true,
+            eof: false,
+        };
+        let point = self.inserted - self.tail;
+        let (used, script) = self.parser.scan(dom, &self.text[..point], feed);
+        self.text.drain(..used);
+        self.inserted -= used;
+        script.map_or(Step::NeedMore, Step::Script)
+    }
 }
 
 struct Open {
@@ -107,7 +223,7 @@ struct Open {
     namespace: Namespace,
 }
 
-fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
+fn open_stack(dom: &Dom, parent: NodeId) -> Vec<Open> {
     let parent_namespace = dom.get(parent).map_or(Namespace::Html, |n| {
         if n.is_element() {
             n.namespace
@@ -115,7 +231,7 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
             Namespace::Html
         }
     });
-    let mut stack: Vec<Open> = vec![Open {
+    vec![Open {
         id: parent,
         tag: dom
             .get(parent)
@@ -123,106 +239,66 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
             .unwrap_or("")
             .to_owned(),
         namespace: parent_namespace,
-    }];
-    // In a whole document, what comes before `<body>` that belongs in `<head>` goes there.
-    let mut in_body = !matches!(context, Context::Document { .. });
-    let mut rest = markup;
-    while !rest.is_empty() {
-        let Some(lt) = rest.find('<') else {
-            push_text(dom, &mut stack, rest, true, context, &mut in_body);
-            break;
-        };
-        if lt > 0 {
-            push_text(dom, &mut stack, &rest[..lt], true, context, &mut in_body);
+    }]
+}
+
+/// How far a parse reads, and what it stops for.
+#[derive(Clone, Copy)]
+struct Feed {
+    /// Stop after a `<script>` element is complete: the page runs it before reading on.
+    pause: bool,
+    /// No more markup will come: what is unfinished is finished as it stands.
+    eof: bool,
+}
+
+/// A parse in progress: the open elements and where the markup is being put. It reads what it is
+/// given as far as it can, and is picked up where it stopped.
+struct Parser {
+    stack: Vec<Open>,
+    /// In a whole document, what comes before `<body>` that belongs in `<head>` goes there.
+    in_body: bool,
+    context: Context,
+}
+
+fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
+    let mut parser = Parser::new(dom, parent, context);
+    parser.scan(
+        dom,
+        markup,
+        Feed {
+            pause: false,
+            eof: true,
+        },
+    );
+}
+
+impl Parser {
+    fn new(dom: &Dom, parent: NodeId, context: Context) -> Self {
+        Self {
+            stack: open_stack(dom, parent),
+            in_body: !matches!(context, Context::Document { .. }),
+            context,
         }
-        rest = &rest[lt..];
-        if let Some(after) = rest.strip_prefix("<!--") {
-            let (data, next) = match after.find("-->") {
-                Some(end) => (&after[..end], &after[end + 3..]),
-                None => (after, ""),
-            };
-            let comment = dom.create_comment(data);
-            dom.append(current(&stack), comment);
-            rest = next;
-            continue;
-        }
-        if let Some(after) = rest.strip_prefix("<![CDATA[") {
-            let (data, next) = match after.find("]]>") {
-                Some(end) => (&after[..end], &after[end + 3..]),
-                None => (after, ""),
-            };
-            if stack.last().is_some_and(|o| o.namespace != Namespace::Html) {
-                push_text(dom, &mut stack, data, false, context, &mut in_body);
-            } else {
-                let comment = dom.create_comment(&format!("[CDATA[{data}]]"));
-                dom.append(current(&stack), comment);
-            }
-            rest = next;
-            continue;
-        }
-        if rest.starts_with("<!") || rest.starts_with("<?") {
-            let end = rest.find('>').unwrap_or(rest.len());
-            let inside = &rest[2..end.max(2)];
-            if let Some(name) = inside
-                .get(..7)
-                .filter(|d| d.eq_ignore_ascii_case("doctype"))
-                .map(|_| inside[7..].trim())
-            {
-                if let Context::Document { .. } = context {
-                    let document = dom.root_of(parent);
-                    if dom.children(document).iter().all(|c| {
-                        !matches!(dom.get(*c).map(|n| &n.kind), Some(NodeKind::Doctype(_)))
-                    }) {
-                        let doctype =
-                            dom.create_doctype(name.split_whitespace().next().unwrap_or("html"));
-                        let first = dom.children(document).first().copied();
-                        dom.insert_before(document, doctype, first);
-                    }
-                }
-            } else {
-                let comment = dom.create_comment(inside.trim_start_matches('-'));
-                dom.append(current(&stack), comment);
-            }
-            rest = rest.get(end + 1..).unwrap_or("");
-            continue;
-        }
-        // `<` not followed by a tag name is text.
-        let opens_tag = rest[1..]
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
-        if !opens_tag {
-            push_text(dom, &mut stack, "<", false, context, &mut in_body);
-            rest = &rest[1..];
-            continue;
-        }
-        let Some(gt) = find_tag_end(rest) else {
-            // An unclosed tag at the end is dropped, as a browser drops it.
-            break;
-        };
-        let inside = &rest[1..gt];
-        rest = &rest[gt + 1..];
-        if let Some(name) = inside.strip_prefix('/') {
-            let name = name
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            close(dom, &mut stack, &name, context, &mut in_body);
-            continue;
-        }
-        let self_closing = inside.trim_end().ends_with('/');
-        let inside = inside.trim_end().trim_end_matches('/');
-        let (raw_name, attrs) = split_name(inside);
-        let name = raw_name.to_ascii_lowercase();
-        // A whole document's own three.
+    }
+
+    /// A whole document's own `<html>`, `<head>` and `<body>`: what they say lands on the
+    /// elements the document has, and what is written before the body goes to the head.
+    /// Answers whether the tag was one of them and is done with.
+    fn route(
+        stack: &mut Vec<Open>,
+        in_body: &mut bool,
+        context: Context,
+        dom: &mut Dom,
+        name: &str,
+        attrs: &str,
+    ) -> bool {
         if let Context::Document { html, head, body } = context {
-            match name.as_str() {
+            match name {
                 "html" => {
                     set_attrs(dom, html, attrs, Namespace::Html, true);
-                    continue;
+                    return true;
                 }
-                "head" if !in_body => {
+                "head" if !*in_body => {
                     set_attrs(dom, head, attrs, Namespace::Html, true);
                     stack.truncate(1);
                     stack[0] = Open {
@@ -230,21 +306,21 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
                         tag: "head".into(),
                         namespace: Namespace::Html,
                     };
-                    continue;
+                    return true;
                 }
                 "body" => {
                     set_attrs(dom, body, attrs, Namespace::Html, true);
-                    in_body = true;
+                    *in_body = true;
                     stack.truncate(1);
                     stack[0] = Open {
                         id: body,
                         tag: "body".into(),
                         namespace: Namespace::Html,
                     };
-                    continue;
+                    return true;
                 }
-                "head" => continue,
-                tag if !in_body
+                "head" => return true,
+                tag if !*in_body
                     && matches!(
                         tag,
                         "meta" | "title" | "link" | "style" | "script" | "base" | "noscript"
@@ -262,8 +338,8 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
                         };
                     }
                 }
-                _ if !in_body => {
-                    in_body = true;
+                _ if !*in_body => {
+                    *in_body = true;
                     stack.truncate(1);
                     stack[0] = Open {
                         id: body,
@@ -273,79 +349,253 @@ fn parse(dom: &mut Dom, parent: NodeId, markup: &str, context: Context) {
                 }
                 _ => {}
             }
-        } else if matches!(name.as_str(), "html" | "head" | "body") {
-            continue;
+        } else if matches!(name, "html" | "head" | "body") {
+            return true;
         }
-        let namespace = match (stack.last().map(|o| o.namespace), name.as_str()) {
-            (_, "svg") => Namespace::Svg,
-            (_, "math") => Namespace::MathMl,
-            // HTML inside SVG's `foreignObject` is HTML again.
-            (Some(Namespace::Svg), _) if stack.last().is_some_and(|o| o.tag == "foreignobject") => {
-                Namespace::Html
-            }
-            (Some(ns @ (Namespace::Svg | Namespace::MathMl)), _) => ns,
-            _ => Namespace::Html,
-        };
-        if namespace == Namespace::Html {
-            imply_end_tags(dom, &mut stack, &name);
-        }
-        // Rows written straight into a table are in a body of it.
-        if namespace == Namespace::Html
-            && name == "tr"
-            && stack.last().is_some_and(|o| o.tag == "table")
-        {
-            let tbody = dom.create_element("tbody");
-            dom.append(current(&stack), tbody);
-            stack.push(Open {
-                id: tbody,
-                tag: "tbody".into(),
-                namespace,
-            });
-        }
-        if open_shadow_template(dom, &mut stack, context, &name, attrs) {
-            continue;
-        }
-        let element = dom.create_element_ns(&name, namespace);
-        set_attrs(dom, element, attrs, namespace, false);
-        dom.append(current(&stack), element);
-        let closes = if namespace == Namespace::Html {
-            VOID.contains(&name.as_str())
-        } else {
-            self_closing
-        };
-        if closes {
-            continue;
-        }
-        if namespace == Namespace::Html
-            && let Some(decode_refs) = raw_text(&name)
-        {
-            // Text up to the matching end tag, whatever it holds.
-            let end = find_end_tag(rest, &name);
-            let content = &rest[..end];
-            let text = if decode_refs {
-                decode(content)
-            } else {
-                content.to_owned()
+        false
+    }
+
+    /// Reads `text` as far as it goes, into the open elements: answers how much of it was read
+    /// and, when `feed` pauses at scripts, the `<script>` that was just completed.
+    fn scan(&mut self, dom: &mut Dom, text: &str, feed: Feed) -> (usize, Option<NodeId>) {
+        let context = self.context;
+        let stack = &mut self.stack;
+        let in_body = &mut self.in_body;
+        let total = text.len();
+        let mut rest = text;
+        while !rest.is_empty() {
+            let Some(lt) = rest.find('<') else {
+                push_text(dom, stack, rest, true, context, in_body);
+                rest = "";
+                break;
             };
-            // A newline right after `<textarea>` or `<pre>` is not part of its text.
-            let text = if name == "textarea" {
-                text.strip_prefix('\n').unwrap_or(&text).to_owned()
-            } else {
-                text
-            };
-            if !text.is_empty() {
-                let node = dom.create_text(&text);
-                dom.append(element, node);
+            if lt > 0 {
+                push_text(dom, stack, &rest[..lt], true, context, in_body);
             }
-            rest = rest[end..].find('>').map_or("", |gt| &rest[end + gt + 1..]);
-            continue;
+            rest = &rest[lt..];
+            if let Some(after) = rest.strip_prefix("<!--") {
+                let Some(next) = comment(dom, stack, after, feed.eof) else {
+                    break;
+                };
+                rest = next;
+                continue;
+            }
+            if let Some(after) = rest.strip_prefix("<![CDATA[") {
+                rest = cdata(dom, stack, after, context, in_body);
+                continue;
+            }
+            if rest.starts_with("<!") || rest.starts_with("<?") {
+                rest = declaration(dom, stack, context, rest);
+                continue;
+            }
+            // `<` not followed by a tag name is text.
+            let opens_tag = rest[1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+            if !opens_tag {
+                push_text(dom, stack, "<", false, context, in_body);
+                rest = &rest[1..];
+                continue;
+            }
+            match tag(dom, stack, in_body, context, rest, feed) {
+                Tag::Read(next) => rest = next,
+                Tag::Wait(at) => {
+                    rest = at;
+                    break;
+                }
+                Tag::Script(next, element) => return (total - next.len(), Some(element)),
+            }
         }
+        (total - rest.len(), None)
+    }
+}
+
+/// The tag at the start of `rest`, an end tag or the start of an element, with what the tag
+/// brings (a raw text element's text, a `<script>` the page runs).
+fn tag<'a>(
+    dom: &mut Dom,
+    stack: &mut Vec<Open>,
+    in_body: &mut bool,
+    context: Context,
+    mut rest: &'a str,
+    feed: Feed,
+) -> Tag<'a> {
+    let Some(gt) = find_tag_end(rest) else {
+        // An unclosed tag at the end is dropped, as a browser drops it; before the end it
+        // waits for the rest of the markup.
+        return Tag::Wait(if feed.eof { "" } else { rest });
+    };
+    let tag_start = rest;
+    let inside = &rest[1..gt];
+    rest = &rest[gt + 1..];
+    if let Some(name) = inside.strip_prefix('/') {
+        let name = name
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        close(dom, stack, &name, context, in_body);
+        return Tag::Read(rest);
+    }
+    let self_closing = inside.trim_end().ends_with('/');
+    let inside = inside.trim_end().trim_end_matches('/');
+    let (raw_name, attrs) = split_name(inside);
+    let name = raw_name.to_ascii_lowercase();
+    if Parser::route(stack, in_body, context, dom, &name, attrs) {
+        return Tag::Read(rest);
+    }
+    let start = Start {
+        name: &name,
+        attrs,
+        self_closing,
+        tag_start,
+        rest,
+    };
+    open_element(dom, stack, context, &start, feed)
+}
+
+/// A start tag, read: its name and attributes, and the markup from its `<` and after it.
+struct Start<'n, 'a> {
+    name: &'n str,
+    attrs: &'a str,
+    self_closing: bool,
+    tag_start: &'a str,
+    rest: &'a str,
+}
+
+/// The namespace a start tag's element is in, from the element it is put in.
+fn namespace_of(stack: &[Open], name: &str) -> Namespace {
+    match (stack.last().map(|o| o.namespace), name) {
+        (_, "svg") => Namespace::Svg,
+        (_, "math") => Namespace::MathMl,
+        // HTML inside SVG's `foreignObject` is HTML again.
+        (Some(Namespace::Svg), _) if stack.last().is_some_and(|o| o.tag == "foreignobject") => {
+            Namespace::Html
+        }
+        (Some(ns @ (Namespace::Svg | Namespace::MathMl)), _) => ns,
+        _ => Namespace::Html,
+    }
+}
+
+/// The element a start tag opens: it goes in the tree and, unless it is empty, on the stack; a
+/// raw text element takes its text with it.
+fn open_element<'a>(
+    dom: &mut Dom,
+    stack: &mut Vec<Open>,
+    context: Context,
+    start: &Start<'_, 'a>,
+    feed: Feed,
+) -> Tag<'a> {
+    let (name, attrs, rest) = (start.name, start.attrs, start.rest);
+    let namespace = namespace_of(stack, name);
+    if namespace == Namespace::Html {
+        imply_end_tags(dom, stack, name);
+    }
+    // Rows written straight into a table are in a body of it.
+    if namespace == Namespace::Html
+        && name == "tr"
+        && stack.last().is_some_and(|o| o.tag == "table")
+    {
+        let tbody = dom.create_element("tbody");
+        dom.append(current(stack), tbody);
         stack.push(Open {
-            id: element,
-            tag: name,
+            id: tbody,
+            tag: "tbody".into(),
             namespace,
         });
     }
+    if open_shadow_template(dom, stack, context, name, attrs) {
+        return Tag::Read(rest);
+    }
+    if namespace == Namespace::Html
+        && raw_text(name).is_some()
+        && !feed.eof
+        && find_end_tag(rest, name) == rest.len()
+    {
+        // The element's text has not all arrived.
+        return Tag::Wait(start.tag_start);
+    }
+    let element = dom.create_element_ns(name, namespace);
+    mark_made_by_parser(dom, stack, element, name, namespace, feed);
+    set_attrs(dom, element, attrs, namespace, false);
+    dom.append(current(stack), element);
+    let closes = if namespace == Namespace::Html {
+        VOID.contains(&name)
+    } else {
+        start.self_closing
+    };
+    if closes {
+        return Tag::Read(rest);
+    }
+    if namespace == Namespace::Html
+        && let Some(decode_refs) = raw_text(name)
+    {
+        let rest = fill_raw_text(dom, element, name, decode_refs, rest);
+        if feed.pause && name == "script" && !stack.iter().any(|o| o.tag == "template") {
+            return Tag::Script(rest, element);
+        }
+        return Tag::Read(rest);
+    }
+    stack.push(Open {
+        id: element,
+        tag: name.to_owned(),
+        namespace,
+    });
+    Tag::Read(rest)
+}
+
+/// What the parser notes of the element it made. A script of the page's own parse has its
+/// "already started" flag set, for the parser runs it itself, except in a template: there it
+/// never runs, and runs when put in a page, as it does in a browser. A `<link>` the page's
+/// parser made may hold back scripts.
+fn mark_made_by_parser(
+    dom: &mut Dom,
+    stack: &[Open],
+    element: NodeId,
+    name: &str,
+    namespace: Namespace,
+    feed: Feed,
+) {
+    if namespace != Namespace::Html {
+        return;
+    }
+    let in_template = stack.iter().any(|o| o.tag == "template");
+    if name == "script" && !(feed.pause && in_template) {
+        dom.mark_started(element);
+    }
+    if name == "link" && feed.pause {
+        dom.mark_parser_made(element);
+    }
+}
+
+/// Puts the text of a raw text element (up to its end tag, whatever it holds) in `element`, and
+/// answers the markup after the end tag.
+fn fill_raw_text<'a>(
+    dom: &mut Dom,
+    element: NodeId,
+    name: &str,
+    decode_refs: bool,
+    rest: &'a str,
+) -> &'a str {
+    let end = find_end_tag(rest, name);
+    let content = &rest[..end];
+    let text = if decode_refs {
+        decode(content)
+    } else {
+        content.to_owned()
+    };
+    // A newline right after `<textarea>` or `<pre>` is not part of its text.
+    let text = if name == "textarea" {
+        text.strip_prefix('\n').unwrap_or(&text).to_owned()
+    } else {
+        text
+    };
+    if !text.is_empty() {
+        let node = dom.create_text(&text);
+        dom.append(element, node);
+    }
+    rest[end..].find('>').map_or("", |gt| &rest[end + gt + 1..])
 }
 
 fn current(stack: &[Open]) -> NodeId {
@@ -1154,5 +1404,93 @@ mod tests {
         assert_eq!(inner(&dom, body), "<h1>Hi</h1>");
         assert_eq!(dom.get_attr(body, "class").as_deref(), Some("b"));
         assert!(outer(&dom, document).starts_with("<!DOCTYPE html><html lang=\"en\">"));
+    }
+
+    fn streamed(chunks: &[&str]) -> (Dom, StreamParser, NodeId) {
+        let mut dom = Dom::new();
+        let (document, _, _, body) = dom.create_html_document();
+        let mut parser = StreamParser::new(&dom, document);
+        for chunk in chunks {
+            parser.feed(chunk);
+        }
+        (dom, parser, body)
+    }
+
+    #[test]
+    fn the_stream_stops_at_each_script_with_the_page_so_far() {
+        let (mut dom, mut parser, body) =
+            streamed(&["<p>a</p><script>one</script><p>b</p><script>two</script><p>c</p>"]);
+        parser.finish();
+        let Step::Script(first) = parser.step(&mut dom) else {
+            panic!("a script")
+        };
+        assert_eq!(dom.text_content(first), "one");
+        assert_eq!(inner(&dom, body), "<p>a</p><script>one</script>");
+        assert!(dom.is_started(first));
+        let Step::Script(_) = parser.step(&mut dom) else {
+            panic!("another script")
+        };
+        assert_eq!(parser.step(&mut dom), Step::Done);
+        assert_eq!(
+            dom.query(body, "p:last-of-type")
+                .map(|p| dom.text_content(p)),
+            Some("c".into())
+        );
+    }
+
+    #[test]
+    fn what_a_script_writes_goes_in_where_the_parser_is() {
+        let (mut dom, mut parser, body) = streamed(&["<p>x</p><script>w</script><i>after</i>"]);
+        parser.finish();
+        assert!(matches!(parser.step(&mut dom), Step::Script(_)));
+        parser.insert("<b>written</b>");
+        assert_eq!(parser.step(&mut dom), Step::Done);
+        assert_eq!(
+            inner(&dom, body),
+            "<p>x</p><script>w</script><b>written</b><i>after</i>"
+        );
+    }
+
+    #[test]
+    fn a_tag_split_between_chunks_waits_for_its_end() {
+        let (mut dom, mut parser, body) = streamed(&["<p>x</p><div cla"]);
+        assert_eq!(parser.step(&mut dom), Step::NeedMore);
+        assert_eq!(inner(&dom, body), "<p>x</p>");
+        parser.feed("ss=a>y</div><script>un");
+        assert_eq!(parser.step(&mut dom), Step::NeedMore);
+        assert_eq!(inner(&dom, body), "<p>x</p><div class=\"a\">y</div>");
+        parser.feed("finished</script>");
+        parser.finish();
+        assert!(matches!(parser.step(&mut dom), Step::Script(_)));
+        assert_eq!(parser.step(&mut dom), Step::Done);
+    }
+
+    #[test]
+    fn scripts_made_by_a_fragment_parse_never_run() {
+        let mut dom = Dom::new();
+        let div = dom.create_element("div");
+        parse_into(&mut dom, div, "<script>x</script>");
+        let script = dom.query(div, "script").unwrap();
+        assert!(dom.is_started(script));
+    }
+
+    #[test]
+    fn a_copy_of_a_script_that_has_run_has_run_and_a_template_script_has_not() {
+        let (mut dom, mut parser, body) = streamed(&[
+            "<script>one</script><template><script>two</script></template><link rel=x><p>c</p>",
+        ]);
+        parser.finish();
+        let Step::Script(first) = parser.step(&mut dom) else {
+            panic!("a script")
+        };
+        let copy = dom.clone_node(first, true).unwrap();
+        assert!(dom.is_started(copy));
+        assert_eq!(parser.step(&mut dom), Step::Done);
+        let inert = dom.query(body, "template script").unwrap();
+        assert!(!dom.is_started(inert));
+        let again = dom.clone_node(inert, true).unwrap();
+        assert!(!dom.is_started(again));
+        let link = dom.query(body, "link").unwrap();
+        assert!(dom.is_parser_made(link));
     }
 }

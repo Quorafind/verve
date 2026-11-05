@@ -33,17 +33,18 @@ pub mod field;
 pub mod html;
 mod inner_text;
 mod input;
+mod load;
 mod media;
 mod rect;
 mod snapshot;
 mod state;
+mod storage;
 mod window_state;
 
 pub use window_state::{Align, FontFaceId, FontOutcome, ScrollRequest};
 
 use std::cell::{Ref, RefCell};
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -53,12 +54,14 @@ pub use css::{Computed, Environment, Style};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
 pub use field::Draft;
 pub use input::{Key, Modifiers, Pointer};
+pub use load::{Destination, LoadError, LoadEvent, LoadRequest, LoadResult, Loader, Ready};
 pub use media::{
     MediaCommand, MediaCommandKind, MediaError, MediaSettings, MediaState, MediaUpdate,
 };
 pub use rect::Rect;
 pub use snapshot::{Snapshot, SnapshotData};
 pub use state::FrameClock;
+pub use storage::{FileStorage, StorageBackend};
 
 use state::{Shared, SheetOwner, SheetRecord, State, shared};
 
@@ -76,8 +79,12 @@ pub enum Request {
     },
     /// `location.reload()`.
     Reload,
-    /// `window.open(url)`.
-    Open(String),
+    /// `window.open(url, name, features)`, the address resolved.
+    Open {
+        url: String,
+        name: String,
+        features: String,
+    },
     /// `navigator.clipboard.writeText`, `document.execCommand('copy')`.
     CopyText(String),
     /// `alert`, `confirm` and `prompt`'s message (they answer as a browser that blocked them).
@@ -100,33 +107,6 @@ pub enum Request {
     /// An `<img src>` needs its bytes: the embedder fetches them and calls
     /// [`Document::set_image_bytes`] — or [`Document::fail_image`] when there are none.
     Image(String),
-}
-
-/// Where `localStorage` lives between runs.
-pub trait StorageBackend {
-    fn load(&self) -> std::collections::BTreeMap<String, String>;
-    fn save(&self, items: &std::collections::BTreeMap<String, String>);
-}
-
-/// `localStorage` kept as one JSON file.
-pub struct FileStorage(pub PathBuf);
-
-impl StorageBackend for FileStorage {
-    fn load(&self) -> std::collections::BTreeMap<String, String> {
-        std::fs::read_to_string(&self.0)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    }
-
-    fn save(&self, items: &std::collections::BTreeMap<String, String>) {
-        if let Some(parent) = self.0.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(text) = serde_json::to_string(items) {
-            let _ = std::fs::write(&self.0, text);
-        }
-    }
 }
 
 /// What the window is.
@@ -154,6 +134,8 @@ pub struct Options {
     pub storage: Option<Box<dyn StorageBackend>>,
     /// `document.title` when the page has no `<title>`.
     pub title: String,
+    /// What the page loads its scripts, sheets and images through; `None` loads nothing.
+    pub loader: Option<Box<dyn Loader>>,
 }
 
 impl Default for Options {
@@ -170,6 +152,7 @@ impl Default for Options {
             stylesheets: Vec::new(),
             storage: None,
             title: String::new(),
+            loader: None,
         }
     }
 }
@@ -178,13 +161,15 @@ impl Default for Options {
 /// and the classes and functions of the web platform (see the README for the list). Answers
 /// the handle whoever draws the document keeps. A runtime has one document; installing again
 /// answers the one it has.
-pub fn install(runtime: &mut verve::Runtime, options: Options) -> Result<Document, String> {
+pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Document, String> {
     if let Some(document) = Document::of(runtime) {
         return Ok(document);
     }
     let url = url::Url::parse(&options.url)
         .or_else(|_| url::Url::parse("about:blank"))
         .map_err(|e| e.to_string())?;
+    // A page reads no local file until a `file:` document has started loading.
+    runtime.set_local_modules(false);
     let context = runtime.context();
     let state: Shared = Rc::new(RefCell::new(State::new(url)));
     {
@@ -198,6 +183,8 @@ pub fn install(runtime: &mut verve::Runtime, options: Options) -> Result<Documen
         };
         s.frame_clock = options.frames;
         s.title_fallback = options.title.clone();
+        s.load.loader = options.loader.take().map(Rc::from);
+        s.load.active = s.load.loader.is_some();
         let document = s.dom.document;
         if options.user_agent_sheet {
             s.sheets.push(SheetRecord {
@@ -233,6 +220,7 @@ fn install_classes(context: &mut Context, options: &Options) -> JsResult<()> {
     bind::document::install(context)?;
     bind::window::install(context, options)?;
     bind::fetch::install(context)?;
+    load::install(context)?;
     bind::platform::install(context)?;
     bind::observers::install(context)?;
     bind::xhr::install(context)?;

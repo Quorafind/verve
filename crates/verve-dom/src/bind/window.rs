@@ -26,7 +26,7 @@ use crate::state::{FrameClock, shared};
 /// Goes to `href`: within the page (only the fragment differs) the address changes and
 /// `hashchange` is heard; anywhere else, the embedder is asked.
 pub(crate) fn http_url(context: &mut Context, href: &str) -> JsResult<url::Url> {
-    let resolved = shared(context).borrow().url.join(href).ok();
+    let resolved = shared(context).borrow().base_url().join(href).ok();
     match resolved {
         Some(url) if matches!(url.scheme(), "http" | "https") => Ok(url),
         _ => Err(dom_error(
@@ -37,8 +37,23 @@ pub(crate) fn http_url(context: &mut Context, href: &str) -> JsResult<url::Url> 
     }
 }
 
+/// What a page's own navigation to an address it may not go to comes to: Chromium throws
+/// nothing, it says why on the console and the page stays. Answers whether the address is the
+/// network's, which goes on.
+fn refuse(context: &mut Context, url: &url::Url) -> bool {
+    let message = match url.scheme() {
+        "http" | "https" => return true,
+        "data" => format!("Not allowed to navigate top frame to data URL: {url}"),
+        "file" => format!("Not allowed to load local resource: {url}"),
+        // `blob:` and the schemes left to other programs: Chromium says nothing.
+        _ => return false,
+    };
+    verve::console_line(context, verve::Level::Error, message);
+    false
+}
+
 pub fn navigate(context: &mut Context, href: &str, replace: bool) -> JsResult<()> {
-    let resolved = shared(context).borrow().url.join(href).ok();
+    let resolved = shared(context).borrow().base_url().join(href).ok();
     let Some(new) = resolved else {
         return Err(dom_error(context, "目标地址无效", "SyntaxError"));
     };
@@ -51,7 +66,9 @@ pub fn navigate(context: &mut Context, href: &str, replace: bool) -> JsResult<()
         a == b && new.fragment().is_some()
     };
     if !same_page {
-        http_url(context, new.as_str())?;
+        if !crate::load::navigable(context, &new) && !refuse(context, &new) {
+            return Ok(());
+        }
         let state = shared(context);
         let mut state = state.borrow_mut();
         state.requests.push(crate::Request::Navigate {
@@ -191,7 +208,7 @@ fn change_history(context: &mut Context, args: &[JsValue], replace: bool) -> JsR
     let state = shared(context);
     let mut state = state.borrow_mut();
     let new = match url {
-        Some(url) => match state.url.join(&url) {
+        Some(url) => match state.base_url().join(&url) {
             Ok(new) if new.origin() == state.url.origin() => new,
             _ => {
                 drop(state);
@@ -751,10 +768,13 @@ const WINDOW_FUNCTIONS: &[Method] = &[
     ("open", 3, |_, args, cx| {
         let url = opt_string(args, 0, cx)?.unwrap_or_default();
         let resolved = http_url(cx, &url)?.to_string();
-        shared(cx)
-            .borrow_mut()
-            .requests
-            .push(crate::Request::Open(resolved));
+        let name = opt_string(args, 1, cx)?.unwrap_or_default();
+        let features = opt_string(args, 2, cx)?.unwrap_or_default();
+        shared(cx).borrow_mut().requests.push(crate::Request::Open {
+            url: resolved,
+            name,
+            features,
+        });
         Ok(JsValue::null())
     }),
     ("close", 0, |_, _, _| Ok(JsValue::undefined())),

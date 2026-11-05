@@ -21,7 +21,10 @@ use crate::beat;
 use crate::hub::{Hub, Program};
 use crate::ids::{ContentsId, WindowId};
 use crate::launcher::Target;
-use crate::msg::{AppEvent, FromRenderer, FromShell, ToShell, WindowEvent, WindowOp};
+use crate::msg::{
+    AppEvent, FromRenderer, FromShell, LoadOptions, PageEvent, ToRenderer, ToShell, WindowEvent,
+    WindowOp,
+};
 use crate::probe;
 
 /// The browser process: its runtime, the API the app's script calls, and what ends the app.
@@ -184,7 +187,10 @@ impl MainGuest {
                 self.runtime.run_microtasks();
                 self.sweep_at = api::ipc_main::watch_unanswered(self.runtime.context());
             }
-            FromRenderer::Dom(verve_dom::Request::Title(title)) => {
+            // The window is titled by its page, as in Electron; P13 adds 'page-title-updated',
+            // which a listener may cancel.
+            FromRenderer::Dom(verve_dom::Request::Title(title))
+            | FromRenderer::Lifecycle(PageEvent::TitleUpdated(title)) => {
                 if let Some(window) = self.hub.window_of(contents) {
                     self.hub.to_shell(ToShell::Window {
                         window,
@@ -192,12 +198,40 @@ impl MainGuest {
                     });
                 }
             }
+            // A page that goes to another address (`location.href`, a link, a form) asks the
+            // main process, which lets it.
+            FromRenderer::Reload { url } => self.page_reloads(contents, url),
+            FromRenderer::Dom(verve_dom::Request::Navigate { url, .. }) => {
+                self.page_navigates(contents, url);
+            }
             // `'render-process-gone'` is `webContents`' event, P13's; until then it is said.
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
             }
             _ => {}
         }
+    }
+
+    /// Page `contents` asks to go to `url`: the main process's say in it. P13 wraps this in
+    /// `will-frame-navigate` and `will-navigate`, which a listener may cancel; until then every
+    /// navigation goes through, and the page is given a document of its own.
+    fn page_navigates(&mut self, contents: ContentsId, url: String) {
+        self.load_for_page(contents, url);
+    }
+
+    /// Page `contents` asks to be loaded again (`location.reload()`): no `will-navigate`, which
+    /// P13 leaves out for a reload as Electron does, and a document of its own all the same.
+    fn page_reloads(&mut self, contents: ContentsId, url: String) {
+        self.load_for_page(contents, url);
+    }
+
+    /// Has page `contents` load `url` in a document of its own.
+    fn load_for_page(&mut self, contents: ContentsId, url: String) {
+        let load = ToRenderer::Load {
+            url,
+            options: LoadOptions::default(),
+        };
+        self.hub.to_renderer(contents, load);
     }
 
     fn window_event(&mut self, window: WindowId, event: WindowEvent) {

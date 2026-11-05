@@ -6,6 +6,13 @@
   </head>
   <body>
     <h1>Hello</h1>
-    <ul id="versions"><!--versions--></ul>
+    <ul id="versions"></ul>
+    <script>
+      for (const [name, version] of new URLSearchParams(location.search)) {
+        const item = document.createElement('li');
+        item.textContent = name + ' ' + version;
+        document.getElementById('versions').append(item);
+      }
+    </script>
   </body>
 </html>

@@ -96,7 +96,7 @@ fn set_source(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
 /// found changed, so a page adds no cost for the images it does not touch.
 pub(crate) fn sync(state: &mut State, node: NodeId) {
     let source = state.dom.get_attr(node, "src").unwrap_or_default();
-    let wanted = resolve(&state.url, &source);
+    let wanted = resolve(&state.base_url(), &source);
     let named = state
         .images
         .nodes

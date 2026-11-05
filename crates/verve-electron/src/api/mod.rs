@@ -121,10 +121,10 @@ pub(crate) fn install_state(runtime: &mut verve::Runtime, hub: Arc<Hub>) -> Rc<M
 pub(crate) fn install_page(
     runtime: &mut verve::Runtime,
     hub: Arc<Hub>,
-    contents: ContentsId,
+    page: (ContentsId, u64),
     prefs: &WebPreferences,
 ) -> JsResult<()> {
-    ipc_renderer::install(runtime.context(), hub, contents)?;
+    ipc_renderer::install(runtime.context(), hub, page)?;
     runtime.define_builtin_lazy("electron", renderer_module);
     if prefs.node_integration && !prefs.context_isolation && !prefs.sandbox {
         let require = runtime.global_require();

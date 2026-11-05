@@ -40,6 +40,11 @@ pub enum SheetOwner {
     Element(NodeId),
     /// A `new CSSStyleSheet()` adopted by the document, by its number.
     Adopted(u32),
+    /// A `<link rel=stylesheet>` in the document.
+    Link(NodeId),
+    /// A sheet the `<link>`'s `@import`s, by its path of positions (an import of an import
+    /// extends its importer's): an import comes before the sheet that imports it.
+    Import(NodeId, Vec<usize>),
 }
 
 /// An observer, and what it watches.
@@ -185,9 +190,13 @@ pub struct State {
     /// The history's entries: `pushState`'s states and their addresses, and where it stands.
     pub history: Vec<(JsValue, String)>,
     pub history_at: usize,
+    /// `base_url()` for the document as it was at a revision: (revision, address, base).
+    base_cache: std::cell::RefCell<Option<(u64, url::Url, url::Url)>>,
     pub next_id: u32,
     /// Moves when something outside the arena changed: a sheet, the viewport, the title.
     pub revision: u64,
+    /// The page's loading.
+    pub load: crate::load::Load,
 }
 
 impl State {
@@ -238,9 +247,28 @@ impl State {
             window_focused: true,
             fragments: HashMap::new(),
             history_at: 0,
+            base_cache: Default::default(),
             next_id: 1,
             revision: 0,
+            load: Default::default(),
         }
+    }
+
+    /// What relative addresses resolve against: the first `<base href>`, else the document's own.
+    pub fn base_url(&self) -> url::Url {
+        if let Some((revision, url, base)) = &*self.base_cache.borrow()
+            && *revision == self.dom.revision
+            && *url == self.url
+        {
+            return base.clone();
+        }
+        let base = self.dom.query(self.dom.document, "base[href]");
+        let href = base.and_then(|node| self.dom.get_attr(node, "href"));
+        let base = href
+            .and_then(|href| self.url.join(href.trim()).ok())
+            .unwrap_or_else(|| self.url.clone());
+        *self.base_cache.borrow_mut() = Some((self.dom.revision, self.url.clone(), base.clone()));
+        base
     }
 
     pub fn id(&mut self) -> u32 {
@@ -267,6 +295,7 @@ impl State {
     /// Reads the `<style>` elements and the adopted sheets again, when what they hold changed:
     /// answers whether the cascade's sheets changed.
     pub fn read_style_elements(&mut self) -> bool {
+        let pruned = self.prune_links();
         let revision = self.dom.styles_revision();
         let found = if self.style_revision == Some(revision) {
             None
@@ -297,7 +326,10 @@ impl State {
             .is_none_or(|found| *found == self.style_texts)
             && adopted == known_adopted
         {
-            return false;
+            if pruned {
+                self.sheets_changed();
+            }
+            return pruned;
         }
         let found = found.unwrap_or_else(|| self.style_texts.clone());
         self.sheets
@@ -318,8 +350,51 @@ impl State {
             });
         }
         self.style_texts = found;
+        self.order_sheets();
         self.sheets_changed();
         true
+    }
+
+    /// Forgets the sheets of `<link>`s that left the document.
+    fn prune_links(&mut self) -> bool {
+        let before = self.sheets.len();
+        let dom = &self.dom;
+        self.sheets.retain(|r| match r.owner {
+            SheetOwner::Link(node) | SheetOwner::Import(node, _) => dom.is_connected(node),
+            _ => true,
+        });
+        self.sheets.len() != before
+    }
+
+    /// The page's sheets in the order of their elements, those it adopted last.
+    pub(crate) fn order_sheets(&mut self) {
+        let dom = &self.dom;
+        let group = |owner: &SheetOwner| match owner {
+            SheetOwner::UserAgent | SheetOwner::Embedder(_) => 0,
+            SheetOwner::Element(_) | SheetOwner::Link(_) | SheetOwner::Import(..) => 1,
+            SheetOwner::Adopted(_) => 2,
+        };
+        // Where in the page an element's sheets are, and in what order: imports, then its own.
+        fn place(owner: &SheetOwner) -> Option<(NodeId, &[usize])> {
+            match owner {
+                SheetOwner::Element(x) | SheetOwner::Link(x) => Some((*x, &[])),
+                SheetOwner::Import(x, path) => Some((*x, path.as_slice())),
+                _ => None,
+            }
+        }
+        let before = |a: &SheetRecord, b: &SheetRecord| match (place(&a.owner), place(&b.owner)) {
+            (Some((x, px)), Some((y, py))) => dom.order(x, y).then(import_order(px, py)),
+            _ => group(&a.owner).cmp(&group(&b.owner)),
+        };
+        // An insertion sort, stable, in place: the list is nearly in order, and a sort of the
+        // standard library would be one more copy of it in the binary.
+        for i in 1..self.sheets.len() {
+            let mut at = i;
+            while at > 0 && before(&self.sheets[at - 1], &self.sheets[at]).is_gt() {
+                self.sheets.swap(at - 1, at);
+                at -= 1;
+            }
+        }
     }
 
     pub fn sheets_changed(&mut self) {
@@ -362,6 +437,21 @@ impl State {
 }
 
 /// The state, from inside a native function.
+/// How two sheets of one `<link>` go, by their paths: the imports of a sheet come before it, in
+/// the order it names them.
+fn import_order(a: &[usize], b: &[usize]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if a == b {
+        Ordering::Equal
+    } else if a.starts_with(b) {
+        Ordering::Less
+    } else if b.starts_with(a) {
+        Ordering::Greater
+    } else {
+        a.cmp(b)
+    }
+}
+
 pub fn shared(context: &Context) -> Shared {
     context
         .get_data::<Shared>()
@@ -418,6 +508,7 @@ impl State {
             self.custom.forget(*id);
         }
         crate::canvas::forget(self, gone);
+        self.load.forget(gone);
         self.template_contents
             .retain(|t, f| !gone.contains(t) && !gone.contains(f));
         if self.fullscreen.is_some_and(|id| gone.contains(&id)) {

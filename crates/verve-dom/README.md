@@ -161,6 +161,21 @@ everything of its app — CodeMirror, Markdown, the vault, views, menus, its gen
 --test dsh --test react_dev -- --ignored` runs those (set `VERVE_DOM_DSH`/`VERVE_DOM_REACT_DEV`
 to keep the installed packages somewhere of your own; about 30 MB for DSH's).
 
+## Loading a page
+
+`Options::loader` gives the realm a `Loader` (what `file:`, an `app://` scheme or the network
+are to it). `Document::navigate_initial(runtime, url)` fetches the page and `load_html` takes
+markup in hand; the embedder then calls `Document::pump_loads(runtime)` on its beat for as long
+as `is_loading()` and reads `take_load_events()` (`Started`, `Committed`, `FirstPaintable`,
+`Title`, `Icons`, `DomContentLoaded`, `Loaded`, `Failed`). The page is read by a
+`html::StreamParser` that stops at each `<script>`; scripts run in HTML's order (classic, `defer`,
+`async`, `type=module` with its graph fetched first and an `importmap`, and those a script
+inserts), a `<link rel=stylesheet>` (and its `@import`s) holds the scripts after it, `<img>` and
+`@font-face` bytes are fetched through the loader, and `readystatechange`, `DOMContentLoaded`,
+`load` and `pageshow` fire in a browser's order. Attributes such as `onload="…"` become handlers.
+`fetch` and `XMLHttpRequest` of an address the loader claims go through it. The order was
+observed in Chromium 142 (Electron 39): `tests/load.rs` and `tests/fixtures/load/`.
+
 ## Not yet
 
 - No layout: where things are is the drawer's to work out and report. Until it does, boxes
@@ -174,7 +189,8 @@ to keep the installed packages somewhere of your own; about 30 MB for DSH's).
 - CSS: `calc()`, `env()` and other functions stay as written; pseudo-elements (`::before`)
   match nothing, so generated content is not in the snapshot; `@container`, animations and
   transitions are not run (`animate()` answers a finished animation).
-- Nothing loads: `<img>`, `<link rel=stylesheet>`, `<script src>`, `<iframe>` and media fire
-  no `load`; a canvas measures text and paints nothing; no WebGL.
+- Loading is the embedder's: with an `Options::loader` (a `Loader`) the page loads as a tab's
+  does (see "Loading a page" below); without one nothing loads. `<iframe>` and media fire no
+  `load`; a canvas measures text and paints nothing; no WebGL.
 - `document.cookie` lives in memory; `XMLHttpRequest`'s synchronous requests are sent
   asynchronously.

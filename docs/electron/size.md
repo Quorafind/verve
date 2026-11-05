@@ -238,3 +238,29 @@ Where the package's own code is (`cargo bloat --release --filter verve_electron`
 The rest of the growth is `.rdata`, `.pdata` and relocations, which `cargo bloat` does not attribute. The per-module figures are
 sums of the symbols `cargo bloat` lists, rounded; the dispatch in `MainGuest::from_renderer` is the biggest single piece and was not
 shrunk.
+
+## P20: the page loader
+
+`electron/p20-page-loading`: `cargo build --release -p verve-gpui --bin electron --features jit` is 33,731,072 bytes against
+33,302,016 for `docs/electron-plan` `82079241` built the same way, +429,056 bytes (+1.29 %); the first measurement, before the
+review's fixes, was 33,638,912 (+336,896), and after the first batch 33,566,720 (+264,704). The second batch added the write
+insertion point, the attribute-driven handler/script preparation, the stylesheet ordering and blocking rules, the token-reading
+module scanner and the import map's spec checks (+164,352). The fixes took the module-graph bookkeeping into one table (`Load::mods`) and out of
+three parallel maps, and the `file:`/navigation checks replaced a longer ad-hoc one.
+
+Where it is (`cargo bloat --release --crates --filter verve_dom`; `.text`): `Document::pump_loads` with the load state machine
+inlined 42.7 KiB, `html::Parser::scan` and its tag/element functions (`scan` was split into several functions; the 13.9 KiB figure was for the earlier single one), `load::script::connected` 8.5 KiB; the
+rest is `ElectronLoader` and the `RendererGuest`/`Hub` navigation code (small), the kernel's `ImportMap` and web resolution
+(`src/esm.rs`, `src/import_map.rs`, a few KiB) and `.rdata`/`.pdata`/relocations that `cargo bloat` does not attribute. No new
+crate edge: `url`, `serde_json` and `boa_gc` were in the graph. Left in: the module-graph scanner (`load/modules.rs`) and the
+`@import` handling are the two pieces that are P20's own and have no cheaper form; nothing else was cheap to cut.
+
+Third review's fixes (rebased on `docs/electron-plan` `4ffdcaa6`, base 33,653,760 bytes): the tip before them built to 34,089,472 (+435,712); `with_dom<R>`'s tail (the
+`joined` collect, `connected`, `page_changes`, the `written` loop, the observers' and custom elements' hooks) was copied into each of its ~137 callers, and moving it into one non-generic
+`#[inline(never)] settle` together with the other fixes (the best-effort dynamic-import prefetch, the generation checks, `order_sheets` as an in-place insertion sort instead of a
+`sort_by` instantiation) brought it to 33,833,472, -256,000 bytes against the tip before and +179,712 (+0.53 %) against the base. (`cargo bloat --filter verve_dom` did not name the
+functions under that filter, so the split is not itemised.)
+
+Fourth review's fixes (the `file:` rule decided by the document, `Isolate::retire` split into its own kernel commit, the captured `Response.prototype.url` getter): 33,838,592 bytes, +184,832 (+0.55 %) against the base and +5,120 against the third round.
+
+

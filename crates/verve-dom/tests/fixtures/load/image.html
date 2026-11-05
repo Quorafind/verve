@@ -1,0 +1,6 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script>window.__log = [];</script></head><body>
+<img id="i" src="dot.png" onload="__log.push('img-load:' + this.naturalWidth + 'x' + this.naturalHeight + ':' + this.complete)">
+<img id="bad" src="missing.png" onerror="__log.push('img-error')">
+<script>window.addEventListener('load', function () { __log.push('load:' + document.getElementById('i').complete); });</script>
+</body></html>

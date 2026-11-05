@@ -32,7 +32,11 @@ pub(crate) fn make(context: &mut Context) -> JsResult<JsObject> {
             length: 0,
             init,
             parent: Some(&emitter),
-            methods: &[("loadURL", 1, load_url), ("close", 0, close)],
+            methods: &[
+                ("loadURL", 1, load_url),
+                ("loadFile", 1, load_file),
+                ("close", 0, close),
+            ],
             accessors: &[("id", id, None), ("webContents", web_contents, None)],
             new_only: Some(NewOnly::Native),
             ..ClassSpec::default()
@@ -122,6 +126,40 @@ fn load_url(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let (_, page) = page_of(this, context)?;
     page.to_renderer(ToRenderer::Load {
         url,
+        options: LoadOptions::default(),
+    });
+    native::settled(Ok(JsValue::undefined()), context)
+}
+
+/// `loadFile(path[, { query, search, hash }])`: `loadURL` of the file's `file:` address.
+fn load_file(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let path = Args::new(&[native::arg(args, 0)]).string(0, "filePath", context)?;
+    let given = args.get(1).and_then(JsValue::as_object);
+    let fields = Fields::new(given.as_ref());
+    let search = fields.string("search", context)?;
+    let hash = fields.string("hash", context)?;
+    let query = fields.object("query", context)?;
+    let query = match query {
+        Some(object) => Some(verve::query_string(&object.into(), context)?),
+        None => None,
+    };
+    let base = shared(context).hub.options().app_path.clone();
+    let path = base.join(path);
+    let mut url = url::Url::from_file_path(&path).map_err(|()| {
+        native::type_error(format!(
+            "loadFile: {} is not an absolute path",
+            path.display()
+        ))
+    })?;
+    match (search, query) {
+        (Some(search), _) => url.set_query(Some(search.trim_start_matches('?'))),
+        (None, Some(query)) => url.set_query(Some(&query)),
+        _ => {}
+    }
+    url.set_fragment(hash.as_deref().map(|hash| hash.trim_start_matches('#')));
+    let (_, page) = page_of(this, context)?;
+    page.to_renderer(ToRenderer::Load {
+        url: url.to_string(),
         options: LoadOptions::default(),
     });
     native::settled(Ok(JsValue::undefined()), context)
