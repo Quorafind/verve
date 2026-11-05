@@ -474,3 +474,6 @@ Electron 有几十个类、几百个方法，绝大多数是"校验参数 → �
   方法用 `Args::node`。`SendSync` 的答复是 `SyncReply::send(self, value)`。
 - **P20**：替换 `RendererGuest::load` 与 `markup_of`；`Hub::preferences_of(contents)` 给导航时重建 isolate 用。
 - **P30/P31/P34**：`shell.rs` 的 `WindowOp` 分支与 `headless.rs` 必须一致；`DomView::texts` 可整段删。
+- **P34 追加的契约**：`Hub::observe_shell(observer)`（观察 Shell 发给主进程的每条 `FromShell`，在发送线程上、先于主进程；
+  两种 Shell 的共用测试靠它）；`WindowEvent::FirstPaint`、`WindowEvent::NativeHandle(u64)`、`ToRendererInput::Visibility(bool)`
+  （上表预留的三个变体，追加在各自枚举末尾，`main_guest`/`renderer_guest` 的 `_ => {}` 接住）。`FirstPaint` 是“窗口可见时画出的第一帧”，每窗口一次（真 Shell 在显示时强制画一帧；无头 Shell 在可见窗口的第一份快照到达时发）；`show: false` 的窗口显示前没有帧，所以隐藏窗口的 `ready-to-show` 要由 P13 按渲染器的第一份快照决定，不是它。`NativeHandle` 是 `HWND` / `NSView*`（Electron 的 `getNativeWindowHandle` 同）。`AppEvent::QuitRequested`（系统要求退出：与
