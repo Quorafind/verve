@@ -710,3 +710,14 @@ Rebase onto the next release tag when Su moves to it, and drop what upstream has
   buffer are unchanged: only the rope whose length ends the buffer appends in place, others get a
   plain node, and flattening and dropping use the heap stack of the existing code. Appending
   `'中' + i` 320000 times no longer costs a node per step.
+
+- `boa_engine`, `vm/jit`, `vm/opcode/{get,set}/property.rs`: the JIT compiles the inline
+  typed-array element path (about 35 basic blocks for each element access) only into functions in
+  which the interpreter has met a typed array at an element read or write (one flag on the code
+  block's `JitSlot`, set by the two handlers' typed-array shortcuts). Other functions compile the
+  array path alone, as before the typed path existed, and leave a typed array to the helper, which
+  gives the same result; a function that meets its first typed array after it is compiled stays
+  with the helper. `JitOptions::typed_elements_everywhere` (`BOA_JIT_TYPED_ALL=1`) compiles the
+  path into every access; tests use it for the forced-compile mode. 400 functions of 40 element
+  accesses on plain arrays at threshold 0: 19.4 to 13.5 s of CPU, the time before the typed path
+  existed (13.8 s).

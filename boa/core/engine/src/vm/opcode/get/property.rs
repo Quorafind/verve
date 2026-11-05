@@ -126,6 +126,8 @@ fn get_by_value<const PUSH_KEY: bool>(
                     return Ok(());
                 }
             } else if let Some(value) = typed_array_element_get_shortcut(&object, index.get()) {
+                #[cfg(feature = "jit")]
+                context.vm.frame().code_block.jit.note_typed_element();
                 if PUSH_KEY {
                     context.vm.set_register(key.into(), key_value.into());
                 }

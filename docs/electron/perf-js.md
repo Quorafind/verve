@@ -618,3 +618,5 @@ The other rows differ by up to a few percent in either direction with load 16–
 and `alloc` re-run with 7 processes: `fib` JIT 230.6 (229.4) then 226.8 (225.3), `alloc` JIT 312.8 (266.9) then 287.5 (266.2). `sort` (numbers only)
 read +6.5 % in the median of its re-run (2353.8 then 2507.8, best 2312.1 then 2407.5) with its interpreter column the other way round
 (3076.5 then 2723.7): load, not the change.
+
+P81 (typed-array element path compiled only into functions that have met a typed array): 400 functions of 40 element accesses on plain arrays, threshold 0, CPU ms (min of 5): before P76 13,828, P76 19,406, now 13,484; on a `Float64Array` (200 functions, 6 calls, threshold 3) 10,234 against 10,188 (they need the path). `typed` JIT 219.5–224.3 ms (P76 build 222.2–237.9 in the same interleaved rounds); the rest of the suite inside the noise of a shared machine (load 23–56 %).

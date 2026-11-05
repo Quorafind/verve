@@ -522,7 +522,7 @@ JavaScript:
 | `boa_engine::vm::jit_unavailable()` | `Some(CompilerPanicked \| NoExecutableMemory)` once the JIT has switched itself off for the process. |
 | `Runtime::set_jit_enabled(bool)`, `Runtime::jit_enabled()` | Always present; without the feature, off and a no-op. |
 | `Runtime::jit_options_mut()`, `Runtime::jit_stats()` | With the feature. |
-| `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>` | Read when a `Context` is made. |
+| `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>`, `BOA_JIT_TYPED_ALL=1` (the typed-array element path in every function) | Read when a `Context` is made. |
 | `VERVE_JIT=0`, `VERVE_JIT_THRESHOLD=<n>` | Read when a `Runtime` is made, after Boa's. `verve run` and every isolate obey them. |
 
 With the feature built, the JIT is on unless switched off.
@@ -997,7 +997,7 @@ closure, reading and cloning registers, `set_register`. Inline code does the fiv
 
 What a compile costs. A function of 40 element accesses (the same four-line body repeated; 60 or 400 such functions called once each at threshold 0,
 `VERVE_JIT_THRESHOLD=0`) compiles 55 to 60 % slower with the typed paths in than without: 13.1 to 16.9 s against 20.0 to 23.7 s for 400. Folding the guards into three
-branches and sharing the array path's register store changed that by about 5 %. See Risks.
+branches and sharing the array path's register store changed that by about 5 %. P81 compiles the typed paths only into functions that have met a typed array; see Risks.
 
 ## Where a call goes
 
@@ -1473,8 +1473,15 @@ entirely. Background compilation on another thread fits here too, since `CodeBlo
   compiles 55 to 60 % slower (400 such functions at threshold 0: 13.1 to 16.9 s before, 20.0 to
   23.7 s after; the same ratio with the guards folded into three branches and the register store
   shared with the array path). Programs with few element accesses in hot functions do not see it.
-  Next: one typed path per function, entered from every site, or compile the typed path only where
-  the interpreter saw a typed array.
+  The typed path is therefore compiled only into functions in which the interpreter has met a typed
+  array at an element access (P81; one flag on the code block): the same 400 functions on plain
+  arrays are back at 13.5 s CPU (13.8 s before the typed path, 19.4 s with it everywhere). A
+  function that does meet typed arrays pays the full cost (200 functions of 40 accesses, called six
+  times on a `Float64Array`, threshold 3: 6.8 s without the typed path, 10.2 s with), and one
+  that first meets a typed array after it is compiled stays on the helper for them (no wrong
+  result, 11 ns an access instead of 4). `BOA_JIT_TYPED_ALL=1` compiles the path everywhere.
+  Not done: one shared typed path per function, which would cut the cost for the functions that
+  do use typed arrays.
 - **Compile time** is about 5 ms a function, on the JavaScript thread. The type checks of each
   inline instruction expand into many small blocks, and phase 2 added the property and element
   accesses. A threshold of 1000 and the profitability check keep compiles rare, but a program

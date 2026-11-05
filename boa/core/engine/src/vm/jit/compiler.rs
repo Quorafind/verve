@@ -60,6 +60,7 @@ use super::{
         STEPS, jit_lookup, jit_store,
     },
     stack_layout::{StackLayout, stack_layout},
+    typed_elements::TypedLayout,
 };
 
 /// The tag bits of NaN-boxed values (`value/inner/nan_boxed.rs`); checked against values made
@@ -147,6 +148,9 @@ impl From<&str> for CompileError {
 
 #[cfg(test)]
 thread_local! {
+    /// How many element accesses were compiled with the inline typed-array path on this thread.
+    pub(super) static TYPED_PATHS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
     /// Tests make the code generator panic, as a Cranelift bug would.
     pub(super) static PANIC_IN_CODEGEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -175,7 +179,7 @@ pub(super) fn compile(
             !PANIC_IN_CODEGEN.with(std::cell::Cell::get),
             "code generator panic (test)"
         );
-        let (function, sites) = translate(code_block, &block_pcs, isa);
+        let (function, sites) = translate(code_block, options, &block_pcs, isa);
         let mut context = ClifContext::for_function(function);
         let compiled = context
             .compile(&**isa, &mut ControlPlane::default())
@@ -544,6 +548,10 @@ struct Translator<'a> {
     b: FunctionBuilder<'a>,
     /// The code block's bytecode.
     bytes: &'a [u8],
+    /// The code block, for what the interpreter saw.
+    code_block: &'a CodeBlock,
+    /// Whether every element access gets the typed-array path.
+    typed_everywhere: bool,
     state: Value,
     regs: Variable,
     blocks: BTreeMap<u32, Block>,
@@ -577,6 +585,7 @@ struct Translator<'a> {
 )]
 fn translate(
     code_block: &CodeBlock,
+    options: &JitOptions,
     block_pcs: &[u32],
     isa: &OwnedTargetIsa,
 ) -> (Function, Vec<Box<SiteCache>>) {
@@ -631,6 +640,8 @@ fn translate(
     let mut t = Translator {
         b,
         bytes: &code_block.bytecode.bytes,
+        code_block,
+        typed_everywhere: options.typed_elements_everywhere,
         state,
         regs,
         blocks,
@@ -1687,7 +1698,8 @@ impl Translator<'_> {
 
     /// The address of the array that register `object` holds, and the index register `key`
     /// holds, when the key is a non-negative `int32`; `miss` otherwise. An object that is not an
-    /// array goes to `not_array` (with the address and the index as `i64`s). Leaves the builder
+    /// array goes to `not_array` (with the address and the index as `i64`s), or to `miss` if
+    /// there is none. Leaves the builder
     /// in a new block.
     fn array_and_index(
         &mut self,
@@ -1695,7 +1707,7 @@ impl Translator<'_> {
         object: u32,
         key: u32,
         miss: Block,
-        not_array: Block,
+        not_array: Option<Block>,
     ) -> (Value, Value) {
         let key = self.load(key);
         let is_int = self.is_int(key);
@@ -1714,10 +1726,31 @@ impl Translator<'_> {
         let is_array = self.b.ins().icmp_imm_s(IntCC::Equal, vtable, array_vtable);
         let array = self.b.create_block();
         let index = self.b.ins().uextend(I64, index);
-        let other = [address, index].map(BlockArg::Value);
-        self.b.ins().brif(is_array, array, &[], not_array, &other);
+        match not_array {
+            Some(not_array) => {
+                let other = [address, index].map(BlockArg::Value);
+                self.b.ins().brif(is_array, array, &[], not_array, &other);
+            }
+            None => {
+                self.b.ins().brif(is_array, array, &[], miss, &[]);
+            }
+        }
         self.b.switch_to_block(array);
         (address, index)
+    }
+
+    /// The layout of typed arrays when the element accesses of this function are to be compiled
+    /// with the inline typed-array path: the interpreter has met a typed array in it (or the
+    /// options ask for it everywhere). Other functions leave a typed array to the helper, and
+    /// compile no more than the array path.
+    fn typed_path(&self, layout: ObjectLayout) -> Option<TypedLayout> {
+        let typed = layout.typed?;
+        if !(self.typed_everywhere || self.code_block.jit.saw_typed_element()) {
+            return None;
+        }
+        #[cfg(test)]
+        TYPED_PATHS.with(|count| count.set(count.get() + 1));
+        Some(typed)
     }
 
     /// A new block that takes an object's address and an index, both `i64`s.
@@ -1771,7 +1804,8 @@ impl Translator<'_> {
         let miss = self.b.create_block();
         self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
-            let not_array = self.address_and_index_block();
+            let typed = self.typed_path(layout);
+            let not_array = typed.map(|_| self.address_and_index_block());
             let (address, index) = self.array_and_index(layout, object, key, miss, not_array);
             let flag = self.load_at(I64, address, layout.flag);
             let writing = self.b.ins().icmp_imm_s(IntCC::Equal, flag, -1);
@@ -1822,15 +1856,12 @@ impl Translator<'_> {
             let result = self.b.block_params(store)[0];
             self.store(dst, result);
             self.b.ins().jump(done, &[]);
-            self.b.switch_to_block(not_array);
-            let [address, index] = self.b.block_params(not_array)[..] else {
-                unreachable!("an address and an index");
-            };
-            match layout.typed {
-                Some(typed) => self.typed_read(layout, typed, [address, index], miss, store),
-                None => {
-                    self.b.ins().jump(miss, &[]);
-                }
+            if let (Some(typed), Some(not_array)) = (typed, not_array) {
+                self.b.switch_to_block(not_array);
+                let [address, index] = self.b.block_params(not_array)[..] else {
+                    unreachable!("an address and an index");
+                };
+                self.typed_read(layout, typed, [address, index], miss, store);
             }
         } else {
             self.b.ins().jump(miss, &[]);
@@ -1858,7 +1889,8 @@ impl Translator<'_> {
         self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
             let new = self.load(value);
-            let not_array = self.address_and_index_block();
+            let typed = self.typed_path(layout);
+            let not_array = typed.map(|_| self.address_and_index_block());
             let (address, index) = self.array_and_index(layout, object, key, miss, not_array);
             // Not borrowed at all, as `borrow_mut` requires, and extensible.
             let flag = self.load_at(I64, address, layout.flag);
@@ -1911,15 +1943,12 @@ impl Translator<'_> {
             self.b.switch_to_block(values);
             self.replace_value(element, new, miss);
             self.b.ins().jump(done, &[]);
-            self.b.switch_to_block(not_array);
-            let [address, index] = self.b.block_params(not_array)[..] else {
-                unreachable!("an address and an index");
-            };
-            match layout.typed {
-                Some(typed) => self.typed_write(layout, typed, [address, index], new, miss, done),
-                None => {
-                    self.b.ins().jump(miss, &[]);
-                }
+            if let (Some(typed), Some(not_array)) = (typed, not_array) {
+                self.b.switch_to_block(not_array);
+                let [address, index] = self.b.block_params(not_array)[..] else {
+                    unreachable!("an address and an index");
+                };
+                self.typed_write(layout, typed, [address, index], new, miss, done);
             }
         } else {
             self.b.ins().jump(miss, &[]);
