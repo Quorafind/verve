@@ -389,6 +389,11 @@ impl Native {
         ));
     }
 
+    /// Whether the window takes input: a disabled one ignores the mouse and the keyboard.
+    pub fn set_enabled(&self, enabled: bool) {
+        sys!(EnableWindow(self.hwnd, i32::from(enabled)));
+    }
+
     pub fn set_always_on_top(&self, on: bool) {
         let level = if on {
             w::HWND_TOPMOST

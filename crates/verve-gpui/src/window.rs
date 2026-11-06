@@ -284,6 +284,16 @@ impl Window {
             WindowOp::SetOpacity(opacity) => native.set_opacity(opacity),
             WindowOp::SetSkipTaskbar(skip) => native.set_skip_taskbar(skip),
             WindowOp::SetIgnoreMouseEvents(ignore) => native.set_ignore_mouse(ignore),
+            WindowOp::SetClosable(closable) => native.set_closable(closable),
+            WindowOp::SetEnabled(enabled) => native.set_enabled(enabled),
+            // P34: the platform layer acts on these; the main process remembers them and answers
+            // for them meanwhile.
+            WindowOp::SetMovable(_)
+            | WindowOp::SetMinimizable(_)
+            | WindowOp::SetMaximizable(_)
+            | WindowOp::SetFocusable(_)
+            | WindowOp::SetParent(_)
+            | WindowOp::MoveTop => {}
             // Closing is the shell's.
             WindowOp::Close | WindowOp::CloseAnswer { .. } | WindowOp::Destroy => return,
             // `Unmaximize` of a window that is not maximized does nothing.

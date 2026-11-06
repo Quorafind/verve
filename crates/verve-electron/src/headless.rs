@@ -21,9 +21,7 @@ pub use window::HeadlessWindow;
 
 use crate::hub::{Hub, ShellPort};
 use crate::ids::{ContentsId, WindowId};
-use crate::msg::{
-    AppEvent, Display, FromShell, Rect, ToRendererInput, ToShell, WindowEvent, WindowOp,
-};
+use crate::msg::{AppEvent, Display, FromShell, ToRendererInput, ToShell, WindowEvent, WindowOp};
 use window::Window;
 
 /// What a headless shell is told about the machine it pretends to be.
@@ -43,21 +41,9 @@ pub struct HeadlessOptions {
 impl Default for HeadlessOptions {
     /// One 1920 x 1080 display at 1x, a light theme, block-stack layout.
     fn default() -> Self {
-        let screen = Rect {
-            x: 0.,
-            y: 0.,
-            width: 1920.,
-            height: 1080.,
-        };
         Self {
             layout: FakeLayout::default(),
-            displays: vec![Display {
-                id: 1,
-                bounds: screen,
-                work_area: screen,
-                scale_factor: 1.,
-                primary: true,
-            }],
+            displays: vec![Display::default()],
             dark: false,
             trace: false,
         }
@@ -225,6 +211,7 @@ impl HeadlessShell {
                 ..State::default()
             }),
         });
+        hub.set_displays(shell.displays.clone());
         hub.record_console();
         hub.record_page_events();
         hub.set_shell(shell.clone());
