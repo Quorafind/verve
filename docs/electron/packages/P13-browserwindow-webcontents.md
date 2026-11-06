@@ -323,8 +323,7 @@
    - 返回其他值 → 主进程 `console.error('The window open handler response must be an object with an \'action\' property of \'allow\' or \'deny\'.')`，按 `deny`。
 2. 没有 handler → 允许。
 3. 创建：选项 = 解析 `features`（`width`、`height`、`left`→`x`、`top`→`y`、`resizable`、`show` 等，`yes/no/1/0`）
-   合并 `overrideBrowserWindowOptions`；`webPreferences` 继承打开者的（`nodeIntegration`、`contextIsolation`、`sandbox`、`preload`、`session`），
-   Electron 的规则是**子窗口不能比父窗口拥有更多权限**；`parent` 不自动设置。新窗口 `webContents.opener` = 打开者的主框架。
+   合并 `overrideBrowserWindowOptions`；`webPreferences` 按 Electron 的 `makeWebPreferences`（`guest-window-manager.ts`）：只有打开者的值是**安全值**（`contextIsolation` 真、`sandbox` 真、`nodeIntegration` 假、`javascript` 假、`webviewTag` 假、`nodeIntegrationInSubFrames` 假、`enableWebSQL` 假）才复制，否则子窗口用默认值；`preload`、`session` 不继承（要的话由 handler 的 `overrideBrowserWindowOptions` 给）。这样子窗口**不能比父窗口拥有更多权限**，也不会因为打开者有 Node 而让一个远端页面拿到 `require`（早先的实现照抄了打开者的设置，评审指出后改正）；`parent` 不自动设置。新窗口 `webContents.opener` = 打开者的主框架。
 4. 发打开者 webContents 的 `did-create-window(window, details)`、`app` 的 `browser-window-created`。
 5. 打开者关闭时，若 `outlivesOpener` 为 `false`，子窗口一并关闭。
 
@@ -394,7 +393,7 @@ Electron **不**显示默认右键菜单；没有监听者时什么也不发生�
 ## 状态
 
 P13 分两段做。**第一段（本节写的）是步骤 1–5 与步骤 9 中第一段追加的变体**：选项与 `webPreferences`、注册表与状态缓存、整个 `BrowserWindow` 类、
-`WindowEvent` → 窗口事件、`ready-to-show`、关闭往返、`destroy()`、与 P10 退出流程的对接、父子/模态。**第二段（步骤 6–9 的其余部分）没有开始。**
+`WindowEvent` → 窗口事件、`ready-to-show`、关闭往返、`destroy()`、与 P10 退出流程的对接、父子/模态。**第二段（步骤 6–9 的其余部分）见本节末尾的「第二段」。**
 
 ### 第一段完成了什么
 
@@ -459,7 +458,7 @@ P13 分两段做。**第一段（本节写的）是步骤 1–5 与步骤 9 中�
 
 ### 没做 / 与任务书不同
 
-- **第二段的全部**：`WebContents` 类（`webContents` 仍是 P12 的 `contents_ipc::contents_object`，只多了上面列的几个事件）、`loadURL` 的 Promise（仍立即 resolve）、导航历史、`PageEvent` → `webContents` 事件的完整表（`did-navigate`、`did-fail-load`、`did-navigate-in-page`、`did-start-navigation`…）、`executeJavaScript`、`insertCSS`、编辑命令、`sendInputEvent`、`will-navigate`、`window.open`/`setWindowOpenHandler`、`context-menu`、`before-input-event`、心跳（`unresponsive`/`responsive`）、`render-process-gone`、`webFrameMain` 的其余成员、`webContents` 静态与 `getURL()`/`getUserAgent()` 等。
+- **第二段的全部（已做，见「第二段」）**：`WebContents` 类（`webContents` 仍是 P12 的 `contents_ipc::contents_object`，只多了上面列的几个事件）、`loadURL` 的 Promise（仍立即 resolve）、导航历史、`PageEvent` → `webContents` 事件的完整表（`did-navigate`、`did-fail-load`、`did-navigate-in-page`、`did-start-navigation`…）、`executeJavaScript`、`insertCSS`、编辑命令、`sendInputEvent`、`will-navigate`、`window.open`/`setWindowOpenHandler`、`context-menu`、`before-input-event`、心跳（`unresponsive`/`responsive`）、`render-process-gone`、`webFrameMain` 的其余成员、`webContents` 静态与 `getURL()`/`getUserAgent()` 等。
 - 窗口事件里没发的：`will-resize`、`will-move`、`resized`、`moved`（Shell 不报用户拖动的起止）、`query-session-end`、`session-end`、`app-command`、`system-context-menu`、`enter-html-full-screen`/`leave-html-full-screen`（`Request::Fullscreen` 没接）、`unresponsive`/`responsive`、`swipe` 等 macOS 的。
 - 选项里只"收到"不记的：`titleBarOverlay`、`trafficLightPosition`、`vibrancy`、`visualEffectState`、`backgroundMaterial`、`zoomToPageWidth`、`tabbingIdentifier`、`type`、`acceptFirstMouse`、`disableAutoHideCursor`、`enableLargerThanScreen`、`darkTheme`、`roundedCorners`、`thickFrame`；`icon` 只收路径（`NativeImage` 对象是 P14 的，`api/window_options.rs` 与 `window_methods.rs::set_icon` 各一处）。
   `webPreferences.session` 不读（P16），`additionalArguments` 留给 P21。
@@ -507,3 +506,116 @@ P13 分两段做。**第一段（本节写的）是步骤 1–5 与步骤 9 中�
 - `target/debug/electron.exe tests/electron/apps/windows`（真 Shell，临时 `--user-data-dir`）：自己结束，退出码 0，输出 `main ready-to-show`、`windows open 2`、`tour setAlwaysOnTop` ×2、`tour setBounds`、`tour center`、`tour setProgressBar`、`tour flashFrame`、`tour done`、`main closed`，没有 "skipped"。
 - `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、`bash scripts/style-check.sh`：通过。
 - 体积：`cargo build --release -p verve-gpui --bin electron --features jit` 的 `electron.exe` 为 33,949,696（比基线 33,839,104 多 110,592，约 108 KB，未超 ~150 KB，没有往 size.md 记） 字节（基线 33,839,104，上限 35,651,584）。
+
+## 第二段（步骤 6–9 的其余部分）
+
+### 做了什么
+
+提交（`docs/electron-plan..`）：P02 契约的 docs 提交；`msg.rs`/`hub.rs` 的消息与 Hub 调用；页面一侧（`page_script.rs`）；主进程一侧的 `WebContents` 类；测试。
+
+- **契约**（P02 的代码块与汇总表）：`ToRenderer::{InsertCss, RemoveCss, EditCommand}`、`ExecuteJavaScript` 多一个 `world: i32`、`FromRenderer::ContextMenu`、`FromShell::KeyForContents`，及 `EditCommand`、`ContextMenuParams`。`Hub` 多了 `renderer_busy_for`（心跳）、`kill_renderer`（`forcefullyCrashRenderer`）、`set_intercept_keys`/`intercepts_keys`。
+- **页面一侧**（`crates/verve-electron/src/page_script.rs`，`renderer_guest.rs` 里只多了几个分支）：`executeJavaScript`（用 P21 的 `preload::world_numbered` + `web_frame::evaluate`；Promise 等到落定；结果、拒绝原因经结构化克隆）、`insertCSS`/`removeInsertedCSS`（`verve_dom::insert_stylesheet`）、编辑命令（经文档自己的 `execCommand`，`insertText` 用 `Document::insert_text`）、指针/滚轮/键/文字（`Document::pointer_*`/`wheel`/`key_*`/`type_text`）、右键松开且 `contextmenu` 未被阻止 → `ContextMenu`；页面自己换了地址（`location.hash`、`pushState`）→ `DidNavigateInPage`（`RendererGuest::report_move_within_page`，比较 `Document::url()`）。
+- **`WebContents` 类**（主进程，每个文件 ≤ 400 行）：
+  - `api/web_contents.rs`：类（继承 `EventEmitter`，`new_only`，原型表）、`loadURL`/`loadFile`（`BrowserWindow` 的同名方法也走这里）、`close({ waitForBeforeUnload })`（`window_lifecycle::{ask_page, finish_close}` 改成 `pub(crate)`）、`reload`、`forcefullyCrashRenderer`、UA、缩放（`factor = 1.2^level`）、`getProcessId` 等、`opener`、静态模块（`getAllWebContents`、`getFocusedWebContents`、`fromId`、`fromFrame`、`fromDevToolsTargetId`）。
+  - `api/page_state.rs`：每个窗口的页面状态 `PageState`（`WindowRecord.page_state`，取代 `WindowRecord.url`）与会话历史 `History`（纯 Rust，有单测）。`Intent`（`Push`/`Replace`/`Go(i)`/`Reload`）说明下一个提交的文档怎样进历史；失败的加载也是一条历史（Electron 观测）；加载当前地址不加新条目。
+  - `api/navigation.rs`：主进程发起的加载（`start`：地址不是 URL 则立即 `did-fail-load(-300)` 并拒绝；有未完成的 `loadURL` 则以 `ERR_ABORTED (-3)` 拒绝，消息里写后一个地址）、`reload`、`go_to_index`、页面发起的导航（`page_navigates`：`did-start-navigation`、`will-frame-navigate`、`will-navigate`，任一被阻止就不加载；`page_reloads` 不发 will 事件）、导航事件对象 `emit_navigation`。
+  - `api/page_events.rs`：`PageEvent` 到 `webContents` 事件的整张表（把第一段的四个早期事件搬了进来）、`render-process-gone`（`FromRenderer::Gone`；`Calls::fail` 让页面没回答的脚本失败；`window_lifecycle::page_gone` 照旧）、心跳 `heartbeat`（`MainGuest` 每秒一次，页面连续跑一段脚本 ≥ 5 s 则 `unresponsive`，先 webContents 后窗口，恢复则 `responsive`）。`did-fail-load` 也置 `ready.finished`。
+  - `api/page_calls.rs`：发给页面、还没回答的脚本（`executeJavaScript` 的 Promise）。
+  - `api/contents_page.rs`：`executeJavaScript`、`executeJavaScriptInIsolatedWorld`、`insertCSS`、`removeInsertedCSS`、编辑命令、`insertText`、`sendInputEvent`、`setWindowOpenHandler`。
+  - `api/contents_history.rs`：`navigationHistory`（对象，方法由表生成）与旧的 `webContents.canGoBack()` 等（首次调用在 stderr 打印 Electron 的弃用行，每个方法一次）。
+  - `api/contents_stubs.rs`：只记录、答常量或不支持的那些方法（音频、离屏、DevTools、打印、`capturePage` 拒绝……）与 `findInPage` 的 v1 行为。
+  - `api/window_open.rs`：`window.open`/`<a target>` 的主进程一侧：`setWindowOpenHandler` 的 `details`、`{action}` 的三种回答（其余按 deny，并在主进程 `console.error` 任务书里的那句）、`overrideBrowserWindowOptions`（盖过 features；`webPreferences` 先取打开者的安全值，再由 handler 的覆盖）、`outlivesOpener`（默认假：打开者关闭时 `window_closed` 一并销毁）、`did-create-window(window, details)`、`opener`。
+  - `api/input_events.rs`：`before-input-event`（`newListener`/`removeListener` 的钩子在第一个/最后一个监听者时调 `Hub::set_intercept_keys`；`FromShell::KeyForContents` 触发事件，未阻止则 `Hub::input`）与 `context-menu`（全部 `params`，页面给 `linkURL` `linkText` `srcURL` `mediaType` `isEditable` `selectionText` `titleText` `altText`，其余由主进程补）。
+  - `api/web_frame_main.rs`：`url` `origin` `name` `top` `parent` `frames` `framesInSubtree` `frameToken` `visibilityState` `detached`、`executeJavaScript` `reload` `collectJavaScriptCallStack`（拒绝）`isDestroyed`；`webFrameMain.fromId`/`fromFrameToken`。
+  - `api/app/system.rs` 的 `user_agent(context)`（`app.userAgentFallback` 与 `webContents.getUserAgent()` 共用）。
+- **观测程序** `tests/electron/web-contents/observe/`（`npx electron .`，自己结束，`OBSERVE_OUT`/`OBSERVE_ONLY` 同第一段）：加载与事件、历史、`will-navigate`、脚本、`window.open`、静态与崩溃。用 **Electron 39.8.10（Windows）** 跑过一次，冻结在 `tests/web_contents.rs`。
+- **测试**：`tests/web_contents.rs` 15 个（无头）；`tests/browser_window.rs` 加了 2 个，它的 `run` 搬进 `tests/support`（`run`/`run_with`/`run_within`）；`page_state.rs`、`window_open.rs` 各有纯函数单测；`tests/fixtures.rs` 的 `windows_have_parents_children_and_a_modal` 取消 `#[ignore]`。**这些测试都没有跑过**（任务的规则：只 `cargo check`，由总控统一跑），只确认了 `cargo check --locked -p verve-electron -p verve-dom -p verve-gpui --all-targets` 通过。
+
+### 对真实 Electron 39.8.10（Windows）的观测（第二段）
+
+（都在 `tests/web_contents.rs`；下面是任务书里"以观测冻结"和与任务书不同的几处）
+
+- **事件顺序**：首次加载 `frame-created`、`did-start-loading`、`did-start-navigation`、**`did-frame-navigate` 在 `did-navigate` 之前**、`page-title-updated`、`dom-ready`、`did-frame-finish-load`、`did-finish-load`、`did-stop-loading`。`did-navigate` 参数 `(event, url, 200, 'OK')`，data 与 file 也一样；`did-frame-navigate` 多 `(isMainFrame, processId, routingId)`。
+- **导航事件的参数是旧的位置参数**：`did-start-navigation`/`will-navigate`/`will-frame-navigate` 收到 `(event, url, isInPlace, isMainFrame, processId, routingId)`，`event` 上同时有 `url` `isSameDocument` `isMainFrame` `frame` `initiator` `processId` `routingId`（`Object.keys` 就是这七个；`defaultPrevented`/`preventDefault` 不列出）。
+- **页面点链接**：`did-start-navigation`、`will-frame-navigate`、`will-navigate`；被阻止则页面不动，也没有别的事件；放行则 `did-start-navigation`、`will-frame-navigate`、`did-navigate`。`loadURL`/`loadFile` 只有 `did-start-navigation`、`did-navigate`，没有 will 事件。
+- **加载失败**：`did-start-loading`、`did-start-navigation`、`did-fail-provisional-load`、`did-fail-load`（都是 `(event, -6, 'ERR_FILE_NOT_FOUND', url, true, processId, routingId)`），**然后 Chromium 提交错误页，所以还有 `dom-ready`、`did-frame-finish-load`、`did-finish-load`、`did-stop-loading`**；失败的地址成为当前地址和一条历史条目。Promise 的 `Error`：`message` 是 `ERR_FILE_NOT_FOUND (-6) loading 'file:///…'`，另有 `errno`、`code`（名字）、`url`。
+- **不是 URL 的地址**（`'not a url'`）：同步 `did-fail-load(event, -300, 'ERR_INVALID_URL', '', true)`（只有四个参数，没有 frame 号，也没有 `did-start-loading`），拒绝 `ERR_INVALID_URL (-300) loading ''`。（端口 1 的 http 是 `ERR_UNSAFE_PORT (-312)`，Verve 的网络层给 `-2`，没有冻结。）
+- **被替代的加载**：第一个 Promise 以 `ERR_ABORTED (-3)` 拒绝，**消息里写的是第二个地址**；第二个正常完成。
+- **历史**：条目 `{ url, title, pageState }`；`getEntryAtIndex(越界)` 是 `null`；`goBack` 等只有 `did-start-navigation`、`did-navigate`、`did-finish-load`；从中间加载新页面会丢掉前面的；`reload()` 不加条目；`removeEntryAtIndex(当前)` 不行；`clear()` 留下当前一条（长度 1，下标 0）；`canGoToOffset(n)` 看目标是否在范围内。hash 变化加一条（`location.hash`：`did-start-loading`、`did-start-navigation(url, true)`、`did-navigate-in-page(url, true, pid, rid)`、`did-stop-loading`）。
+- **`executeJavaScript`**：抛错（Error、字符串、语法错误）一律 `Script failed to execute, this normally means an error was thrown. Check the renderer console for the error.`；被拒绝的 Promise 以其原因拒绝（`Error: no`）；函数 `An object could not be cloned.`；`executeJavaScript(5)` 当脚本 `5` 求值得 `5`；DOM 元素克隆成 `{}`（Verve 这里没有冻结，见"没做"）；`executeJavaScriptInIsolatedWorld(7, …)` 的 world 看得到 `document`，页面看不到它设的 `window.mark`。`insertCSS` 的键是字符串，`getComputedStyle` 先红后黑。
+- **`window.open`**：没有 handler 也**返回 Window 代理而非 `null`**（Verve 返回 `null`，P20）；handler 的 `details` 键 `url frameName features disposition referrer`（`referrer` 是 `{ url, policy: 'strict-origin-when-cross-origin' }`，`data:` 打开者的 `url` 为空，`postBody` 没有）；带 features 是 `new-window`，`<a target=_blank>` 是 `foreground-tab`；`did-create-window` 的 `details` 键 `disposition frameName options postData referrer url`；`overrideBrowserWindowOptions` 的 `width` 盖过 features，`height` 仍取 features；新窗口 `getType()` 是 `'window'`、`opener` 有、`getParentWindow()` 是 `null`；handler 返回 `'nonsense'`：按 deny，`window.open` 得 `null`。
+- **崩溃**：`forcefullyCrashRenderer()` 发 `render-process-gone`，`details` 是 **`{ reason: 'crashed', exitCode: 2 }`**（任务书写 `killed`，不对），`isCrashed()` 随后为真；`mainFrame.visibilityState` 对隐藏窗口也是 `'visible'`；`mainFrame.name` 是 `''`，`parent` 是 `null`，`frames` 空，`routingId` 是 1。
+- **`webContents.fromId(不存在)`** 是 `undefined`；弃用警告的原文：`(electron) 'webContents.canGoBack' is deprecated and will be removed. Please use 'webContents.navigationHistory.canGoBack' instead.`（stderr，一次）。
+
+### 没做 / 与任务书不同
+
+- **`window.open` 返回的代理**（`ToRenderer::WindowMessage`、`FromRenderer::WindowProxyOp`）：没做。渲染器一侧的代理是 P20 的（现在 `window.open` 返回 `null`），没有它主进程一侧无从验证，契约表里已注明；因此"代理 `postMessage` 往返"的验收没有做。`createWindow` 选项没做。`Request::Open` 只有 `url`/`name`/`features`，`disposition` 由 features 是否为空推出（观测：与 Electron 一致的两种），`referrer` 的 `url` 只在打开者是 http(s) 时有，`postBody` 没有。
+- **表单提交**（`Request::Submit`）没有变成导航，所以没有 `will-navigate`：P20 的渲染器不把它转给主进程。
+- `stop()` 什么也不做（P02 的加载没有可停的东西，没有 `ToRenderer::Stop`）；`isLoadingMainFrame`/`isWaitingForResponse` 都等于 `isLoading`；`did-redirect-navigation`、`will-redirect`、`did-change-theme-color`、`update-target-url`、`cursor-changed`、`zoom-changed`、`input-event`、`enter-html-full-screen`/`leave-html-full-screen`、`content-bounds-updated`、`preferred-size-changed`、`media-*`、`paint` 没有发（缺来源：P16/P30/P32）；`debugger`、`frameRate`、`backgroundThrottling` 属性、`getMediaSourceId` 没做。
+- `sendInputEvent`：`mouseEnter`/`mouseLeave` 当 `mouseMove`；`contextMenu` 是右键按下加松开；不经过 `before-input-event`（没有观测）；未知 `type` 抛 `TypeError: Invalid event object`（没有观测）；`keyCode` 的名字只认单个字符和 `Enter` `Left` `Right` `Up` `Down` `Esc` `Space` `Return` 及同名的 DOM 键。目标元素由页面用上次的布局命中（P30 之前是无头 Shell 的 `FakeLayout`）。
+- 编辑命令经文档的 `execCommand`：现在只有 `copy`（有选区）起作用，其余等 P24；`centerSelection` `adjustSelection` `replace` `replaceMisspelling` 只检查窗口还在。`executeJavaScript` 的 `userGesture` 被忽略，也没有回调形式；DOM 元素的克隆结果没有对照。
+- 心跳阈值 5 s、每秒看一次（`page_events::UNRESPONSIVE_AFTER`、`main_guest::HEARTBEAT`），所以 `unresponsive` 的测试要 6–7 s；`responsive` 没有测试。`render-process-gone` 的 `exitCode`：`crashed`/`oom`/`launch-failed`/`integrity-failure` 为 2（观测只有 `crashed`），`killed`/`abnormal-exit` 为 1，`clean-exit` 为 0。页面 isolate 因 panic 而 `Crashed` 的路径没有测试（从脚本里触发不了 panic）。
+- `did-navigate` 的状态码一律 `200 'OK'`（http 的真实状态码要 P16/P20 带来）；`did-fail-load` 的错误名取自页面一侧（`LoadEvent::Failed.description`）。
+- `session` 是个空对象（P16）；`frame-created` 只在第一次加载时发一次。
+- 失败的加载之后 `ready-to-show` 不发（`FirstPaintable` 没来），观测没有对照。
+
+### 已知问题
+
+- `getTitle()` 在没有 `<title>` 的页面上是空串（Electron 观测未做）。
+- 回到一个 hash 历史条目（`goBack` 到 `#frag`）会重新加载整个文档，Electron 只在页内移动。
+- `newListener`/`removeListener` 的两个内部监听者会出现在 `webContents.eventNames()` 里；用户不带名字的 `removeAllListeners()` 会把它们一起去掉，之后 `before-input-event` 不再让 Shell 先问主进程。
+- 页面崩溃后，同一页面上没回答的 `loadURL` 的 Promise 不会被拒绝（只有被新加载替代时才拒绝）。
+
+### 给其他包的备注
+
+- **P32 / P34（Shell）**：`Hub::intercepts_keys(contents)` 为真时，键盘事件不要直接 `Hub::input`，改发 `FromShell::KeyForContents { contents, down, key }`（主进程决定后再转渲染器）；`setIgnoreMenuShortcuts` 现在只记不处理。
+- **P20**：`Request::Open` 需要 `disposition`/`referrer`/`post_body` 才能和 Electron 完全一致；`window.open` 要返回代理（见上，`WindowMessage`/`WindowProxyOp` 到时再进契约）；`Request::Submit` 要转成 `Request::Navigate`（或在 `RendererGuest::drain` 里翻译），主进程才有 `will-navigate`；`DidFailLoad.description` 要用 Chromium 的错误名（现在 `-6` 是 `ERR_FILE_NOT_FOUND`，别的码没查）。
+- **P24**：`webContents` 的编辑命令都经 `document.execCommand`（`page_script::edit`），你把命令做了它们就自动有；`insertText` 用 `Document::insert_text`。
+- **P15**：`msg::EditCommand` 已经在 `msg.rs`，菜单 role 可以直接用 `ToRenderer::EditCommand`。
+- **P16**：`webContents.session` 是空对象，`will-redirect`/`did-redirect-navigation`/`login`/`certificate-error` 都没发；`LoadOptions` 的 `httpReferrer`/`userAgent`/`extraHeaders` 已经从 `loadURL` 带进 `ToRenderer::Load`（`webContents.setUserAgent` 记下的 UA 没有传给加载器）。
+- **P43**：`openDevTools` 等只检查窗口还在，没有 `devtools-opened`/`devtools-closed`。
+- **P41**：本节"没做 / 与任务书不同"每一条；`window.open` 在 Electron 里返回代理而 Verve 返回 `null`。
+
+### 验收（本机）
+
+- 通过：`cargo check --locked -p verve-electron -p verve-dom -p verve-gpui --all-targets`；`bash scripts/style-check.sh`（每个提交的钩子）。
+- **没有跑**（按任务规则交给总控）：`cargo test -p verve-electron --test web_contents --test browser_window --test fixtures --test page_load --test ipc --test api`、`cargo test -p verve-electron --lib`（`page_state` 与 `window_open` 的单测）、clippy、Linux 检查、体积测量。
+- 观测程序只跑了一遍 Electron 39.8.10（`tests/electron/web-contents/observe`），结果在上面的"观测"里。
+
+### 第二段：评审与中心测试之后改的
+
+- **`window.open` 的子窗口权限（安全）**：`inherited_preferences` 改成 Electron 的 `makeWebPreferences`：打开者的值是安全值（`contextIsolation` 真、`sandbox` 真、`nodeIntegration`/`javascript`/`webviewTag`/`nodeIntegrationInSubFrames`/`enableWebSQL` 假）才复制，否则用默认值；`preload`、`partition`、`webSecurity` 不再继承。早先的实现把打开者的 `nodeIntegration: true` 原样给了子窗口，一个远端页面就能 `require('child_process')`。测试：`a_window_does_not_inherit_permissions_its_opener_has`。上面第 326 行与 `window_open.rs` 条目已按此改正。
+- **`<a target>` 与 `window.open`（verve-dom，P20 的代码，单独的 `fix(dom)` 提交）**：带 `target`（`_self` `_parent` `_top` 除外）的链接原来在同一个窗口里 `navigate`，绕过 `setWindowOpenHandler`，并把远端页面装进有特权的窗口；`window.open` 又只收 http(s)，对 `about:blank`、`data:`、`file:` 抛一句写死的中文 `SecurityError`。现在两者都发 `Request::Open`（`_blank` 的 `name` 为空），除 `javascript:` 外的地址都交给嵌入方定夺；表单 `action` 仍只收 http(s)，错误文字改成英文。verve-dom 的 `review_navigation_and_forms_only_queue_http_urls` 不再把 `window.open` 算进去，另加一个新测试。
+- **不会挂起的 Promise**：`Calls::execute` 自己检查 `has_renderer`（`webFrameMain.executeJavaScript` 也走它）；发出 `Load`（页面 isolate 被换）和 `window_closed` 时，没回答的脚本都以 `Script failed to execute…` 失败；窗口关闭时还在等的 `loadURL` 以 `ERR_FAILED (-2)` 拒绝。测试：`promises_settle_when_the_page_or_the_window_goes_away`。
+- **历史下标**：`getEntryAtIndex(-1/NaN)` 是 `null`，`removeEntryAtIndex(-1/NaN)` 是 `false`，`goToIndex` 越界什么也不做（不再落到第 0 项）。测试：`history_entries_outside_the_list_are_none`。
+- **心跳**：只有主进程发给页面的输入（`sendInputEvent`、`KeyForContents` 转交的键）或关闭询问（`beforeunload`）在 5 s 内没被页面接走，才算 `unresponsive`；单纯一段长脚本（例如加载大 bundle）不算。`render-process-gone` 时清掉这个状态。
+- **中心测试的 7 个失败**：失败的加载之后多出的 `did-start-loading`/`did-navigate-in-page` 来自渲染器把文档地址的变化当成页内导航（第一次比较时 `self.url` 还是 `about:blank`）——现在只在提交过一个文档之后才比较；脚本抛错被报到控制台之前先回复 `executeJavaScript`，并且只回固定的失败文字（`run_script`/`report_in`）；`before-input-event` 测试的断言多包了一层 `JSON.stringify`（`eval_*` 本来就答 JSON）；`COMMANDS` 用了类型别名。
+- **清理**：`emit_navigation` 改用 `define::emit_with_event`（`emit_cancelable` 的带自备事件的变体）；`referrer_of` 一份；`LEVEL_STEP` 一份（`web_frame.rs`）；`key_named` 用 verve-dom 的 `Key::named`；`findInPage` 在返回 requestId 之后才发 `found-in-page`；`print` 的回调异步；`replace`/`replaceMisspelling`/`centerSelection`/`adjustSelection` 抛 `ERR_NOT_SUPPORTED`；`session` 每次读是同一个对象；`window.open` 的 features 里非 yes/no/数字的值（`title=Foo`）保留为字符串。
+- P02：Hub 的四个新方法写进了 Hub 的代码块，汇总表里重复的两行合并。
+
+### 仍未做（评审提出，登记）
+
+- **页内导航的种类**：`DidNavigateInPage` 还是一律 `Push`：hash a → hash b → `history.back()` 得到长度 4、下标 3（Electron 是 3 和 1），`replaceState` 也加了条目。要让它区分 push / replace / traverse，需要改 `PageEvent::DidNavigateInPage`（契约变更，另走 docs 提交）和 verve-dom 报出种类。
+- stubs：WebRTC 策略、`backgroundThrottling`、`frameRate`、`startPainting`/`stopPainting` 的 setter/getter 仍不回读；DevTools 状态与 `devtools-opened`/`devtools-closed` 没做（P43）；`removeAllListeners()`（不带名字）仍会去掉 `before-input-event` 的两个钩子。
+- 提交历史：`feat(electron): Make webContents a class…`（约 2700 行）没有拆成评审要求的六个提交——各部分互相引用（`MainState`、`WindowRecord.page_state`、`main_guest` 的分支），按提交拆开每一步都要重做接线，这一轮没有做；已知这使它难以逐段评审和二分。
+
+### 第二段：第三轮（复审之后）
+
+- **`window.open` 的目标受打开者的规则约束（安全）**：`window_open::navigable`——`data:`/`blob:`/`javascript:` 永远不能做窗口的顶层，`file:` 只有 `file:` 页面能开；handler 仍然先被调用（Chromium 同），之后加载被拒绝，主进程控制台写 `Not allowed to load local resource: …`。测试：`a_page_cannot_open_a_window_on_what_it_may_not_load` 与单测。因此 `window.open` 的测试改用 `loadFile` 的页面。`partition` 恢复继承（会话不是权限）。
+- **心跳**：`Hub::input` 记下页面还没接走的人为输入（指针、滚轮、键、文字）的数目与最早一条的时间，页面处理完才减；心跳读 `Hub::input_waiting_for`。帧、布局之类 Shell 的消息不算。Shell 直接发的输入也因此被计入。
+- **缺失的 `file:` 路径**（Windows 上没有盘符）：加载器答 `ERR_FILE_NOT_FOUND (-6)`，不再是 `-300`。
+- **`did-create-window`** 没有 event 参数，是 `(window, details)`（之前多传了一个 event）。
+- **`executeJavaScript` 与 `window.open` 的顺序**：脚本里 `window.open` 产生的请求先于脚本结果发给主进程（Electron 里它同步完成）；导航请求仍在结果之后（页面换了文档后旧文档的话不被听见）。
+- 测试：`run` 仍然包含页面的控制台行（`browser_window` 的关闭测试靠它），`execute_javascript…` 自己滤掉页面的 `Uncaught…` 行；顺序改动撤销。
+- `found-in-page` 的延后作业先看页面是否还在；脚本只在页面的 isolate 被换掉时才失败。
+
+仍登记未做：`rel=noopener`/`noreferrer`；`target="foo"` 且已有名为 foo 的窗口时应该直接导航那个窗口而不问 handler；`window.open()` 不带地址应开 `about:blank`；同一 session 的页面共用一个 `session` 对象（P16）。**提交历史**：`feat(electron): Make webContents a class…` 仍是一个提交（约 2700 行，20 个文件），没有拆成六个：各部分共用的文件（`main_guest.rs`、`api/mod.rs`、`contents_ipc.rs`、`web_contents.rs`、`windows.rs`、`page_state.rs`、`hub.rs`）每一步都要手工摘掉后面的部分并编译，这一轮没有做完。
+
+### 第二段：第四轮
+
+- **输入计数**：`Hub` 为每个页面留一条先进先出的"人为输入发出时间"队列，页面处理完一条才弹出一条；换 isolate（`renew_for_navigation`）和 `kill_renderer` 时清空（那些排着的作业随旧 isolate 一起丢了）。测试 `input_dropped_by_a_load_does_not_make_a_later_long_script_a_hang`。
+- **换 isolate 时让脚本失败**：`Hub::to_renderer` 现在答"这次 `Load` 是否换掉了 isolate"（`RendererHandle::to_renderer` 同），`navigation::start` 据此让没回答的脚本失败，不再看 `page_state.url`（未提交的第一次加载也算）。测试 `a_script_asked_of_a_load_that_is_replaced_before_it_commits_fails`。
+- **`window.open` 的规则**按 Chromium：`data:` 永远不能做窗口的顶层（消息 `Not allowed to navigate top frame to data URL: …`）；`file:` 只能由 `file:` 页面开；`blob:` 只能开同源的；消息写在**打开者页面的控制台**里（新增 `ToRenderer::ConsoleError`，P02 契约已补），不再写主进程的。
+- 测试：`window.open` 之后不再 `sleep`（请求先于脚本结果），打开者关闭后用条件轮询；`executeJavaScript` 的测试用 `run_main`（只取主进程的行）而不是按前缀滤掉；`did-create-window` 先于脚本结果、handler 回答不合规时主进程控制台恰好一行，都写进了断言。
+
+给 P20：同一批里 `Navigate` 之后的东西会丢——`page_navigates` → `start` 换掉 isolate，`from_renderer_batch` 因代数不符丢掉批里其余的事件。所以 `location.href='a'; window.open('b')` 会丢掉 `window.open`。（`executeJavaScript` 里的 `window.open` 因为排在结果之前所以不受影响。）
