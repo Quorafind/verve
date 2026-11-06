@@ -850,7 +850,7 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
     let paths = JsArray::new(context)?;
     module.set(js_string!("globalPaths"), paths, false, context)?;
     #[cfg(feature = "typescript")]
-    let strip = crate::typescript::function(context)?;
+    let strip = crate::typescript::strip_function(context)?;
     #[cfg(not(feature = "typescript"))]
     let strip = crate::native::function(context, "stripTypeScriptTypes", 1, |_, _, cx| {
         Err(crate::native::coded_error(

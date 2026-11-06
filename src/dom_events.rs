@@ -1001,7 +1001,7 @@ pub fn dispatch_value(target: &JsValue, event: &JsObject, context: &mut Context)
         // state its own.
         let kind = text_of(&event.get(js_string!("type"), context)?, context)?;
         if let Some(holder) = holder(target, context) {
-            invoke(&holder, target, &kind, event, None, false, context)?;
+            invoke_listeners(&holder, target, &kind, event, None, false, context)?;
         }
         return Ok(!get(&event.clone().into(), "defaultPrevented", context)?.to_boolean());
     }
@@ -1052,7 +1052,7 @@ pub fn dispatch_value(target: &JsValue, event: &JsObject, context: &mut Context)
             state.current = this.clone();
             state.phase = phase;
         }
-        match invoke(&holder, this, &kind, event, capture, true, context) {
+        match invoke_listeners(&holder, this, &kind, event, capture, true, context) {
             Ok(false) => {}
             Ok(true) => break,
             Err(error) => {
@@ -1076,7 +1076,7 @@ pub fn dispatch_value(target: &JsValue, event: &JsObject, context: &mut Context)
 /// The listeners for `kind` on `holder` (the object `this` keeps its listeners on) called with
 /// `event`: only the capturing ones or only the others when `capture` says, both — capturing
 /// first — at the target. Answers whether `stopImmediatePropagation` was called.
-fn invoke(
+fn invoke_listeners(
     holder: &JsObject,
     this: &JsValue,
     kind: &str,

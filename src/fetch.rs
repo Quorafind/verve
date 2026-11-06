@@ -1704,7 +1704,7 @@ const GLOBALS: &[(&str, crate::native::GlobalMaker)] = &[
     ("Request", |cx| Ok(classes(cx)?.request.clone().into())),
     ("Response", |cx| Ok(classes(cx)?.response.clone().into())),
     ("FormData", |cx| Ok(classes(cx)?.form_data.clone().into())),
-    ("fetch", |cx| Ok(crate::network::fetch::function(cx).into())),
+    ("fetch", |cx| Ok(crate::network::fetch::create(cx).into())),
 ];
 
 /// The five globals, each made (with the rest) the first time one is read. A host with

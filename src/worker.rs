@@ -456,7 +456,7 @@ fn script_of(url: &str, context: &Context) -> Option<String> {
         let bytes = crate::encoding::unbase64(body)?;
         Some(String::from_utf8_lossy(&bytes).into_owned())
     } else {
-        crate::esm_resolve::percent_decode(body).ok()
+        crate::esm_resolve::decode_url_escapes(body).ok()
     }
 }
 

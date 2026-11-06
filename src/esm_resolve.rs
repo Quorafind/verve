@@ -385,7 +385,7 @@ fn map_match(
 }
 
 fn invalid_segments(path: &str) -> bool {
-    let decoded = percent_decode(path)
+    let decoded = decode_url_escapes(path)
         .unwrap_or_else(|_| path.into())
         .replace('\\', "/");
     decoded
@@ -523,7 +523,7 @@ pub(crate) fn finalize(view: &View, mut url: Url) -> Result<Url> {
     Ok(url)
 }
 
-pub(crate) fn percent_decode(text: &str) -> Result<String> {
+pub(crate) fn decode_url_escapes(text: &str) -> Result<String> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;
