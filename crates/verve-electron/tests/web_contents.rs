@@ -420,6 +420,35 @@ fn window_open_follows_the_handler_and_makes_a_child_window() {
 }
 
 #[test]
+fn the_statics_and_the_frame_answer_for_a_page() {
+    // Electron 39.8.10: type 'window'; fromId finds it, an unknown id nothing; the main frame is
+    // its own top, has no parent or children, processId a number and routingId 1; the zoom level of
+    // factor 2 is ln 2 / ln 1.2; the user agent names Electron until it is set.
+    let lines = run(r#"
+    const { webContents } = require('electron');
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await load(win, '<p>s</p>');
+    const frame = wc.mainFrame;
+    log(wc.getType(), typeof wc.id, webContents.fromId(wc.id) === wc, webContents.fromId(9999), webContents.getAllWebContents().length, webContents.getFocusedWebContents());
+    log(frame.url.slice(0, 15), JSON.stringify(frame.name), frame.top === frame, frame.parent, frame.frames.length, typeof frame.processId, frame.routingId, frame.detached, webContents.fromFrame(frame) === wc);
+    log(wc.getUserAgent().includes('Electron/'), (wc.setUserAgent('custom/1'), wc.getUserAgent()), wc.userAgent);
+    log(wc.getZoomFactor(), wc.getZoomLevel(), (wc.setZoomFactor(2), wc.getZoomFactor()), wc.getZoomLevel());
+    log(wc.isCrashed(), wc.isAudioMuted(), wc.getOSProcessId() > 0, wc.hostWebContents, wc.devToolsWebContents);
+    log(await frame.executeJavaScript('1 + 1'));
+    "#);
+    assert_eq!(lines[0], "window number true undefined 1 null");
+    assert_eq!(
+        lines[1],
+        "data:text/html, \"\" true null 0 number 1 false true"
+    );
+    assert_eq!(lines[2], "true custom/1 custom/1");
+    assert_eq!(lines[3], "1 0 2 3.8017840169239308");
+    assert_eq!(lines[4], "false false true null null");
+    assert_eq!(lines[5], "2");
+}
+
+#[test]
 fn a_crashed_page_says_so_fails_its_scripts_and_comes_back_on_reload() {
     // Electron 39.8.10: forcefullyCrashRenderer() says render-process-gone with reason 'crashed'
     // and exitCode 2; isCrashed() is true until the page loads again.

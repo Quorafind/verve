@@ -140,6 +140,7 @@ pub(crate) struct PageState {
     pub load: RefCell<Option<ResolvingFunctions>>,
     pub user_agent: RefCell<Option<String>>,
     pub zoom_factor: Cell<Option<f64>>,
+    pub audio_muted: Cell<bool>,
     /// The page's process ended and no load has made a new one.
     pub crashed: Cell<bool>,
     /// The page has been busy longer than the heartbeat allows.

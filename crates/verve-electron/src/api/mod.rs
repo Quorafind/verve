@@ -9,6 +9,7 @@ pub(crate) mod command_line;
 pub(crate) mod contents_history;
 pub(crate) mod contents_ipc;
 pub(crate) mod contents_page;
+pub(crate) mod contents_stubs;
 pub(crate) mod context_bridge;
 pub mod define;
 pub(crate) mod dialog;

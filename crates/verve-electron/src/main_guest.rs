@@ -153,6 +153,13 @@ impl MainGuest {
         define::report(context, heard);
     }
 
+    /// `findInPage`'s `found-in-page`, heard after the call that asked for it returned.
+    pub(crate) fn found_in_page(&mut self, contents: ContentsId, request: u64) {
+        let found = api::contents_stubs::found(self.runtime.context(), contents, request);
+        api::define::report(self.runtime.context(), found);
+        self.runtime.run_microtasks();
+    }
+
     pub(crate) fn all_closed(&mut self) {
         app::quit::all_closed(self.runtime.context());
     }
