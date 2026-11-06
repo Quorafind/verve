@@ -152,6 +152,8 @@ pub enum FromShell {
     MenuClicked { menu_item: u32, window: Option<WindowId> },     // P15
     Displays(Vec<Display>),                                       // screen 模块缓存（P14）
     DialogResult { call: u64, result: DialogResult },             // P14：异步对话框的答复
+    /// P13（第二段）：`before-input-event`——页面的 `intercept_keys` 为真（主进程有监听者）时，Shell 把键盘事件发到这里而不是直接发渲染器；主进程发事件，未阻止就用 `Hub::input` 转交
+    KeyForContents { contents: ContentsId, down: bool, key: verve_dom::Key },
 }
 
 pub enum WindowEvent {
@@ -186,13 +188,23 @@ pub enum ToRenderer {
     Ipc { channel: String, args: Vec<Cloned>, sender_id: ContentsId /* 0 = 主进程 */ },
     InvokeReply { call: u64, result: Result<Cloned, Cloned /* Error 克隆 */> },
     SendSyncReply { call: u64, value: Cloned },      // 也可直接走 oneshot，见 P12
-    ExecuteJavaScript { call: u64, code: String, user_gesture: bool },
+    /// `world`: 0 = the page's own world, else `executeJavaScriptInIsolatedWorld`'s number (P13 第二段加）
+    ExecuteJavaScript { call: u64, code: String, user_gesture: bool, world: i32 },
     SetZoomFactor(f64),
     // —— P13 追加（关闭往返）——
     /// 窗口要关了：在页面 window 上派发 `beforeunload`，答 `FromRenderer::BeforeUnloadReply`
     BeforeUnload { call: u64 },
     /// 关闭继续：派发 `pagehide`、`unload`，答 `FromRenderer::UnloadReply`
     Unload { call: u64 },
+    // —— P13 追加（第二段）——
+    /// `webContents.insertCSS`：键由主进程取好（`insertCSS` 的 Promise 以它 resolve），`user` 是 `cssOrigin: 'user'`
+    InsertCss { key: String, css: String, user: bool },
+    /// `webContents.removeInsertedCSS(key)`
+    RemoveCss { key: String },
+    /// `webContents` 的编辑命令（`undo`、`copy`、`selectAll`、`insertText`…；菜单 role 的 `EditCommand` 也是它，P15 复用）
+    EditCommand(EditCommand),
+    /// 页面自己控制台的一行错误（`window.open` 被拒时 Chromium 写在打开者的控制台里）
+    ConsoleError { message: String },
 }
 
 // ---------- 渲染器 → 主进程 ----------
@@ -219,6 +231,9 @@ pub enum FromRenderer {
     PreloadError { path: String, name: String, message: String },
     /// P21：`webFrame.setZoomFactor`：页面自己改了缩放系数（主进程不记；`getZoomFactor`/`zoom-changed` 是 P13 的，要用自己留）
     ZoomChanged(f64),
+    // —— P13 追加（第二段）——
+    /// 页面的 `contextmenu` 事件未被 `preventDefault`（右键松开）：主进程发 `webContents` 的 `context-menu`
+    ContextMenu(ContextMenuParams),
 }
 
 pub enum PageEvent {
@@ -259,6 +274,8 @@ pub struct RendererView {
 }
 ```
 
+P13 第二段另加两个类型（`msg.rs`）：`EditCommand`（`Undo` `Redo` `Cut` `Copy` `Paste` `PasteAndMatchStyle` `Delete` `SelectAll` `Unselect` `ScrollToTop` `ScrollToBottom` `InsertText(String)`）与 `ContextMenuParams`（`x` `y` `link_url` `link_text` `src_url` `media_type` `is_editable` `selection_text` `title_text` `alt_text`；其余参数由主进程按页面地址与这些字段补全）。
+
 `MenuOp`、`CompositionEvent`、`GoneReason`、`LoadOptions`、`PointerKind`、`TitleBarStyle` 在本包给出最小定义，
 后续包（P15/P24/P13/P20/P32/P34）在其上**追加**。
 
@@ -282,9 +299,9 @@ pub struct RendererView {
 | `AppEvent::Ready`（Shell 启动完成，`app` 的 `ready` 依据）— P10 已加，由 Hub 在 `start` 时发 | P10 |
 | `WindowEvent::FirstPaint`（`ready-to-show` 的精确依据）、`WindowEvent::NativeHandle(u64)` | P13 / P34 |
 | `ToRenderer::{BeforeUnload, Unload}`（各带 `call`）、`FromRenderer::{BeforeUnloadReply { call, proceed }, UnloadReply { call }}`；`WindowOp::{SetClosable, SetMovable, SetMinimizable, SetMaximizable, SetFocusable, SetEnabled, SetParent, MoveTop}` | P13（第一阶段） |
-| `ToRenderer::WindowMessage`、`FromRenderer::WindowProxyOp`（`window.open` 返回的代理） | P13 |
-| `FromRenderer::ContextMenu(ContextMenuParams)` | P13 |
-| `FromShell::KeyForContents`（`before-input-event`，Shell 不等 JS：先投递给主进程，主进程决定后再转渲染器） | P13 / P32 |
+| `ToRenderer::WindowMessage`、`FromRenderer::WindowProxyOp`（`window.open` 返回的代理）——**P13 第二段没做**：渲染器侧的代理是 P20 的，没有它主进程这一侧无从验证 | P13 |
+| `ToRenderer::{InsertCss, RemoveCss, EditCommand, ConsoleError}`、`ExecuteJavaScript.world`、`FromRenderer::ContextMenu`、`FromShell::KeyForContents`，及 `EditCommand`、`ContextMenuParams` | P13（第二段） |
+| `FromShell::KeyForContents`（`before-input-event`，Shell 不等 JS：`Hub::intercepts_keys(contents)` 为真时先投递给主进程，主进程决定后再转渲染器；上一行也列了它） | P13 / P32 |
 | `ToRendererInput::Visibility(bool)`（`document.visibilityState`） | P13 / P34 |
 | `FromRenderer::Font(..)`、`ToRendererInput::FontsChanged`（`@font-face` 注册到 GPUI 文字系统） | P31 |
 | `ToRendererInput::Choose { select, value }`（`<select>` 下拉弹层选中） | P32 |
@@ -331,6 +348,10 @@ impl Hub {
     pub fn has_renderer(&self, id: ContentsId) -> bool;                // 页面有可问的 isolate（没建、已退役或已崩溃的没有）；关闭往返问之前看
     pub fn set_displays(&self, displays: Vec<Display>);                // 外壳报的显示器；`FromShell::Displays` 到时 Hub 自己记
     pub fn primary_display(&self) -> Display;                          // 新窗口落在哪块屏；外壳没报过就是 `Display::default()`（1920×1080，1x）
+    pub fn renderer_busy_for(&self, id: ContentsId) -> Option<Duration>; // 页面正在跑的这一段脚本跑了多久（心跳读它；P13）
+    pub fn kill_renderer(self: &Arc<Self>, id: ContentsId);           // `forcefullyCrashRenderer`：丢掉 isolate，主进程收到 `Gone { Crashed }`，下次加载重建（P13）
+    pub fn set_intercept_keys(&self, id: ContentsId, on: bool);        // 主进程有 `before-input-event` 监听者时为真（P13）
+    pub fn intercepts_keys(&self, id: ContentsId) -> bool;            // Shell 据此把键发给 `FromShell::KeyForContents` 而不是直接 `input`（P13 / P32）
     pub fn set_shell(&self, shell: Arc<dyn ShellPort>);                // ToShell 的收件人；它也就是唤醒的入口
     pub fn shutdown(&self, exit_code: i32);                            // 先到的退出码为准；停掉所有 isolate，再发 Quit
     pub fn exit_code(&self) -> Option<i32>;                            // 进程该用的退出码
