@@ -9,11 +9,13 @@
 mod display_list;
 mod gradient;
 mod grid;
+mod layout;
 mod measure;
 mod paint_style;
 mod props;
 mod shadow;
 mod transform;
+mod tree;
 mod value;
 
 pub use display_list::{
