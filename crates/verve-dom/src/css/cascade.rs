@@ -26,6 +26,9 @@ use crate::dom::{Dom, Namespace, NodeId};
 pub enum Origin {
     /// The browser's defaults: `div { display: block }`.
     UserAgent,
+    /// The user's own sheet: `webFrame.insertCSS(css, { cssOrigin: 'user' })`. Between the
+    /// browser's and the page's, and its `!important` declarations over the page's.
+    User,
     /// The embedder's and the document's.
     Author,
 }
@@ -37,6 +40,8 @@ pub enum Origin {
 pub(super) enum Precedence {
     /// The user agent's normal declarations.
     UserAgent,
+    /// The user's normal declarations.
+    User,
     /// Normal author declarations of an inner tree reaching out (`:host`, `::slotted`).
     InnerAuthor,
     /// Normal author declarations.
@@ -49,6 +54,8 @@ pub(super) enum Precedence {
     ImportantInline,
     /// `!important` declarations of an inner tree reaching out.
     ImportantInnerAuthor,
+    /// The user's `!important` declarations.
+    ImportantUser,
     /// The user agent's `!important` declarations.
     ImportantUserAgent,
 }
@@ -59,10 +66,12 @@ impl Precedence {
     pub(super) fn of(important: bool, origin: Origin, inner: bool) -> Self {
         match (important, origin, inner) {
             (false, Origin::UserAgent, _) => Self::UserAgent,
+            (false, Origin::User, _) => Self::User,
             (false, Origin::Author, true) => Self::InnerAuthor,
             (false, Origin::Author, false) => Self::Author,
             (true, Origin::Author, true) => Self::ImportantInnerAuthor,
             (true, Origin::Author, false) => Self::ImportantAuthor,
+            (true, Origin::User, _) => Self::ImportantUser,
             (true, Origin::UserAgent, _) => Self::ImportantUserAgent,
         }
     }

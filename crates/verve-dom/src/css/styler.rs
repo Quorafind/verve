@@ -175,6 +175,6 @@ impl Styler {
     /// not found among a node's own candidates.
     fn applies(&self, index: usize, tree: NodeId) -> bool {
         let entry = &self.rules[index];
-        entry.own && (entry.origin == Origin::UserAgent || entry.tree == tree)
+        entry.own && (entry.origin != Origin::Author || entry.tree == tree)
     }
 }
