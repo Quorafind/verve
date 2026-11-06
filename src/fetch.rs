@@ -14,15 +14,15 @@
 //! that or from a urlencoded body.
 
 use boa_engine::{
-    Context, JsData, JsObject, JsResult, JsSymbol, JsValue, builtins::promise::ResolvingFunctions,
-    js_string, native_function::NativeFunctionPointer,
+    Context, JsData, JsError, JsObject, JsResult, JsSymbol, JsValue,
+    builtins::promise::ResolvingFunctions, js_string, native_function::NativeFunctionPointer,
 };
 use boa_gc::{Finalize, Gc, Trace};
 
 use crate::native::{arg, arg_text, array, get, js_text, list_of, object, text_of, type_error};
 use crate::streams::{
-    error_value, pending, prototype_for, reject, rejected, resolve, rethrow, symbol_method,
-    type_error_value, u8array, web_class, when,
+    error_value, pending, prototype_for, reject, resolve, rethrow, symbol_method, type_error_value,
+    u8array, web_class, when,
 };
 
 // ─── The classes, made once ─────────────────────────────────────────────────────────────────
@@ -539,15 +539,15 @@ fn consume(context: &mut Context, target: &JsObject) -> JsResult<JsValue> {
     match &taken {
         Err(()) => {
             let reason = type_error_value("Body is unusable: Body has already been read", context);
-            rejected(reason, context)
+            crate::native::settled(Err(JsError::from_opaque(reason)), context)
         }
         Ok(Body::Empty) => {
             let bytes = u8array(Vec::new(), context)?;
-            crate::streams::resolved(bytes, context)
+            crate::native::settled(Ok(bytes), context)
         }
         Ok(Body::Bytes(bytes)) => {
             let bytes = u8array(bytes.clone(), context)?;
-            crate::streams::resolved(bytes, context)
+            crate::native::settled(Ok(bytes), context)
         }
         Ok(Body::Stream(stream)) => read_all(context, stream),
     }
@@ -652,7 +652,7 @@ fn consume_then(
         Ok(target) => target,
         Err(error) => {
             let reason = error_value(error, context);
-            return rejected(reason, context);
+            return crate::native::settled(Err(JsError::from_opaque(reason)), context);
         }
     };
     let kind = js_text(&content_type(&headers_object(&target)));

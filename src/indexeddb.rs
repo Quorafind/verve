@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::native::{
     PlainClass, arg, arg_text, define_global, function, hidden, js_text, list_from, object,
-    plain_class, text_of, type_error,
+    plain_class, text_of,
 };
 use crate::shared;
 
@@ -2362,7 +2362,7 @@ fn define_interface(
         context,
         PlainClass {
             name,
-            construct: |_, _, _| Err(type_error("Illegal constructor")),
+            construct: crate::native::illegal_constructor,
             length: 0,
             parent: parent.cloned(),
             methods,

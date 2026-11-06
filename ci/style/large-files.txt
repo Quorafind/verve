@@ -13,6 +13,6 @@ src/intl.rs 1997
 src/network/http.rs 1765
 src/path.rs 1507
 src/stream.rs 4600
-src/streams.rs 4030
+src/streams.rs 4026
 src/util.rs 3498
 tests/npm.rs 1572

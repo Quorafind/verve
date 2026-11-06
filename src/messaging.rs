@@ -53,7 +53,7 @@ pub(crate) fn make_classes(
         context,
         "MessagePort",
         0,
-        |_, _, _| Err(type_error("Illegal constructor")),
+        crate::dom_events::illegal,
         parent,
         PORT_METHODS,
         &[],

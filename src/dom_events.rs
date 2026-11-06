@@ -274,7 +274,7 @@ pub fn web_class(
     Ok((constructor, prototype))
 }
 
-fn illegal(_: &JsObject, _: &[JsValue], _: &mut Context) -> JsResult<JsObject> {
+pub(crate) fn illegal(_: &JsObject, _: &[JsValue], _: &mut Context) -> JsResult<JsObject> {
     Err(type_error("Illegal constructor"))
 }
 
@@ -1369,15 +1369,8 @@ pub fn define_event_class(
     fields: &'static [(&'static str, FieldDefault)],
     methods: &[(&str, usize, NativeFunctionPointer)],
 ) -> JsResult<(JsObject, JsObject)> {
-    let (constructor, prototype) = web_class(
-        context,
-        name,
-        1,
-        |_, _, _| Err(type_error("Illegal constructor")),
-        Some(parent),
-        methods,
-        &[],
-    )?;
+    let (constructor, prototype) =
+        web_class(context, name, 1, illegal, Some(parent), methods, &[])?;
     // The constructor `web_class` made calls a plain `Make`, which carries nothing; this class's
     // fields are on its constructor instead, read when it makes an event.
     let fields_list = FieldList(fields);
