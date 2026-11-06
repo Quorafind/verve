@@ -20,7 +20,7 @@ use super::{
     dom_error, extend_prototype, get, handle_of, illegal_constructor, native_instance, node_id,
     node_of, opt_string, plain_object, set, string, text, type_error,
 };
-use crate::dom::{Dom, Namespace, NodeId, ShadowMode, camel_name, css_name};
+use crate::dom::{Dom, NodeId, ShadowMode, camel_name, css_name};
 use crate::state::shared;
 use crate::{Align, Rect};
 
@@ -922,7 +922,7 @@ fn content_size(this: &JsValue, context: &mut Context, axis: usize) -> JsResult<
 /// `innerHTML = markup`: what was there taken out, `markup` read in. A `<template>`'s goes to
 /// its content.
 pub fn set_inner_html(context: &mut Context, id: NodeId, markup: &str) {
-    let target = super::platform::template_target(context, id).unwrap_or(id);
+    let target = super::template::template_target(context, id).unwrap_or(id);
     with_dom(context, |dom| {
         dom.empty(target);
         let fragment = dom.create_fragment();
@@ -3153,71 +3153,6 @@ const CELL_REFLECTED: &[(&str, &str, Reflect)] = &[
     ("abbr", "abbr", Reflect::Text),
 ];
 
-// ─── SVG ────────────────────────────────────────────────────────────────────────────────────
-
-const SVG_ACCESSORS: &[Accessor] = &[
-    (
-        "ownerSVGElement",
-        Some(|this, _, cx| {
-            let id = node_of(this)?;
-            let owner = read_dom(cx, |dom| {
-                let mut at = dom.parent(id);
-                while let Some(node) = at {
-                    if dom
-                        .get(node)
-                        .is_some_and(|n| n.tag() == Some("svg") && n.namespace == Namespace::Svg)
-                    {
-                        return Some(node);
-                    }
-                    at = dom.parent(node);
-                }
-                None
-            });
-            Ok(wrap_opt(cx, owner))
-        }),
-        None,
-    ),
-    ("viewportElement", Some(|_, _, _| Ok(JsValue::null())), None),
-];
-
-const SVG_GRAPHICS_METHODS: &[Method] = &[
-    ("getBBox", 0, |this, _, cx| {
-        let id = node_of(this)?;
-        let rect = painted(cx, id);
-        rect_object(
-            cx,
-            Rect {
-                x: 0.,
-                y: 0.,
-                ..rect
-            },
-        )
-    }),
-    ("getCTM", 0, |_, _, cx| super::platform::identity_matrix(cx)),
-    ("getScreenCTM", 0, |_, _, cx| {
-        super::platform::identity_matrix(cx)
-    }),
-    ("getTotalLength", 0, |_, _, _| Ok(0.into())),
-    ("getPointAtLength", 1, |_, _, cx| {
-        let point = plain_object(cx);
-        set(&point, "x", 0, cx)?;
-        set(&point, "y", 0, cx)?;
-        Ok(point.into())
-    }),
-];
-
-const SVG_SVG_METHODS: &[Method] = &[
-    ("createSVGPoint", 0, |_, _, cx| {
-        super::platform::new_point(cx)
-    }),
-    ("createSVGMatrix", 0, |_, _, cx| {
-        super::platform::identity_matrix(cx)
-    }),
-    ("suspendRedraw", 1, |_, _, _| Ok(0.into())),
-    ("unsuspendRedraw", 1, |_, _, _| Ok(JsValue::undefined())),
-    ("forceRedraw", 0, |_, _, _| Ok(JsValue::undefined())),
-];
-
 // ─── Installing ─────────────────────────────────────────────────────────────────────────────
 
 fn plain_class(context: &mut Context, name: &'static str, parent: &str) -> JsResult<JsObject> {
@@ -3483,7 +3418,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         "HTMLTemplateElement",
         "HTMLElement",
         &[],
-        super::platform::TEMPLATE_ACCESSORS,
+        super::template::TEMPLATE_ACCESSORS,
         &[],
     )?;
     full_class(
@@ -3726,13 +3661,20 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     }
     super::slot::install(context)?;
     // SVG's classes, under one that shapes share.
-    let svg = full_class(context, "SVGElement", "Element", &[], SVG_ACCESSORS, &[])?;
+    let svg = full_class(
+        context,
+        "SVGElement",
+        "Element",
+        &[],
+        super::svg::SVG_ACCESSORS,
+        &[],
+    )?;
     extend_prototype(context, &svg, FOCUS_METHODS, STYLED_ACCESSORS)?;
     full_class(
         context,
         "SVGGraphicsElement",
         "SVGElement",
-        SVG_GRAPHICS_METHODS,
+        super::svg::SVG_GRAPHICS_METHODS,
         &[],
         &[],
     )?;
@@ -3740,7 +3682,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         plain_class(context, name, "SVGGraphicsElement")?;
     }
     let svg_svg = crate::state::class_prototype(context, "SVGSVGElement");
-    extend_prototype(context, &svg_svg, SVG_SVG_METHODS, &[])?;
+    extend_prototype(context, &svg_svg, super::svg::SVG_SVG_METHODS, &[])?;
     plain_class(context, "MathMLElement", "Element")?;
     // What an element hands out.
     class(

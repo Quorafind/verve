@@ -23,6 +23,8 @@ pub mod observers;
 pub mod platform;
 pub mod reveal;
 pub mod slot;
+pub mod svg;
+pub mod template;
 pub mod traversal;
 pub mod window;
 pub mod xhr;
