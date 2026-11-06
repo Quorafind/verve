@@ -299,10 +299,23 @@ impl Document {
     /// arrives, runs its scripts in HTML's order. Progress comes back through
     /// [`Document::take_load_events`].
     pub fn navigate_initial(&self, runtime: &mut verve::Runtime, url: &str) {
+        self.navigate_initial_with(runtime, url, |_| {});
+    }
+
+    /// [`Document::navigate_initial`], running `before` once the document is loading
+    /// (`readyState` is `loading`) and nothing of it has been fetched or parsed: where an
+    /// embedder runs the scripts that come before the page's, a preload.
+    pub fn navigate_initial_with(
+        &self,
+        runtime: &mut verve::Runtime,
+        url: &str,
+        before: impl FnOnce(&mut verve::Runtime),
+    ) {
         let Ok(parsed) = Url::parse(url) else {
             return self.fail(url, -300, "ERR_INVALID_URL");
         };
         self.start_load(runtime, &parsed);
+        before(runtime);
         net::start(
             runtime.context(),
             parsed,
