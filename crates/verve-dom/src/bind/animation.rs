@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use boa_engine::object::builtins::JsPromise;
 use boa_engine::{Context, JsObject, JsResult, JsValue, NativeFunction};
-use verve::native::{arg, array, coded_error, get, js_text, list_of, text_of, type_error};
+use verve::native::{self, arg, coded_error, get, js_text, list_of, text_of, type_error};
 
 use super::node::with_dom;
 use super::{Accessor, ClassSpec, Method, class, illegal_constructor, node_of, queue_microtask};
@@ -145,7 +145,7 @@ fn objects(ids: Vec<u32>, context: &mut Context) -> JsResult<JsValue> {
         .into_iter()
         .map(|id| object_of(context, id).into())
         .collect();
-    Ok(array(context, list))
+    Ok(native::array(context, list))
 }
 
 /// How animation `id` stands: its state, how far in it is (`None` when idle), and how fast it

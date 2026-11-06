@@ -67,6 +67,8 @@ pub use world::{create_world, insert_stylesheet, remove_stylesheet};
 
 use state::{Shared, SheetOwner, SheetRecord, State, shared};
 
+use verve::native::js_text;
+
 /// What a script asked of the window that only the embedder can do.
 ///
 /// 地址和剪贴板内容来自不可信脚本；即使地址限于 HTTP(S)，宿主仍须检查网络权限和用户授权。
@@ -1077,8 +1079,8 @@ impl Document {
     fn key_init(key: &Key, char_code: u32) -> Vec<(&'static str, JsValue)> {
         let code = key_code(&key.key);
         vec![
-            ("key", bind::text(&key.key)),
-            ("code", bind::text(&key.code)),
+            ("key", js_text(&key.key)),
+            ("code", js_text(&key.code)),
             ("keyCode", code.into()),
             (
                 "which",
@@ -1375,10 +1377,7 @@ impl Document {
         text: &str,
         input_type: &str,
     ) {
-        let init = [
-            ("data", bind::text(text)),
-            ("inputType", bind::text(input_type)),
-        ];
+        let init = [("data", js_text(text)), ("inputType", js_text(input_type))];
         let allowed = self.fire(runtime, field, "InputEvent", "beforeinput", &init);
         if !allowed {
             return;
@@ -1433,7 +1432,7 @@ impl Document {
             (false, true) => "deleteWordForward",
         };
         let init = [
-            ("inputType", bind::text(input_type)),
+            ("inputType", js_text(input_type)),
             ("data", JsValue::null()),
         ];
         if !self.fire(runtime, field, "InputEvent", "beforeinput", &init) {
@@ -1503,7 +1502,7 @@ impl Document {
                 node,
                 "InputEvent",
                 "input",
-                &[("inputType", bind::text("insertText"))],
+                &[("inputType", js_text("insertText"))],
             );
         }
         runtime.run_microtasks();
@@ -1616,7 +1615,7 @@ pub mod host {
     ) -> JsResult<()> {
         let prototype = crate::state::class_of(context, class)
             .map(|(_, p)| p)
-            .ok_or_else(|| crate::bind::type_error(format!("verve-dom has no class {class}")))?;
+            .ok_or_else(|| verve::native::type_error(format!("verve-dom has no class {class}")))?;
         crate::bind::extend_prototype(context, &prototype, methods, accessors)
     }
 

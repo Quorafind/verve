@@ -5,7 +5,7 @@ use boa_engine::property::Attribute;
 use boa_engine::{Context, JsResult, JsValue, js_string, native_function::NativeFunctionPointer};
 
 use crate::bind::{
-    self, Accessor, ClassSpec, Kind, Method, arg, arg_string, class, dom_error, extend_prototype,
+    self, Accessor, ClassSpec, Kind, Method, class, dom_error, extend_prototype,
     illegal_constructor, instance,
 };
 use crate::canvas::bitmap::{
@@ -20,6 +20,7 @@ use crate::canvas::pixels::construct_image_data;
 use crate::canvas::properties::install_properties;
 use crate::canvas::store::{owner_of_context, this_handle};
 use crate::state::shared;
+use verve::native::{arg, function, text_of};
 
 /// A class: its constructor, its own methods and accessors, and methods it shares with another.
 struct Entry {
@@ -106,7 +107,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             install_properties(context, &prototype)?;
         }
     }
-    let create = bind::function(context, "createImageBitmap", 1, create_image_bitmap);
+    let create = function(context, "createImageBitmap", 1, create_image_bitmap);
     let writable = Attribute::WRITABLE | Attribute::CONFIGURABLE;
     context.register_global_property(js_string!("createImageBitmap"), create, writable)
 }
@@ -119,7 +120,7 @@ fn construct_path(
 ) -> JsResult<JsValue> {
     let first = arg(args, 0);
     let builder = if first.is_string() {
-        from_svg(&arg_string(args, 0, context)?).unwrap_or_default()
+        from_svg(&text_of(&arg(args, 0), context)?).unwrap_or_default()
     } else {
         let source = bind::handle_of(&first, Kind::Path);
         let state = shared(context);
@@ -139,7 +140,7 @@ fn add_color_stop(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         let message = "Failed to execute 'addColorStop' on 'CanvasGradient': The provided value is outside the range (0.0, 1.0).";
         return Err(dom_error(context, message, "IndexSizeError"));
     }
-    let written = arg_string(args, 1, context)?;
+    let written = text_of(&arg(args, 1), context)?;
     let Some((color, _)) = parse_color(&written) else {
         let message = "Failed to execute 'addColorStop' on 'CanvasGradient': The value provided is not a valid color.";
         return Err(dom_error(context, message, "SyntaxError"));

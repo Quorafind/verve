@@ -14,11 +14,12 @@ use boa_engine::{Context, JsObject, JsResult, JsValue, builtins::promise::Resolv
 use crate::Request;
 use crate::bind::element::{Reflect, absolute_url};
 use crate::bind::node::{read_dom, with_dom};
-use crate::bind::{self, Accessor, Method, arg, closure, node_of, string, text};
+use crate::bind::{self, Accessor, Method, node_of, string};
 use crate::canvas::image::{ElementImage, Keep, Status, image_size};
 use crate::canvas::{Axis, set_dimension};
 use crate::dom::NodeId;
 use crate::state::{State, shared};
+use verve::native::{arg, closure, js_text};
 
 pub const IMAGE_ACCESSORS: &[Accessor] = &[
     (
@@ -38,7 +39,7 @@ pub const IMAGE_ACCESSORS: &[Accessor] = &[
     ),
     (
         "currentSrc",
-        Some(|this, _, cx| Ok(text(&report(cx, node_of(this)?).url.unwrap_or_default()))),
+        Some(|this, _, cx| Ok(js_text(&report(cx, node_of(this)?).url.unwrap_or_default()))),
         None,
     ),
     (
@@ -77,7 +78,7 @@ pub const IMAGE_REFLECTED: &[(&str, &str, Reflect)] = &[
 fn source(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
     let id = node_of(this)?;
     let value = read_dom(context, |dom| dom.get_attr(id, "src")).unwrap_or_default();
-    Ok(text(&absolute_url(context, value)))
+    Ok(js_text(&absolute_url(context, value)))
 }
 
 /// Setting the source starts the load at once, as in a browser, so its events are due.
@@ -220,12 +221,12 @@ pub(crate) fn deliver(context: &mut Context, waiting: Waiting, failure: Option<&
 pub(crate) fn flush_events(context: &mut Context) {
     let owed = std::mem::take(&mut shared(context).borrow_mut().images.events);
     for (node, status) in owed {
-        let fire = closure(context, "image event", fire_event, ());
+        let fire = closure(context, "image event", 0, fire_event, ());
         let name = match status {
             Status::Loaded => "load",
             _ => "error",
         };
-        let args = vec![node.into(), text(name)];
+        let args = vec![node.into(), js_text(name)];
         verve::set_timeout(context, fire.into(), 0., false, args);
     }
 }

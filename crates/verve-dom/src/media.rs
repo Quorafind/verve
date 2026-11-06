@@ -10,9 +10,10 @@ use boa_engine::{
     property::PropertyDescriptor,
 };
 
-use crate::bind::{self, Accessor, Method, arg, dom_error, node_of, text, type_error};
+use crate::bind::{self, Accessor, Method, dom_error, node_of};
 use crate::state::shared;
 use crate::{Document, NodeId};
+use verve::native::{self, arg, js_text, type_error};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MediaSettings {
@@ -913,7 +914,7 @@ pub(crate) const METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     // 解码能力由宿主决定，不能凭 MIME 文本保证本机存在某个解码器。
-    ("canPlayType", 1, |_, _, _| Ok(text(""))),
+    ("canPlayType", 1, |_, _, _| Ok(js_text(""))),
     ("fastSeek", 1, |this, args, cx| {
         let node = node_of(this)?;
         let time = arg(args, 0).to_number(cx)?;
@@ -1035,7 +1036,7 @@ pub(crate) const ACCESSORS: &[Accessor] = &[
     ),
     (
         "currentSrc",
-        Some(|this, _, cx| read(this, cx, |s| text(&s.src))),
+        Some(|this, _, cx| read(this, cx, |s| js_text(&s.src))),
         None,
     ),
     (
@@ -1074,7 +1075,7 @@ pub(crate) const ACCESSORS: &[Accessor] = &[
                 Some(error) => {
                     let object = bind::plain_object(cx);
                     bind::set(&object, "code", u32::from(error.code), cx)?;
-                    bind::set(&object, "message", text(&error.message), cx)?;
+                    bind::set(&object, "message", js_text(&error.message), cx)?;
                     Ok(object.into())
                 }
             }
@@ -1098,7 +1099,7 @@ pub(crate) const ACCESSORS: &[Accessor] = &[
     ),
     (
         "textTracks",
-        Some(|_, _, cx| Ok(bind::array(Vec::new(), cx))),
+        Some(|_, _, cx| Ok(native::array(cx, Vec::new()))),
         None,
     ),
 ];

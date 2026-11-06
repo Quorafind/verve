@@ -7,14 +7,13 @@ use boa_engine::{Context, JsResult, JsValue};
 use tiny_skia::Pixmap;
 
 use crate::bind::node::read_dom;
-use crate::bind::{
-    Accessor, Kind, Method, arg, arg_string, dom_error, get, node_of, plain_object, string, text,
-};
+use crate::bind::{Accessor, Kind, Method, dom_error, node_of, plain_object, string};
 use crate::canvas::context2d::{Canvas2d, CanvasOwner};
 use crate::canvas::pixels::{DEFAULT_JPEG_QUALITY, Encoded, ImageType, encode};
 use crate::canvas::store::{CanvasId, canvas_object};
 use crate::canvas::{Axis, element_dimension, element_size, write_dimension};
 use crate::state::shared;
+use verve::native::{arg, get, js_text, text_of};
 
 pub const CANVAS_ACCESSORS: &[Accessor] = &[
     (
@@ -82,7 +81,7 @@ fn canvas_of(this: &JsValue, context: &mut Context, alpha: bool) -> JsResult<Can
 /// `getContext(kind, options)`: a 2D context, a bitmap renderer, or `null` for the kinds that
 /// need a GPU, as on a machine without one: libraries fall back.
 fn get_context(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let kind = arg_string(args, 0, context)?;
+    let kind = text_of(&arg(args, 0), context)?;
     let options = arg(args, 1);
     let class = match kind.as_str() {
         "2d" => (Kind::Context2d, "CanvasRenderingContext2D"),
@@ -176,11 +175,11 @@ fn to_data_url(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     let encoded = exported_element(this, context, "toDataURL")?
         .and_then(|pixmap| encode(&pixmap, kind, quality));
     Ok(match encoded {
-        Some(Encoded { mime, bytes }) => text(&format!(
+        Some(Encoded { mime, bytes }) => js_text(&format!(
             "data:{mime};base64,{}",
             verve::encoding::base64(&bytes, false)
         )),
-        None => text("data:,"),
+        None => js_text("data:,"),
     })
 }
 

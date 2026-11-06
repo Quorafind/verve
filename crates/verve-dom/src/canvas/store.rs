@@ -12,13 +12,14 @@ use boa_engine::{Context, JsError, JsObject, JsResult, JsValue};
 use tiny_skia::{PathBuilder, Pixmap};
 
 use crate::bind::node::wrap;
-use crate::bind::{Kind, handle_of, native_instance, type_error};
+use crate::bind::{Kind, handle_of, native_instance};
 use crate::canvas::CanvasFrame;
 use crate::canvas::context2d::{Canvas2d, CanvasOwner, Scene};
 use crate::canvas::fonts::FontStack;
 use crate::canvas::paint::{GradientSpec, PatternSpec};
 use crate::dom::NodeId;
 use crate::state::{State, shared};
+use verve::native::type_error;
 
 /// The number a canvas, gradient, pattern, path or bitmap is stored under.
 pub type CanvasId = u32;

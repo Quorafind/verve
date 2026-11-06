@@ -6,9 +6,10 @@ use boa_engine::object::builtins::JsUint8ClampedArray;
 use boa_engine::{Context, JsObject, JsResult, JsValue};
 use tiny_skia::Pixmap;
 
-use crate::bind::{Kind, arg, get, instance, native_instance, set, text};
+use crate::bind::{Kind, instance, native_instance, set};
 use crate::canvas::context2d::Canvas2d;
 use crate::canvas::image::{premultiply, unpremultiply};
+use verve::native::{arg, get, js_text};
 
 /// An `ImageData` object of a size and straight RGBA bytes.
 pub fn make_image_data(
@@ -34,7 +35,7 @@ fn fill_image_data(
         ("width", JsValue::from(width)),
         ("height", JsValue::from(height)),
         ("data", pixels.into()),
-        ("colorSpace", text("srgb")),
+        ("colorSpace", js_text("srgb")),
     ];
     for (name, value) in members {
         set(object, name, value, context)?;
