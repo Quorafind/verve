@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Module, js_string,
+    Context, JsError, JsObject, JsResult, JsString, JsValue, Module, js_string,
     module::{ModuleLoader, ModuleRequest, Referrer, SyntheticModuleInitializer},
     object::builtins::{JsFunction, JsPromise},
     property::PropertyKey,
@@ -32,11 +32,7 @@ fn module_error(context: &mut Context, message: &str, code: &str) -> JsError {
             | "ERR_IMPORT_ATTRIBUTE_UNSUPPORTED"
             | "ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE"
     ) {
-        let error = JsNativeError::typ()
-            .with_message(message.to_owned())
-            .into_opaque(context);
-        let _ = error.set(js_string!("code"), JsString::from(code), false, context);
-        JsError::from_opaque(error.into())
+        crate::events::coded_type_error(context, message, code)
     } else {
         crate::native::coded_error(context, message, code)
     }
@@ -1045,7 +1041,9 @@ fn cjs_names(
 }
 
 fn data_source(url: &Url, context: &mut Context) -> JsResult<(String, bool)> {
-    let Some((header, body)) = url.path().split_once(',') else {
+    // Node reads the URL's pathname: the query is no part of the data, and the format is
+    // checked before anything is decoded.
+    let Some((header, _)) = url.path().split_once(',') else {
         return Err(module_error(
             context,
             "Malformed data URL",
@@ -1061,14 +1059,16 @@ fn data_source(url: &Url, context: &mut Context) -> JsResult<(String, bool)> {
             "ERR_UNKNOWN_MODULE_FORMAT",
         ));
     }
-    let decoded = resolve::decode_url_escapes(body).map_err(|e| resolve_error(context, e))?;
-    let source = if header.split(';').any(|s| s.eq_ignore_ascii_case("base64")) {
-        let bytes = crate::encoding::unbase64(&decoded)
-            .ok_or_else(|| module_error(context, "Invalid base64 data URL", "ERR_INVALID_URL"))?;
-        String::from_utf8(bytes)
-            .map_err(|_| module_error(context, "Module source is not UTF-8", "ERR_INVALID_URL"))?
-    } else {
-        decoded
-    };
+    let mut data = url.clone();
+    data.set_query(None);
+    let (_, bytes) = crate::encoding::data_url_strict(&data).map_err(|message| {
+        let message = match message.as_str() {
+            "invalid base64 in data: URL" => "Invalid base64 data URL",
+            other => other,
+        };
+        module_error(context, message, "ERR_INVALID_URL")
+    })?;
+    let source = String::from_utf8(bytes)
+        .map_err(|_| module_error(context, "Module source is not UTF-8", "ERR_INVALID_URL"))?;
     Ok((source, json))
 }

@@ -109,6 +109,24 @@ pub fn bytes_of(value: &JsValue, context: &mut Context) -> JsResult<Option<Vec<u
 
 /// A `data:` address's type and bytes, by the standard's data: URL processor.
 pub fn data_url(url: &url::Url) -> Result<(String, Vec<u8>), String> {
+    data_url_with(url, |body| Ok(percent_decode(body)))
+}
+
+/// [`data_url`] where a malformed `%` escape is an error, as a module loader takes it, not
+/// kept as it is.
+pub fn data_url_strict(url: &url::Url) -> Result<(String, Vec<u8>), String> {
+    data_url_with(url, |body| {
+        percent_decode_strict(body).map_err(str::to_owned)
+    })
+}
+
+fn data_url_with(
+    url: &url::Url,
+    decode: fn(&str) -> Result<Vec<u8>, String>,
+) -> Result<(String, Vec<u8>), String> {
+    if url.scheme() != "data" {
+        return Err("not a data: URL".to_owned());
+    }
     let mut url = url.clone();
     url.set_fragment(None);
     let rest = &url.as_str()["data:".len()..];
@@ -118,7 +136,7 @@ pub fn data_url(url: &url::Url) -> Result<(String, Vec<u8>), String> {
     let mut kind = kind
         .trim_matches([' ', '\t', '\n', '\r', '\x0c'])
         .to_owned();
-    let mut bytes = percent_decode(body);
+    let mut bytes = decode(body)?;
     let lower = kind.to_ascii_lowercase();
     if let Some(head) = lower.strip_suffix("base64")
         && head.trim_end_matches(' ').ends_with(';')
@@ -158,6 +176,29 @@ pub fn percent_decode(text: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+/// [`percent_decode`] where a `%` must start two hex digits (nothing else: not a sign), or the
+/// text is refused, naming what is wrong.
+pub fn percent_decode_strict(text: &str) -> Result<Vec<u8>, &'static str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let escape = bytes.get(i + 1..i + 3).ok_or("Incomplete percent escape")?;
+            let digit = |b: u8| (b as char).to_digit(16);
+            match (digit(escape[0]), digit(escape[1])) {
+                (Some(high), Some(low)) => out.push((high * 16 + low) as u8),
+                _ => return Err("Invalid percent escape"),
+            }
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(out)
 }
 
 // ─── atob and btoa ──────────────────────────────────────────────────────────────────────────
@@ -438,6 +479,20 @@ mod tests {
             ("text/plain;charset=utf-8".into(), b"x".to_vec())
         );
         assert!(data_url(&url::Url::parse("data:;base64,%%%").unwrap()).is_err());
+    }
+
+    #[test]
+    fn only_a_data_url_is_one() {
+        for other in ["https://h/a,b.js", "a:", "file:///x,y"] {
+            assert!(
+                data_url(&url::Url::parse(other).unwrap()).is_err(),
+                "{other}"
+            );
+            assert!(
+                data_url_strict(&url::Url::parse(other).unwrap()).is_err(),
+                "{other}"
+            );
+        }
     }
 
     use super::*;

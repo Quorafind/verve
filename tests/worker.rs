@@ -219,3 +219,18 @@ fn a_worker_that_posts_what_cannot_be_cloned_says_why() {
     assert!(said.contains("() => 1 could not be cloned."), "{said}");
     assert!(!said.contains("Failed to execute"), "{said}");
 }
+
+#[test]
+fn only_a_blob_file_or_data_address_is_a_script() {
+    let mut rt = Runtime::new();
+    for address in ["https://h/a,b.js", "a:"] {
+        let outcome = js(
+            &mut rt,
+            &format!("try {{ new Worker('{address}'); 'made' }} catch (e) {{ e.message }}"),
+        );
+        assert!(
+            outcome.contains("is not a script here"),
+            "{address}: {outcome}"
+        );
+    }
+}
