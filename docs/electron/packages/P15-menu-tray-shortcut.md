@@ -219,4 +219,103 @@ Wayland 全局快捷键、菜单项 `palette`/`header` 的 macOS 14 新样式（
 
 ## 状态
 
-（实现者完成后填写）
+### 做了什么
+
+- **`accelerator.rs`**（`verve_electron::accelerator`）：全部修饰键别名、键名、标点与需要 Shift 的符号；`Accelerator::matches(&verve_dom::Key)` 按 `code` 比较（没有 `code` 时按键入的字符），修饰键必须完全相同。单元测试覆盖所有键名与非法输入。
+- **`menu/`**（纯数据，主进程与两个 Shell 共用）：`roles.rs`（角色表，照 Electron 39.8.10 的 `menu-item-roles.ts`）、`sort.rs`（照 `menu-utils.ts` 与 `removeExtraSeparators`）、`book.rs`（`MenuBook`：跟随 `MenuOp`，`item_for(window, key)` 先窗口菜单再应用菜单，按 Electron 39 的规则：非 macOS 上每个 `enabled` 且 `registerAccelerator` 的项都在表里，不管 `visible` 与菜单栏是否隐藏；macOS 上 `visible: false` 的项只有 `acceleratorWorksWhenHidden` 才算；同一加速键取最后一项；禁用的子菜单不挡住里面的项）。
+- **`msg/menu.rs`**：`MenuSpec`/`MenuItemSpec`/`MenuOp`/`TrayOp`/`TrayEvent`；`FromShell` 追加 `MenuWillShow`、`MenuWillClose`、`Tray`、`TrayBounds`、`Shortcut`，`MenuClicked` 追加 `triggered_by_accelerator` 与 `modifiers`。`ToRenderer::EditCommand` 已由 P13 追加，未再改。
+- **`api/menu_item.rs`、`menu.rs`、`menu_roles.rs`、`menu_state.rs`、`menu_window.rs`**：`MenuItem` 照 `menu-item.ts` 逐步构造（`Object.keys(item)` 与 Electron 相同顺序）；`Menu` 的 `buildFromTemplate`/`append`/`insert`/`getMenuItemById`/`popup`/`closePopup`/`setApplicationMenu`/`getApplicationMenu`、`menu-will-show`/`menu-will-close`、radio 组（`checked` 是访问器）；`app.applicationMenu`；`BrowserWindow.setMenu`/`removeMenu`，`setMenuBarVisibility`/`setAutoHideMenuBar` 发 `SetMenuBarVisibility`（只有脚本说过 `setMenuBarVisibility(false)` 才隐藏）；窗口创建时（非 macOS）得到应用菜单；`will-finish-launching` 时若没人设过应用菜单就设 Electron 的默认菜单（`default-menu.ts`）。角色行为（`copy`/`selectAll` 等调聚焦页面的 `webContents` 方法，`close`/`minimize`/`togglefullscreen`/`reload` 调窗口方法，`quit` 调 `app.quit()`）按 `execute` 的规则实现。
+- **向 Shell 同步**：每次 `Guest::tick` 的末尾（定时器与它们的微任务之后）读一遍已下发的菜单，与 Shell 手里的比较，不同才发一次整份 `Upsert`；所以一轮里改多少次只发一次。菜单对象被回收时发 `Drop`；`Tray` 对象被回收时销毁图标。
+- **`api/global_shortcut.rs`**：`register`/`registerAll`/`isRegistered`/`unregister`/`unregisterAll`；`register` 在一次性通道上最多等 Shell 500 ms。
+- **`api/tray.rs`**：`Tray` 全部方法与事件（`click`、`right-click`、`double-click`、`middle-click`、`mouse-*`、`drop-files`）；`getBounds` 用 Shell 最近一次报告的位置。
+- **无头 Shell**（`headless/menu.rs`）：保存收到的菜单；`popup` 立刻打开并关闭（什么也没选）；托盘图标是可读的记录；全局快捷键默认接受，`accept_shortcuts(false)` 后拒绝，从不向系统注册；`press_key(window, key)` 注入按键——有 `before-input-event` 监听者时走 `KeyForContents`，否则先查 `MenuBook`，命中就是 `MenuClicked { triggered_by_accelerator: true }`，页面收不到这个键。
+- **GPUI Shell**（`crates/verve-gpui/src/{menu,tray,shortcut,native}.rs`）：`muda` 画菜单栏（Windows 在每个窗口的 `HWND` 上 `init_for_hwnd`，macOS 是 `init_for_nsapp`）和弹出菜单，`tray-icon` 做托盘，`global-hotkey` 做全局快捷键；`shell.rs` 只多了一个分发。`window.rs` 只多了 `raw_handle()`。
+
+### 没做 / 与任务书不同
+
+- **Linux 没有菜单栏、托盘、全局快捷键**：`muda`/`tray-icon`/`global-hotkey` 只在 `cfg(any(windows, target_os = "macos"))` 下编入，Linux 的 Shell 里 `popup` 立即关闭，`register` 返回 `false`（与 Electron 在 Wayland 上一致），托盘不显示。**请登记给 P41**；Linux 菜单栏的自绘（任务书里的 GPUI 元素）没做。
+- **角色与 `click` 的顺序**：见「契约修订」，真 Electron 是 role 有行为时不调脚本的 `click`。
+- **`MenuItem.sharingItem`/`shareMenu`、macOS `header`/`palette` 的新样式、Touch Bar**：按「不做」；`palette`/`header` 按 `normal` 画。
+- **`displayBalloon`/`removeBalloon`/`focus`/`setPressedImage`**：`tray-icon` 没有对应接口，Shell 不处理（没有 `balloon-*` 事件）。`Tray.setTitle`/`getTitle` 在 Windows 上只记录。托盘事件的位置按系统 DPI 换算成 DIP，混合 DPI 的屏幕不精确。
+- **`webContents.setIgnoreMenuShortcuts`** 仍是 P13 的空操作，没有接线。
+- **`toggleDevTools` 角色**调用 `webContents.toggleDevTools()`，那是 P43 的空操作。`togglespellchecker` 角色有页面时只翻转页面 `session.spellCheckerEnabled`（页面的 `session` 没有 `spellCheckerEnabled` 属性时什么也不做）。
+- **`isMinimizable` 等对 `minimize`/`togglefullscreen`/`close` 角色启用状态的影响**（`_isCommandIdEnabled` 里的特例）没做。
+- **菜单栏占用的高度**：Electron 的窗口有应用菜单时内容区少 26 像素（P13 的观察）。无头 Shell 与 P13 的 `window_state.rs` 的 `FRAME` 没有跟着变，真 Shell 里 muda 的菜单栏会占去窗口内容区的高度——这是 P13/P34 的事。
+- **体积**：见第三轮。依赖：`muda` 0.21.2、`tray-icon` 0.26.1、`global-hotkey` 0.9.0，都是 `default-features = false`（`global-hotkey` 无默认特性）。**重复**：`Cargo.lock` 多了 `windows-sys 0.59`（`global-hotkey` 要求，各版本都一样）；`windows-sys 0.61`、`objc2 0.6` 与已有的共用。`Cargo.lock` 只新增包（`keyboard-types 0.8.3`、`crossbeam-channel`、`dpi`、`muda`、`tray-icon`、`global-hotkey`、`windows-sys 0.59` 与 Linux 才用的 `x11rb` 等），已有包的依赖边没有改动（`git diff b1a27600 -- Cargo.lock` 只有新增）；其中 `keyboard-types` 是新包，不是共用的。
+- **每轮读菜单的代价**：默认菜单一直是已下发的，所以每个 `Guest::tick` 都会读它的约 30 个菜单项；很小，但若 P44（性能）的基线里看到主进程的空转变慢，先看 `menu_state::sync`。
+
+### 已知缺口（第三轮后仍在）
+
+- `popUpContextMenu`/`menu.popup` 在 Windows 上阻塞 OS 线程，期间 GPUI 的前台任务是否停转**没有验证**（`TrackPopupMenu` 的模态循环会分发已投递的消息，也许照常运行）；弹出时选中的项先于 `menu-will-close` 送出，回调在其后。
+- GPUI Shell 的 `tray.popUpContextMenu` 忽略它收到的菜单和位置（`tray.rs` 的 `TrayOp::PopUpContextMenu` 只调 `icon.show_menu()`，显示的是 `setContextMenu` 设的那个，位置由系统定）。
+- radio 项在 muda 里画成带勾的复选项。muda 点击时自己翻转勾，Shell 在点击后按 `Menus` 里最近一次的状态把勾设回（`Menus::restore_check`），弹出菜单（`popup`）与菜单栏、托盘菜单（`Native::heard`）都一样；点中的 radio 随后由脚本的 `Upsert` 就地改成选中。**没有在真机上验证。**
+- 形状不变的 `Upsert`（标签、勾、可用、加速键、图标变了，项的个数、嵌套与种类没变）现在就地更新（`Menus::upsert` → `update_in_place`），不再卸下重挂菜单栏；形状变了才整份重建。**没有在真机上验证。**
+- 菜单栏上的菜单不发 `menu-will-show`/`menu-will-close`（只有弹出菜单发）。
+- Alt、F10、Alt+字母可能打不开 muda 的菜单栏：GPUI 自己对 `WM_SYSKEYUP` 回 0（`gpui_windows` 的 `events.rs`），没在真机上试。
+- `MenuClicked.modifiers` 从 Shell 来时总是空的（muda 不给）。`ToShell::Menu(TrayCreate)` 在 `release()` 之后到达时仍会建图标。
+- 加速键按物理 `code` 匹配，Chromium 按布局的 VKEY；两者在非美式键盘上不同（例如法语键盘上 `Ctrl+A` 在 `KeyQ` 的位置）。没有改，因为 GPUI 给的是 `code`。
+- `Plus` 现在是 Shift 加 `=` 键（`CmdOrCtrl+Plus` 即 Ctrl+Shift+=），`+` 两边的空白裁掉，几个键取最后一个；这三条都是在 Electron 39.8.10 上用 `globalShortcut.register` 的转换（先于 `ready` 检查）观察到的，只有「最后一个键」具体是哪个观察不到。
+- 体积：第三轮做了下面「体积」里的几处。总控量过：相对 b1a27600 增加 504,832 字节，超过任务书的 400 KB 预算；2026-11-07 总控在 electron.exe 上限提高到 36 MB 后接受了这个数。没做：默认菜单的静态表（它会多出代码而不是少）、把 `read_nested` 等大函数拆开。
+- 8d72126c 没有拆成 Menu/MenuItem、窗口菜单、默认菜单、按键查找四个提交：这些文件互相引用，拆开每个提交都要编译通过，改动量大，没做。
+- 菜单栏的 muda 加速键不触发（GPUI 的循环没有 `TranslateAcceleratorW`，见下），P32 之前页面里按菜单的快捷键走不通。
+
+### 第三轮做了什么
+
+- 正确性：就地更新与勾的恢复（上）；主进程路径上被菜单拿走的键，其 key up 也不再到页面（`MenuState::swallow`/`release`，`tests/menu.rs` 有测试）。
+- 保真：`registerAll` 全有或全无并返回布尔（`registerAll([])` 是 `true`）；`register`/`registerAll`/`unregister`/`unregisterAll` 先转换参数再查 `ready`（`isRegistered` 不查 `ready`，`unregisterAll` 查）；`setMenu(空菜单)` 不挂菜单栏；构造选项 `autoHideMenuBar` 发给 Shell；`togglespellchecker` 有页面时由角色处理、不调脚本的 `click`；`copy_options` 是 `for…in`（含继承的可枚举键）；`Menu` 不再调 `EventEmitter` 构造函数，`Object.keys(new Menu())` 与 Electron 相同，探针的 "menu inst"/"menu props" 两行现在在比较里。
+- 去重：`string_of`/`text`/`role_of` 并成 `menu_state::text`；`this_object`/`this_menu_item` 并成 `menu_state::this_object`；`field`/`assign` 换成 `native::get` 与 `set`；`overrideProperty`/`overrideReadOnlyProperty` 共用 `override_method`；`accelerator::System` 并入 `menu::roles::Os`；gpui 里 muda 与 global-hotkey 的加速键转换并成 `native::key_parts`。
+- 结构：`FromShell` 的五个新变体移到枚举末尾；`VERVE_NO_SYSTEM_DIALOGS` 写进了 `conventions.md`；gpui 里剩下的 `let _ =` 都有理由。
+- 体积（**没有量**，期望是缩小）：`verve_electron::keyed::Keyed` 是按序搜索的小表，替掉 `attached`、`window_menus`、托盘注册表和 gpui 里的 `menus`/`bars`/`icons`/`taken`，少了每种值各一份 `BTreeMap::insert`/`remove`（约每份 3 KiB）；`menu_state::text`/`flag` 与 `override_property`/`override_read_only` 标了 `#[inline(never)]`，不在 `read_nested`、`MenuItem::init` 里内联十几份；`muda`/`global-hotkey` 的加速键转换合一。
+- 新测试：被回收的 `Tray` 在 Shell 里销毁、被回收的弹出菜单发 `Drop`（`tests/menu.rs`，用 `boa_engine::gc::force_collect`）。
+
+### 我在真 Electron 39.8.10（Windows）上观察并冻结的东西
+
+探针与回答在 `tests/electron/menu/observe/main.js`、`expected/probe.txt`（135 行；`tests/menu.rs` 与其中约 75 个标签逐行比较）：
+
+- `globalShortcut` 先转换全部参数、再查 `ready`：`register('NotAKey', f)` 在 `ready` 之前是 gin 的转换失败，`register('Ctrl+A', f)` 才是下面的 `ready` 错误；`unregister` 与 `unregisterAll` 在 `ready` 之前也抛同样的错，`registerAll([], f)` 在 `ready` 之后是 `true`；加速键里 `Ctrl + A`、` Ctrl+A`、`A+B` 都能转换，`Ctrl++` 与 `Ctrl+ ` 不能。
+- `globalShortcut.register` 在 `ready` 之前是 `Error: globalShortcut cannot be used before the app is ready`；`isRegistered` 在 `ready` 之前返回 `false` 不抛；非法加速键是 gin 的 `TypeError: Error processing argument at index 0, conversion failure from NotAKey`（`registerAll` 里是 `conversion failure from ` 后面为空）；缺回调是 `Insufficient number of arguments.`。
+- `new Tray()` 是 `TypeError: Insufficient number of arguments.`（先于 `ready` 检查）；`ready` 之前是 `Error: Cannot create Tray before app is ready`；参数不是路径或 `NativeImage` 是 `Error: Argument must be a file path or a NativeImage`。
+- `Menu.getApplicationMenu()` 在 `ready` 之前是 `null`，之后是默认菜单（Windows：File/Edit/View/Window/Help，Help 在未打包时有四个链接）；`menu.popup()` 没有窗口是 `Error: Cannot open Menu without a BaseWindow present`。
+- 全部角色的标签、默认加速键、`registerAccelerator`（只有 cut/copy/paste/pasteAndMatchStyle 是 `false`）、类型（`togglespellchecker` 是 `checkbox`，带子菜单的是 `submenu`）、各 `*Menu` 角色展开的子菜单。未知角色保留名字、标签为空。
+- `Object.keys(new MenuItem({label}))` 与带 `id`/`userData`/`click`/`accelerator`/`icon` 的顺序；`type`/`role`/`accelerator`/`icon`/`submenu`/`commandId` 只读；模板和 `insert` 的全部错误文案；`before`/`after`/`*GroupContaining` 的排序结果；radio 的 `checked` 设置器（设成 `false` 也会选中自己）。
+- **没有观察到**：无效加速键在 `win.setMenu` 时不输出任何警告（stderr 为空），所以 Verve 也静默忽略，而不是任务书里写的 `console.warn`；点击事件 `event` 的键名（`shiftKey`/`ctrlKey`/`altKey`/`metaKey`/`triggeredByAccelerator`）来自文档，没有原生点击可以观察；托盘与真正的全局快捷键因不能碰桌面而没有探。
+
+### GPUI 的 Windows 消息循环（P34 要求确认的）
+
+`gpui_windows` 的 `platform.rs`（`run` 与 `run_foreground_task`）里**没有** `TranslateAcceleratorW`：每个 `WM_KEYDOWN`/`WM_SYSKEYDOWN` 先作为 `WM_GPUI_KEYDOWN` 发给窗口，GPUI 不处理才 `TranslateMessage`+`DispatchMessageW`。muda 的 Windows 实现也不自己翻译加速键（它的 `Menu::haccel()` 要调用方放进 `TranslateAcceleratorW`），所以 muda 菜单栏上的加速键在这里**不会触发**，只有菜单文字里显示。因此走「统一路径」：按键先查 `MenuBook`。
+
+### 给其他包的备注
+
+- **P32（输入桥）**：对窗口里的每个 **key down**，在把键发给页面**之前**：若该页面的 `Hub::intercepts_keys(contents)` 为真，**不查**，把键作为 `FromShell::KeyForContents` 发给主进程（主进程先发 `before-input-event`，没被阻止再查菜单，命中就点击，否则交给页面）；否则调 `verve_gpui::Control::menu_item_for_key(window, &key)`，得到 `Some(item)` 就向 Hub 发 `FromShell::MenuClicked { menu_item: item, window: Some(window), triggered_by_accelerator: true, modifiers: key.modifiers }` 且**不**把这个键发给页面（它的 key up 也不发）；`None` 就照常发给页面。无头 Shell 的 `HeadlessShell::press_key` 是同样的流程，可以对照；主进程路径（`input_events::key_for`）同样吞掉 key up。规则（第四轮修正）：吞掉的键记成 `(页面, code)`，**同一个 `(页面, code)` 不重复记**（按住不放的自动重复 `repeat: true` 的 key down 会反复命中）；一个没有菜单项接走的 key down 要**删掉**该 `(页面, code)` 的记录（菜单项开了对话框，key up 去了别处，下一次普通按键不该丢 key up）；key up 找到记录就删掉它并吞掉。无头 Shell 的 `hold_key` 与 `tests/menu.rs` 的 `a_held_accelerator_leaves_one_key_up_to_swallow_not_one_per_repeat` 是这条规则的样子。
+- **P34**：`ToShell::Menu` 的分发在 `shell.rs` 一行，具体在 `native.rs`（读开关的函数叫 `touches_desktop`）；`VERVE_NO_SYSTEM_DIALOGS` 的意思是“Shell 不碰桌面”：现在也关掉菜单栏、托盘、全局快捷键（GPUI 的二进制测试都设了它，所以它们不会把菜单放到桌面上）。Windows 上 `Popup` 在 OS 线程里阻塞（`TrackPopupMenu` 自己抽消息）到菜单关闭才返回；这在嵌套消息循环里是否与 GPUI 的前台任务相安无事**没有在真机上验证**，见下面的手动清单。`ClosePopup` 在 Windows 上无法实现（弹出菜单阻塞着）。
+- **P13**：`setMenu`/`removeMenu` 已实现；`setIgnoreMenuShortcuts` 没接线；`isMenuBarVisible` 等标志仍由 `window_state.rs` 记录（初值与真 Electron 不一致：观察到隐藏窗口 `isMenuBarVisible()` 初始 `false`，`setAutoHideMenuBar(true)` 之后读到 `true`，本包没改）。内容区高度见上。
+- **P24**：菜单角色 `undo`/`redo`/`cut`/`copy`/`paste`/`pasteAndMatchStyle`/`delete`/`selectAll` 调的是 `webContents` 同名方法，P13 已把它们接到 `ToRenderer::EditCommand`；渲染器侧没有就什么也不发生。
+- **P41**：Linux 的菜单栏、托盘、全局快捷键（见上）；macOS 的菜单与托盘代码照 muda/tray-icon 的接口写了，**没有编译过**。
+
+### 手动清单（Windows 桌面，用户亲自跑；自动化从不跑）
+
+`cargo test -p verve-gpui --test menu_tray -- --ignored` 会把菜单栏、托盘图标和 `Ctrl+Shift+X` 在桌面上放半秒后退出。要慢慢看，用 `MENU_TRAY_STAY=1`：
+
+1. 窗口只有 `MENU_TRAY_STAY=1` 时才显示（`global.win`/`global.tray` 持有，否则托盘对象会被回收、图标消失，正是本包照抄的那个坑）。在没有 `VERVE_NO_SYSTEM_DIALOGS` 的 PowerShell 里：`$env:MENU_TRAY_STAY='1'; electron.exe tests\electron\apps\menu-tray --user-data-dir=<临时目录>`。
+2. 窗口有菜单栏：File（Open `Ctrl+O`、分隔线、Exit）、Edit（Copy/Paste）；按 `Alt+F` 能展开（助记符），点 Open 控制台出现 `menu: open`。
+3. 按 `Ctrl+O` **不会**触发 Open（GPUI 还不把键交给菜单，P32 之后会）；这是已知的。
+4. 通知区出现图标，悬停显示 `menu-tray fixture`，右键出现菜单（只有 Exit）；选 Exit 退出应用。
+5. 另一个窗口有焦点时按 `Ctrl+Shift+X`，控制台出现 `shortcut: pressed`。
+6. 退出后通知区的图标消失（没有残留的幽灵图标）。
+
+### 要跑的测试
+
+```
+cargo test --locked -p verve-electron --lib accelerator
+cargo test --locked -p verve-electron --lib menu::
+cargo test --locked -p verve-electron --lib keyed
+cargo test --locked -p verve-electron --test menu
+cargo test --locked -p verve-electron --test fixtures menus_a_tray_and_a_shortcut_are_built
+cargo test --locked -p verve-electron --test pipeline
+cargo test --locked -p verve-electron --test browser_window
+cargo test --locked -p verve-electron --test web_contents
+cargo test --locked -p verve-electron
+cargo test --locked -p verve-gpui --features jit
+```
+
+`--test menu` 里 `menus_trays_and_shortcuts_answer_as_electron_39_does` 只在 Windows 上编入。我没有运行过任何测试（只 `cargo check`），所以期望值都是照源码与探针推演出来的；失败请把输出发回。
