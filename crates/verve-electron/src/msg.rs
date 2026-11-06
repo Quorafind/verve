@@ -523,6 +523,11 @@ pub enum ToRenderer {
     BeforeUnload {
         call: u64,
     },
+    /// A line for the page's own console, as an error (what Chromium writes when it refuses a
+    /// `window.open`).
+    ConsoleError {
+        message: String,
+    },
     /// The close goes ahead: dispatch `pagehide` and `unload`, then answer with
     /// [`FromRenderer::UnloadReply`].
     Unload {

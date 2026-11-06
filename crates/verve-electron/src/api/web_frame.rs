@@ -17,7 +17,7 @@ use crate::msg::FromRenderer;
 use crate::preload::{self, setup};
 
 /// What `executeJavaScript` rejects with when the script throws.
-const SCRIPT_FAILED: &str = "Script failed to execute, this normally means an error was thrown. Check the renderer console for the error.";
+pub(crate) const SCRIPT_FAILED: &str = "Script failed to execute, this normally means an error was thrown. Check the renderer console for the error.";
 
 /// The ratio between zoom levels.
 const LEVEL_STEP: f64 = 1.2;
