@@ -106,7 +106,7 @@ pub enum DecodeError {
 }
 
 /// Straight RGBA bytes made premultiplied, in place.
-pub(crate) fn premultiply(pixels: &mut [u8]) {
+pub fn premultiply(pixels: &mut [u8]) {
     for pixel in pixels.chunks_exact_mut(4) {
         let alpha = u32::from(pixel[3]);
         for channel in &mut pixel[..3] {
@@ -116,8 +116,7 @@ pub(crate) fn premultiply(pixels: &mut [u8]) {
 }
 
 /// Premultiplied RGBA bytes made straight, in place.
-#[cfg(feature = "canvas")]
-pub(crate) fn unpremultiply(pixels: &mut [u8]) {
+pub fn unpremultiply(pixels: &mut [u8]) {
     for pixel in pixels.chunks_exact_mut(4) {
         let alpha = u32::from(pixel[3]);
         if alpha == 0 || alpha == 255 {

@@ -18,6 +18,8 @@ fn run_app_for(name: &str, main_js: &str, limit: Duration) -> Option<i32> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_electron"))
         .arg(&main)
         .arg(format!("--user-data-dir={}", dir.join("profile").display()))
+        // A load error would otherwise be a real message box, which waits for a click.
+        .env("VERVE_NO_SYSTEM_DIALOGS", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

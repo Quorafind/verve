@@ -15,6 +15,7 @@ use verve_electron::ids::WindowId;
 use verve_electron::msg::{AppEvent, FromShell, ToRendererInput, ToShell, WindowOp};
 
 use crate::app_region::AppRegion;
+use crate::dialog;
 use crate::platform;
 use crate::window::{self, Opening, Window};
 
@@ -153,8 +154,28 @@ impl Shell {
             } => self.create(window, contents, &options, cx),
             ToShell::Window { window, op } => self.window_op(window, op, cx),
             // Menus, trays and global shortcuts are P15's.
-            // The error box is P14's dialog; the error is already on standard error.
-            ToShell::Menu(_) | ToShell::ErrorBox { .. } => {}
+            ToShell::Menu(_) => {}
+            ToShell::ErrorBox { title, content } => {
+                dialog::error_box(&title, &content, self.windows.values().next(), cx);
+            }
+            ToShell::Dialog {
+                call,
+                parent,
+                spec,
+                reply,
+            } => {
+                let window = match parent {
+                    Some(id) => self.windows.get(&id),
+                    None => self.windows.values().next(),
+                };
+                if parent.is_some() && window.is_none() {
+                    dialog::closed(&self.hub, call, reply);
+                } else {
+                    dialog::show(&self.hub, call, window, spec, reply, cx);
+                }
+            }
+            // The frames follow the system's theme until P34 draws them by the source.
+            ToShell::SetThemeSource(_) => {}
             ToShell::Quit { .. } => cx.update(|cx| cx.quit()),
         }
     }

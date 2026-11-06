@@ -4,13 +4,23 @@
 
 pub(crate) mod app;
 pub(crate) mod browser_window;
+pub(crate) mod clipboard;
 pub(crate) mod command_line;
 pub(crate) mod contents_ipc;
 pub mod define;
+pub(crate) mod dialog;
 pub(crate) mod ipc_main;
 pub(crate) mod ipc_renderer;
 pub(crate) mod message_port_main;
+pub(crate) mod native_image;
+pub(crate) mod native_theme;
+pub(crate) mod notification;
+pub(crate) mod power;
 pub(crate) mod process;
+pub(crate) mod safe_storage;
+pub(crate) mod screen;
+pub(crate) mod shell;
+pub(crate) mod system_preferences;
 pub(crate) mod web_frame_main;
 pub(crate) mod web_preferences;
 pub(crate) mod window_events;
@@ -23,7 +33,7 @@ pub(crate) mod windows;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use boa_engine::{Context, JsResult, JsValue, js_string};
+use boa_engine::{Context, JsResult, JsString, JsValue, js_string};
 use verve::native;
 
 use crate::hub::{Hub, RendererHandle};
@@ -39,6 +49,8 @@ pub(crate) struct MainState {
     pub(crate) app: app::AppState,
     /// The windows the app made, until their `'closed'` has been heard.
     pub(crate) windows: windows::Windows,
+    /// The dialogs asked for and not yet answered.
+    pub(crate) dialogs: dialog::Pending,
 }
 
 impl MainState {
@@ -47,6 +59,7 @@ impl MainState {
             hub,
             app,
             windows: windows::Windows::default(),
+            dialogs: dialog::Pending::default(),
         })
     }
 
@@ -82,7 +95,14 @@ pub(crate) fn install_page(
     prefs: &WebPreferences,
 ) -> JsResult<()> {
     ipc_renderer::install(runtime.context(), hub, page)?;
-    runtime.define_builtin_lazy("electron", renderer_module);
+    // Electron 39 takes `clipboard` from a sandboxed renderer; a page with Node still has it, and
+    // `nativeImage`, which P21 gives a sandboxed preload by `native_image::make`.
+    let module = if prefs.node_integration && !prefs.sandbox {
+        renderer_module_with_system
+    } else {
+        renderer_module
+    };
+    runtime.define_builtin_lazy("electron", module);
     if prefs.node_integration && !prefs.context_isolation && !prefs.sandbox {
         let require = runtime.global_require();
         native::define_global(runtime.context(), "require", require)?;
@@ -102,6 +122,9 @@ pub(crate) fn shared(context: &Context) -> Rc<MainState> {
         .expect("the electron module is installed before its classes are used")
 }
 
+/// Makes one of the modules the main process's `electron` holds.
+type ModuleMaker = fn(&mut Context) -> JsResult<JsValue>;
+
 /// The main process's `require('electron')`.
 fn main_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     let exports = native::object(context);
@@ -109,7 +132,40 @@ fn main_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     exports.set(js_string!("BrowserWindow"), window, false, context)?;
     exports.set(js_string!("app"), app::make(context)?, false, context)?;
     ipc_main::add_exports(context, &exports)?;
+    let modules: [(&str, ModuleMaker); 11] = [
+        ("dialog", dialog::make),
+        ("Notification", notification::make),
+        ("shell", shell::make),
+        ("clipboard", clipboard::make),
+        ("nativeImage", native_image::make),
+        ("nativeTheme", native_theme::make),
+        ("screen", screen::make),
+        ("powerSaveBlocker", power::make_blocker),
+        ("powerMonitor", power::make_monitor),
+        ("safeStorage", safe_storage::make),
+        ("systemPreferences", system_preferences::make),
+    ];
+    for (name, make) in modules {
+        exports.set(JsString::from(name), make(context)?, false, context)?;
+    }
     Ok(exports.into())
+}
+
+/// The `require('electron')` of a page with `nodeIntegration` and no sandbox: the page's, and the
+/// modules that need no main process.
+fn renderer_module_with_system(context: &mut Context, name: &str) -> JsResult<JsValue> {
+    let exports = renderer_module(context, name)?;
+    if let Some(object) = exports.as_object() {
+        object.set(
+            js_string!("clipboard"),
+            clipboard::make(context)?,
+            false,
+            context,
+        )?;
+        let image = native_image::make(context)?;
+        object.set(js_string!("nativeImage"), image, false, context)?;
+    }
+    Ok(exports)
 }
 
 /// A page's `require('electron')`.

@@ -1,0 +1,318 @@
+
+{
+ "display": {
+  "keys": [
+   "accelerometerSupport",
+   "bounds",
+   "colorDepth",
+   "colorSpace",
+   "depthPerComponent",
+   "detected",
+   "displayFrequency",
+   "id",
+   "internal",
+   "label",
+   "maximumCursorSize",
+   "monochrome",
+   "nativeOrigin",
+   "rotation",
+   "scaleFactor",
+   "size",
+   "touchSupport",
+   "workArea",
+   "workAreaSize"
+  ],
+  "types": {
+   "accelerometerSupport": "string",
+   "bounds": "object",
+   "colorDepth": "number",
+   "colorSpace": "string",
+   "depthPerComponent": "number",
+   "detected": "boolean",
+   "displayFrequency": "number",
+   "id": "number",
+   "internal": "boolean",
+   "label": "string",
+   "maximumCursorSize": "object",
+   "monochrome": "boolean",
+   "nativeOrigin": "object",
+   "rotation": "number",
+   "scaleFactor": "number",
+   "size": "object",
+   "workArea": "object",
+   "workAreaSize": "object",
+   "touchSupport": "string"
+  },
+  "boundsKeys": [
+   "height",
+   "width",
+   "x",
+   "y"
+  ],
+  "size": [
+   "height",
+   "width"
+  ],
+  "workAreaSize": [
+   "height",
+   "width"
+  ],
+  "rotation": 0,
+  "internal": false,
+  "touchSupport": "unknown",
+  "monitorKeys": []
+ },
+ "displays": true,
+ "cursor": {
+  "keys": [
+   "x",
+   "y"
+  ]
+ },
+ "nearest": true,
+ "matching": true,
+ "dipToScreen": [
+  "x",
+  "y"
+ ],
+ "screenKeys": [
+  "_events",
+  "_eventsCount",
+  "_maxListeners",
+  "addListener",
+  "constructor",
+  "dipToScreenPoint",
+  "dipToScreenRect",
+  "emit",
+  "eventNames",
+  "getAllDisplays",
+  "getCursorScreenPoint",
+  "getDisplayMatching",
+  "getDisplayNearestPoint",
+  "getMaxListeners",
+  "getPrimaryDisplay",
+  "listenerCount",
+  "listeners",
+  "off",
+  "on",
+  "once",
+  "prependListener",
+  "prependOnceListener",
+  "rawListeners",
+  "removeAllListeners",
+  "removeListener",
+  "screenToDipPoint",
+  "screenToDipRect",
+  "setMaxListeners"
+ ],
+ "screenBadArg": {
+  "name": "TypeError",
+  "message": "Insufficient number of arguments."
+ },
+ "screenBadArg2": {
+  "name": "TypeError",
+  "message": "Error processing argument at index 0, conversion failure from "
+ },
+ "theme": {
+  "source": "system",
+  "dark": false,
+  "highContrast": false,
+  "inverted": false,
+  "forced": false,
+  "transparency": false
+ },
+ "themeDark": {
+  "source": "dark",
+  "dark": true
+ },
+ "themeLight": {
+  "dark": false
+ },
+ "themeBad": {
+  "name": "TypeError",
+  "message": "Error processing argument at index 0, conversion failure from blue"
+ },
+ "themeEvents": [
+  "updated",
+  "updated"
+ ],
+ "notification": {
+  "supported": true
+ },
+ "power": {
+  "idleState": "idle",
+  "idleTimeType": "number",
+  "thermal": "unknown",
+  "battery": "boolean",
+  "onBattery": "boolean",
+  "badThreshold": {
+   "name": "TypeError",
+   "message": "Error processing argument at index 0, conversion failure from undefined"
+  }
+ },
+ "blocker": {
+  "idType": "number",
+  "started": true,
+  "afterStop": false,
+  "unknownStop": {
+   "value": false
+  },
+  "badType": {
+   "name": "TypeError",
+   "message": "Error processing argument at index 0, conversion failure from nope"
+  },
+  "second": 1
+ },
+ "prefs": {
+  "accent": "0078D7FF",
+  "window": "#FFFFFFFF",
+  "windowText": "#000000FF",
+  "badColor": {
+   "name": "Error",
+   "message": "Unknown color: nope"
+  },
+  "functions": [
+   "constructor",
+   "getAccentColor",
+   "getAnimationSettings",
+   "getColor",
+   "getMediaAccessStatus"
+  ],
+  "aero": "undefined",
+  "animation": {
+   "shouldRenderRichAnimation": true,
+   "scrollAnimationsEnabledBySystem": true,
+   "prefersReducedMotion": false
+  },
+  "media": "granted",
+  "screenMedia": "granted",
+  "badMedia": {
+   "name": "Error",
+   "message": "Invalid media type"
+  },
+  "ask": "undefined",
+  "invertedColors": "undefined",
+  "highContrast": "undefined",
+  "macMethods": {
+   "isTrustedAccessibilityClient": "undefined",
+   "getUserDefault": "undefined",
+   "getEffectiveAppearance": "undefined",
+   "getSystemColor": "undefined",
+   "subscribeNotification": "undefined",
+   "isDarkMode": "undefined"
+  }
+ },
+ "htmlRead": "<b>bold</b>",
+ "rtfRead": "{\\rtf1 hello}",
+ "bookmarkRead": {
+  "title": "",
+  "url": "https://example.com/"
+ },
+ "imageRead": "000000000000808000ff00ffff0000ffffffffff000000ff646464ff40000040",
+ "imageReadSize": {
+  "width": 4,
+  "height": 2
+ },
+ "has": {
+  "text": false,
+  "html": false,
+  "png": false,
+  "other": false
+ },
+ "buffer": {
+  "read": "",
+  "formats": [
+   "text/plain",
+   "text/html"
+  ],
+  "missing": ""
+ },
+ "empty": {
+  "text": "",
+  "html": "",
+  "rtf": "",
+  "bookmark": {
+   "title": "",
+   "url": ""
+  },
+  "image": true
+ },
+ "clipboardSelection": {
+  "text": {
+   "value": ""
+  }
+ },
+ "clipboardFind": {
+  "value": ""
+ },
+ "clipboardBad": {
+  "name": "TypeError",
+  "message": "Error processing argument at index 0, conversion failure from "
+ },
+ "clipboardImageBad": {
+  "name": "TypeError",
+  "message": "Error processing argument at index 0, conversion failure from x"
+ },
+ "clipboardWriteBad": {},
+ "formats": {
+  "afterClear": [],
+  "text": [
+   "text/plain"
+  ],
+  "html": [
+   "text/html"
+  ],
+  "rtf": [
+   "text/rtf"
+  ],
+  "bookmark": [],
+  "image": [
+   "image/png"
+  ],
+  "both": [
+   "text/plain",
+   "text/html"
+  ]
+ },
+ "shell": {
+  "missing": "Failed to open path",
+  "trashMissing": "Failed to parse path",
+  "readLink": {
+   "name": "Error",
+   "message": "Failed to read shortcut link"
+  },
+  "openExternalNone": {
+   "name": "TypeError",
+   "message": "Insufficient number of arguments."
+  },
+  "openPathBad": {
+   "name": "TypeError",
+   "message": "Error processing argument at index 0, conversion failure from "
+  }
+ },
+ "dialogBad": {
+  "errorBoxNoArg": {
+   "name": "TypeError",
+   "message": "Insufficient number of arguments."
+  }
+ },
+ "fileIcon": {
+  "size": {
+   "width": 16,
+   "height": 16
+  },
+  "kind": "NativeImage"
+ },
+ "fileIconNormal": {
+  "width": 32,
+  "height": 32
+ },
+ "fileIconLarge": {
+  "width": 48,
+  "height": 48
+ },
+ "fileIconMissing": {
+  "width": 32,
+  "height": 32
+ }
+}

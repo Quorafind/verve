@@ -38,6 +38,8 @@ mod code_cache_mark;
 mod code_cache_pack;
 mod code_cache_sweep;
 mod crypto;
+/// AES-GCM and AES-CBC on bytes, for formats an embedder keeps compatible with Chromium's (`safeStorage`).
+pub use crypto::primitives as crypto_primitives;
 pub mod dom_events;
 mod embed;
 pub mod encoding;

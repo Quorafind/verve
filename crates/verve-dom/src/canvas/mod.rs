@@ -20,6 +20,7 @@ mod element;
 #[cfg(feature = "canvas")]
 mod fonts;
 mod image;
+pub use self::image::{premultiply, unpremultiply};
 mod img;
 pub(crate) use img::sync as sync_image;
 #[cfg(feature = "canvas")]

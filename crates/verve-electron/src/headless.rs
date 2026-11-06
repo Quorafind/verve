@@ -10,7 +10,7 @@
 mod layout;
 mod window;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
@@ -21,7 +21,10 @@ pub use window::HeadlessWindow;
 
 use crate::hub::{Hub, ShellPort};
 use crate::ids::{ContentsId, WindowId};
-use crate::msg::{AppEvent, Display, FromShell, ToRendererInput, ToShell, WindowEvent, WindowOp};
+use crate::msg::{
+    AppEvent, DialogReply, DialogResult, DialogSpec, Display, FromShell, ToRendererInput, ToShell,
+    WindowEvent, WindowOp,
+};
 use window::Window;
 
 /// What a headless shell is told about the machine it pretends to be.
@@ -55,9 +58,21 @@ pub struct HeadlessShell {
     /// Held weakly: the Hub holds the shell, and neither keeps the other alive.
     hub: Weak<Hub>,
     layout: FakeLayout,
-    displays: Vec<Display>,
+    displays: Mutex<Vec<Display>>,
     trace: bool,
     state: Mutex<State>,
+    desk: Mutex<DialogDesk>,
+}
+
+/// The dialogs a headless shell was asked for and how they are answered: from the answers a test
+/// queued, else at once with what a person who changes nothing and presses Enter answers (a
+/// cancel, the default button), else not at all while the test holds them.
+#[derive(Default)]
+struct DialogDesk {
+    presets: VecDeque<DialogResult>,
+    hold: bool,
+    asked: Vec<(u64, DialogSpec)>,
+    waiting: BTreeMap<u64, DialogReply>,
 }
 
 #[derive(Default)]
@@ -136,7 +151,10 @@ impl State {
                 self.windows.insert(*window, created);
             }
             ToShell::Window { window, op } => self.apply_op(*window, op, primary, &mut out),
-            ToShell::Menu(_) | ToShell::ErrorBox { .. } => {}
+            ToShell::Menu(_)
+            | ToShell::ErrorBox { .. }
+            | ToShell::Dialog { .. }
+            | ToShell::SetThemeSource(_) => {}
             ToShell::Quit { exit_code } => {
                 self.exit = Some(*exit_code);
                 self.windows.values_mut().for_each(|window| {
@@ -204,14 +222,16 @@ impl HeadlessShell {
         let shell = Arc::new(Self {
             hub: Arc::downgrade(hub),
             layout: options.layout,
-            displays: options.displays,
+            displays: Mutex::new(options.displays.clone()),
             trace: options.trace,
             state: Mutex::new(State {
                 dark: options.dark,
                 ..State::default()
             }),
+            desk: Mutex::new(DialogDesk::default()),
         });
-        hub.set_displays(shell.displays.clone());
+        // `screen` is right from the first line: the main process is not up to hear it said.
+        hub.set_displays(options.displays.clone());
         hub.record_console();
         hub.record_page_events();
         hub.set_shell(shell.clone());
@@ -303,11 +323,75 @@ impl HeadlessShell {
         self.say(FromShell::App(AppEvent::ThemeChanged { dark }));
     }
 
+    /// The displays change: the main process hears `display-added`, `display-removed` and
+    /// `display-metrics-changed` for what differs.
+    pub fn set_displays(&self, displays: Vec<Display>) {
+        *self.displays.lock().unwrap_or_else(|p| p.into_inner()) = displays.clone();
+        self.say(FromShell::Displays(displays));
+    }
+
+    /// Answers the next dialog with `result`, before any held or default answer.
+    pub fn queue_dialog_answer(&self, result: DialogResult) {
+        self.desk().presets.push_back(result);
+    }
+
+    /// Holds dialogs until [`HeadlessShell::answer_dialog`] answers them, as a person takes their
+    /// time; `false` goes back to answering at once.
+    pub fn hold_dialogs(&self, hold: bool) {
+        self.desk().hold = hold;
+    }
+
+    /// Every dialog asked for so far, `(call, spec)`, in order.
+    pub fn dialogs(&self) -> Vec<(u64, DialogSpec)> {
+        self.desk().asked.clone()
+    }
+
+    /// Answers the held dialog `call`; `false` if none is waiting under that number.
+    pub fn answer_dialog(&self, call: u64, result: DialogResult) -> bool {
+        let waiting = self.desk().waiting.remove(&call);
+        waiting.is_some_and(|reply| self.reply(call, reply, result))
+    }
+
+    fn desk(&self) -> MutexGuard<'_, DialogDesk> {
+        self.desk.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A dialog: answered from a preset, at once, or when the test says.
+    fn dialog(&self, call: u64, spec: &DialogSpec, reply: &DialogReply) {
+        let result = {
+            let mut desk = self.desk();
+            desk.asked.push((call, spec.clone()));
+            let preset = desk.presets.pop_front();
+            match preset {
+                Some(result) => Some(result),
+                None if desk.hold => {
+                    desk.waiting.insert(call, reply.clone());
+                    None
+                }
+                None => Some(default_answer(spec)),
+            }
+        };
+        if let Some(result) = result {
+            self.reply(call, reply.clone(), result);
+        }
+    }
+
+    /// Says a dialog's answer where the dialog asked for it. `false` when the main process
+    /// stopped waiting on it.
+    fn reply(&self, call: u64, reply: DialogReply, result: DialogResult) -> bool {
+        match reply {
+            DialogReply::Sync(answer) => answer.send(result).is_ok(),
+            DialogReply::Async => {
+                self.say(FromShell::DialogResult { call, result });
+                true
+            }
+        }
+    }
+
     fn primary(&self) -> Display {
-        self.displays
-            .iter()
-            .find(|display| display.primary)
-            .or(self.displays.first())
+        let displays = self.displays.lock().unwrap_or_else(|p| p.into_inner());
+        (displays.iter().find(|display| display.primary))
+            .or(displays.first())
             .cloned()
             .expect("a headless shell has a display")
     }
@@ -422,6 +506,30 @@ fn describe(msg: &ToShell) -> String {
         ToShell::Menu(op) => format!("[menu] {op:?}"),
         ToShell::Quit { exit_code } => format!("[app] quit {exit_code}"),
         ToShell::ErrorBox { title, content } => format!("[app] error box {title:?} {content:?}"),
+        ToShell::Dialog { call, spec, .. } => format!("[dialog {call}] {spec:?}"),
+        ToShell::SetThemeSource(source) => format!("[app] theme source {source:?}"),
+    }
+}
+
+/// What a person who changes nothing and presses Enter answers.
+fn default_answer(spec: &DialogSpec) -> DialogResult {
+    match spec {
+        DialogSpec::Open { .. } => DialogResult::Open {
+            canceled: true,
+            file_paths: Vec::new(),
+        },
+        DialogSpec::Save { .. } => DialogResult::Save {
+            canceled: true,
+            file_path: None,
+        },
+        DialogSpec::MessageBox {
+            default_id,
+            checkbox_checked,
+            ..
+        } => DialogResult::MessageBox {
+            response: usize::try_from(*default_id).unwrap_or(0),
+            checkbox_checked: *checkbox_checked,
+        },
     }
 }
 
@@ -429,6 +537,12 @@ impl ShellPort for HeadlessShell {
     fn send(&self, msg: ToShell) {
         if self.trace {
             eprintln!("{}", describe(&msg));
+        }
+        if let ToShell::Dialog {
+            call, spec, reply, ..
+        } = &msg
+        {
+            self.dialog(*call, spec, reply);
         }
         // Nothing is said back to the main process while the shell's own state is held: a window
         // that closed is reported once this message is done with.

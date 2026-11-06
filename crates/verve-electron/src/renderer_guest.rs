@@ -48,7 +48,7 @@ impl RendererGuest {
         generation: u64,
         prefs: WebPreferences,
     ) -> Self {
-        let dark = hub.options().dark;
+        let dark = hub.dark();
         let mut runtime = Runtime::new();
         runtime.set_vfs(hub.overlay());
         // A page without Node resolves its modules as a browser does.

@@ -12,6 +12,7 @@ fn run_headless(name: &str, main_js: &str) -> (Option<i32>, String) {
     let main = dir.join("main.js");
     std::fs::write(&main, main_js).expect("the app's script");
     let output = Command::new(env!("CARGO_BIN_EXE_electron"))
+        .env("VERVE_NO_SYSTEM_DIALOGS", "1")
         .arg("--headless")
         .arg(&main)
         .arg(format!("--user-data-dir={}", dir.join("profile").display()))

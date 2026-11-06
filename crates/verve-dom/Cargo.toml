@@ -24,7 +24,7 @@ serde_json = "1"
 tiny-skia = { optional = true, version = "0.11", default-features = false, features = ["std", "simd"] }
 # `<img>` and `drawImage` sources: the same decoder GPUI's `img()` uses, so a binary holds
 # one copy of it. Only the formats the snapshot hands to the drawer.
-image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "webp"] }
+image = { workspace = true }
 # Canvas text: the system's fonts, their shaping and their outlines — `fillText` and
 # `measureText` are synchronous, and GPUI's text system lives on another thread.
 fontdb = { optional = true, version = "0.23", default-features = false, features = ["std", "fs", "memmap"] }

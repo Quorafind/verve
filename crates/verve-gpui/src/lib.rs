@@ -12,6 +12,7 @@
 //! [`AppRegion`]s.
 
 mod app_region;
+mod dialog;
 mod dom_view;
 mod platform;
 mod report;
@@ -53,6 +54,11 @@ pub fn run(hub: Arc<Hub>, program: Program) -> i32 {
 pub fn run_with(hub: Arc<Hub>, start: impl FnOnce(&Arc<Hub>, Control) + 'static) -> i32 {
     let (wake, woken) = async_channel::bounded(1);
     let inbox = Inbox::new(wake);
+    // The system's own error box when no window exists, unless the environment says no (the
+    // tests of this crate do, so none puts a box on the desktop).
+    if std::env::var_os("VERVE_NO_SYSTEM_DIALOGS").is_none() {
+        hub.allow_system_boxes();
+    }
     hub.set_shell(Arc::new(Port {
         inbox: inbox.clone(),
     }));

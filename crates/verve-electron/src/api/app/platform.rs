@@ -278,7 +278,7 @@ mod windows {
         }
     }
 
-    fn read_dword(root: Root, key: &str, name: &str) -> Option<u32> {
+    pub(crate) fn read_dword(root: Root, key: &str, name: &str) -> Option<u32> {
         let (key, name) = (wide(key), wide(name));
         let (mut value, mut bytes) = (0u32, 4u32);
         // SAFETY: `value` holds the four bytes a DWORD needs.
