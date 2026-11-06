@@ -285,3 +285,10 @@ is 34,431,488 bytes against 33,839,104 for `125d2d8c` before the batch, +592,384
 P13's first half measured +110,592 and P14 +287,232 on their own branches, which leaves about 194,560 bytes (+0.57 %) for P21. P21 was not
 built on its own, to spare the shared machine. It adds no crate and changes no manifest: the worlds, the bridge's copy, the per-world classes
 and the mirrored events are kernel and `verve-dom` code.
+
+## P13: the second half (`webContents`)
+
+`electron/p13-webcontents` at its tested tip (the tree `docs/electron-plan` has after the merge): `cargo build --release -p
+verve-gpui --bin electron --features jit` is 34,679,808 bytes against 34,431,488 for `8e259992` (the batch above), +248,320 bytes (+0.72 %);
+the brief aimed at about 250 KB. The cap (35,651,584) leaves 0.97 MB. No crate or manifest changed: the class, the history, the event
+table, `window.open`'s side of the main process, the input hooks and the heartbeat are all `verve-electron` code over what was there.
