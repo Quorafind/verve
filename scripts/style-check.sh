@@ -9,15 +9,24 @@
 #      gates remove them; a new copy fails.
 #   3. No dbg!, todo! or unimplemented! in library code; a TODO comment names its package (P31: …).
 #   4. Every new crate (verve-electron, verve-gpui, verve-layout) takes the workspace lints.
+#   5. verve-dom's legacy helpers in src/bind/mod.rs (`text`, `list`, `array`, `arg_string`,
+#      copies of verve::native with other signatures; style.md §1) gain no callers: the lines
+#      that call them, counted per file, may not pass ci/style/legacy-calls.txt, and a file not
+#      listed there may not call them at all.
+#   6. A realm is entered only in src/world.rs (`verve::in_realm` / `in_world`, which put the
+#      previous realm back); everyone else calls those.
 #
-# `scripts/style-check.sh --baseline` rewrites both lists from the tree as it is: run it only
-# when a refactor shrinks them, never to let a new violation in.
+# `scripts/style-check.sh --baseline` rewrites the three lists from the tree as it is: run it
+# only when a refactor shrinks them, never to let a new violation in.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MAX_LINES=1500
 LARGE=ci/style/large-files.txt
 COPIES=ci/style/toolkit-copies.txt
+LEGACY=ci/style/legacy-calls.txt
+LEGACY_HOME=crates/verve-dom/src/bind/mod.rs
+LEGACY_HELPERS='text|list|array|arg_string'
 # Each helper has one home: the native-function toolkit in src/native.rs, the encoders in
 # src/encoding.rs. A definition of one of these names anywhere else is a copy.
 NATIVE='arg|js_text|text_of|type_error|range_error|coded_error|coded_error_value|object|function|closure|hidden|methods|exports|accessors|get|invoke|list_of|array|global|class|instance'
@@ -55,11 +64,28 @@ toolkit_copies() {
     return 0
 }
 
+# "path lines" for each verve-dom source with lines that call a legacy helper: a bare or
+# `bind::` call, not a method (`.text(`) nor another module's function (`x::text(`).
+legacy_calls() {
+    library_sources | grep '^crates/verve-dom/src/' | grep -vxF "$LEGACY_HOME" | tr '\n' '\0' |
+        { xargs -0 -r grep -cHE "(^|[^A-Za-z0-9_.:]|bind::)($LEGACY_HELPERS)\(" || true; } |
+        awk -F: '$2 > 0 { print $1, $2 }'
+    return 0
+}
+
+# Appends to each "path count" line on stdin the ceiling the table $1 gives that path, or "-".
+with_ceiling() {
+    awk -v table="$1" '
+        BEGIN { while ((getline line < table) > 0) { split(line, field, " "); ceiling[field[1]] = field[2] } }
+        { print $1, $2, ($1 in ceiling ? ceiling[$1] : "-") }'
+}
+
 if [ "${1:-}" = "--baseline" ]; then
     mkdir -p ci/style
     large_files > "$LARGE"
     toolkit_copies > "$COPIES"
-    echo "wrote $LARGE ($(wc -l < "$LARGE") files) and $COPIES ($(wc -l < "$COPIES") copies)"
+    legacy_calls > "$LEGACY"
+    echo "wrote $LARGE ($(wc -l < "$LARGE") files), $COPIES ($(wc -l < "$COPIES") copies) and $LEGACY ($(wc -l < "$LEGACY") files)"
     exit 0
 fi
 
@@ -73,9 +99,7 @@ while read -r f n ceiling; do
     elif [ "$n" -gt "$ceiling" ]; then
         fail "$f grew to $n lines (it may not grow past $ceiling; move the new code to a module of its own)"
     fi
-done < <(large_files | awk -v table="$LARGE" '
-    BEGIN { while ((getline line < table) > 0) { split(line, field, " "); ceiling[field[1]] = field[2] } }
-    { print $1, $2, ($1 in ceiling ? ceiling[$1] : "-") }')
+done < <(large_files | with_ceiling "$LARGE")
 
 # 2. One toolkit. A copy not listed in COPIES is new.
 while read -r f name; do
@@ -97,6 +121,21 @@ for crate in verve-electron verve-gpui verve-layout; do
     grep -qE '^\[lints\]' "$manifest" && grep -qE '^workspace *= *true' "$manifest" ||
         fail "$manifest must have \`[lints] workspace = true\`"
 done
+
+# 5. No new callers of verve-dom's legacy helpers.
+while read -r f n ceiling; do
+    if [ "$ceiling" = "-" ]; then
+        fail "$f calls verve-dom's legacy helpers ($LEGACY_HELPERS) on $n line(s): use verve::native (style.md §1)"
+    elif [ "$n" -gt "$ceiling" ]; then
+        fail "$f calls verve-dom's legacy helpers on $n line(s), more than its $ceiling: use verve::native (style.md §1)"
+    fi
+done < <(legacy_calls | with_ceiling "$LEGACY")
+
+# 6. Realms are entered only through verve::in_realm / in_world.
+while IFS= read -r hit; do
+    fail "$hit (enter a realm with verve::in_world / in_realm, which put the previous one back)"
+done < <(library_sources | grep -vxF src/world.rs | tr '\n' '\0' |
+    { xargs -0 -r grep -nHE '\benter_realm\(' || true; })
 
 if [ "$failed" -ne 0 ]; then
     echo "style: see docs/electron/style.md" >&2

@@ -15,6 +15,10 @@
   `verve::events` 的辅助；结构化克隆只用 `verve::clone`。
 - 历史遗留：`crates/verve-dom/src/bind/mod.rs` 现在有一套同名不同签名的副本（`text`≈`js_text`、`list`≈`list_of`、
   `array` 参数顺序相反）。**新代码不得再调用这些副本**；R1 关卡把 verve-dom 迁到 `verve::native` 并删除副本。
+  `style-check` 按文件数调用这些副本（`text`、`list`、`array`、`arg_string`）的行：只许比 `ci/style/legacy-calls.txt` 少，
+  不在表里的文件一处也不许有。
+- 切换 Realm 只用 `verve::in_world` / `verve::in_realm`（`src/world.rs`，返回时放回原来的 Realm）；别处手写 `enter_realm` 会被
+  `style-check` 拦下。
 - Electron 的 API 定义辅助（P02 的 `api/define.rs`）**建立在 `verve::native` 之上**，只加 Electron 特有的部分
   （句柄映射、已销毁检查、参数提取），不另起一套。
 
@@ -107,6 +111,8 @@ pub(crate) fn bare_name(name: &str) -> &str {
 | 函数行数 | 80 | clippy `too_many_lines`（新 crate 开启） |
 | 参数个数 | 7 | clippy `too_many_arguments` |
 | 文件行数 | 1500（新文件）；旧超长文件不得增长 | `scripts/style-check.sh` |
+| verve-dom 旧副本的调用 | 每个文件不得增加；新文件为 0 | `scripts/style-check.sh` |
+| 手写 `enter_realm` | 只在 `src/world.rs` | `scripts/style-check.sh` |
 | 嵌套层级 | 3 | 审查 |
 | PR 净增（不含测试与夹具） | ~1500 行 | 审查 |
 
@@ -117,7 +123,7 @@ pub(crate) fn bare_name(name: &str) -> &str {
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-scripts/style-check.sh            # 文件长度棘轮、工具箱副本、禁用模式
+scripts/style-check.sh            # 文件长度棘轮、工具箱副本、禁用模式、旧副本调用棘轮、Realm 切换
 ```
 
 新 crate（`verve-electron`、`verve-gpui`、`verve-layout`）在 `Cargo.toml` 写 `[lints] workspace = true`，
