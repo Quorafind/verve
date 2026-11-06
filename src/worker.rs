@@ -19,14 +19,14 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
-    js_string,
+    Context, JsError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string,
     native_function::NativeFunctionPointer,
     object::{FunctionObjectBuilder, builtins::JsArray},
     property::{Attribute, PropertyDescriptor},
 };
 
 use crate::clone::{Cloned, entries};
+use crate::native::{arg, function, type_error};
 use crate::{Level, Runtime, shared};
 
 /// A worker, as its page holds it: the way to its thread, and what came back from it.
@@ -46,27 +46,6 @@ pub(crate) struct WorkerSlot {
 pub(crate) struct Port {
     pub outbox: Vec<JsValue>,
     pub closed: bool,
-}
-
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
-
-fn type_error(message: impl Into<String>) -> JsError {
-    JsNativeError::typ().with_message(message.into()).into()
-}
-
-fn function(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
 }
 
 // ─── The worker's own realm ─────────────────────────────────────────────────────────────────

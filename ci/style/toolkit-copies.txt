@@ -20,12 +20,6 @@ src/indexeddb.rs js_text
 src/indexeddb.rs list_of
 src/indexeddb.rs object
 src/indexeddb.rs text_of
-src/url.rs arg
-src/url.rs class
-src/url.rs function
-src/url.rs js_text
-src/url.rs text_of
-src/url.rs type_error
 src/wasm.rs arg
 src/wasm.rs class
 src/wasm.rs function
@@ -41,6 +35,3 @@ src/web.rs js_text
 src/web.rs object
 src/web.rs text_of
 src/web.rs type_error
-src/worker.rs arg
-src/worker.rs function
-src/worker.rs type_error

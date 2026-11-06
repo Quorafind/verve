@@ -7,12 +7,14 @@
 use std::cell::RefCell;
 
 use boa_engine::{
-    Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue,
-    NativeFunction, Trace, js_string,
+    Context, Finalize, JsData, JsObject, JsResult, JsString, JsValue, NativeFunction, Trace,
+    js_string,
     native_function::NativeFunctionPointer,
     object::{FunctionObjectBuilder, builtins::JsArray},
     property::{Attribute, PropertyDescriptor, PropertyKey},
 };
+
+use crate::native::{arg, function, js_text, text_of, type_error};
 
 #[derive(Trace, Finalize, JsData)]
 struct UrlData {
@@ -28,35 +30,6 @@ struct ParamsData {
     pairs: RefCell<Vec<(String, String)>>,
     /// The URL these are the query of, if they are one's.
     owner: boa_gc::GcRefCell<Option<JsObject>>,
-}
-
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
-
-fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
-    Ok(value.to_string(context)?.to_std_string_escaped())
-}
-
-fn type_error(message: impl Into<String>) -> boa_engine::JsError {
-    JsNativeError::typ().with_message(message.into()).into()
-}
-
-fn js_text(text: &str) -> JsValue {
-    JsString::from(text).into()
-}
-
-fn function(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
 }
 
 fn constructor(
@@ -566,7 +539,7 @@ fn define_method(
     Ok(())
 }
 
-fn class(
+fn define_class(
     context: &mut Context,
     name: &str,
     construct: NativeFunctionPointer,
@@ -597,7 +570,7 @@ fn class(
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let (url_class, url_proto) = class(context, "URL", construct_url, URL_METHODS)?;
+    let (url_class, url_proto) = define_class(context, "URL", construct_url, URL_METHODS)?;
     for (name, get, set) in URL_ACCESSORS {
         let getter = function(context, &format!("get {name}"), 0, *get);
         let setter = (!matches!(*name, "origin"))
@@ -624,7 +597,8 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         let method = function(context, name, *length, *f);
         url_class.set(JsString::from(*name), method, false, context)?;
     }
-    let (_, params_proto) = class(context, "URLSearchParams", construct_params, PARAMS_METHODS)?;
+    let (_, params_proto) =
+        define_class(context, "URLSearchParams", construct_params, PARAMS_METHODS)?;
     // `for (const [k, v] of params)`, and `params.size`.
     let entries = params_proto.get(js_string!("entries"), context)?;
     params_proto.define_property_or_throw(
