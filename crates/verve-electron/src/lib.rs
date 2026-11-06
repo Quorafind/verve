@@ -10,6 +10,7 @@
 //! Every API a script calls is a native Rust function on Boa: nothing in this crate is
 //! JavaScript standing in for Electron.
 
+pub mod accelerator;
 pub mod api;
 mod beat;
 pub mod headless;
