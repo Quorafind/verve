@@ -8,6 +8,7 @@
 //! process: it is called on their threads.
 
 mod layout;
+mod menu;
 mod window;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -17,13 +18,15 @@ use std::time::Duration;
 use verve_dom::{NodeId, Snapshot};
 
 pub use layout::FakeLayout;
+pub use menu::{HeadlessPopup, HeadlessTray};
 pub use window::HeadlessWindow;
 
+use crate::accelerator::Accelerator;
 use crate::hub::{Hub, ShellPort};
 use crate::ids::{ContentsId, WindowId};
 use crate::msg::{
-    AppEvent, DialogReply, DialogResult, DialogSpec, Display, FromShell, ToRendererInput, ToShell,
-    WindowEvent, WindowOp,
+    AppEvent, DialogReply, DialogResult, DialogSpec, Display, FromShell, MenuId, MenuSpec, Rect,
+    ToRendererInput, ToShell, TrayEvent, TrayId, WindowEvent, WindowOp,
 };
 use window::Window;
 
@@ -80,6 +83,7 @@ struct State {
     received: Vec<ToShell>,
     windows: BTreeMap<WindowId, Window>,
     pages: BTreeMap<ContentsId, Page>,
+    menus: menu::Desk,
     dark: bool,
     exit: Option<i32>,
 }
@@ -151,10 +155,8 @@ impl State {
                 self.windows.insert(*window, created);
             }
             ToShell::Window { window, op } => self.apply_op(*window, op, primary, &mut out),
-            ToShell::Menu(_)
-            | ToShell::ErrorBox { .. }
-            | ToShell::Dialog { .. }
-            | ToShell::SetThemeSource(_) => {}
+            ToShell::Menu(op) => self.menus.apply(op, &mut out),
+            ToShell::ErrorBox { .. } | ToShell::Dialog { .. } | ToShell::SetThemeSource(_) => {}
             ToShell::Quit { exit_code } => {
                 self.exit = Some(*exit_code);
                 self.windows.values_mut().for_each(|window| {
@@ -310,6 +312,149 @@ impl HeadlessShell {
             triggered_by_accelerator: false,
             modifiers: verve_dom::Modifiers::default(),
         });
+    }
+
+    /// A person chose menu item `item` of `window`'s menu, holding `modifiers`.
+    pub fn menu_click_in(&self, window: WindowId, item: u32, modifiers: verve_dom::Modifiers) {
+        self.say(FromShell::MenuClicked {
+            menu_item: item,
+            window: Some(window),
+            triggered_by_accelerator: false,
+            modifiers,
+        });
+    }
+
+    /// The application menu, as the main process last sent it.
+    pub fn application_menu(&self) -> Option<MenuSpec> {
+        self.state().menus.application_menu()
+    }
+
+    /// The menu `window` shows: its own, else (on macOS) the application menu.
+    pub fn menu_of(&self, window: WindowId) -> Option<MenuSpec> {
+        self.state().menus.book.menu_of(window).cloned()
+    }
+
+    /// The menu the main process last sent as `id`.
+    pub fn menu(&self, id: MenuId) -> Option<MenuSpec> {
+        self.state().menus.book.menu(id).cloned()
+    }
+
+    /// Every popup the main process asked for, in order. Each opened and closed at once, with
+    /// nothing chosen.
+    pub fn popups(&self) -> Vec<HeadlessPopup> {
+        self.state().menus.popups.clone()
+    }
+
+    /// The tray icons the app made, by number.
+    pub fn trays(&self) -> BTreeMap<TrayId, HeadlessTray> {
+        self.state().menus.trays.clone()
+    }
+
+    /// A person did `event` to tray icon `tray`.
+    pub fn tray_event(&self, tray: TrayId, event: TrayEvent) {
+        self.say(FromShell::Tray {
+            tray,
+            event,
+            bounds: Rect {
+                x: 1800.,
+                y: 1040.,
+                width: 16.,
+                height: 16.,
+            },
+            position: Some((1808., 1048.)),
+            modifiers: verve_dom::Modifiers::default(),
+        });
+    }
+
+    /// The global shortcuts the app registered, by the number it was registered under.
+    pub fn shortcuts(&self) -> BTreeMap<u32, Accelerator> {
+        self.state().menus.shortcuts.clone()
+    }
+
+    /// Whether the system takes the global shortcuts the app registers from now on. It does,
+    /// until a test says it does not.
+    pub fn accept_shortcuts(&self, accept: bool) {
+        self.state().menus.refuse_shortcuts = !accept;
+    }
+
+    /// The system hands the app global shortcut `id`.
+    pub fn press_shortcut(&self, id: u32) {
+        self.say(FromShell::Shortcut { id });
+    }
+
+    /// A person pressed `key` in `window` and let go. A key `'before-input-event'` listeners are
+    /// asked of goes to the main process first; otherwise the menu's accelerators are looked up
+    /// here, and a key one chooses is a click on that item and not a key for the page.
+    pub fn press_key(&self, window: WindowId, key: verve_dom::Key) {
+        self.key_event(window, true, key.clone());
+        self.key_event(window, false, key);
+    }
+
+    /// A person held `key` in `window`: it went down, auto-repeated `repeats` more times
+    /// (`repeat: true` each) and came up once.
+    pub fn hold_key(&self, window: WindowId, key: verve_dom::Key, repeats: usize) {
+        self.key_event(window, true, key.clone());
+        for _ in 0..repeats {
+            let again = verve_dom::Key {
+                repeat: true,
+                ..key.clone()
+            };
+            self.key_event(window, true, again);
+        }
+        self.key_event(window, false, key);
+    }
+
+    fn key_event(&self, window: WindowId, down: bool, key: verve_dom::Key) {
+        let Some(contents) = self.state().windows.get(&window).map(|w| w.shown.contents) else {
+            return;
+        };
+        let intercepted = self
+            .hub
+            .upgrade()
+            .is_some_and(|hub| hub.intercepts_keys(contents));
+        if intercepted {
+            self.say(FromShell::KeyForContents {
+                contents,
+                down,
+                key,
+            });
+            return;
+        }
+        let chosen = {
+            let mut state = self.state();
+            let chosen = down
+                .then(|| state.menus.book.item_for(window, &key))
+                .flatten();
+            match (chosen, down) {
+                (Some(_), _) => {
+                    if !state.menus.swallowed.contains(&key.code) {
+                        state.menus.swallowed.push(key.code.clone());
+                    }
+                }
+                (None, false) => {
+                    let at = state
+                        .menus
+                        .swallowed
+                        .iter()
+                        .position(|code| *code == key.code);
+                    if let Some(at) = at {
+                        state.menus.swallowed.remove(at);
+                        return;
+                    }
+                }
+                (None, true) => state.menus.swallowed.retain(|code| *code != key.code),
+            }
+            chosen
+        };
+        match chosen {
+            Some(item) => self.say(FromShell::MenuClicked {
+                menu_item: item,
+                window: Some(window),
+                triggered_by_accelerator: true,
+                modifiers: key.modifiers,
+            }),
+            None => self.input(contents, ToRendererInput::Key { down, key }),
+        }
     }
 
     /// The system theme changed.
@@ -505,7 +650,7 @@ fn describe(msg: &ToShell) -> String {
             options.width, options.height, options.title
         ),
         ToShell::Window { window, op } => format!("[window {window}] {op:?}"),
-        ToShell::Menu(op) => format!("[menu] {op:?}"),
+        ToShell::Menu(op) => format!("[menu] {}", menu::describe(op)),
         ToShell::Quit { exit_code } => format!("[app] quit {exit_code}"),
         ToShell::ErrorBox { title, content } => format!("[app] error box {title:?} {content:?}"),
         ToShell::Dialog { call, spec, .. } => format!("[dialog {call}] {spec:?}"),

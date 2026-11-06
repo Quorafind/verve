@@ -1,0 +1,135 @@
+before-ready register Error: globalShortcut cannot be used before the app is ready
+before-ready isRegistered ok false
+before-ready register invalid TypeError: Error processing argument at index 0, conversion failure from NotAKey
+before-ready unregister Error: globalShortcut cannot be used before the app is ready
+before-ready unregisterAll Error: globalShortcut cannot be used before the app is ready
+before-ready registerAll Error: globalShortcut cannot be used before the app is ready
+before-ready tray TypeError: Insufficient number of arguments.
+before-ready tray 123 Error: Cannot create Tray before app is ready
+before-ready buildFromTemplate ok 1
+before-ready getApplicationMenu ok null
+default app menu [{"label":"File","accelerator":null,"type":"submenu","role":"filemenu","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":["quit"]},{"label":"Edit","accelerator":null,"type":"submenu","role":"editmenu","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":["undo","redo","separator","cut","copy","paste","delete","separator","selectall"]},{"label":"View","accelerator":null,"type":"submenu","role":"viewmenu","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":["reload","forcereload","toggledevtools","separator","resetzoom","zoomin","zoomout","separator","togglefullscreen"]},{"label":"Window","accelerator":null,"type":"submenu","role":"windowmenu","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":["minimize","zoom","close"]},{"label":"Help","accelerator":null,"type":"submenu","role":"help","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":["Learn More","Documentation","Community Discussions","Search Issues"]}]
+default help sub ["Learn More","Documentation","Community Discussions","Search Issues"]
+popup no window Error: Cannot open Menu without a BaseWindow present
+register invalid TypeError: Error processing argument at index 0, conversion failure from NotAKey
+register invalid2 TypeError: Error processing argument at index 0, conversion failure from Ctrl+
+register nofn TypeError: Insufficient number of arguments.
+registerAll invalid TypeError: Error processing argument at index 0, conversion failure from 
+registerAll empty ok true
+isRegistered ok false
+isRegistered bogus TypeError: Error processing argument at index 0, conversion failure from NotAKey
+unregister bogus TypeError: Error processing argument at index 0, conversion failure from NotAKey
+unregister none ok undefined
+unregisterAll ok undefined
+tray bad TypeError: Insufficient number of arguments.
+tray bad 123 Error: Argument must be a file path or a NativeImage
+tray {} Error: Argument must be a file path or a NativeImage
+role undo ok {"label":"Undo","accelerator":"CommandOrControl+Z","type":"normal","role":"undo","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role redo ok {"label":"Redo","accelerator":"Control+Y","type":"normal","role":"redo","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role cut ok {"label":"Cut","accelerator":"CommandOrControl+X","type":"normal","role":"cut","reg":false,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role copy ok {"label":"Copy","accelerator":"CommandOrControl+C","type":"normal","role":"copy","reg":false,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role paste ok {"label":"Paste","accelerator":"CommandOrControl+V","type":"normal","role":"paste","reg":false,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role pasteAndMatchStyle ok {"label":"Paste and Match Style","accelerator":"Shift+CommandOrControl+V","type":"normal","role":"pasteandmatchstyle","reg":false,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role delete ok {"label":"Delete","accelerator":null,"type":"normal","role":"delete","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role selectAll ok {"label":"Select All","accelerator":"CommandOrControl+A","type":"normal","role":"selectall","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role reload ok {"label":"Reload","accelerator":"CmdOrCtrl+R","type":"normal","role":"reload","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role forceReload ok {"label":"Force Reload","accelerator":"Shift+CmdOrCtrl+R","type":"normal","role":"forcereload","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role toggleDevTools ok {"label":"Toggle Developer Tools","accelerator":"Ctrl+Shift+I","type":"normal","role":"toggledevtools","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role resetZoom ok {"label":"Actual Size","accelerator":"CommandOrControl+0","type":"normal","role":"resetzoom","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role zoomIn ok {"label":"Zoom In","accelerator":"CommandOrControl+Plus","type":"normal","role":"zoomin","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role zoomOut ok {"label":"Zoom Out","accelerator":"CommandOrControl+-","type":"normal","role":"zoomout","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role togglefullscreen ok {"label":"Toggle Full Screen","accelerator":"F11","type":"normal","role":"togglefullscreen","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role window ok {"label":"Window","accelerator":null,"type":"normal","role":"window","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role minimize ok {"label":"Minimize","accelerator":"CommandOrControl+M","type":"normal","role":"minimize","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role close ok {"label":"Close","accelerator":"CommandOrControl+W","type":"normal","role":"close","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role zoom ok {"label":"Zoom","accelerator":null,"type":"normal","role":"zoom","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role front ok {"label":"Bring All to Front","accelerator":null,"type":"normal","role":"front","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role quit ok {"label":"Exit","accelerator":null,"type":"normal","role":"quit","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role about ok {"label":"About p15probe","accelerator":null,"type":"normal","role":"about","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role hide ok {"label":"Hide p15probe","accelerator":"Command+H","type":"normal","role":"hide","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role hideOthers ok {"label":"Hide Others","accelerator":"Command+Alt+H","type":"normal","role":"hideothers","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role unhide ok {"label":"Show All","accelerator":null,"type":"normal","role":"unhide","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role services ok {"label":"Services","accelerator":null,"type":"normal","role":"services","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role editMenu ok {"label":"Edit","accelerator":null,"type":"submenu","role":"editmenu","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":["undo","redo","separator","cut","copy","paste","delete","separator","selectall"]}
+role viewMenu ok {"label":"View","accelerator":null,"type":"submenu","role":"viewmenu","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":["reload","forcereload","toggledevtools","separator","resetzoom","zoomin","zoomout","separator","togglefullscreen"]}
+role windowMenu ok {"label":"Window","accelerator":null,"type":"submenu","role":"windowmenu","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":["minimize","zoom","close"]}
+role fileMenu ok {"label":"File","accelerator":null,"type":"submenu","role":"filemenu","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":["quit"]}
+role appMenu ok {"label":"p15probe","accelerator":null,"type":"submenu","role":"appmenu","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":["about","separator","services","separator","hide","hideothers","unhide","separator","quit"]}
+role help ok {"label":"Help","accelerator":null,"type":"normal","role":"help","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role recentDocuments ok {"label":"Open Recent","accelerator":null,"type":"normal","role":"recentdocuments","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role clearRecentDocuments ok {"label":"Clear Menu","accelerator":null,"type":"normal","role":"clearrecentdocuments","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role shareMenu ok {"label":"Share","accelerator":null,"type":"submenu","role":"sharemenu","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true,"sub":[]}
+role startSpeaking ok {"label":"Start Speaking","accelerator":null,"type":"normal","role":"startspeaking","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role stopSpeaking ok {"label":"Stop Speaking","accelerator":null,"type":"normal","role":"stopspeaking","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role toggleSpellChecker ok {"label":"Check Spelling While Typing","accelerator":null,"type":"checkbox","role":"togglespellchecker","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role showSubstitutions ok {"label":"Show Substitutions","accelerator":null,"type":"normal","role":"showsubstitutions","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role toggleSmartQuotes ok {"label":"Smart Quotes","accelerator":null,"type":"normal","role":"togglesmartquotes","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role toggleSmartDashes ok {"label":"Smart Dashes","accelerator":null,"type":"normal","role":"togglesmartdashes","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role toggleTextReplacement ok {"label":"Text Replacement","accelerator":null,"type":"normal","role":"toggletextreplacement","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role bogus ok {"label":"","accelerator":null,"type":"normal","role":"bogus","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role Copy ok {"label":"Copy","accelerator":"CommandOrControl+C","type":"normal","role":"copy","reg":false,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+role COPY ok {"label":"Copy","accelerator":"CommandOrControl+C","type":"normal","role":"copy","reg":false,"enabled":true,"visible":true,"checked":false,"whenHidden":true}
+submenu of editMenu [{"label":"Undo","accelerator":"CommandOrControl+Z","type":"normal","role":"undo","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Redo","accelerator":"Control+Y","type":"normal","role":"redo","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"","accelerator":null,"type":"separator","role":null,"reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Cut","accelerator":"CommandOrControl+X","type":"normal","role":"cut","reg":false,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Copy","accelerator":"CommandOrControl+C","type":"normal","role":"copy","reg":false,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Paste","accelerator":"CommandOrControl+V","type":"normal","role":"paste","reg":false,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Delete","accelerator":null,"type":"normal","role":"delete","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"","accelerator":null,"type":"separator","role":null,"reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Select All","accelerator":"CommandOrControl+A","type":"normal","role":"selectall","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}]
+submenu of viewMenu [{"label":"Reload","accelerator":"CmdOrCtrl+R","type":"normal","role":"reload","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Force Reload","accelerator":"Shift+CmdOrCtrl+R","type":"normal","role":"forcereload","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Toggle Developer Tools","accelerator":"Ctrl+Shift+I","type":"normal","role":"toggledevtools","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"","accelerator":null,"type":"separator","role":null,"reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Actual Size","accelerator":"CommandOrControl+0","type":"normal","role":"resetzoom","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Zoom In","accelerator":"CommandOrControl+Plus","type":"normal","role":"zoomin","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Zoom Out","accelerator":"CommandOrControl+-","type":"normal","role":"zoomout","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"","accelerator":null,"type":"separator","role":null,"reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Toggle Full Screen","accelerator":"F11","type":"normal","role":"togglefullscreen","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}]
+submenu of windowMenu [{"label":"Minimize","accelerator":"CommandOrControl+M","type":"normal","role":"minimize","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Zoom","accelerator":null,"type":"normal","role":"zoom","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Close","accelerator":"CommandOrControl+W","type":"normal","role":"close","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}]
+submenu of fileMenu [{"label":"Exit","accelerator":null,"type":"normal","role":"quit","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}]
+submenu of appMenu [{"label":"About p15probe","accelerator":null,"type":"normal","role":"about","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"","accelerator":null,"type":"separator","role":null,"reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Services","accelerator":null,"type":"normal","role":"services","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"","accelerator":null,"type":"separator","role":null,"reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Hide p15probe","accelerator":"Command+H","type":"normal","role":"hide","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Hide Others","accelerator":"Command+Alt+H","type":"normal","role":"hideothers","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Show All","accelerator":null,"type":"normal","role":"unhide","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"","accelerator":null,"type":"separator","role":null,"reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true},{"label":"Exit","accelerator":null,"type":"normal","role":"quit","reg":true,"enabled":true,"visible":true,"checked":false,"whenHidden":true}]
+submenu of help null
+submenu of shareMenu []
+keys ["label","submenu","type","role","accelerator","icon","sublabel","toolTip","enabled","visible","checked","acceleratorWorksWhenHidden","registerAccelerator","commandId","userAccelerator","click"]
+keys2 ["label","id","userData","click","accelerator","icon","submenu","type","role","sublabel","toolTip","enabled","visible","checked","acceleratorWorksWhenHidden","registerAccelerator","commandId","userAccelerator"]
+desc ok {"value":"a","writable":true,"enumerable":true,"configurable":true}
+desc type ok {"value":"normal","writable":false,"enumerable":true,"configurable":true}
+desc commandId ok {"value":151,"writable":false,"enumerable":true,"configurable":true}
+commandIds [152,153]
+proto ["constructor","getDefaultRoleAccelerator","getCheckStatus","overrideProperty","overrideReadOnlyProperty"]
+menu proto ["_callMenuWillShow","_executeCommand","_getAcceleratorForCommandId","_getAcceleratorTextAt","_init","_isCommandIdChecked","_isCommandIdEnabled","_isCommandIdVisible","_menuWillShow","_shouldCommandIdWorkWhenHidden","_shouldRegisterAcceleratorForCommandId","append","clear","closePopup","closePopupAt","constructor","getCommandIdAt","getIndexOfCommandId","getItemCount","getLabelAt","getMenuItemById","getSublabelAt","getToolTipAt","insert","insertCheckItem","insertItem","insertRadioItem","insertSeparator","insertSubMenu","isEnabledAt","isItemCheckedAt","isVisibleAt","popup","popupAt","setCustomType","setIcon","setRole","setSublabel","setToolTip","worksWhenHiddenAt"]
+menu statics ["buildFromTemplate","getApplicationMenu","length","name","prototype","sendActionToFirstResponder","setApplicationMenu"]
+menu inst ["commandsMap","groupsMap","items"]
+type bogus Error: Unknown menu item type: bogus
+type submenu none Error: Invalid submenu
+submenu bad TypeError: Invalid template for Menu: Menu template must be an array
+submenu template ok 1
+type inferred submenu
+role lowercased copy
+no args TypeError: Cannot read properties of undefined (reading 'click')
+call without new TypeError: Cannot use 'in' operator to search for 'label' in undefined
+tmpl not array TypeError: Invalid template for Menu: Menu template must be an array
+tmpl bad item TypeError: Invalid template for MenuItem: must have at least one of label, role or type
+tmpl null item TypeError: Invalid template for MenuItem: must have at least one of label, role or type
+tmpl sep ok ok 0
+insert bad TypeError: Invalid item
+insert neg RangeError: Position -1 cannot be less than 0
+insert big RangeError: Position 5 cannot be greater than the total MenuItem count
+append str TypeError: Invalid item
+setApplicationMenu bad TypeError: Invalid menu
+setApplicationMenu bad2 TypeError: Invalid menu
+popup bad opts TypeError: Options must be an object
+sort sep ["a","separator","b"]
+sort invisible sep ["a"]
+sort before/after ["two","one","three"]
+sort groups ["b","separator","a","separator","c"]
+sort submenu ["y","x"]
+sort cross-group ["a","b","separator","c"]
+sort cycle ["b","a"]
+radio initial [true,false,false,false,false,true]
+radio after r2 [false,true,false,false,false,true] [["r2",true,"undefined",true]]
+radio after r3 [false,true,false,true,false,true]
+checkbox [false,true,false,true,false,true] [["r2",true,"undefined",true],["r3"],["c1",true],["c1",false]]
+radio set false [true,false,false,true,false,true]
+radio set true [true,false,false,true,false,true]
+radio groupId [1,1,null,2,null,null]
+menu props ["commandsMap","groupsMap","items"] [true,true,true,true,true,true]
+getMenuItemById nested d
+getMenuItemById missing null
+click role+click 1
+click plain [3,true,"W","{\"ctrlKey\":true}"]
+app.applicationMenu ok 1
+set null ok null
+menuBarVisible false false
+setMenu bad TypeError: Invalid Menu
+setMenu null ok undefined
+removeMenu ok undefined
+setMenu ok ok undefined
+setAutoHide ok [true,true]
+setMenuBarVisibility ok [false,false,true]

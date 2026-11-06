@@ -70,6 +70,11 @@ impl MenuBook {
         self.bars.remove(&window);
     }
 
+    /// The application menu, as the shell was last sent it.
+    pub fn application_menu(&self) -> Option<&MenuSpec> {
+        self.app.and_then(|id| self.menus.get(&id))
+    }
+
     /// The menu `id`, as the shell was last sent it.
     pub fn menu(&self, id: MenuId) -> Option<&MenuSpec> {
         self.menus.get(&id)
