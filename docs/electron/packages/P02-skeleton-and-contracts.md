@@ -70,7 +70,7 @@ crates/verve-gpui       (lib + bin "electron")
 | API | 包 | 说明 |
 |---|---|---|
 | `dialog.show*Sync` | P14 | 对话框在 OS 主线程弹出，主进程线程在 `ToShell::Dialog` 带去的一次性通道（`DialogReply::Sync`）上等结果；Shell 在 GPUI 的 `cx.spawn` 里等对话框的 future，不阻塞消息循环；父窗口已销毁或 Shell 在退出时发 `DialogResult::Closed`，主进程当作取消；阻塞期间到达的 `FromShell`/`FromRenderer` 照常排队，对话框返回后处理 |
-| `globalShortcut.register` / `isRegistered` | P15 | 等 Shell 注册结果，500 ms 超时后按失败处理 |
+| `globalShortcut.register` / `registerAll` | P15 | 主进程在 `ToShell::Menu(MenuOp::ShortcutRegister { reply })` 带去的一次性通道上等 Shell 注册结果（Shell 只做一次系统调用就回答，不等主进程），500 ms 超时后按失败处理并警告；`isRegistered` 由主进程自己的记录回答，不经过 Shell（Electron 39.8.10 观察：`isRegistered` 在 `ready` 之前也不抛错，返回 `false`） |
 | `clipboard.*`（若走 Shell） | P14 | 不走 Shell：主进程线程直接调用系统剪贴板（Windows 用 `windows-sys`），所以不在此例外内 |
 
 新增例外必须先改这张表。
@@ -291,8 +291,9 @@ P13 第二段另加两个类型（`msg/page.rs`）：`EditCommand`（`Undo` `Red
 
 | 变体 | 包 |
 |---|---|
-| `FromShell::MenuClicked` 增加字段 `triggered_by_accelerator: bool`（占位变体，允许 P15 改字段） | P15 |
-| `ToRenderer::EditCommand(EditCommand)`（菜单 role：copy/paste/undo/selectAll…） | P15 |
+| `FromShell::MenuClicked` 增加字段 `triggered_by_accelerator: bool` 与 `modifiers: Modifiers`（占位变体，允许 P15 改字段；`modifiers` 是点击事件 `shiftKey`/`ctrlKey`/`altKey`/`metaKey` 的来源） | P15 |
+| `ToRenderer::EditCommand(EditCommand)`（菜单 role：copy/paste/undo/selectAll…）——P13 已经追加，P15 直接复用，不再改 | P13（P15 复用） |
+| `MenuOp` 的全部变体（`Upsert`、`Drop`、`SetApplicationMenu`、`SetWindowMenu`、`SetMenuBarVisibility`、`Popup`、`ClosePopup`、`Tray*`、`Shortcut*`）与 `msg/menu.rs` 的 `MenuSpec`/`MenuItemSpec`/`TrayOp`/`TrayEvent`；`FromShell::{MenuWillShow, MenuWillClose, Tray, Shortcut, TrayBounds}`（详见 P15「接口契约」，实现与那里一致） | P15 |
 | `ToRenderer::SetProxy(…)` | P16 |
 | `ToRenderer::InspectorEval { call, code }`、`FromRenderer::InspectorEvalReply { call, result }`、`ToShell::Inspector(…)` | P43 |
 | Shell 提供 `native_handle(WindowId) -> Option<RawWindowHandle>`（对话框父窗口、muda 挂菜单） | P34（P14/P15 使用） |

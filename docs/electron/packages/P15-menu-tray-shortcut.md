@@ -176,6 +176,18 @@ pub struct Accelerator { pub modifiers: Mods /* cmd, ctrl, alt(option), shift, s
   存到全局变量里）。
 - `app` 退出时 Shell 先销毁所有托盘图标（Windows 不清理会残留幽灵图标）。
 
+## 契约修订（实现前确定，以此为准）
+
+下列各点在读过 Electron 39.8.10 自带的 `menu.ts`/`menu-item.ts`/`menu-item-roles.ts`/`default-menu.ts` 并观察真 Electron 之后改动了上文：
+
+- **点击顺序**：`MenuItem.click` 先翻转 checkbox/radio（`checked` 的 setter 对 radio 总是“选中自己、取消同组”），再试 role 行为；role 有行为**且**目标（窗口或 `webContents`）存在时只做 role，**不**调 `click`；否则调 `click(menuItem, browserWindow, event)`。上文第 3 节“有 `click` 时只调 `click`”不对。
+- `MenuItemSpec.role` 是 Electron 存的小写字符串（`Option<String>`），不是枚举；平台差异（标签、默认快捷键）在生成 `MenuItemSpec` 时按当前平台定下，Shell 不再查表。
+- `MenuItemSpec.label` 保持原样（含 `&` 助记符），由 Shell 的平台层处理；`&&` 是字面 `&`。
+- `FromShell::MenuClicked` 追加 `triggered_by_accelerator: bool` 与 `modifiers: Modifiers`；`ToRenderer::EditCommand` 已由 P13 追加，不再改。
+- **默认应用菜单**：Electron 在 `will-finish-launching` 时若没人设过应用菜单，就设 `File/Edit/View/Window/Help`（`default-menu.ts`），所以 `Menu.getApplicationMenu()` 在 `ready` 时非空；P15 照做。
+- `globalShortcut.isRegistered` 由主进程的记录回答（`ready` 之前也不抛错），只有 `register`/`registerAll` 等 Shell。
+- Linux：`muda`、`tray-icon`、`global-hotkey` 只在 Windows 与 macOS 编入；Linux 上菜单栏、托盘、全局快捷键都是空操作（`register` 返回 `false`，与 Electron 在 Wayland 上一致），登记给 P41。
+
 ## 步骤
 
 1. `accelerator.rs` + 单元测试（全部键名、修饰键别名、非法输入）。
