@@ -215,6 +215,10 @@ pub enum FromRenderer {
     BeforeUnloadReply { call: u64, proceed: bool },
     /// `pagehide`、`unload` 已派发
     UnloadReply { call: u64 },
+    /// P21：preload 抛错（或读不到）：主进程在 webContents 上发 `preload-error(event, path, error)`
+    PreloadError { path: String, name: String, message: String },
+    /// P21：`webFrame.setZoomFactor`：页面自己改了缩放系数（主进程不记；`getZoomFactor`/`zoom-changed` 是 P13 的，要用自己留）
+    ZoomChanged(f64),
 }
 
 pub enum PageEvent {
@@ -308,6 +312,7 @@ verve-dom 侧的配套改动（由 P20/P23/P24 在 verve-dom 内完成）：`Req
 - `ToRenderer::Stop` 已删：P02 的加载是同步的，没有可停的东西；`webContents.stop()` 由 P13/P20 追加。
 - `WebPreferences`（`msg.rs`）P02 给出能解析的子集（`devTools`/`nodeIntegration*`/`preload`/`sandbox`/`partition`/
   `zoomFactor`/`javascript`/`webSecurity`/`allowRunningInsecureContent`/`images`，默认值同 Electron），P13 补全（第一阶段：`api/web_preferences.rs` 读 P13 文档表里的全部字段，除 `additionalArguments`，那是 P21 的）；
+  P21 加 `additional_arguments: Vec<String>`（`additionalArguments`，追加到渲染器 `process.argv`）；
   `Hub::create_renderer(contents, prefs)` 把它存在页面的槽里（`Hub::preferences_of`），P20 在导航时用同一份重建 isolate。
 
 ## Hub（`hub.rs`）
