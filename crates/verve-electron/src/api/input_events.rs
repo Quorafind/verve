@@ -81,11 +81,29 @@ pub(crate) fn key_for(context: &mut Context, contents: ContentsId, down: bool, k
         }
         Err(_) => false,
     };
-    if !prevented {
-        shared(context)
-            .hub
-            .input(contents, ToRendererInput::Key { down, key });
+    if prevented {
+        return;
     }
+    // The menu's accelerators come after `before-input-event`, and a key one chooses is the
+    // menu's and not the page's, going down and coming up.
+    let window = shared(context).hub.window_of(contents);
+    let menus = super::menu_state::state(context);
+    let chosen = window
+        .filter(|_| down)
+        .and_then(|window| menus.item_for(window, &key));
+    if let Some(item) = chosen {
+        menus.swallow(contents, &key.code);
+        super::menu_state::clicked(context, item, window, true, key.modifiers);
+        return;
+    }
+    if down {
+        menus.pass(contents, &key.code);
+    } else if menus.release(contents, &key.code) {
+        return;
+    }
+    shared(context)
+        .hub
+        .input(contents, ToRendererInput::Key { down, key });
 }
 
 /// The `input` a `before-input-event` listener is given.

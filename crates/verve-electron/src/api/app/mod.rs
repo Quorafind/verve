@@ -112,6 +112,11 @@ impl AppState {
         }
     }
 
+    /// Whether the app runs from its packaged `app.asar`.
+    pub(crate) fn is_packaged(&self) -> bool {
+        self.packaged
+    }
+
     /// The app's name, which `userAgentFallback` and `getName` say.
     pub(crate) fn name(&self) -> String {
         self.name.borrow().clone()
@@ -218,6 +223,9 @@ pub(crate) fn second_instance(context: &mut Context, argv: &[String], cwd: &Path
 
 /// The entry has run: `will-finish-launching`.
 pub(crate) fn will_finish_launching(context: &mut Context) {
+    // Electron's own listener, the first there is, sets the default application menu.
+    let menu = super::menu::set_default_application_menu(context);
+    define::report(context, menu);
     emit_quietly(context, "will-finish-launching", &[]);
 }
 
@@ -290,6 +298,11 @@ const ACCESSORS: &[(&str, NativeFunctionPointer, Option<NativeFunctionPointer>)]
         "name",
         |_, _, cx| Ok(js_text(&shared(cx).app.name())),
         Some(set_name),
+    ),
+    (
+        "applicationMenu",
+        super::menu::application_menu_getter,
+        Some(super::menu::application_menu_setter),
     ),
 ];
 

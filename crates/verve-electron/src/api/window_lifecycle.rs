@@ -191,6 +191,7 @@ impl MainState {
             }
         }
         self.hub.remove_window(window);
+        super::menu_window::window_gone(context, window);
         define::emit_reporting(context, &record.object, "closed", &[]);
         if let Some(contents) = contents {
             if let Ok(object) = contents_ipc::contents_object(context, contents)
