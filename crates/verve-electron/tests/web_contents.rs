@@ -10,7 +10,9 @@
 
 mod support;
 
-use support::{run, run_main, run_with};
+use support::{App, TIMEOUT, run, run_main, run_with};
+use verve_dom::Key;
+use verve_electron::msg::FromShell;
 
 /// The pages the `window.open` tests open from and to: a window opens only what its opener may.
 const FILES: &[(&str, &str)] = &[("o.html", "<p>o</p>"), ("c.html", "<p>child</p>")];
@@ -316,6 +318,37 @@ fn inserted_css_changes_the_computed_style_until_it_is_removed() {
 }
 
 #[test]
+fn input_events_click_and_type_in_the_page() {
+    // sendInputEvent reaches the page as a person's input would: a press and a release click the
+    // element under the pointer, a right button asks for a context menu (with the link, the
+    // editable field and the selected text), insertText types into the focused field.
+    let lines = run(r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await load(win, '<button id="b" style="display:block">press</button><a id="a" style="display:block" href="https://example.com/x">link text</a><div id="e" contenteditable style="display:block">edit</div><input id="i">');
+    await wc.executeJavaScript("window.clicks = 0; document.getElementById('b').addEventListener('click', () => window.clicks++)");
+    wc.sendInputEvent({ type: 'mouseDown', x: 5, y: 5, button: 'left', clickCount: 1 });
+    wc.sendInputEvent({ type: 'mouseUp', x: 5, y: 5, button: 'left', clickCount: 1 });
+    log('clicks', await wc.executeJavaScript('window.clicks'));
+    wc.on('context-menu', (event, params) => log('menu', params.linkURL, params.linkText, params.isEditable, params.mediaType, params.pageURL.startsWith('data:'), params.x, params.y));
+    wc.sendInputEvent({ type: 'contextMenu', x: 5, y: 21 });
+    await sleep(100);
+    wc.sendInputEvent({ type: 'contextMenu', x: 5, y: 37 });
+    await sleep(100);
+    await wc.executeJavaScript('document.getElementById("i").focus()');
+    await wc.insertText('abc');
+    log('typed', await wc.executeJavaScript('document.getElementById("i").value'));
+    "#);
+    assert_eq!(lines[0], "clicks 1");
+    assert_eq!(
+        lines[1],
+        "menu https://example.com/x link text false none true 5 21"
+    );
+    assert_eq!(lines[2], "menu   true none true 5 37");
+    assert_eq!(lines[3], "typed abc");
+}
+
+#[test]
 fn window_open_follows_the_handler_and_makes_a_child_window() {
     // Electron 39.8.10: with no handler the window opens and the opener says did-create-window; a
     // handler is given { url, frameName, features, disposition, referrer }; `deny` leaves the page
@@ -382,6 +415,49 @@ fn window_open_follows_the_handler_and_makes_a_child_window() {
     assert_eq!(lines[10], "bad true");
     assert_eq!(lines[11], "after 0");
     assert_eq!(lines.len(), 12, "{lines:?}");
+}
+
+#[test]
+fn before_input_event_can_keep_a_key_from_the_page() {
+    // While a `before-input-event` listener exists the Hub says the shell is to hand the page's keys
+    // to the main process (`intercepts_keys`); the listener gets { type, key, code, … }, and a key it
+    // prevents never reaches the page.
+    let app = App::launch_script(
+        r#"
+    const { app, BrowserWindow } = require('electron');
+    global.seen = [];
+    app.whenReady().then(async () => {
+      const win = new BrowserWindow({ show: false });
+      win.webContents.on('before-input-event', (event, input) => {
+        global.seen.push([input.type, input.key, input.code, input.shift]);
+        if (input.key === 'a') event.preventDefault();
+      });
+      await win.loadURL('data:text/html,' + encodeURIComponent('<script>window.keys = []; addEventListener("keydown", (e) => window.keys.push(e.key))</script>'));
+      console.log('READY');
+    });"#,
+        &[],
+    );
+    assert!(
+        app.run_until(|app| app.console().iter().any(|l| l == "READY"), TIMEOUT),
+        "{:?}",
+        app.console()
+    );
+    assert!(app.hub.intercepts_keys(1));
+    for key in ['a', 'b'] {
+        app.hub.from_shell(FromShell::KeyForContents {
+            contents: 1,
+            down: true,
+            key: Key::char(key),
+        });
+    }
+    assert!(app.run_until(
+        |app| app.eval_renderer(1, "window.keys") == "[\"b\"]",
+        TIMEOUT
+    ));
+    assert_eq!(
+        app.eval_main("global.seen"),
+        "[[\"keyDown\",\"a\",\"KeyA\",false],[\"keyDown\",\"b\",\"KeyB\",false]]"
+    );
 }
 
 #[test]

@@ -12,6 +12,7 @@ pub(crate) mod contents_page;
 pub(crate) mod context_bridge;
 pub mod define;
 pub(crate) mod dialog;
+pub(crate) mod input_events;
 pub(crate) mod ipc_main;
 pub(crate) mod ipc_renderer;
 pub(crate) mod message_port_main;

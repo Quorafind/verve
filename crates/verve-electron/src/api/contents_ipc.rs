@@ -8,10 +8,10 @@ use boa_engine::native_function::NativeFunctionPointer;
 use boa_engine::{Context, JsObject, JsResult, JsValue};
 use verve::native::{self, arg, js_text};
 
-use super::contents_history;
 use super::define::{self, Args, Kind};
 use super::ipc_main::{self, console};
 use super::message_port_main;
+use super::{contents_history, input_events};
 use super::{shared, web_frame_main};
 use crate::ids::ContentsId;
 use crate::ipc::{self, MAIN_FRAME};
@@ -79,6 +79,7 @@ pub(crate) fn contents_object(context: &mut Context, id: ContentsId) -> JsResult
         .pages
         .borrow_mut()
         .insert(id, page);
+    input_events::watch_listeners(context, &object, id)?;
     Ok(object)
 }
 

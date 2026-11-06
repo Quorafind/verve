@@ -17,8 +17,8 @@ use verve::native;
 use verve::{Level, ProcessInfo, Runtime, UncaughtBehavior};
 
 use crate::api::{
-    self, MainState, app, define, navigation, page_events, web_contents, window_events,
-    window_lifecycle, window_open,
+    self, MainState, app, define, input_events, navigation, page_events, web_contents,
+    window_events, window_lifecycle, window_open,
 };
 use crate::beat;
 use crate::hub::{Hub, Program};
@@ -181,6 +181,14 @@ impl MainGuest {
                 api::dialog::answered(self.runtime.context(), call, &result);
                 self.runtime.run_microtasks();
             }
+            FromShell::KeyForContents {
+                contents,
+                down,
+                key,
+            } => {
+                input_events::key_for(self.runtime.context(), contents, down, key);
+                self.runtime.run_microtasks();
+            }
             _ => {}
         }
     }
@@ -233,6 +241,9 @@ impl MainGuest {
             }
             FromRenderer::ExecuteJavaScriptReply { call, result } => {
                 api::shared(context).calls.answer(context, call, result);
+            }
+            FromRenderer::ContextMenu(params) => {
+                input_events::context_menu(context, contents, params)
             }
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
