@@ -20,6 +20,7 @@ mod ipc;
 pub mod launcher;
 mod loader;
 pub mod main_guest;
+pub mod menu;
 pub mod msg;
 mod os;
 mod oscrypt;

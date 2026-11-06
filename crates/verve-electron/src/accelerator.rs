@@ -8,28 +8,12 @@
 //! carries, and what the shell compares a pressed key by.
 //!
 //! The parse depends on the system only in `CommandOrControl`, which is Command on macOS and
-//! Control elsewhere; [`Accelerator::parse_for`] takes the system, [`Accelerator::parse`] is the
+//! Control elsewhere; [`Accelerator::parse_for`] takes the [`Os`], [`Accelerator::parse`] is the
 //! one the program runs on. Whitespace around a `+` is ignored, and `Plus` is `Shift+=`.
 
 use std::fmt;
 
-/// Which system `CommandOrControl` is read for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum System {
-    /// macOS: `CommandOrControl` is Command.
-    Mac,
-    /// Windows and Linux: `CommandOrControl` is Control.
-    Other,
-}
-
-impl System {
-    /// The system this program was built for.
-    pub const CURRENT: System = if cfg!(target_os = "macos") {
-        System::Mac
-    } else {
-        System::Other
-    };
-}
+use crate::menu::roles::Os;
 
 /// The modifier keys of an accelerator. Command, `Super` and `Meta` are one key: the Windows key
 /// off macOS, Command on it.
@@ -175,18 +159,18 @@ const SHIFTED: &[(char, &str)] = &[
 
 /// What one `+`-separated part of an accelerator is.
 enum Part {
-    Modifier(fn(&mut Mods, System)),
+    Modifier(fn(&mut Mods, Os)),
     Key(&'static str, bool),
 }
 
 fn part_of(token: &str) -> Option<Part> {
     let lower = token.to_ascii_lowercase();
-    let modifier: Option<fn(&mut Mods, System)> = match lower.as_str() {
+    let modifier: Option<fn(&mut Mods, Os)> = match lower.as_str() {
         "command" | "cmd" | "super" | "meta" => Some(|mods, _| mods.meta = true),
         "control" | "ctrl" => Some(|mods, _| mods.ctrl = true),
         "commandorcontrol" | "cmdorctrl" => Some(|mods, system| match system {
-            System::Mac => mods.meta = true,
-            System::Other => mods.ctrl = true,
+            Os::Mac => mods.meta = true,
+            Os::Windows | Os::Linux => mods.ctrl = true,
         }),
         "alt" | "option" => Some(|mods, _| mods.alt = true),
         "altgr" => Some(|mods, _| mods.alt_gr = true),
@@ -249,7 +233,7 @@ impl Accelerator {
     ///
     /// The part of `text` that is neither a modifier nor a key, or no key at all.
     pub fn parse(text: &str) -> Result<Self, AcceleratorError> {
-        Self::parse_for(text, System::CURRENT)
+        Self::parse_for(text, Os::CURRENT)
     }
 
     /// Reads `text` with `CommandOrControl` meaning what it does on `system`.
@@ -257,7 +241,7 @@ impl Accelerator {
     /// # Errors
     ///
     /// As [`Accelerator::parse`].
-    pub fn parse_for(text: &str, system: System) -> Result<Self, AcceleratorError> {
+    pub fn parse_for(text: &str, system: Os) -> Result<Self, AcceleratorError> {
         let bad = |token: &str| AcceleratorError {
             token: token.to_owned(),
         };
@@ -340,7 +324,7 @@ mod tests {
     use super::*;
 
     fn parse(text: &str) -> Accelerator {
-        Accelerator::parse_for(text, System::Other).expect(text)
+        Accelerator::parse_for(text, Os::Windows).expect(text)
     }
 
     #[test]
@@ -362,7 +346,7 @@ mod tests {
 
     #[test]
     fn command_or_control_is_command_on_a_mac() {
-        let mac = Accelerator::parse_for("CmdOrCtrl+Q", System::Mac).unwrap();
+        let mac = Accelerator::parse_for("CmdOrCtrl+Q", Os::Mac).unwrap();
         assert!(mac.mods.meta && !mac.mods.ctrl);
     }
 
@@ -463,7 +447,7 @@ mod tests {
             "Ctrl+Foo",
         ] {
             assert!(
-                Accelerator::parse_for(text, System::Other).is_err(),
+                Accelerator::parse_for(text, Os::Windows).is_err(),
                 "{text:?}"
             );
         }
