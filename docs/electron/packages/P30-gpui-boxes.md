@@ -1,6 +1,6 @@
 # P30 DomView 盒模型绘制
 
-**依赖**：P02 P34  **规模**：L  **修改**：新建 `crates/verve-layout`；`crates/verve-gpui/src/dom_view.rs`、`dom_element.rs`；`crates/verve-dom/src/lib.rs`（加布局提供者钩子）；`crates/verve-electron/src/renderer_guest.rs`（接入布局引擎）；`crates/verve-electron/src/msg.rs`（`RendererView` 追加字段，见下）
+**依赖**：P02 P34  **规模**：L  **修改**：新建 `crates/verve-layout`；`crates/verve-gpui/src/dom_view.rs`、`dom_element.rs`；`crates/verve-dom/src/lib.rs`（加布局提供者钩子）；`crates/verve-electron/src/renderer_guest.rs`（接入布局引擎）；`crates/verve-electron/src/msg/input.rs`（`RendererView` 追加字段，见下）
 
 ## 目标
 
@@ -53,7 +53,7 @@ Hub.renderer_view(id) ───────────────────�
 - GPUI 线程上不做布局，只按绘制项回放，帧时间稳定。
 - 这改变了 P02 契约的数据流向：几何不再从 Shell 回传渲染器，`ToRendererInput::Layout` 不再使用（保留变体不删，
   标注废弃）；`RendererView` 追加 `display_list` 字段。**本包第一个 commit 只改 `docs/electron/` 和
-  `msg.rs`，说明这一调整**（见 conventions）。
+  `msg/input.rs`，说明这一调整**（见 conventions）。
 
 ### 第一步的验证：已完成（2026-11-02，见 [`spikes/p30-text-measurement.md`](../spikes/p30-text-measurement.md)）
 
@@ -152,7 +152,7 @@ impl Document {
 
 "过期"的判定：自上次布局以来 `Changes` 非空或视口变化。没有 provider 时行为不变（现有测试必须仍过）。
 
-### `msg.rs` 追加
+### `msg/input.rs` 追加
 
 ```rust
 pub struct RendererView { /* P02 原有字段 */ pub display_list: Option<Arc<verve_layout::DisplayList>> }

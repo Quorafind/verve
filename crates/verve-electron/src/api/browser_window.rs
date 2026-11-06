@@ -109,7 +109,7 @@ fn init(this: &JsObject, args: &[JsValue], context: &mut Context) -> JsResult<()
     });
     if read.opacity != 1. {
         let op = WindowOp::SetOpacity(read.opacity);
-        hub.to_shell(ToShell::Window { window, op });
+        hub.to_window(window, op);
     }
     if let Some(record) = state.windows.get(window) {
         state.follow_modal(&record);

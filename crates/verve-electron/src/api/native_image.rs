@@ -109,13 +109,7 @@ fn prototype(context: &mut Context) -> JsResult<JsObject> {
 
 /// Runs `f` on the image `this` is; `TypeError: Illegal invocation` for anything else.
 fn with_image<T>(this: &JsValue, f: impl FnOnce(&mut NativeImage) -> T) -> JsResult<T> {
-    let object = this.as_object();
-    let data = object
-        .as_ref()
-        .and_then(|o| o.downcast_ref::<ImageData>())
-        .ok_or_else(|| native::type_error("Illegal invocation"))?;
-    let mut image = data.image.borrow_mut();
-    Ok(f(&mut image))
+    define::with_data(this, |data: &ImageData| f(&mut data.image.borrow_mut()))
 }
 
 /// The scale factor an options object asks for: its `scaleFactor`, 1 by default.

@@ -212,9 +212,8 @@ pub(crate) fn prepare(
         ran: Cell::new(false),
     });
     runtime.context().insert_data(Rc::clone(&setup));
-    if let Err(error) = describe_process(runtime.context(), prefs) {
-        verve::report(runtime.context(), &error);
-    }
+    let described = describe_process(runtime.context(), prefs);
+    crate::api::define::report(runtime.context(), described);
     if !page_has_node(prefs) {
         let kept = take_node_globals(runtime.context());
         *setup.node_globals.borrow_mut() = kept;
@@ -306,9 +305,8 @@ fn take_node_globals(context: &mut Context) -> Vec<(&'static str, JsValue)> {
         if let Ok(value) = global.get(key.clone(), context) {
             kept.push((name, value));
         }
-        if let Err(error) = global.delete_property_or_throw(key, context) {
-            verve::report(context, &error);
-        }
+        let deleted = global.delete_property_or_throw(key, context);
+        crate::api::define::report(context, deleted);
     }
     kept
 }

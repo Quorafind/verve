@@ -1,6 +1,6 @@
 # P15 Menu / MenuItem / Tray / globalShortcut
 
-**依赖**：P02、P34（Shell 窗口与原生句柄）、P14（`NativeImage`）  **规模**：M  **修改**：`crates/verve-electron/src/api/{menu,menu_item,tray,global_shortcut,accelerator}.rs`；`crates/verve-gpui/src/{menu.rs,tray.rs,shortcut.rs}`（新建）；`crates/verve-electron/src/msg.rs`（在 `MenuOp` 上追加）
+**依赖**：P02、P34（Shell 窗口与原生句柄）、P14（`NativeImage`）  **规模**：M  **修改**：`crates/verve-electron/src/api/{menu,menu_item,tray,global_shortcut,accelerator}.rs`；`crates/verve-gpui/src/{menu.rs,tray.rs,shortcut.rs}`（新建）；`crates/verve-electron/src/msg/shell.rs`（在 `MenuOp` 上追加）
 
 ## 目标
 
@@ -67,7 +67,7 @@ pub struct MenuSpec { pub id: MenuId, pub items: Vec<MenuItemSpec> }
 - Shell 侧持有 `MenuId → muda::Menu/Submenu` 和 `MenuItemId → muda::MenuItem/CheckMenuItem/IconMenuItem` 映射；
   muda 的菜单项 id 设为 `MenuItemId` 的十进制字符串。
 
-### 2. 在 `MenuOp` 上追加（`msg.rs`）
+### 2. 在 `MenuOp` 上追加（`msg/shell.rs`）
 
 ```rust
 pub enum MenuOp {

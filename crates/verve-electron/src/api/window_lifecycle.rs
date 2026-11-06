@@ -16,7 +16,7 @@ use boa_engine::Context;
 use super::windows::{CLOSE_PATIENCE, Closing, WindowRecord};
 use super::{MainState, app, contents_ipc, define, navigation, shared};
 use crate::ids::{ContentsId, WindowId};
-use crate::msg::{ToRenderer, ToShell, WindowOp};
+use crate::msg::{ToRenderer, WindowOp};
 
 /// The window is asked to close. A close already under way is not asked again, though its
 /// `'close'` is heard once more, as Electron's is — and a listener cannot cancel that second
@@ -60,10 +60,9 @@ fn refuse(context: &mut Context, record: &WindowRecord) {
     record.closing.set(Closing::Idle);
     record.asked_at.set(None);
     app::quit::close_prevented(context);
-    shared(context).hub.to_shell(ToShell::Window {
-        window: record.id,
-        op: WindowOp::CloseAnswer { prevented: true },
-    });
+    shared(context)
+        .hub
+        .to_window(record.id, WindowOp::CloseAnswer { prevented: true });
 }
 
 /// The page answered `beforeunload`: `proceed` is `false` when a handler of its refused.
@@ -137,10 +136,9 @@ pub(crate) fn finish_close(context: &mut Context, record: &WindowRecord) {
     {
         define::emit_reporting(context, &object, "destroyed", &[]);
     }
-    state.hub.to_shell(ToShell::Window {
-        window: record.id,
-        op: WindowOp::CloseAnswer { prevented: false },
-    });
+    state
+        .hub
+        .to_window(record.id, WindowOp::CloseAnswer { prevented: false });
     state.window_closed(context, record.id);
 }
 
@@ -153,10 +151,7 @@ pub(crate) fn destroy(context: &mut Context, window: WindowId) {
         return;
     };
     state.mark_dead(&record);
-    state.hub.to_shell(ToShell::Window {
-        window,
-        op: WindowOp::Destroy,
-    });
+    state.hub.to_window(window, WindowOp::Destroy);
     state.hub.to_main(move |guest| guest.window_gone(window));
 }
 
@@ -184,20 +179,14 @@ impl MainState {
         self.mark_dead(&record);
         self.give_up_on_page(context, &record);
         for child in self.windows.children_of(window) {
-            self.hub.to_shell(ToShell::Window {
-                window: child.id,
-                op: WindowOp::Destroy,
-            });
+            self.hub.to_window(child.id, WindowOp::Destroy);
             self.window_closed(context, child.id);
         }
         self.enable_parent_of(&record);
         let contents = self.hub.contents_of(window);
         for opened in self.windows.opened_by(record.page.contents) {
             if !opened.page_state.outlives_opener.get() {
-                self.hub.to_shell(ToShell::Window {
-                    window: opened.id,
-                    op: WindowOp::Destroy,
-                });
+                self.hub.to_window(opened.id, WindowOp::Destroy);
                 self.window_closed(context, opened.id);
             }
         }
@@ -246,10 +235,7 @@ impl MainState {
         let mut state = record.state.borrow_mut();
         if state.flag(crate::window_state::Flag::Enabled) != enabled {
             state.set_flag(crate::window_state::Flag::Enabled, enabled);
-            self.hub.to_shell(ToShell::Window {
-                window: record.id,
-                op: WindowOp::SetEnabled(enabled),
-            });
+            self.hub.to_window(record.id, WindowOp::SetEnabled(enabled));
         }
     }
 }

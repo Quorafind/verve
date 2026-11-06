@@ -16,7 +16,7 @@ use super::window_lifecycle::begin_close;
 use super::windows::WindowRecord;
 use super::{app, contents_ipc, shared};
 use crate::ids::WindowId;
-use crate::msg::{ToShell, WindowEvent, WindowOp};
+use crate::msg::{WindowEvent, WindowOp};
 
 /// What the shell says happened to `window`.
 pub(crate) fn shell_event(context: &mut Context, window: WindowId, event: WindowEvent) {
@@ -37,7 +37,7 @@ pub(crate) fn shell_event(context: &mut Context, window: WindowId, event: Window
     if let Some(name) = event_name(&event) {
         announce(context, &record, name);
     }
-    check_ready(context, &record);
+    ready_to_show_if_due(context, &record);
 }
 
 /// The event a window says for what the shell reported, if it says one.
@@ -80,10 +80,9 @@ pub(crate) fn page_title(context: &mut Context, record: &WindowRecord, title: &s
     let prevented = define::emit_reporting(context, &record.object, "page-title-updated", &args);
     if !prevented {
         record.state.borrow_mut().title = title.to_owned();
-        shared.hub.to_shell(ToShell::Window {
-            window: record.id,
-            op: WindowOp::SetTitle(title.to_owned()),
-        });
+        shared
+            .hub
+            .to_window(record.id, WindowOp::SetTitle(title.to_owned()));
     }
     if let Ok(object) = contents_ipc::contents_object(context, record.page.contents) {
         define::emit_reporting(context, &object, "page-title-updated", &args);
@@ -100,7 +99,7 @@ pub(crate) fn update_ready(record: &WindowRecord, change: impl FnOnce(&mut super
 /// Says `'ready-to-show'`, once, when the page has something to paint and has finished loading,
 /// and the shell has drawn it if the window can be seen. A window made hidden with
 /// `paintWhenInitiallyHidden: false` waits until it is shown.
-pub(crate) fn check_ready(context: &mut Context, record: &WindowRecord) {
+pub(crate) fn ready_to_show_if_due(context: &mut Context, record: &WindowRecord) {
     let visible = record.state.borrow().is_visible();
     update_ready(record, |ready| ready.shown |= visible);
     let ready = record.ready.get();

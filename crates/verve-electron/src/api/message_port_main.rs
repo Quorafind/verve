@@ -154,13 +154,7 @@ pub(crate) fn adopt_all(ends: Vec<PortEnd>, context: &mut Context) -> JsResult<J
 
 /// Runs `f` on the state of the port `this`: `TypeError: Illegal invocation` for anything else.
 fn with_port<T>(this: &JsValue, f: impl FnOnce(&mut PortState) -> T) -> JsResult<T> {
-    let object = this.as_object();
-    let data = object
-        .as_ref()
-        .and_then(|o| o.downcast_ref::<PortData>())
-        .ok_or_else(|| native::type_error("Illegal invocation"))?;
-    let mut state = data.state.borrow_mut();
-    Ok(f(&mut state))
+    define::with_data(this, |data: &PortData| f(&mut data.state.borrow_mut()))
 }
 
 /// The ends of the ports in `transfer`, taken from them: they are the page's from now on and the

@@ -29,7 +29,7 @@ use super::window_geometry;
 use super::window_lifecycle::destroy;
 use super::window_options::parse_color;
 use super::windows::WindowRecord;
-use crate::msg::{ToShell, WindowOp};
+use crate::msg::WindowOp;
 use crate::window_state::{Flag, WindowState};
 
 /// The window `this` stands for, while a script can use it: `Object has been destroyed` once it
@@ -53,10 +53,7 @@ pub(crate) fn act(context: &mut Context, record: &WindowRecord, op: WindowOp) {
 
 /// Tells the shell to do `op`, which has no effect on the cache.
 fn send(context: &mut Context, record: &WindowRecord, op: WindowOp) {
-    shared(context).hub.to_shell(ToShell::Window {
-        window: record.id,
-        op,
-    });
+    shared(context).hub.to_window(record.id, op);
 }
 
 /// Methods that do one thing to the window and take nothing.
@@ -229,11 +226,11 @@ pub(crate) fn install(context: &mut Context, prototype: &JsObject) -> JsResult<(
         let setter = native::closure(context, spec.set, 1, set_flag, index);
         native::hidden(prototype, JsString::from(spec.set), setter, context)?;
         if let Some(name) = spec.get {
-            let getter = native::closure(context, name, 0, get_flag, index);
+            let getter = native::closure(context, name, 0, flag_of, index);
             native::hidden(prototype, JsString::from(name), getter, context)?;
         }
         if let Some(name) = spec.property {
-            let get = native::closure(context, name, 0, get_flag, index);
+            let get = native::closure(context, name, 0, flag_of, index);
             let set = native::closure(context, name, 1, set_flag, index);
             let property = PropertyDescriptor::builder()
                 .get(get)
@@ -291,7 +288,7 @@ fn set_flag(
     Ok(JsValue::undefined())
 }
 
-fn get_flag(
+fn flag_of(
     this: &JsValue,
     _: &[JsValue],
     index: &usize,

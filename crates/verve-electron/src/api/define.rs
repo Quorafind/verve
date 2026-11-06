@@ -26,6 +26,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use boa_engine::builtins::promise::ResolvingFunctions;
 use boa_engine::{
     Context, JsError, JsObject, JsResult, JsString, JsValue, js_string, object::WeakJsObject,
 };
@@ -133,6 +134,53 @@ pub fn report<T>(context: &mut Context, result: JsResult<T>) -> Option<T> {
             None
         }
     }
+}
+
+/// Runs `read` on the native data of type `T` that `this` carries: `TypeError: Illegal
+/// invocation` for anything else, as Electron's native classes answer a method called on a
+/// foreign object.
+///
+/// # Errors
+///
+/// That `TypeError`.
+pub fn with_data<T: boa_engine::object::NativeObject, R>(
+    this: &JsValue,
+    read: impl FnOnce(&T) -> R,
+) -> JsResult<R> {
+    let object = this.as_object();
+    let data = object
+        .as_ref()
+        .and_then(|o| o.downcast_ref::<T>())
+        .ok_or_else(|| native::type_error("Illegal invocation"))?;
+    Ok(read(&data))
+}
+
+/// Settles the promise `resolvers` belong to: `Ok` resolves it, `Err` rejects it.
+///
+/// # Errors
+///
+/// What a resolving function threw, which a promise's own do not.
+pub fn settle(
+    context: &mut Context,
+    resolvers: &ResolvingFunctions,
+    outcome: Result<JsValue, JsValue>,
+) -> JsResult<()> {
+    let (function, value) = match outcome {
+        Ok(value) => (&resolvers.resolve, value),
+        Err(reason) => (&resolvers.reject, reason),
+    };
+    function.call(&JsValue::undefined(), &[value], context)?;
+    Ok(())
+}
+
+/// Emits `event` on the main process's `process` with `args`; a listener's throw is
+/// [`report`]ed.
+pub fn emit_process(context: &mut Context, event: &str, args: &[JsValue]) {
+    let process = native::global(context, "process").unwrap_or_default();
+    let mut all = vec![native::js_text(event)];
+    all.extend_from_slice(args);
+    let heard = native::invoke(&process, "emit", &all, context);
+    report(context, heard);
 }
 
 /// [`emit_cancelable`] for an event nobody can answer for, with a listener's throw [`report`]ed

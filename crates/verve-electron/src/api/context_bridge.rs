@@ -545,9 +545,7 @@ fn proxy_promise(
             plain,
             cx,
         )?;
-        resolvers
-            .resolve
-            .call(&JsValue::undefined(), &[source.clone().into()], cx)?;
+        super::define::settle(cx, &resolvers, Ok(source.clone().into()))?;
         relay.then(Some(on_value), Some(on_reason), cx)?;
         Ok(())
     })?;

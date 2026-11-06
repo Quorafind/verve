@@ -147,10 +147,7 @@ impl MainGuest {
     }
 
     fn emit_process(&mut self, event: &str) {
-        let context = self.runtime.context();
-        let process = native::global(context, "process").unwrap_or_default();
-        let heard = native::invoke(&process, "emit", &[native::js_text(event)], context);
-        define::report(context, heard);
+        define::emit_process(self.runtime.context(), event, &[]);
     }
 
     /// `findInPage`'s `found-in-page`, heard after the call that asked for it returned.

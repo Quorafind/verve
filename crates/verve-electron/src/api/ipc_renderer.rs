@@ -336,22 +336,14 @@ fn settle_in_world(
     channel: &str,
     result: Result<Cloned, Cloned>,
 ) -> JsResult<()> {
-    match result {
-        Ok(value) => {
-            let value = value.to_value(context)?;
-            resolving
-                .resolve
-                .call(&JsValue::undefined(), &[value], context)?;
-        }
+    let outcome = match result {
+        Ok(value) => Ok(value.to_value(context)?),
         Err(failure) => {
             let failure = failure.to_value(context)?;
             let text = native::text_of(&failure, context)?;
             let message = format!("Error invoking remote method '{channel}': {text}");
-            let error = define::error(&message).into_opaque(context)?;
-            resolving
-                .reject
-                .call(&JsValue::undefined(), &[error], context)?;
+            Err(define::error(&message).into_opaque(context)?)
         }
-    }
-    Ok(())
+    };
+    define::settle(context, resolving, outcome)
 }

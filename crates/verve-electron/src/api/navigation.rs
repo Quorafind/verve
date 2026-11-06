@@ -96,9 +96,9 @@ pub(crate) fn settle_load(
         return;
     };
     let settled = match outcome {
-        Ok(()) => wait.resolve.call(&JsValue::undefined(), &[], context),
+        Ok(()) => define::settle(context, &wait, Ok(JsValue::undefined())),
         Err((code, name, url)) => load_error(context, code, &name, &url)
-            .and_then(|error| wait.reject.call(&JsValue::undefined(), &[error], context)),
+            .and_then(|error| define::settle(context, &wait, Err(error))),
     };
     define::report(context, settled);
 }

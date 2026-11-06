@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use boa_engine::builtins::promise::ResolvingFunctions;
 use boa_engine::object::builtins::JsPromise;
 use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Source, js_string,
@@ -12,7 +13,7 @@ use verve::native::{self, ClassSpec, NewOnly, arg};
 use verve::{MAIN_WORLD, current_world};
 
 use super::context_bridge::bridge_value;
-use super::define::{Args, Fields};
+use super::define::{self, Args, Fields};
 use crate::msg::FromRenderer;
 use crate::preload::{self, setup};
 
@@ -248,11 +249,8 @@ fn answer(
         context,
         "",
         1,
-        |_,
-         args,
-         (resolve, reject, callback, from, to): &(JsObject, JsObject, JsValue, u32, u32),
-         cx| {
-            match bridge_value(&arg(args, 0), *from, *to, cx) {
+        |_, args, (resolvers, callback, from, to): &(ResolvingFunctions, JsValue, u32, u32), cx| {
+            let outcome = match bridge_value(&arg(args, 0), *from, *to, cx) {
                 Ok(value) => {
                     if callback.is_callable() {
                         verve::call(
@@ -262,34 +260,27 @@ fn answer(
                             std::slice::from_ref(&value),
                         )?;
                     }
-                    resolve.call(&JsValue::undefined(), &[value], cx)
+                    Ok(value)
                 }
-                Err(error) => {
-                    let thrown = error.into_opaque(cx).unwrap_or_default();
-                    reject.call(&JsValue::undefined(), &[thrown], cx)
-                }
-            }
+                Err(error) => Err(error.into_opaque(cx).unwrap_or_default()),
+            };
+            define::settle(cx, resolvers, outcome)?;
+            Ok(JsValue::undefined())
         },
-        (
-            JsObject::from(resolvers.resolve.clone()),
-            JsObject::from(resolvers.reject.clone()),
-            callback.unwrap_or_default(),
-            from,
-            to,
-        ),
+        (resolvers.clone(), callback.unwrap_or_default(), from, to),
     );
-    let reject = resolvers.reject.clone();
     let on_error = native::closure(
         context,
         "",
         1,
-        |_, _, reject: &JsObject, cx| {
+        |_, _, resolvers: &ResolvingFunctions, cx| {
             let error = JsNativeError::error()
                 .with_message(SCRIPT_FAILED)
                 .into_opaque(cx);
-            reject.call(&JsValue::undefined(), &[error.into()], cx)
+            define::settle(cx, resolvers, Err(error.into()))?;
+            Ok(JsValue::undefined())
         },
-        JsObject::from(reject),
+        resolvers,
     );
     waited.then(
         Some(boa_engine::object::builtins::JsFunction::from_object(on_value).expect("a function")),

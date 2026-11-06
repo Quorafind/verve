@@ -1,6 +1,6 @@
 # P43 调试替代
 
-**依赖**：P13（`webContents` 与其事件）；第二阶段依赖 P30/P34  **规模**：S（第一阶段）+ M（第二阶段检查器窗口）  **修改**：`crates/verve-electron/src/log.rs`（需新增）、`crates/verve-electron/src/api/web_contents.rs` 的 DevTools 方法、P10 参数表中 `--inspect*` 等条目、第二阶段新增 `crates/verve-gpui/src/inspector.rs`；`msg.rs` 追加变体（见契约 5）
+**依赖**：P13（`webContents` 与其事件）；第二阶段依赖 P30/P34  **规模**：S（第一阶段）+ M（第二阶段检查器窗口）  **修改**：`crates/verve-electron/src/log.rs`（需新增）、`crates/verve-electron/src/api/web_contents.rs` 的 DevTools 方法、P10 参数表中 `--inspect*` 等条目、第二阶段新增 `crates/verve-gpui/src/inspector.rs`；`msg/page.rs` 追加变体（见契约 5）
 
 ## 目标
 
@@ -85,7 +85,7 @@ Verve 没有 Chromium DevTools，也不实现 Chrome DevTools 协议。本包提
 - 页面窗口上高亮悬停/选中的节点（Shell 自己画覆盖层，不经过渲染器）；元素拾取模式（点页面选节点）；
 - 底部：console 列表 + REPL 输入框。
 
-为 REPL 在 `msg.rs` **追加**：
+为 REPL 在 `msg/page.rs` **追加**：
 
 ```rust
 // 主进程/Shell → 渲染器
