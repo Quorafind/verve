@@ -5,8 +5,10 @@
 #   1. File length: a new file has at most 1500 lines; a file already longer is listed in
 #      ci/style/large-files.txt with its length then, and may not grow past it.
 #   2. One toolkit: the helpers in src/native.rs and src/encoding.rs are defined there only, and
-#      so are the names the refactor retired (`text`, `list`, `string`, `arg_string`, ...), and
-#      `ClassSpec`. Copies that predate the rule would be listed in ci/style/toolkit-copies.txt
+#      so are `ClassSpec` and, in verve-dom only, the names its `bind` module's copies had
+#      (`text`, `list`, `string`, `arg_string`, ...): other crates and kernel modules have
+#      unrelated functions of those names (`path::string`, `Clipboard::text`), so the retired
+#      list is not enforced there. Copies that predate the rule would be listed in ci/style/toolkit-copies.txt
 #      (empty since R1); a new copy fails.
 #   3. No dbg!, todo! or unimplemented! in library code; a TODO comment names its package (P31: …).
 #   4. Every new crate (verve-electron, verve-gpui, verve-layout) takes the workspace lints.
@@ -26,8 +28,8 @@ COPIES=ci/style/toolkit-copies.txt
 NATIVE='arg|arg_text|js_text|text_of|type_error|range_error|coded_error|coded_error_value|object|function|closure|hidden|methods|exports|accessors|get|invoke|list_of|list_from|array|global|class|instance|constructor|plain_class|illegal_constructor'
 # Names that were copies once and were retired in R1 (verve-dom's `bind` helpers and the like):
 # they come back only through verve::native.
-RETIRED='text|list|string|arg_string|plain_object|define_class'
-ENCODING='hex|base64|unbase64|percent_decode|decode_base64|data_url'
+RETIRED='text|list|string|arg_string|plain_object|define_class|resolved|rejected'
+ENCODING='hex|base64|unbase64|percent_decode|percent_decode_strict|decode_base64|data_url|data_url_strict'
 
 # Only the folders that exist: a crate without tests/ is not an error.
 existing() { for d in "$@"; do [ -d "$d" ] && echo "$d"; done; return 0; }
