@@ -97,6 +97,8 @@ struct RendererSlot {
     view: Mutex<Option<RendererView>>,
     /// Whether the main process was told the page's process is gone.
     gone: AtomicBool,
+    /// Whether the shell hands the page's keys to the main process first (`before-input-event`).
+    intercept_keys: AtomicBool,
 }
 
 impl RendererSlot {
@@ -354,6 +356,7 @@ impl Hub {
             view: Mutex::new(None),
             gone: AtomicBool::new(false),
             loaded: AtomicBool::new(false),
+            intercept_keys: AtomicBool::new(false),
             generation: Arc::new(AtomicU64::new(0)),
         });
         // Registered first: what the page says while its isolate is made is heard.
@@ -634,6 +637,42 @@ impl Hub {
     pub fn has_renderer(&self, contents: ContentsId) -> bool {
         let slot = lock(&self.renderers).get(&contents).cloned();
         slot.is_some_and(|slot| !slot.gone.load(Ordering::SeqCst) && lock(&slot.isolate).is_some())
+    }
+
+    /// How long the script page `contents` runs has been running, when it runs one: what the main
+    /// process's heartbeat reads for `'unresponsive'`.
+    pub fn renderer_busy_for(&self, contents: ContentsId) -> Option<Duration> {
+        let slot = lock(&self.renderers).get(&contents).cloned()?;
+        lock(&slot.isolate).as_ref()?.busy_for()
+    }
+
+    /// Ends page `contents`' process as `forcefullyCrashRenderer()` does: the isolate is dropped, the
+    /// main process hears it crashed (Electron 39.8.10 says `crashed`, not `killed`), and the next
+    /// load makes a new one.
+    pub fn kill_renderer(self: &Arc<Self>, contents: ContentsId) {
+        let Some(slot) = lock(&self.renderers).get(&contents).cloned() else {
+            return;
+        };
+        slot.loaded.store(true, Ordering::SeqCst);
+        if !slot.gone.swap(true, Ordering::SeqCst) {
+            stop(&slot);
+            let generation = slot.generation.load(Ordering::SeqCst);
+            let reason = GoneReason::Crashed;
+            self.from_renderer(contents, generation, FromRenderer::Gone { reason });
+        }
+    }
+
+    /// Whether the shell is to hand page `contents`' keys to the main process before the page.
+    pub fn set_intercept_keys(&self, contents: ContentsId, on: bool) {
+        if let Some(slot) = lock(&self.renderers).get(&contents) {
+            slot.intercept_keys.store(on, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether keys for page `contents` go to the main process first, as [`FromShell::KeyForContents`].
+    pub fn intercepts_keys(&self, contents: ContentsId) -> bool {
+        let slot = lock(&self.renderers).get(&contents).cloned();
+        slot.is_some_and(|slot| slot.intercept_keys.load(Ordering::SeqCst))
     }
 
     /// The view the shell has not read yet. Taken: a view is delivered once.
