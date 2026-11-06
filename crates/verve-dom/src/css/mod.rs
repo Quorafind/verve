@@ -60,6 +60,7 @@ pub use pseudo::{ContentItem, PseudoBox, PseudoElement, ScrollbarPart};
 pub use selector::{MatchContext, Selector, SelectorError, SelectorList};
 pub use sheet::{Declaration, Sheet, declarations, split_rules};
 pub use styler::Styler;
+pub use syntax::{function_parts, split_slices};
 pub(crate) use values::{ROOT_FONT_SIZE, font_longhands, font_size_px, value_or_initial};
 pub use values::{USER_AGENT_SHEET, initial_value, is_inherited};
 

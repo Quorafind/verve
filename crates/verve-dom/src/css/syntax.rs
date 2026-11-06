@@ -1,43 +1,46 @@
 //! The text-level readings every part of the CSS engine shares: where a list is split, where
 //! a block closes, what a comment hides.
 
-/// `text` cut at each `separator` that is not inside parentheses, brackets or quotes; a last
-/// piece of only whitespace is dropped.
-pub(super) fn split_outside(text: &str, separator: char) -> Vec<String> {
+/// `text` cut at each character `is_separator` accepts that is not inside parentheses, brackets
+/// or quotes, or after a backslash; a last piece of only whitespace is dropped. The pieces are as
+/// written, untrimmed, and an empty one between two separators is kept.
+pub fn split_slices(text: &str, is_separator: impl Fn(char) -> bool) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut quote: Option<char> = None;
-    let mut current = String::new();
     let mut escaped = false;
-    for c in text.chars() {
+    let mut start = 0;
+    for (at, c) in text.char_indices() {
         if escaped {
-            current.push(c);
             escaped = false;
             continue;
         }
         match (quote, c) {
-            (_, '\\') => {
-                escaped = true;
-                current.push(c);
-                continue;
-            }
+            (_, '\\') => escaped = true,
             (Some(q), c) if c == q => quote = None,
             (Some(_), _) => {}
             (None, '"' | '\'') => quote = Some(c),
             (None, '(' | '[') => depth += 1,
             (None, ')' | ']') => depth -= 1,
-            (None, c) if c == separator && depth <= 0 => {
-                out.push(std::mem::take(&mut current));
-                continue;
+            (None, c) if is_separator(c) && depth <= 0 => {
+                out.push(&text[start..at]);
+                start = at + c.len_utf8();
             }
             _ => {}
         }
-        current.push(c);
     }
-    if !current.trim().is_empty() {
-        out.push(current);
+    if !text[start..].trim().is_empty() {
+        out.push(&text[start..]);
     }
     out
+}
+
+/// [`split_slices`] at one character, as owned strings.
+pub(super) fn split_outside(text: &str, separator: char) -> Vec<String> {
+    split_slices(text, |c| c == separator)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// `text` without its `/* … */` comments.
@@ -78,7 +81,7 @@ pub(super) fn matching_brace(text: &str, open: usize) -> Option<usize> {
 }
 
 /// A function as a value is written it: its name and what is inside its parentheses.
-pub(super) fn function_parts(text: &str) -> Option<(&str, &str)> {
+pub fn function_parts(text: &str) -> Option<(&str, &str)> {
     let open = text.find('(')?;
     let args = text[open + 1..].strip_suffix(')')?;
     Some((text[..open].trim(), args.trim()))
