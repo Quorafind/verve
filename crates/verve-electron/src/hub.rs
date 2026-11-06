@@ -165,6 +165,8 @@ pub struct Hub {
     /// Whether [`Hub::set_launch`] was called: an app that was not launched has a profile of
     /// its own to clean up.
     told: AtomicBool,
+    /// Whether an error box with no window may be the system's own; only a real shell says so.
+    system_boxes: AtomicBool,
     /// How many times the main process's thread has run a beat.
     beats: AtomicU64,
     overlay: Mutex<Option<Arc<dyn Overlay>>>,
@@ -215,12 +217,29 @@ impl Hub {
             protocol_calls: Arc::default(),
             launch: Mutex::new(None),
             told: AtomicBool::new(false),
+            system_boxes: AtomicBool::new(false),
             beats: AtomicU64::new(0),
             overlay: Mutex::new(None),
             observer: Mutex::new(None),
             displays: Mutex::new(Vec::new()),
             theme: Mutex::new(theme),
         })
+    }
+
+    /// Lets [`Hub::error_box`] show the system's own box when no window exists. The real shell
+    /// says so; a headless one never does, so a test cannot put a box on the desktop.
+    pub fn allow_system_boxes(&self) {
+        self.system_boxes.store(true, Ordering::Relaxed);
+    }
+
+    /// An error box: the shell's over a window; with none, the system's own on this thread, the
+    /// main process's, as Electron shows it before `ready`, when the shell allows it.
+    pub fn error_box(&self, title: String, content: String) {
+        if self.windows().is_empty() && self.system_boxes.load(Ordering::Relaxed) {
+            crate::os::error_box(&title, &content);
+        } else {
+            self.to_shell(ToShell::ErrorBox { title, content });
+        }
     }
 
     /// Says how the app was started: the command line, and the app it named. Before

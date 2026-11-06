@@ -1,0 +1,48 @@
+
+{
+ "available": true,
+ "roundTrip": true,
+ "prefix": "763130",
+ "lengths": [
+  36,
+  48,
+  31,
+  1031
+ ],
+ "twice": true,
+ "backend": {
+  "name": "TypeError",
+  "message": "safeStorage.getSelectedStorageBackend is not a function"
+ },
+ "plain": {},
+ "decryptGarbage": {
+  "name": "Error",
+  "message": "Error while decrypting the ciphertext provided to safeStorage.decryptString. Ciphertext does not appear to be encrypted."
+ },
+ "decryptBadTag": {
+  "name": "Error",
+  "message": "Error while decrypting the ciphertext provided to safeStorage.decryptString."
+ },
+ "encryptBad": {
+  "name": "TypeError",
+  "message": "Error processing argument at index 0, conversion failure from "
+ },
+ "decryptBad": {
+  "name": "Error",
+  "message": "Expected the first argument of decryptString() to be a buffer"
+ },
+ "keys": [
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__",
+  "__proto__",
+  "constructor",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "toLocaleString",
+  "toString",
+  "valueOf"
+ ]
+}

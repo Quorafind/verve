@@ -22,7 +22,7 @@ use crate::hub::{Hub, Program};
 use crate::ids::{ContentsId, WindowId};
 use crate::launcher::Target;
 use crate::msg::{
-    AppEvent, FromRenderer, FromShell, LoadOptions, PageEvent, ToRenderer, ToShell, WindowEvent,
+    AppEvent, FromRenderer, FromShell, LoadOptions, PageEvent, ToRenderer, WindowEvent,
 };
 use crate::probe;
 
@@ -113,13 +113,13 @@ impl MainGuest {
             "App threw an error during load
 {message}"
         );
-        self.hub.to_shell(ToShell::ErrorBox {
-            title: "A JavaScript error occurred in the main process".into(),
-            content: format!(
+        self.hub.error_box(
+            "A JavaScript error occurred in the main process".into(),
+            format!(
                 "Uncaught Exception:
 {message}"
             ),
-        });
+        );
         self.failed = Some(1);
     }
 
@@ -290,10 +290,10 @@ fn set_up_process(runtime: &mut Runtime, hub: &Arc<Hub>) {
         resources_path: Some(launch.resources_path.to_string_lossy().into_owned()),
         default_app: !matches!(launch.target, Target::Packaged { .. }),
         on_uncaught: UncaughtBehavior::Report(Arc::new(move |line| {
-            error_hub.to_shell(ToShell::ErrorBox {
-                title: "A JavaScript error occurred in the main process".into(),
-                content: format!("Uncaught Exception:\n{line}"),
-            });
+            error_hub.error_box(
+                "A JavaScript error occurred in the main process".into(),
+                format!("Uncaught Exception:\n{line}"),
+            );
         })),
         ..default
     };
