@@ -44,6 +44,7 @@
 | 性能 E（P76–P79 合并后） | P80、P81、P82、P83（P81 与 P82 都可能碰 `vm/jit/compiler.rs`：按文件分开，冲突时后合并者 rebase） |
 | 批次 2 续 + 性能 F（P80–P83 合并后，2026-11-05） | P00、P10、P84（P00 与 P10 都碰 `crates/verve-electron` 与 `electron` 二进制的参数：`--headless` 由 P00 先加最小的一处，P10 并进 `Launch`；冲突时后合并者 rebase。P84 只碰 `boa/`）；P41 等 P00、P10、P12、P13、P20、P21 合并后再开（L1 才有应用可跑） |
 | 批次 2 续二（P00、P10、P84 合并后，2026-11-05） | P12、P20、P34（P12 与 P20 都碰 `renderer_guest.rs`，P34 与 P12、P20 都可能往 `msg.rs` 追加变体：按函数分开，冲突时后合并者 rebase。P03 没做的两个内核钩子由用到的包补：P12 补跨 isolate 的 `MessagePort`（`src/messaging.rs`），P20 补 `ModuleSource`/`ImportMap`（`src/esm.rs`），各自单独提交）；P13 在 P12 合并后，P21 在 P12、P20 合并后，P14 与 P34 都改 `verve-gpui/src/shell.rs`，P34 合并后再派 |
+| 批次 2 续三（P12、P20、P34 合并后，2026-11-06） | P13、P14、P21（三者都只往 `msg.rs` 的枚举末尾追加变体、往 `api/mod.rs` 的 `require('electron')` 加模块，冲突时后合并者 rebase。P13 与 P21 都碰 `renderer_guest.rs` 与 `webPreferences`：P13 把解析搬进 `api/web_preferences.rs`，P21 只读已有的 `preload`/`sandbox`/`contextIsolation`，缺的字段加在原处。P13 分两段派：先 `BrowserWindow`（步骤 1–5），再 `webContents`（步骤 6–9）。P21 补 P03 没做的 `create_world`/`enter_world`（单独的 `feat(kernel)` 提交）；它属 M2 的渲染器部分，按续二的安排先于 R1 开。P13 合并后插入收拢 P10/P12/P13 API 样板的小重构；R1 在 M1 其余包之后） |
 | **R2** | M2 重构关卡 |
 | 4 | P31、P32、P33、P35、P15、P16 |
 | **R3** | M3 重构关卡 |
