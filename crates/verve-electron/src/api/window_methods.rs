@@ -229,11 +229,11 @@ pub(crate) fn install(context: &mut Context, prototype: &JsObject) -> JsResult<(
         let setter = native::closure(context, spec.set, 1, set_flag, index);
         native::hidden(prototype, JsString::from(spec.set), setter, context)?;
         if let Some(name) = spec.get {
-            let getter = native::closure(context, name, 0, get_flag, index);
+            let getter = native::closure(context, name, 0, flag_of, index);
             native::hidden(prototype, JsString::from(name), getter, context)?;
         }
         if let Some(name) = spec.property {
-            let get = native::closure(context, name, 0, get_flag, index);
+            let get = native::closure(context, name, 0, flag_of, index);
             let set = native::closure(context, name, 1, set_flag, index);
             let property = PropertyDescriptor::builder()
                 .get(get)
@@ -291,7 +291,7 @@ fn set_flag(
     Ok(JsValue::undefined())
 }
 
-fn get_flag(
+fn flag_of(
     this: &JsValue,
     _: &[JsValue],
     index: &usize,

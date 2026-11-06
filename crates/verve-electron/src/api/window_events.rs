@@ -37,7 +37,7 @@ pub(crate) fn shell_event(context: &mut Context, window: WindowId, event: Window
     if let Some(name) = event_name(&event) {
         announce(context, &record, name);
     }
-    check_ready(context, &record);
+    ready_to_show_if_due(context, &record);
 }
 
 /// The event a window says for what the shell reported, if it says one.
@@ -100,7 +100,7 @@ pub(crate) fn update_ready(record: &WindowRecord, change: impl FnOnce(&mut super
 /// Says `'ready-to-show'`, once, when the page has something to paint and has finished loading,
 /// and the shell has drawn it if the window can be seen. A window made hidden with
 /// `paintWhenInitiallyHidden: false` waits until it is shown.
-pub(crate) fn check_ready(context: &mut Context, record: &WindowRecord) {
+pub(crate) fn ready_to_show_if_due(context: &mut Context, record: &WindowRecord) {
     let visible = record.state.borrow().is_visible();
     update_ready(record, |ready| ready.shown |= visible);
     let ready = record.ready.get();

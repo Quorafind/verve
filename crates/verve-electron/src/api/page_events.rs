@@ -65,7 +65,7 @@ pub(crate) fn page_event(context: &mut Context, contents: ContentsId, event: Pag
             window_events::update_ready(&record, |ready| ready.paintable = true)
         }
     }
-    window_events::check_ready(context, &record);
+    window_events::ready_to_show_if_due(context, &record);
 }
 
 /// The page of one window and the object that stands for it.
