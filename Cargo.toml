@@ -29,6 +29,9 @@ exclude = ["boa"]
 # `Window::with_element_opacity` for the renderer's text shaping.
 gpui = { git = "https://github.com/Quorafind/zed-c", rev = "e679b519961d280cb878183709e31c28684fb5e0", version = "=0.2.2" }
 gpui_platform = { git = "https://github.com/Quorafind/zed-c", rev = "e679b519961d280cb878183709e31c28684fb5e0", features = ["font-kit"] }
+# Image decoding and encoding, once for `verve-dom` (`<img>`, canvas) and `verve-electron` (`nativeImage`): the
+# codecs the browser needs and no more.
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "webp"] }
 
 # The stricter lints every new crate takes (`[lints] workspace = true`); see docs/electron/style.md.
 # `verve` and `verve-dom` take them once the refactor gates have cleaned them up.
