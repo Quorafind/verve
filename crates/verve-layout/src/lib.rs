@@ -11,6 +11,7 @@ mod gradient;
 mod grid;
 mod layout;
 mod measure;
+mod paint;
 mod paint_style;
 mod place;
 mod props;
