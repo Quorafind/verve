@@ -125,6 +125,13 @@ pub enum WindowOp {
     SetOpacity(f64), SetSkipTaskbar(bool), SetIgnoreMouseEvents(bool),
     /// close 事件 JS 侧的答复：true = 已阻止
     CloseAnswer { prevented: bool },
+    // —— P13 追加 ——
+    SetClosable(bool), SetMovable(bool), SetMinimizable(bool), SetMaximizable(bool), SetFocusable(bool),
+    /// false = 窗口不收输入（模态子窗口显示时的父窗口）
+    SetEnabled(bool),
+    SetParent(Option<WindowId>),
+    /// 置于其他窗口之上，不取焦点
+    MoveTop,
 }
 
 // ---------- Shell → 主进程 ----------
@@ -169,6 +176,11 @@ pub enum ToRenderer {
     SendSyncReply { call: u64, value: Cloned },      // 也可直接走 oneshot，见 P12
     ExecuteJavaScript { call: u64, code: String, user_gesture: bool },
     SetZoomFactor(f64),
+    // —— P13 追加（关闭往返）——
+    /// 窗口要关了：在页面 window 上派发 `beforeunload`，答 `FromRenderer::BeforeUnloadReply`
+    BeforeUnload { call: u64 },
+    /// 关闭继续：派发 `pagehide`、`unload`，答 `FromRenderer::UnloadReply`
+    Unload { call: u64 },
 }
 
 // ---------- 渲染器 → 主进程 ----------
@@ -186,6 +198,11 @@ pub enum FromRenderer {
     Reload { url: String },
     Console { level: verve::Level, message: String, line: u32, source: String },
     Gone { reason: GoneReason },                     // 'render-process-gone'
+    // —— P13 追加（关闭往返）——
+    /// `proceed = false`：处理器调了 `preventDefault()` 或把 `returnValue` 设成了非空字符串
+    BeforeUnloadReply { call: u64, proceed: bool },
+    /// `pagehide`、`unload` 已派发
+    UnloadReply { call: u64 },
 }
 
 pub enum PageEvent {
@@ -248,7 +265,7 @@ pub struct RendererView {
 | Shell 提供 `native_handle(WindowId) -> Option<RawWindowHandle>`（对话框父窗口、muda 挂菜单） | P34（P14/P15 使用） |
 | `AppEvent::Ready`（Shell 启动完成，`app` 的 `ready` 依据）— P10 已加，由 Hub 在 `start` 时发 | P10 |
 | `WindowEvent::FirstPaint`（`ready-to-show` 的精确依据）、`WindowEvent::NativeHandle(u64)` | P13 / P34 |
-| `ToRenderer::BeforeUnload`、`ToRenderer::Unload`、`FromRenderer::BeforeUnloadReply { prevented }` | P13 |
+| `ToRenderer::{BeforeUnload, Unload}`（各带 `call`）、`FromRenderer::{BeforeUnloadReply { call, proceed }, UnloadReply { call }}`；`WindowOp::{SetClosable, SetMovable, SetMinimizable, SetMaximizable, SetFocusable, SetEnabled, SetParent, MoveTop}` | P13（第一阶段） |
 | `ToRenderer::WindowMessage`、`FromRenderer::WindowProxyOp`（`window.open` 返回的代理） | P13 |
 | `FromRenderer::ContextMenu(ContextMenuParams)` | P13 |
 | `FromShell::KeyForContents`（`before-input-event`，Shell 不等 JS：先投递给主进程，主进程决定后再转渲染器） | P13 / P32 |
@@ -277,7 +294,7 @@ verve-dom 侧的配套改动（由 P20/P23/P24 在 verve-dom 内完成）：`Req
   不答就丢掉它，等着的页面会因为发送端被丢而被放开：主进程已在退出则抛 `Main process exited`，否则得到 `{ error: 'reply was never sent' }`（Electron 事件被回收时的答复，P12 观测）。
 - `ToRenderer::Stop` 已删：P02 的加载是同步的，没有可停的东西；`webContents.stop()` 由 P13/P20 追加。
 - `WebPreferences`（`msg.rs`）P02 给出能解析的子集（`devTools`/`nodeIntegration*`/`preload`/`sandbox`/`partition`/
-  `zoomFactor`/`javascript`/`webSecurity`/`allowRunningInsecureContent`/`images`，默认值同 Electron），P13 补全；
+  `zoomFactor`/`javascript`/`webSecurity`/`allowRunningInsecureContent`/`images`，默认值同 Electron），P13 补全（第一阶段：`api/web_preferences.rs` 读 P13 文档表里的全部字段，除 `additionalArguments`，那是 P21 的）；
   `Hub::create_renderer(contents, prefs)` 把它存在页面的槽里（`Hub::preferences_of`），P20 在导航时用同一份重建 isolate。
 
 ## Hub（`hub.rs`）
@@ -293,6 +310,9 @@ impl Hub {
     pub fn to_renderer(&self, id: ContentsId, msg: ToRenderer);
     pub fn input(&self, id: ContentsId, msg: ToRendererInput);         // Shell 用，热路径
     pub fn renderer_view(&self, id: ContentsId) -> Option<RendererView>; // Shell 每帧取（取走；下次没有新的就是 None）
+    pub fn has_renderer(&self, id: ContentsId) -> bool;                // 页面有可问的 isolate（没建、已退役或已崩溃的没有）；关闭往返问之前看
+    pub fn set_displays(&self, displays: Vec<Display>);                // 外壳报的显示器；`FromShell::Displays` 到时 Hub 自己记
+    pub fn primary_display(&self) -> Display;                          // 新窗口落在哪块屏；外壳没报过就是 `Display::default()`（1920×1080，1x）
     pub fn set_shell(&self, shell: Arc<dyn ShellPort>);                // ToShell 的收件人；它也就是唤醒的入口
     pub fn shutdown(&self, exit_code: i32);                            // 先到的退出码为准；停掉所有 isolate，再发 Quit
     pub fn exit_code(&self) -> Option<i32>;                            // 进程该用的退出码
