@@ -153,8 +153,10 @@ impl Shell {
             } => self.create(window, contents, &options, cx),
             ToShell::Window { window, op } => self.window_op(window, op, cx),
             // Menus, trays and global shortcuts are P15's.
-            // The error box is P14's dialog; the error is already on standard error.
-            ToShell::Menu(_) | ToShell::ErrorBox { .. } => {}
+            // The error box is P14's dialog; the error is already on standard error. Until the
+            // GPUI prompts show them, a dialog is dropped, which answers it as closed.
+            ToShell::Menu(_) | ToShell::ErrorBox { .. } | ToShell::Dialog { .. } => {}
+            ToShell::SetThemeSource(_) => {}
             ToShell::Quit { .. } => cx.update(|cx| cx.quit()),
         }
     }

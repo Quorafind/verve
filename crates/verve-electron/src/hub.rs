@@ -19,8 +19,8 @@ use verve::vfs::Overlay;
 use crate::ids::{ContentsId, Ids, WindowId};
 use crate::launcher::Start;
 use crate::msg::{
-    AppEvent, Display, FromRenderer, FromShell, GoneReason, PageEvent, RendererView, ToRenderer,
-    ToRendererInput, ToShell, WebPreferences,
+    AppEvent, Display, FromRenderer, FromShell, GoneReason, PageEvent, RendererView, ThemeSource,
+    ToRenderer, ToRendererInput, ToShell, WebPreferences,
 };
 use crate::{ElectronOptions, MainGuest, RendererGuest};
 
@@ -170,8 +170,26 @@ pub struct Hub {
     overlay: Mutex<Option<Arc<dyn Overlay>>>,
     /// Told of every [`FromShell`] before the main process is: how a test watches what a shell says.
     observer: Mutex<Option<ShellObserver>>,
-    /// The displays as the shell last reported them: where a new window opens.
+    /// The displays the shell last reported: kept here so that what it says before the main
+    /// process is up is still there when `screen` is first asked.
     displays: Mutex<Vec<Display>>,
+    theme: Mutex<Theme>,
+}
+
+/// The colour scheme the pages are told: the system's, unless `nativeTheme.themeSource` forces one.
+struct Theme {
+    system_dark: bool,
+    source: ThemeSource,
+}
+
+impl Theme {
+    fn dark(&self) -> bool {
+        match self.source {
+            ThemeSource::System => self.system_dark,
+            ThemeSource::Light => false,
+            ThemeSource::Dark => true,
+        }
+    }
 }
 
 /// What [`Hub::observe_shell`] calls.
@@ -180,6 +198,10 @@ type ShellObserver = Arc<dyn Fn(&FromShell) + Send + Sync>;
 impl Hub {
     /// A Hub for one app; nothing runs until [`Hub::start_main`].
     pub fn new(options: ElectronOptions) -> Arc<Hub> {
+        let theme = Theme {
+            system_dark: options.dark,
+            source: ThemeSource::System,
+        };
         Arc::new(Self {
             options,
             ids: Mutex::new(Ids::default()),
@@ -197,6 +219,7 @@ impl Hub {
             overlay: Mutex::new(None),
             observer: Mutex::new(None),
             displays: Mutex::new(Vec::new()),
+            theme: Mutex::new(theme),
         })
     }
 
@@ -431,6 +454,9 @@ impl Hub {
         if let Some(observer) = observer {
             observer(&msg);
         }
+        if let FromShell::App(AppEvent::ThemeChanged { dark }) = &msg {
+            lock(&self.theme).system_dark = *dark;
+        }
         self.to_main(move |guest| guest.from_shell(msg));
     }
 
@@ -517,7 +543,56 @@ impl Hub {
     /// What a person did to the window, to the page under it: the hot path, and the only
     /// messages that never touch the main process.
     pub fn input(&self, contents: ContentsId, msg: ToRendererInput) {
+        // The shell says what the system's theme is; the page is told what `themeSource` makes
+        // of it.
+        let msg = match msg {
+            ToRendererInput::ColorScheme { dark } => {
+                let mut theme = lock(&self.theme);
+                theme.system_dark = dark;
+                ToRendererInput::ColorScheme { dark: theme.dark() }
+            }
+            other => other,
+        };
         self.on_renderer(contents, move |guest| guest.input(msg));
+    }
+
+    /// The displays the shell last reported.
+    pub fn displays(&self) -> Vec<Display> {
+        lock(&self.displays).clone()
+    }
+
+    /// Whether pages are drawn dark: a new page, and the isolate a navigation gives it, starts
+    /// with this.
+    pub fn dark(&self) -> bool {
+        lock(&self.theme).dark()
+    }
+
+    /// Whether the system's theme is dark, as the shell last said.
+    pub fn system_dark(&self) -> bool {
+        lock(&self.theme).system_dark
+    }
+
+    /// `nativeTheme.themeSource`.
+    pub fn theme_source(&self) -> ThemeSource {
+        lock(&self.theme).source
+    }
+
+    /// Sets `nativeTheme.themeSource`: the shell and every page are told, and the new
+    /// `shouldUseDarkColors` is answered.
+    pub fn set_theme_source(&self, source: ThemeSource) -> bool {
+        let dark = {
+            let mut theme = lock(&self.theme);
+            theme.source = source;
+            theme.dark()
+        };
+        self.to_shell(ToShell::SetThemeSource(source));
+        let pages: Vec<_> = lock(&self.renderers).keys().copied().collect();
+        for contents in pages {
+            self.on_renderer(contents, move |guest| {
+                guest.input(ToRendererInput::ColorScheme { dark });
+            });
+        }
+        dark
     }
 
     /// Runs `job` on page `contents`'s thread, in turn. It never waits for the page: a caller
