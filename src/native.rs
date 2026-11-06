@@ -576,18 +576,24 @@ pub fn constructor(
         .into()
 }
 
-/// A plain class, as WebIDL interfaces are: what [`plain_class`] makes.
+/// A plain class: what [`plain_class`] makes from this.
 ///
-/// Unlike [`class`] it is not wrapped in a `Proxy`, so it cannot be called without `new` or
-/// extended through `Foo.call(this)`; its methods are not listed and its getters are.
+/// Unlike [`class`] it is not wrapped in a `Proxy`, so a call without `new` (or
+/// `Foo.call(this)`) runs `construct` with no `this`, and `construct` must refuse it itself.
+/// Its methods are not listed (`for..in` skips them) and its getters are.
 pub struct PlainClass<'a> {
+    /// The class's name: the constructor's `name`.
     pub name: &'a str,
+    /// What `new` runs; it is handed `new.target` as `this`.
     pub construct: NativeFunctionPointer,
     /// The constructor's `length`.
     pub length: usize,
-    /// The prototype the class's own inherits, `Object.prototype` when none.
+    /// The prototype the class's own prototype inherits (a prototype, not a constructor as
+    /// [`ClassSpec::parent`] is); `Object.prototype` when none.
     pub parent: Option<JsObject>,
+    /// The prototype's methods: name, parameter count, function.
     pub methods: &'a [(&'a str, usize, NativeFunctionPointer)],
+    /// The prototype's read-only accessors: name and getter.
     pub getters: &'a [(&'a str, NativeFunctionPointer)],
 }
 

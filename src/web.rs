@@ -16,7 +16,7 @@ use crate::native::{
 };
 
 /// A class of this module: no getters, a constructor of no parameters.
-fn global_class<'a>(
+fn class_spec<'a>(
     name: &'a str,
     construct: NativeFunctionPointer,
     methods: &'a [(&'a str, usize, NativeFunctionPointer)],
@@ -684,9 +684,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     )?;
 
     let (blob, blob_proto) =
-        plain_class(context, global_class("Blob", construct_blob, BLOB_METHODS))?;
+        plain_class(context, class_spec("Blob", construct_blob, BLOB_METHODS))?;
     define_global(context, "Blob", blob)?;
-    let (file, file_proto) = plain_class(context, global_class("File", construct_file, &[]))?;
+    let (file, file_proto) = plain_class(context, class_spec("File", construct_file, &[]))?;
     define_global(context, "File", file)?;
     file_proto.set_prototype(Some(blob_proto));
     Ok(())

@@ -1135,30 +1135,16 @@ fn describe(module: &Module, exports: bool, context: &mut Context) -> JsResult<J
 
 // ─── Installing it ──────────────────────────────────────────────────────────────────────────
 
-/// A class of the `WebAssembly` namespace: no global of its own, the constructor of one
-/// parameter, on `parent`'s prototype when it has one.
+/// `class`, set on `namespace` and not made a global.
 fn in_namespace(
     context: &mut Context,
     namespace: &JsObject,
-    name: &str,
-    construct: NativeFunctionPointer,
-    methods: &[(&str, usize, NativeFunctionPointer)],
-    getters: &[(&str, NativeFunctionPointer)],
-    parent: Option<JsObject>,
+    class: PlainClass<'_>,
 ) -> JsResult<JsObject> {
-    let (class, _) = plain_class(
-        context,
-        PlainClass {
-            name,
-            construct,
-            length: 1,
-            parent,
-            methods,
-            getters,
-        },
-    )?;
-    namespace.set(JsString::from(name), class.clone(), false, context)?;
-    Ok(class)
+    let name = class.name;
+    let (constructor, _) = plain_class(context, class)?;
+    namespace.set(JsString::from(name), constructor.clone(), false, context)?;
+    Ok(constructor)
 }
 
 /// The three errors: each an `Error` with its own name and prototype.
@@ -1172,11 +1158,14 @@ fn error_class(context: &mut Context, namespace: &JsObject, name: &'static str) 
     let constructor = in_namespace(
         context,
         namespace,
-        name,
-        construct,
-        &[],
-        &[],
-        Some(error_proto),
+        PlainClass {
+            name,
+            construct,
+            length: 1,
+            methods: &[],
+            getters: &[],
+            parent: Some(error_proto),
+        },
     )?;
     let prototype = constructor.get(js_string!("prototype"), context)?;
     if let Some(prototype) = prototype.as_object() {
@@ -1227,11 +1216,14 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     let module = in_namespace(
         context,
         &namespace,
-        "Module",
-        construct_module,
-        &[],
-        &[],
-        None,
+        PlainClass {
+            name: "Module",
+            construct: construct_module,
+            length: 1,
+            methods: &[],
+            getters: &[],
+            parent: None,
+        },
     )?;
     for (name, f) in [
         (
@@ -1253,38 +1245,50 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     in_namespace(
         context,
         &namespace,
-        "Instance",
-        construct_instance,
-        &[],
-        &[],
-        None,
+        PlainClass {
+            name: "Instance",
+            construct: construct_instance,
+            length: 1,
+            methods: &[],
+            getters: &[],
+            parent: None,
+        },
     )?;
     in_namespace(
         context,
         &namespace,
-        "Memory",
-        construct_memory,
-        MEMORY_METHODS,
-        MEMORY_GETTERS,
-        None,
+        PlainClass {
+            name: "Memory",
+            construct: construct_memory,
+            length: 1,
+            methods: MEMORY_METHODS,
+            getters: MEMORY_GETTERS,
+            parent: None,
+        },
     )?;
     in_namespace(
         context,
         &namespace,
-        "Table",
-        construct_table,
-        TABLE_METHODS,
-        TABLE_GETTERS,
-        None,
+        PlainClass {
+            name: "Table",
+            construct: construct_table,
+            length: 1,
+            methods: TABLE_METHODS,
+            getters: TABLE_GETTERS,
+            parent: None,
+        },
     )?;
     let global = in_namespace(
         context,
         &namespace,
-        "Global",
-        construct_global,
-        GLOBAL_METHODS,
-        &[],
-        None,
+        PlainClass {
+            name: "Global",
+            construct: construct_global,
+            length: 1,
+            methods: GLOBAL_METHODS,
+            getters: &[],
+            parent: None,
+        },
     )?;
     if let Some(prototype) = global.get(js_string!("prototype"), context)?.as_object() {
         let get = function(context, "get value", 0, global_get);
