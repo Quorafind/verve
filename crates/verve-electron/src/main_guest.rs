@@ -18,7 +18,7 @@ use verve::{Level, ProcessInfo, Runtime, UncaughtBehavior};
 
 use crate::api::{
     self, MainState, app, define, navigation, page_events, web_contents, window_events,
-    window_lifecycle,
+    window_lifecycle, window_open,
 };
 use crate::beat;
 use crate::hub::{Hub, Program};
@@ -217,6 +217,11 @@ impl MainGuest {
             FromRenderer::Dom(verve_dom::Request::Navigate { url, replace }) => {
                 navigation::page_navigates(context, contents, url, replace);
             }
+            FromRenderer::Dom(verve_dom::Request::Open {
+                url,
+                name,
+                features,
+            }) => window_open::requested(context, contents, (url, name, features)),
             FromRenderer::Reload { url } => navigation::page_reloads(context, contents, url),
             FromRenderer::PreloadError {
                 path,

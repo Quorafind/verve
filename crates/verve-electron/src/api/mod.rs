@@ -37,6 +37,7 @@ pub(crate) mod window_events;
 pub(crate) mod window_geometry;
 pub(crate) mod window_lifecycle;
 pub(crate) mod window_methods;
+pub(crate) mod window_open;
 pub(crate) mod window_options;
 pub(crate) mod windows;
 
@@ -65,6 +66,8 @@ pub(crate) struct MainState {
     pub(crate) calls: page_calls::Calls,
     /// The legacy `webContents` methods already warned about.
     pub(crate) deprecated: std::cell::RefCell<Vec<String>>,
+    /// The `BrowserWindow` class, for the windows `window.open` makes.
+    pub(crate) window_class: std::cell::RefCell<Option<boa_engine::JsObject>>,
 }
 
 impl MainState {
@@ -76,6 +79,7 @@ impl MainState {
             dialogs: dialog::Pending::default(),
             calls: page_calls::Calls::default(),
             deprecated: std::cell::RefCell::new(Vec::new()),
+            window_class: std::cell::RefCell::new(None),
         })
     }
 

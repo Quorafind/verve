@@ -8,7 +8,10 @@
 
 use std::cell::{Cell, RefCell};
 
+use boa_engine::JsObject;
 use boa_engine::builtins::promise::ResolvingFunctions;
+
+use crate::ids::ContentsId;
 
 /// One entry of the session history.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,6 +142,11 @@ pub(crate) struct PageState {
     pub zoom_factor: Cell<Option<f64>>,
     /// The page's process ended and no load has made a new one.
     pub crashed: Cell<bool>,
+    /// `setWindowOpenHandler`'s function.
+    pub open_handler: RefCell<Option<JsObject>>,
+    /// The page that opened this one with `window.open`, and whether this one stays when it goes.
+    pub opener: Cell<Option<ContentsId>>,
+    pub outlives_opener: Cell<bool>,
     /// How many sheets `insertCSS` has added: keys are numbered.
     pub sheets: Cell<u32>,
 }

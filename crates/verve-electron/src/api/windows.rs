@@ -15,7 +15,7 @@ use boa_engine::JsObject;
 
 use super::page_state::PageState;
 use crate::hub::RendererHandle;
-use crate::ids::WindowId;
+use crate::ids::{ContentsId, WindowId};
 use crate::window_state::WindowState;
 
 /// Where a window is in the round trip that closes it.
@@ -148,6 +148,13 @@ impl Windows {
             r.closing.get() != Closing::Idle && asked.is_some_and(|at| now >= at + CLOSE_PATIENCE)
         };
         records.values().filter(due).cloned().collect()
+    }
+
+    /// The windows `window.open` made from page `contents`, which go with it unless they outlive it.
+    pub(crate) fn opened_by(&self, contents: ContentsId) -> Vec<Rc<WindowRecord>> {
+        let records = self.records.borrow();
+        let opened = |r: &&Rc<WindowRecord>| r.page_state.opener.get() == Some(contents);
+        records.values().filter(opened).cloned().collect()
     }
 
     /// When the first page still asked about closing runs out of patience.

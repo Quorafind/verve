@@ -101,7 +101,6 @@ fn a_page_with_node_integration_requires_node_modules() {
 }
 
 #[test]
-#[ignore = "P13 phase 2: setWindowOpenHandler and window.open, executeJavaScript (parent, child and modal windows work: tests/browser_window.rs)"]
 fn windows_have_parents_children_and_a_modal() {
     replays("multi-window");
 }

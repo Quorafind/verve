@@ -192,6 +192,15 @@ impl MainState {
         }
         self.enable_parent_of(&record);
         let contents = self.hub.contents_of(window);
+        for opened in self.windows.opened_by(record.page.contents) {
+            if !opened.page_state.outlives_opener.get() {
+                self.hub.to_shell(ToShell::Window {
+                    window: opened.id,
+                    op: WindowOp::Destroy,
+                });
+                self.window_closed(context, opened.id);
+            }
+        }
         self.hub.remove_window(window);
         define::emit_reporting(context, &record.object, "closed", &[]);
         if let Some(contents) = contents {

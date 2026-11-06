@@ -12,6 +12,9 @@ mod support;
 
 use support::{run, run_main, run_with};
 
+/// The pages the `window.open` tests open from and to: a window opens only what its opener may.
+const FILES: &[(&str, &str)] = &[("o.html", "<p>o</p>"), ("c.html", "<p>child</p>")];
+
 /// The events a first load says, in the order Electron 39.8.10 says them.
 const LOAD_EVENTS: &str = "['frame-created', 'did-start-loading', 'did-start-navigation', 'will-navigate', 'will-frame-navigate', 'did-frame-navigate', 'did-navigate', 'page-title-updated', 'dom-ready', 'did-frame-finish-load', 'did-finish-load', 'did-fail-provisional-load', 'did-fail-load', 'did-stop-loading']";
 
@@ -313,6 +316,98 @@ fn inserted_css_changes_the_computed_style_until_it_is_removed() {
 }
 
 #[test]
+fn window_open_follows_the_handler_and_makes_a_child_window() {
+    // Electron 39.8.10: with no handler the window opens and the opener says did-create-window; a
+    // handler is given { url, frameName, features, disposition, referrer }; `deny` leaves the page
+    // `null` and no window; `allow` with `overrideBrowserWindowOptions` wins over the features
+    // (width 321 over 150, height 250 from the features); the new page's `opener` is the opener's
+    // frame; a link with a target is `foreground-tab`, a call with features `new-window`.
+    let lines = run_with(
+        r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await win.loadFile('o.html');
+    const url = new URL('c.html', wc.getURL()).href;
+    wc.on('did-create-window', (w, details) => log('created', w.constructor.name, Object.keys(details).sort(), details.frameName, details.disposition));
+    await wc.executeJavaScript(`window.open('${url}', 'named', 'width=300,height=200'), 0`);
+    log('plain', BrowserWindow.getAllWindows().length);
+    for (const w of BrowserWindow.getAllWindows()) if (w !== win) w.destroy();
+    const seen = [];
+    wc.setWindowOpenHandler((d) => { seen.push(d); return { action: 'deny' }; });
+    log('deny', await wc.executeJavaScript(`window.open('${url}', 'nm', 'width=111,popup=1') === null`));
+    log('details', Object.keys(seen[0]).sort(), seen[0].frameName, seen[0].features, seen[0].disposition, seen[0].referrer);
+    log('windows', BrowserWindow.getAllWindows().length);
+    wc.setWindowOpenHandler((d) => { seen.push(d.disposition); return { action: 'allow', overrideBrowserWindowOptions: { width: 321, show: false } }; });
+    await wc.executeJavaScript(`window.open('${url}', 'nm2', 'width=150,height=250,left=10,top=20'), 0`);
+    const child = BrowserWindow.getAllWindows().find((w) => w !== win);
+    log('child', child.getSize(), child.webContents.getType(), !!child.webContents.opener, child.getParentWindow());
+    await wc.executeJavaScript(`document.body.innerHTML = '<a id="b" target="_blank" href="${url}">x</a>'; document.getElementById('b').click()`);
+    log('link', seen[seen.length - 1], BrowserWindow.getAllWindows().length);
+    wc.setWindowOpenHandler(() => 'nonsense');
+    log('bad', await wc.executeJavaScript(`window.open('${url}') === null`));
+    win.destroy();
+    for (let i = 0; i < 100 && BrowserWindow.getAllWindows().length > 0; i++) await sleep(20);
+    log('after', BrowserWindow.getAllWindows().length);
+    "#,
+        FILES,
+    );
+    // The opener hears did-create-window before the script that opened the window has its result,
+    // and a handler answer that is neither action is said once on the main process's console.
+    let created = "created BrowserWindow [\"disposition\",\"frameName\",\"options\",\"postData\",\"referrer\",\"url\"]";
+    assert!(
+        lines[0].starts_with(&format!("{created} named new-window")),
+        "{lines:?}"
+    );
+    assert_eq!(lines[1], "plain 2");
+    assert_eq!(lines[2], "deny true");
+    assert_eq!(
+        lines[3],
+        "details [\"disposition\",\"features\",\"frameName\",\"referrer\",\"url\"] nm width=111,popup=1 new-window {\"url\":\"\",\"policy\":\"strict-origin-when-cross-origin\"}"
+    );
+    assert_eq!(lines[4], "windows 1");
+    assert!(
+        lines[5].starts_with(&format!("{created} nm2 new-window")),
+        "{lines:?}"
+    );
+    assert_eq!(lines[6], "child [321,250] window true null");
+    assert!(
+        lines[7].starts_with(&format!("{created}  foreground-tab")),
+        "{lines:?}"
+    );
+    assert_eq!(lines[8], "link foreground-tab 3");
+    assert_eq!(
+        lines[9],
+        "The window open handler response must be an object with an 'action' property of 'allow' or 'deny'."
+    );
+    assert_eq!(lines[10], "bad true");
+    assert_eq!(lines[11], "after 0");
+    assert_eq!(lines.len(), 12, "{lines:?}");
+}
+
+#[test]
+fn a_window_does_not_inherit_permissions_its_opener_has() {
+    // Electron's makeWebPreferences copies a security setting from the opener only when it has its
+    // secure value: an opener with Node and no isolation opens a window with neither, and the
+    // opener's preload does not follow.
+    let lines = run_with(
+        r#"
+    const win = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false } });
+    const wc = win.webContents;
+    await win.loadFile('o.html');
+    log('opener', await wc.executeJavaScript('typeof require'));
+    wc.setWindowOpenHandler(() => ({ action: 'allow', overrideBrowserWindowOptions: { show: false } }));
+    const url = new URL('c.html', wc.getURL()).href;
+    await wc.executeJavaScript(`window.open('${url}'), 0`);
+    await sleep(300);
+    const child = BrowserWindow.getAllWindows().find((w) => w !== win);
+    log('child', await child.webContents.executeJavaScript('typeof require'), await child.webContents.executeJavaScript('typeof process'));
+    "#,
+        FILES,
+    );
+    assert_eq!(lines, ["opener function", "child undefined undefined"]);
+}
+
+#[test]
 fn promises_settle_when_the_page_or_the_window_goes_away() {
     // A script asked of a page whose document is replaced fails, so does one asked of a page that
     // is gone, and a loadURL still waiting when its window is destroyed fails as ERR_FAILED (-2).
@@ -344,6 +439,34 @@ fn history_entries_outside_the_list_are_none() {
     log(nav.getEntryAtIndex(-1), nav.getEntryAtIndex(NaN), nav.removeEntryAtIndex(-1), nav.removeEntryAtIndex(NaN), nav.length());
     "#);
     assert_eq!(lines, ["null null false false 2"]);
+}
+
+#[test]
+fn a_page_cannot_open_a_window_on_what_it_may_not_load() {
+    // Chromium calls the handler and then refuses: a remote (here: data:) page gets no `file:`
+    // window, and no page gets a top-level `data:` window.
+    let lines = run_with(
+        r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    let asked = 0;
+    wc.setWindowOpenHandler(() => { asked++; return { action: 'allow' }; });
+    await load(win, '<p>x</p>');
+    await wc.executeJavaScript("window.open('file:///C:/Windows/win.ini'), 0");
+
+    log('from data', asked, BrowserWindow.getAllWindows().length);
+    await win.loadFile('o.html');
+    await wc.executeJavaScript("window.open('data:text/html,x'), 0");
+
+    log('from file', asked, BrowserWindow.getAllWindows().length);
+    "#,
+        FILES,
+    );
+    let lines: Vec<_> = lines
+        .into_iter()
+        .filter(|l| !l.starts_with("Not allowed"))
+        .collect();
+    assert_eq!(lines, ["from data 1 1", "from file 2 1"]);
 }
 
 #[test]

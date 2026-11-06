@@ -68,6 +68,7 @@ pub(crate) fn make(context: &mut Context) -> JsResult<JsObject> {
         },
     )?;
     window_methods::install(context, &prototype)?;
+    *shared(context).window_class.borrow_mut() = Some(window.clone());
     Ok(window)
 }
 

@@ -47,6 +47,7 @@ pub(crate) fn install(context: &mut Context, prototype: &JsObject) -> JsResult<(
             ("removeInsertedCSS", 1, remove_css),
             ("insertText", 1, insert_text),
             ("sendInputEvent", 1, send_input_event),
+            ("setWindowOpenHandler", 1, set_window_open_handler),
         ],
     )
 }
@@ -125,6 +126,17 @@ fn insert_text(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
         .page
         .to_renderer(ToRenderer::EditCommand(EditCommand::InsertText(text)));
     native::settled(Ok(JsValue::undefined()), context)
+}
+
+fn set_window_open_handler(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let record = record_of(this, context)?;
+    let handler = Args::new(args).function(0, "handler", context)?;
+    *record.page_state.open_handler.borrow_mut() = Some(handler);
+    Ok(JsValue::undefined())
 }
 
 // ---------- sendInputEvent ----------

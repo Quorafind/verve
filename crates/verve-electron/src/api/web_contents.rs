@@ -307,6 +307,7 @@ const ACCESSORS: &[(&str, NativeFunctionPointer, Option<NativeFunctionPointer>)]
         |this, _, cx| read(this, cx, |_| JsValue::null()),
         None,
     ),
+    ("opener", opener, None),
     (
         "focusedFrame",
         |this, _, cx| {
@@ -317,6 +318,16 @@ const ACCESSORS: &[(&str, NativeFunctionPointer, Option<NativeFunctionPointer>)]
         None,
     ),
 ];
+
+/// `opener`: the main frame of the page that opened this one with `window.open`.
+fn opener(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let record = record_of(this, context)?;
+    let Some(opener) = record.page_state.opener.get() else {
+        return Ok(JsValue::null());
+    };
+    let page = contents_ipc::page(context, opener)?;
+    Ok(page.map_or(JsValue::null(), |page| page.frame.into()))
+}
 
 // ---------- the module ----------
 
