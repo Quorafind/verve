@@ -15,7 +15,7 @@ use crate::canvas::source::source_pixmap;
 use crate::canvas::store::{canvas_object, read_canvas, this_handle};
 use crate::canvas::{Axis, finite_numbers};
 use crate::state::shared;
-use verve::native::{arg, get, text_of};
+use verve::native::{arg, arg_text, get};
 
 /// An `ImageBitmap` object holding `pixmap`.
 pub fn make_bitmap(context: &mut Context, pixmap: Arc<Pixmap>) -> JsValue {
@@ -116,7 +116,7 @@ fn set_offscreen_size(
 /// `getContext('2d')`; the other kinds need a GPU.
 fn offscreen_context(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = this_handle(this, Kind::Offscreen, "OffscreenCanvas")?;
-    Ok(match text_of(&arg(args, 0), context)?.as_str() {
+    Ok(match arg_text(args, 0, context)?.as_str() {
         "2d" => canvas_object(context, id, (Kind::Context2d, "CanvasRenderingContext2D")).into(),
         _ => JsValue::null(),
     })

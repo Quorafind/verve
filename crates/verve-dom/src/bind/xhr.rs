@@ -10,7 +10,7 @@ use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
 
 use super::{Accessor, ClassSpec, Method, call_method, define_class, plain_object, set, string};
 use crate::state::shared;
-use verve::native::{self, arg, closure, get, js_text, list_of, text_of, type_error};
+use verve::native::{self, arg, arg_text, closure, get, js_text, list_of, type_error};
 
 const EVENTS: &[&str] = &[
     "abort",
@@ -143,8 +143,8 @@ const XHR_ACCESSORS: &[Accessor] = &[
 const XHR_METHODS: &[Method] = &[
     ("open", 2, |this, args, cx| {
         let hidden = record(this, cx)?;
-        let method = text_of(&arg(args, 0), cx)?.to_ascii_uppercase();
-        let url = text_of(&arg(args, 1), cx)?;
+        let method = arg_text(args, 0, cx)?.to_ascii_uppercase();
+        let url = arg_text(args, 1, cx)?;
         let resolved = shared(cx)
             .borrow()
             .base_url()
@@ -162,8 +162,8 @@ const XHR_METHODS: &[Method] = &[
     ("setRequestHeader", 2, |this, args, cx| {
         let hidden = record(this, cx)?;
         let headers = hidden.get(js_string!("headers"), cx)?;
-        let name = js_text(&text_of(&arg(args, 0), cx)?);
-        let value = js_text(&text_of(&arg(args, 1), cx)?);
+        let name = js_text(&arg_text(args, 0, cx)?);
+        let value = js_text(&arg_text(args, 1, cx)?);
         let pair = native::array(cx, vec![name, value]);
         call_method(&headers, "push", &[pair], cx)?;
         Ok(JsValue::undefined())
@@ -219,7 +219,7 @@ const XHR_METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     ("getResponseHeader", 1, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+        let name = arg_text(args, 0, cx)?.to_ascii_lowercase();
         let headers = string(&read(this, "responseHeaders", cx)?, cx)?;
         let values: Vec<&str> = headers
             .lines()

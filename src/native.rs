@@ -38,6 +38,11 @@ pub fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
     Ok(value.to_string(context)?.to_std_string_escaped())
 }
 
+/// The argument at `at` converted to a string as `String(value)` does: [`text_of`] of [`arg`].
+pub fn arg_text(args: &[JsValue], at: usize, context: &mut Context) -> JsResult<String> {
+    text_of(&arg(args, at), context)
+}
+
 /// `text` as a JavaScript string value.
 pub fn js_text(text: &str) -> JsValue {
     JsString::from(text).into()

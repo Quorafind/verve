@@ -13,7 +13,7 @@ use crate::canvas::pixels::{DEFAULT_JPEG_QUALITY, Encoded, ImageType, encode};
 use crate::canvas::store::{CanvasId, canvas_object};
 use crate::canvas::{Axis, element_dimension, element_size, write_dimension};
 use crate::state::shared;
-use verve::native::{arg, get, js_text, text_of};
+use verve::native::{arg, arg_text, get, js_text};
 
 pub const CANVAS_ACCESSORS: &[Accessor] = &[
     (
@@ -81,7 +81,7 @@ fn canvas_of(this: &JsValue, context: &mut Context, alpha: bool) -> JsResult<Can
 /// `getContext(kind, options)`: a 2D context, a bitmap renderer, or `null` for the kinds that
 /// need a GPU, as on a machine without one: libraries fall back.
 fn get_context(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let kind = text_of(&arg(args, 0), context)?;
+    let kind = arg_text(args, 0, context)?;
     let options = arg(args, 1);
     let class = match kind.as_str() {
         "2d" => (Kind::Context2d, "CanvasRenderingContext2D"),

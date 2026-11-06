@@ -18,7 +18,7 @@ use super::{
 };
 use crate::dom::{Dom, Namespace, Node, NodeId, NodeKind};
 use crate::state::shared;
-use verve::native::{self, arg, get, js_text, list_of, text_of, type_error};
+use verve::native::{self, arg, arg_text, get, js_text, list_of, type_error};
 
 /// What distinguishes a node's number among host targets: bit 40. An animation's is bit 41, in
 /// `bind/animation.rs`.
@@ -900,7 +900,7 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
     }),
     ("getElementsByClassName", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let classes = text_of(&arg(args, 0), cx)?;
+        let classes = arg_text(args, 0, cx)?;
         let wanted: Vec<String> = classes.split_whitespace().map(str::to_owned).collect();
         super::live::collection(cx, move |dom| {
             if wanted.is_empty() {
@@ -917,7 +917,7 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
     }),
     ("getElementsByTagName", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let tag = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+        let tag = arg_text(args, 0, cx)?.to_ascii_lowercase();
         super::live::collection(cx, move |dom| {
             dom.descendants(id)
                 .into_iter()
@@ -928,7 +928,7 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
     ("getElementsByTagNameNS", 2, |this, args, cx| {
         let id = node_of(this)?;
         let namespace = opt_string(args, 0, cx)?;
-        let tag = text_of(&arg(args, 1), cx)?;
+        let tag = arg_text(args, 1, cx)?;
         super::live::collection(cx, move |dom| {
             let in_namespace = |n: &Node| {
                 namespace.as_deref() == Some("*") || n.namespace.uri() == namespace.as_deref()
@@ -951,7 +951,7 @@ pub fn query_selector(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<crate::css::SelectorList> {
-    let selector = text_of(&arg(args, 0), context)?;
+    let selector = arg_text(args, 0, context)?;
     crate::css::SelectorList::parse(&selector).map_err(|error| {
         dom_error(
             context,
@@ -1122,14 +1122,14 @@ const CHARACTER_DATA_ACCESSORS: &[Accessor] = &[
 const CHARACTER_DATA_METHODS: &[Method] = &[
     ("appendData", 1, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
-        let more = text_of(&arg(args, 0), cx)?;
+        let more = arg_text(args, 0, cx)?;
         with_dom(cx, |dom| dom.set_text(id, &format!("{data}{more}")));
         Ok(JsValue::undefined())
     }),
     ("insertData", 2, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
         let offset = arg(args, 0).to_number(cx)?;
-        let more = text_of(&arg(args, 1), cx)?;
+        let more = arg_text(args, 1, cx)?;
         let units = utf16(&data);
         let (at, _) = span(&units, offset, 0.);
         let joined = format!(
@@ -1159,7 +1159,7 @@ const CHARACTER_DATA_METHODS: &[Method] = &[
     ("replaceData", 3, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
         let (offset, count) = (arg(args, 0).to_number(cx)?, arg(args, 1).to_number(cx)?);
-        let more = text_of(&arg(args, 2), cx)?;
+        let more = arg_text(args, 2, cx)?;
         let units = utf16(&data);
         let (start, end) = span(&units, offset, count);
         let joined = format!(
@@ -1395,7 +1395,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         &fragment,
         &[("getElementById", 1, |this, args, cx| {
             let root = node_of(this)?;
-            let wanted = text_of(&arg(args, 0), cx)?;
+            let wanted = arg_text(args, 0, cx)?;
             let found = read_dom(cx, |dom| {
                 dom.descendants(root)
                     .into_iter()
@@ -1469,7 +1469,7 @@ const COLLECTION_METHODS: &[Method] = &[
         })
     }),
     ("namedItem", 1, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let nodes: Vec<NodeId> = list_of(this, cx)?.iter().filter_map(node_id).collect();
         Ok(wrap_opt(cx, super::live::named_item(cx, &nodes, &name)))
     }),

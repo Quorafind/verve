@@ -20,7 +20,7 @@ use crate::canvas::pixels::construct_image_data;
 use crate::canvas::properties::install_properties;
 use crate::canvas::store::{owner_of_context, this_handle};
 use crate::state::shared;
-use verve::native::{arg, function, text_of};
+use verve::native::{arg, arg_text, function};
 
 /// A class: its constructor, its own methods and accessors, and methods it shares with another.
 struct Entry {
@@ -120,7 +120,7 @@ fn construct_path(
 ) -> JsResult<JsValue> {
     let first = arg(args, 0);
     let builder = if first.is_string() {
-        from_svg(&text_of(&arg(args, 0), context)?).unwrap_or_default()
+        from_svg(&arg_text(args, 0, context)?).unwrap_or_default()
     } else {
         let source = bind::handle_of(&first, Kind::Path);
         let state = shared(context);
@@ -140,7 +140,7 @@ fn add_color_stop(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         let message = "Failed to execute 'addColorStop' on 'CanvasGradient': The provided value is outside the range (0.0, 1.0).";
         return Err(dom_error(context, message, "IndexSizeError"));
     }
-    let written = text_of(&arg(args, 1), context)?;
+    let written = arg_text(args, 1, context)?;
     let Some((color, _)) = parse_color(&written) else {
         let message = "Failed to execute 'addColorStop' on 'CanvasGradient': The value provided is not a valid color.";
         return Err(dom_error(context, message, "SyntaxError"));

@@ -16,7 +16,7 @@ use crate::canvas::source::source_pixmap;
 use crate::canvas::store::{CanvasId, canvas_object, read_canvas, this_handle};
 use crate::canvas::text::{Align, HANGING_BASELINE, Placement};
 use crate::state::shared;
-use verve::native::{self, arg, get, js_text, list_of, text_of, type_error};
+use verve::native::{self, arg, arg_text, get, js_text, list_of, type_error};
 
 pub const CONTEXT_METHODS: &[Method] = &[
     ("save", 0, |this, _, cx| update(this, cx, Canvas2d::save)),
@@ -416,7 +416,7 @@ fn get_line_dash(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
 
 /// `fillText` and `strokeText`: `content`, a point, and an optional width to condense to.
 fn draw_text(this: &JsValue, args: &[JsValue], context: &mut Context, op: Op) -> JsResult<JsValue> {
-    let content = text_of(&arg(args, 0), context)?;
+    let content = arg_text(args, 0, context)?;
     let Some([x, y]) = finite_numbers(args.get(1..).unwrap_or_default(), context)? else {
         return Ok(JsValue::undefined());
     };
@@ -451,7 +451,7 @@ fn physical_align(align: Align, rtl: bool) -> Align {
 }
 
 fn measure_text(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let content = text_of(&arg(args, 0), context)?;
+    let content = arg_text(args, 0, context)?;
     let id = canvas_id(this)?;
     let metrics = shared(context)
         .borrow_mut()

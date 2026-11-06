@@ -10,7 +10,7 @@ use super::{
 };
 use crate::dom::{Dom, Namespace, NodeId, NodeKind};
 use crate::state::shared;
-use verve::native::{arg, function, hidden, js_text, text_of, type_error};
+use verve::native::{arg, arg_text, function, hidden, js_text, type_error};
 
 /// The document a document's member is asked of: a parsed one, or the window's.
 fn document_of(this: &JsValue, context: &Context) -> NodeId {
@@ -66,22 +66,22 @@ pub fn create_element(context: &mut Context, tag: &str, namespace: Namespace) ->
 const DOCUMENT_METHODS: &[Method] = &[
     ("getAnimations", 0, super::animation::document_animations),
     ("createElement", 2, |_, args, cx| {
-        let tag = text_of(&arg(args, 0), cx)?;
+        let tag = arg_text(args, 0, cx)?;
         create_element(cx, &tag, Namespace::Html)
     }),
     ("createElementNS", 3, |_, args, cx| {
         let namespace = opt_string(args, 0, cx)?;
-        let name = text_of(&arg(args, 1), cx)?;
+        let name = arg_text(args, 1, cx)?;
         let local = name.rsplit(':').next().unwrap_or(&name).to_owned();
         create_element(cx, &local, Namespace::from_uri(namespace.as_deref()))
     }),
     ("createTextNode", 1, |_, args, cx| {
-        let content = text_of(&arg(args, 0), cx)?;
+        let content = arg_text(args, 0, cx)?;
         let id = with_dom(cx, |dom| dom.create_text(&content));
         Ok(wrap(cx, id))
     }),
     ("createCDATASection", 1, |_, args, cx| {
-        let content = text_of(&arg(args, 0), cx)?;
+        let content = arg_text(args, 0, cx)?;
         let id = with_dom(cx, |dom| dom.create_text(&content));
         Ok(wrap(cx, id))
     }),
@@ -100,12 +100,12 @@ const DOCUMENT_METHODS: &[Method] = &[
         Ok(wrap(cx, id))
     }),
     ("createAttribute", 1, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         super::platform::attr_object(cx, &JsValue::null(), &name.to_ascii_lowercase(), "", this)
     }),
     // The old way to make an event: of the class named, made ready by its `init…Event`.
     ("createEvent", 1, |_, args, cx| {
-        let named = text_of(&arg(args, 0), cx).unwrap_or_default();
+        let named = arg_text(args, 0, cx).unwrap_or_default();
         let class = match named.trim_end_matches('s').to_ascii_lowercase().as_str() {
             "customevent" => "CustomEvent",
             "mouseevent" => "MouseEvent",
@@ -145,7 +145,7 @@ const DOCUMENT_METHODS: &[Method] = &[
         super::traversal::create(args, cx, true)
     }),
     ("getElementById", 1, |this, args, cx| {
-        let wanted = text_of(&arg(args, 0), cx)?;
+        let wanted = arg_text(args, 0, cx)?;
         let doc = document_of(this, cx);
         let found = read_dom(cx, |dom| {
             dom.descendants(doc)
@@ -155,7 +155,7 @@ const DOCUMENT_METHODS: &[Method] = &[
         Ok(wrap_opt(cx, found))
     }),
     ("getElementsByName", 1, |this, args, cx| {
-        let wanted = text_of(&arg(args, 0), cx)?;
+        let wanted = arg_text(args, 0, cx)?;
         let doc = document_of(this, cx);
         let found = read_dom(cx, |dom| {
             dom.descendants(doc)
@@ -269,7 +269,7 @@ const DOCUMENT_METHODS: &[Method] = &[
     ("close", 0, |_, _, _| Ok(JsValue::undefined())),
     // The old editing commands: answered as a page without a focused editable region answers.
     ("execCommand", 3, |_, args, cx| {
-        let command = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+        let command = arg_text(args, 0, cx)?.to_ascii_lowercase();
         if command == "copy" {
             let selected =
                 super::call_method(&super::platform::selection(cx)?, "toString", &[], cx)?;
@@ -285,7 +285,7 @@ const DOCUMENT_METHODS: &[Method] = &[
         Ok(false.into())
     }),
     ("queryCommandSupported", 1, |_, args, cx| {
-        let command = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+        let command = arg_text(args, 0, cx)?.to_ascii_lowercase();
         Ok(matches!(
             command.as_str(),
             "copy" | "cut" | "paste" | "inserttext" | "delete" | "selectall" | "undo" | "redo"
@@ -408,7 +408,7 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
         }),
         Some(|this, args, cx| {
             let doc = document_of(this, cx);
-            let value = text_of(&arg(args, 0), cx)?;
+            let value = arg_text(args, 0, cx)?;
             with_dom(cx, |dom| {
                 let found = dom
                     .descendants(doc)
@@ -443,7 +443,7 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
             cx.global_object().get(js_string!("location"), cx)
         }),
         Some(|_, args, cx| {
-            let href = text_of(&arg(args, 0), cx)?;
+            let href = arg_text(args, 0, cx)?;
             super::window::navigate(cx, &href, false)?;
             Ok(JsValue::undefined())
         }),
@@ -472,7 +472,7 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
             Ok(if jar.is_undefined() { js_text("") } else { jar })
         }),
         Some(|_, args, cx| {
-            let given = text_of(&arg(args, 0), cx)?;
+            let given = arg_text(args, 0, cx)?;
             let pair = given.split(';').next().unwrap_or("").trim().to_owned();
             let Some((name, _)) = pair.split_once('=') else {
                 return Ok(JsValue::undefined());
@@ -679,8 +679,8 @@ fn tagged_collection(
 const DOM_PARSER_METHODS: &[Method] = &[
     // A document of its own, holding what `text` says: an HTML page, or an XML (an SVG's) root.
     ("parseFromString", 2, |_, args, cx| {
-        let markup = text_of(&arg(args, 0), cx)?;
-        let kind = text_of(&arg(args, 1), cx).unwrap_or_default();
+        let markup = arg_text(args, 0, cx)?;
+        let kind = arg_text(args, 1, cx).unwrap_or_default();
         let doc = with_dom(cx, |dom| {
             if kind == "text/html" {
                 let (doc, ..) = dom.create_html_document();
@@ -753,7 +753,7 @@ const IMPLEMENTATION_METHODS: &[Method] = &[
         Ok(wrap(cx, doc))
     }),
     ("createDocumentType", 3, |_, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let id = with_dom(cx, |dom| dom.create_doctype(&name));
         Ok(wrap(cx, id))
     }),

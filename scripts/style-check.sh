@@ -69,7 +69,7 @@ toolkit_copies() {
 legacy_calls() {
     library_sources | grep '^crates/verve-dom/src/' | grep -vxF "$LEGACY_HOME" | tr '\n' '\0' |
         { xargs -0 -r grep -HE "(^|[^A-Za-z0-9_.:]|bind::)($LEGACY_HELPERS)\(" || true; } |
-        grep -vE ":[^:]*fn ($LEGACY_HELPERS)\(" | awk -F: '{ count[$1]++ } END { for (f in count) print f, count[f] }' | sort
+        { grep -vE ":[^:]*fn ($LEGACY_HELPERS)\(" || true; } | awk -F: '{ count[$1]++ } END { for (f in count) print f, count[f] }' | sort
     return 0
 }
 

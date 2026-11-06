@@ -16,7 +16,7 @@ use super::node::{existing_wrapper, read_dom, with_dom, wrap};
 use super::{Method, dom_error, string};
 use crate::dom::{AttrChange, Namespace, NodeId, is_custom_element_name};
 use crate::state::shared;
-use verve::native::{arg, js_text, list_of, text_of, type_error};
+use verve::native::{arg, arg_text, js_text, list_of, type_error};
 
 /// A tag `customElements.define` was given a class for.
 pub struct Definition {
@@ -282,7 +282,7 @@ fn observed_attributes(class: &JsObject, context: &mut Context) -> JsResult<Vec<
 }
 
 fn define(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let name = text_of(&arg(args, 0), context)?;
+    let name = arg_text(args, 0, context)?;
     let Some(class) = arg(args, 1).as_object().filter(|c| c.is_constructor()) else {
         return Err(type_error(
             "Failed to execute 'define' on 'CustomElementRegistry': parameter 2 is not a constructor.",
@@ -347,7 +347,7 @@ fn define(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsVa
 pub const METHODS: &[Method] = &[
     ("define", 3, define),
     ("get", 1, |_, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Ok(class_of(cx, &name).map_or(JsValue::undefined(), JsValue::from))
     }),
     ("getName", 1, |_, args, cx| {
@@ -357,7 +357,7 @@ pub const METHODS: &[Method] = &[
         Ok(name.map_or(JsValue::null(), |n| js_text(&n)))
     }),
     ("whenDefined", 1, |_, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         if let Some(class) = class_of(cx, &name) {
             return super::resolved(class.into(), cx);
         }

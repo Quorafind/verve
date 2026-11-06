@@ -19,7 +19,7 @@ use super::{
 };
 use crate::css::MediaQuery;
 use crate::state::{FrameClock, shared};
-use verve::native::{self, arg, closure, function, get, js_text, list_of, text_of, type_error};
+use verve::native::{self, arg, arg_text, closure, function, get, js_text, list_of, type_error};
 
 // ─── Location and history ───────────────────────────────────────────────────────────────────
 
@@ -150,7 +150,7 @@ macro_rules! location_accessor {
             $name,
             Some(|_, _, cx| Ok(js_text(&location_part($name, cx)))),
             Some(|_, args, cx| {
-                let value = text_of(&arg(args, 0), cx)?;
+                let value = arg_text(args, 0, cx)?;
                 let mut url = shared(cx).borrow().url.clone();
                 let change: fn(&mut url::Url, &str) = $set;
                 change(&mut url, &value);
@@ -166,7 +166,7 @@ const LOCATION_ACCESSORS: &[Accessor] = &[
         "href",
         Some(|_, _, cx| Ok(js_text(shared(cx).borrow().url.as_str()))),
         Some(|_, args, cx| {
-            let href = text_of(&arg(args, 0), cx)?;
+            let href = arg_text(args, 0, cx)?;
             navigate(cx, &href, false)?;
             Ok(JsValue::undefined())
         }),
@@ -206,12 +206,12 @@ const LOCATION_ACCESSORS: &[Accessor] = &[
 
 const LOCATION_METHODS: &[Method] = &[
     ("assign", 1, |_, args, cx| {
-        let href = text_of(&arg(args, 0), cx)?;
+        let href = arg_text(args, 0, cx)?;
         navigate(cx, &href, false)?;
         Ok(JsValue::undefined())
     }),
     ("replace", 1, |_, args, cx| {
-        let href = text_of(&arg(args, 0), cx)?;
+        let href = arg_text(args, 0, cx)?;
         navigate(cx, &href, true)?;
         Ok(JsValue::undefined())
     }),
@@ -381,20 +381,20 @@ fn read_storage<R>(
 const STORAGE_METHODS: &[Method] = &[
     ("getItem", 1, |this, args, cx| {
         let which = storage_of(this)?;
-        let key = text_of(&arg(args, 0), cx)?;
+        let key = arg_text(args, 0, cx)?;
         Ok(read_storage(cx, which, |s| s.get(&key).cloned())
             .map_or(JsValue::null(), |v| js_text(&v)))
     }),
     ("setItem", 2, |this, args, cx| {
         let which = storage_of(this)?;
-        let key = text_of(&arg(args, 0), cx)?;
-        let value = text_of(&arg(args, 1), cx)?;
+        let key = arg_text(args, 0, cx)?;
+        let value = arg_text(args, 1, cx)?;
         with_storage(cx, which, |s| s.insert(key, value));
         Ok(JsValue::undefined())
     }),
     ("removeItem", 1, |this, args, cx| {
         let which = storage_of(this)?;
-        let key = text_of(&arg(args, 0), cx)?;
+        let key = arg_text(args, 0, cx)?;
         with_storage(cx, which, |s| s.remove(&key));
         Ok(JsValue::undefined())
     }),
@@ -644,7 +644,7 @@ const MEDIA_QUERY_METHODS: &[Method] = &[
 /// `matchMedia(query)`: a list whose `matches` follows the viewport and colour scheme, and
 /// which hears `change` when they move it.
 fn match_media(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let query = text_of(&arg(args, 0), context)?;
+    let query = arg_text(args, 0, context)?;
     let (target, list) = {
         let class = |name| crate::state::class_of(context, name).expect("made").0;
         (class("EventTarget"), class("MediaQueryList"))
@@ -995,7 +995,7 @@ fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResul
     let clipboard = plain_object(context);
     let methods: &[Method] = &[
         ("writeText", 1, |_, args, cx| {
-            let content = text_of(&arg(args, 0), cx)?;
+            let content = arg_text(args, 0, cx)?;
             shared(cx)
                 .borrow_mut()
                 .requests

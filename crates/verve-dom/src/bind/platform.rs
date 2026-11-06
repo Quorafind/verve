@@ -26,7 +26,7 @@ use super::{
 };
 use crate::dom::{Dom, NodeId, NodeKind, ShadowMode, SlotAssignment};
 use crate::state::shared;
-use verve::native::{self, arg, function, get, hidden, js_text, list_of, text_of, type_error};
+use verve::native::{self, arg, arg_text, function, get, hidden, js_text, list_of, type_error};
 
 // ─── Attributes ─────────────────────────────────────────────────────────────────────────────
 
@@ -115,7 +115,7 @@ const NAMED_NODE_MAP_METHODS: &[Method] = &[
         })
     }),
     ("getNamedItem", 1, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         for attr in list_of(this, cx)? {
             if string(&get(&attr, "name", cx)?, cx)?.eq_ignore_ascii_case(&name) {
                 return Ok(attr);
@@ -155,7 +155,7 @@ const ATTRIBUTE_METHODS: &[Method] = &[
     }),
     ("getAttributeNode", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         match read_dom(cx, |dom| dom.get_attr(id, &name)) {
             Some(value) => attr_object(cx, this, &name, &value, &JsValue::undefined()),
             None => Ok(JsValue::null()),
@@ -172,7 +172,7 @@ const ATTRIBUTE_METHODS: &[Method] = &[
     // attribute, as an HTML document keeps it.
     ("getAttributeNS", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let name = text_of(&arg(args, 1), cx)?;
+        let name = arg_text(args, 1, cx)?;
         let found = read_dom(cx, |dom| {
             dom.get_attr(id, &name).or_else(|| {
                 dom.attributes(id)
@@ -185,14 +185,14 @@ const ATTRIBUTE_METHODS: &[Method] = &[
     }),
     ("setAttributeNS", 3, |this, args, cx| {
         let id = node_of(this)?;
-        let name = text_of(&arg(args, 1), cx)?;
-        let value = text_of(&arg(args, 2), cx)?;
+        let name = arg_text(args, 1, cx)?;
+        let value = arg_text(args, 2, cx)?;
         with_dom(cx, |dom| dom.set_attr(id, &name, &value));
         Ok(JsValue::undefined())
     }),
     ("removeAttributeNS", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let name = text_of(&arg(args, 1), cx)?;
+        let name = arg_text(args, 1, cx)?;
         let qualified = read_dom(cx, |dom| {
             dom.attributes(id)
                 .into_iter()
@@ -205,7 +205,7 @@ const ATTRIBUTE_METHODS: &[Method] = &[
     }),
     ("hasAttributeNS", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let name = text_of(&arg(args, 1), cx)?;
+        let name = arg_text(args, 1, cx)?;
         Ok(read_dom(cx, |dom| {
             dom.get_attr(id, &name).is_some()
                 || dom
@@ -319,10 +319,8 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
         "slotAssignment",
         Some(|this, _, cx| {
             let root = node_of(this)?;
-            let assignment = read_dom(cx, |dom| dom.shadow(root).map(|s| s.assignment));
-            Ok(js_text(
-                assignment.unwrap_or(SlotAssignment::Named).as_str(),
-            ))
+            let slot = read_dom(cx, |dom| dom.shadow(root).map(|s| s.assignment));
+            Ok(js_text(slot.unwrap_or(SlotAssignment::Named).as_str()))
         }),
         None,
     ),
@@ -334,7 +332,7 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
         }),
         Some(|this, args, cx| {
             let root = node_of(this)?;
-            let markup = text_of(&arg(args, 0), cx)?;
+            let markup = arg_text(args, 0, cx)?;
             with_dom(cx, |dom| {
                 dom.empty(root);
                 crate::html::parse_into(dom, root, &markup);
@@ -374,17 +372,13 @@ fn rule_object(context: &mut Context, rule: &str, sheet: &JsValue) -> JsResult<J
         let style = plain_object(context);
         set(&style, "cssText", js_text(body), context)?;
         for declaration in crate::css::declarations(body) {
-            set(
-                &style,
-                &declaration.name,
-                js_text(&declaration.value),
-                context,
-            )?;
+            let value = js_text(&declaration.value);
+            set(&style, &declaration.name, value.clone(), context)?;
             let camel = crate::dom::camel_name(&declaration.name);
-            set(&style, &camel, js_text(&declaration.value), context)?;
+            set(&style, &camel, value, context)?;
         }
         let get_value = function(context, "getPropertyValue", 1, |this, args, cx| {
-            let name = text_of(&arg(args, 0), cx)?;
+            let name = arg_text(args, 0, cx)?;
             let value = get(this, &name, cx)?;
             Ok(if value.is_undefined() {
                 js_text("")
@@ -541,7 +535,7 @@ const SHEET_ACCESSORS: &[Accessor] = &[
 
 const SHEET_METHODS: &[Method] = &[
     ("insertRule", 2, |this, args, cx| {
-        let rule = text_of(&arg(args, 0), cx)?;
+        let rule = arg_text(args, 0, cx)?;
         let at = match arg(args, 1) {
             i if i.is_undefined() => 0,
             i => i.to_number(cx)? as usize,
@@ -563,8 +557,8 @@ const SHEET_METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     ("addRule", 2, |this, args, cx| {
-        let selector = text_of(&arg(args, 0), cx)?;
-        let body = text_of(&arg(args, 1), cx)?;
+        let selector = arg_text(args, 0, cx)?;
+        let body = arg_text(args, 1, cx)?;
         change_rules(this, cx, |rules| {
             rules.push(format!("{selector} {{ {body} }}"))
         })?;
@@ -574,12 +568,12 @@ const SHEET_METHODS: &[Method] = &[
         super::call_method(this, "deleteRule", args, cx)
     }),
     ("replaceSync", 1, |this, args, cx| {
-        let css = text_of(&arg(args, 0), cx)?;
+        let css = arg_text(args, 0, cx)?;
         change_rules(this, cx, |rules| *rules = crate::css::split_rules(&css))?;
         Ok(JsValue::undefined())
     }),
     ("replace", 1, |this, args, cx| {
-        let css = text_of(&arg(args, 0), cx)?;
+        let css = arg_text(args, 0, cx)?;
         change_rules(this, cx, |rules| *rules = crate::css::split_rules(&css))?;
         super::resolved(this.clone(), cx)
     }),
@@ -692,7 +686,7 @@ fn construct_sheet(
 const CSS_FUNCTIONS: &[Method] = &[
     // CSS.escape, as the CSSOM writes it.
     ("escape", 1, |_, args, cx| {
-        let value = text_of(&arg(args, 0), cx)?;
+        let value = arg_text(args, 0, cx)?;
         let mut out = String::new();
         let chars: Vec<char> = value.chars().collect();
         for (i, &c) in chars.iter().enumerate() {
@@ -718,7 +712,7 @@ const CSS_FUNCTIONS: &[Method] = &[
     }),
     ("supports", 2, |_, args, cx| {
         // A selector is supported when it parses; a declaration, always.
-        let first = text_of(&arg(args, 0), cx)?;
+        let first = arg_text(args, 0, cx)?;
         if let Some(selector) = first
             .trim()
             .strip_prefix("selector(")
@@ -911,7 +905,7 @@ const RANGE_METHODS: &[Method] = &[
     }),
     // A fragment of what `html` says, parsed as the inside of the range's start would parse it.
     ("createContextualFragment", 1, |_, args, cx| {
-        let markup = text_of(&arg(args, 0), cx)?;
+        let markup = arg_text(args, 0, cx)?;
         let fragment = with_dom(cx, |dom| {
             let fragment = dom.create_fragment();
             crate::html::parse_runnable(dom, fragment, &markup);
@@ -1917,13 +1911,13 @@ fn construct_data_transfer(
 const DATA_TRANSFER_METHODS: &[Method] = &[
     ("setData", 2, |this, args, cx| {
         let data = get(this, "__data", cx)?;
-        let format = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+        let format = arg_text(args, 0, cx)?.to_ascii_lowercase();
         let format = if format == "text" {
             "text/plain".to_owned()
         } else {
             format
         };
-        let value = text_of(&arg(args, 1), cx)?;
+        let value = arg_text(args, 1, cx)?;
         if let Some(data) = data.as_object() {
             set(&data, &format, js_text(&value), cx)?;
         }
@@ -1931,7 +1925,7 @@ const DATA_TRANSFER_METHODS: &[Method] = &[
     }),
     ("getData", 1, |this, args, cx| {
         let data = get(this, "__data", cx)?;
-        let format = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+        let format = arg_text(args, 0, cx)?.to_ascii_lowercase();
         let format = if format == "text" {
             "text/plain".to_owned()
         } else {
