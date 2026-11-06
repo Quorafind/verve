@@ -18,17 +18,7 @@ use boa_engine::{
     property::Attribute,
 };
 
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
-
-fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
-    Ok(value.to_string(context)?.to_std_string_escaped())
-}
-
-fn type_error(message: impl Into<String>) -> boa_engine::JsError {
-    JsNativeError::typ().with_message(message.into()).into()
-}
+use crate::native::{arg, function, text_of, type_error};
 
 // ─── Base64 and the rest ────────────────────────────────────────────────────────────────────
 
@@ -401,14 +391,6 @@ fn with_prototype(
 /// A `Uint8Array` of `bytes`, made a `Buffer` (see `crate::buffer`).
 pub(crate) fn make_buffer(context: &mut Context, bytes: Vec<u8>) -> JsResult<JsValue> {
     crate::buffer::make(context, bytes)
-}
-
-fn function(context: &mut Context, name: &str, length: usize, f: NativeFunctionPointer) -> JsValue {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
 }
 
 fn constructor(

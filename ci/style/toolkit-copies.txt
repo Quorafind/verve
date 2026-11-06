@@ -8,10 +8,6 @@ crates/verve-dom/src/bind/mod.rs hidden
 crates/verve-dom/src/bind/mod.rs instance
 crates/verve-dom/src/bind/mod.rs type_error
 crates/verve-dom/src/bind/node.rs list_of
-src/encoding.rs arg
-src/encoding.rs function
-src/encoding.rs text_of
-src/encoding.rs type_error
 src/indexeddb.rs arg
 src/indexeddb.rs class
 src/indexeddb.rs function
