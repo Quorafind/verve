@@ -292,3 +292,16 @@ and the mirrored events are kernel and `verve-dom` code.
 verve-gpui --bin electron --features jit` is 34,679,808 bytes against 34,431,488 for `8e259992` (the batch above), +248,320 bytes (+0.72 %);
 the brief aimed at about 250 KB. The cap (35,651,584) leaves 0.97 MB. No crate or manifest changed: the class, the history, the event
 table, `window.open`'s side of the main process, the input hooks and the heartbeat are all `verve-electron` code over what was there.
+
+## R1: the refactor gate
+
+Two branches, measured each at its tested tip with `cargo build --release -p verve-gpui --bin electron --features jit`:
+
+- `electron/refactor-api` (refactor A, `verve-electron`: `msg/` and `hub/` split by domain, one way to settle, report, check and
+  send): 34,676,224 bytes against 34,679,808 for `35ab2dd0` (P13's second half), −3,584 bytes.
+- `electron/refactor-r1-toolkit` (refactor B, the kernel and `verve-dom`: the 53 toolkit copies and `verve-dom`'s legacy helpers
+  replaced by `verve::native` and `verve::encoding`): 34,617,856 bytes against 34,676,224 for `3923d2e0` (refactor A merged; B merged as `7936804e`),
+  −58,368 bytes.
+
+Together −61,952 bytes (−0.18 %). The cap (35,651,584) leaves 1.03 MB. Neither branch adds a crate or changes a manifest;
+the bytes come from builders and helpers that each existed several times over and now exist once.
