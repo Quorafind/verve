@@ -315,4 +315,91 @@ HTTP 缓存（`clearCache` resolve、`getCacheSize` 返回 0）、Chromium Cooki
 
 ## 状态
 
-（实现者完成后填写）
+### 阶段 1（钩子、protocol、net；会话只做值类方法）
+
+**做了什么**
+
+- **内核钩子 `verve::browser_net`**（`src/browser_net.rs`、`src/browser_net/{custom,gate}.rs`，`src/network/fetch.rs` 接入）：见上文“契约修订”。
+  未设置 `BrowserNet` 时 `fetch` 的路径不变：只有 `Fetch` 多了一个 `Option<Gate>`，`wire_headers` 拆成 `wire_list` + `header_object`（行为相同），
+  `start` 拆成 `start`（权限与是否交给宿主）+ `dispatch`（发出）。`src/fetch.rs`、`src/network/http.rs` 没有变长。测试 `tests/browser_net.rs`（宿主应答、逐块拉取与背压、失败的三种样子、
+  取消/abort、请求体与头到达宿主、`before_send`/`headers_received` 改头/取消/改址、`notify` 顺序、显式 `BrowserNet`；内核没有 bypass 开关，`bypassCustomProtocolHandlers` 是宿主的 `custom()` 不认领）。
+- **verve-dom**：`Options::{standard_schemes, secure_schemes}`（`Options` 搬到新文件 `options.rs`，因为 `lib.rs` 在行数上限上）、`schemes.rs`（`location.origin`、`history` 同源判断、
+  `isSecureContext` 改成按地址计算的 getter）、`Loader::{forwards, allows_fetch}`、页面 `fetch` 对 forwards 的 scheme 走内核 `fetch`（XHR 另走一份不受 `supportFetchAPI` 限制的闭包）。
+- **verve-electron**：
+  - `hub/sessions.rs`：`Session`（分区名、`persist:`、`fromPath`、已处理的 scheme、UA）、`Hub::{session_for, session_at, session_by_id, session_of, set_privileged, privileged}`。
+  - `renderer_net.rs`：页面线程的 `BrowserNet`（`FromRenderer::{Protocol, ProtocolPull, ProtocolCancel}` / `ToRenderer::{ProtocolHead, ProtocolChunk, ProtocolEnd}`）；
+    `loader.rs` 的 scheme 表改为会话的，`files.rs` 与 `api/mime.rs` 是页面加载与 `net.fetch` 共用的文件读取与唯一的 MIME 表（65 种）。
+  - 主进程：`api/protocol.rs`（`handle`/`unhandle`/`isProtocolHandled`、`register*`/`intercept*`、`registerSchemesAsPrivileged`、`getStandardSchemes`）、
+    `api/protocol_serve.rs`（处理器引擎：一份代码服务页面 `fetch`、页面子资源加载与主进程 `net.fetch`；每次拉取读一块）、`api/protocol_legacy.rs`（旧回调接口转成 `Response`）、
+    `api/main_net.rs`（主进程请求的 `BrowserNet`，含 `file:`，asar 内可读）、`api/session.rs`（`defaultSession`、`fromPartition`、`fromPath`、UA、存储路径、`isPersistent`、`protocol`、`fetch`、
+    `resolveHost`、`session-created`）、`api/net.rs`（`net.fetch`、`isOnline`/`online`、`resolveHost`）、`api/net_request.rs`（`ClientRequest`、`IncomingMessage`）。`webContents.session` 是真的会话对象。
+- 测试：`tests/protocol.rs`、`tests/net.rs`（见下面“要跑的命令”）。
+
+**没做 / 只做了一部分**
+
+- asar 内文件经 `protocol.handle` + `net.fetch`：`file:` 读取走 `Hub::overlay()`（P11），`tests/protocol.rs` 有测试（打包一个 asar）。
+- 旧的 `registerStreamProtocol` 的 Node `Readable` 是收齐后再发（不是流式）；`registerHttpProtocol` 的 `{url, method, headers}` 用主进程全局 `fetch` 取，不带 `session`/`uploadData`。Electron 对后者的行为（探针里 `cb({url})` 得到 `ERR_UNEXPECTED`）没有弄清，没有冻结。
+- `net.request` 的上传不是真的分块：`write()` 的片段收齐后随 `end()` 一次发送（服务器收到完整正文；`chunkedEncoding` 只是被记下）。`login` 事件不触发，`useSessionCookies`、`credentials`、`referrerPolicy`、`cache`、`priority` 被接受但无效（cookie 在阶段 2）。
+- `webPreferences.session`（用会话对象指定页面的会话）读，换算成分区名；`webContents.session` 是真的会话对象。`canvas` 的同源判断仍按 `url::Origin`。
+- 阶段 2 的 cookie 罐、webRequest、权限、代理、下载、`--test session` 都没开始。`Session` 对象目前只有值类方法与 `protocol`、`fetch`、`resolveHost`。
+- 页面线程的 `RendererNet::user_agent` 读会话的 UA，但没有人把页面 `navigator.userAgent` 接到 `session.setUserAgent`（verve-dom 的 `Options::user_agent` 在 `RendererGuest::new` 时没有设）。阶段 2。
+- 体积：没有测（不跑 release 构建）。新增依赖：无。
+
+**冻结的 Electron 39.8.10 观察**（探针在本包 scratch 里：`probe1`…`probe3`；JS 源码取自 `electron.exe` 里的 `lib/…` 压缩文本）
+
+- `protocol.registerSchemesAsPrivileged` 在 ready 之后：`Error: protocol.registerSchemesAsPrivileged should be called before app is ready`。
+- `protocol.handle` 同一 scheme 两次：`Failed to register protocol: <scheme>`；`unhandle` 未登记的：`Failed to unhandle protocol: <scheme>`；`handle` 不检查 scheme 的写法与 handler 的类型，不抛；
+  scheme 不转小写（`handle('UPPER')` 之后 `isProtocolHandled('upper')` 为假）；`http`/`https`/`file` 的 `handle` 是拦截（`isProtocolHandled('https')` 初始为假）。
+- 处理器抛错、拒绝、返回非 `Response`：`net.fetch` 以 `Error: net::ERR_UNEXPECTED` 失败（抛错还把栈写到标准错误）；`Response.error()`：`net::ERR_FAILED`。**与任务书不同**。
+- 旧 `register*Protocol`/`intercept*Protocol` **不发任何 deprecation 警告**。**与任务书/派发不同**，按观察不发。`registerFileProtocol` 重复登记不抛（返回 `false`），`cb({error: -6})` 得 `net::ERR_FILE_NOT_FOUND`，
+  `registerStringProtocol` 的回应没有 `content-type`，`registerBufferProtocol` 的 `mimeType`/`statusCode`/`headers` 生效。
+- `net.fetch`：`Response` 无 `url`（`''`）、`type` 为 `default`、`redirected` 为假；`statusText` 取自 `IncomingMessage.statusMessage`（http 是 `OK`；探针 netfetch-http 那一行里的 `""` 是 `url`）；`file:` 的头只有 `content-type`（`application/json`）与 `last-modified`，无 `content-length`；
+  失败是 `Error: net::ERR_…`（无 `cause`）；`redirect: 'manual'` 以 `Error: Redirect was cancelled` 失败；未知 scheme `net::ERR_UNKNOWN_URL_SCHEME`；`new URL` 解析失败是 `TypeError`。
+- `net.request`：要求 ready（`net module can only be used after app is ready`）；`ftp:` 抛 `ClientRequest only supports http: and https: protocols`；`nonsense` 抛 `TypeError: Invalid URL`（`ERR_INVALID_URL`）；
+  事件顺序 `finish`、`close`（请求体交出即关）、`redirect`、`response`；`redirect` 的参数是 `(302, 'GET', 新地址, 响应头)`，**跟随模式也发**；`manual` 不调 `followRedirect()` 以 `Redirect was cancelled` 失败；
+  `error` 模式以 `Attempted to redirect, but redirect policy was 'error'` 失败；`abort()` 得 `finish`、`abort`、`close`；`IncomingMessage` 的 `statusMessage` 为 `OK`，`httpVersion` 为 `1.1`，`set-cookie` 是数组。
+- 页面：标准+secure+supportFetchAPI 的 scheme：`location.origin === 'std://bundle'`、`isSecureContext === true`、`fetch('./data')` 的 `url` 为 `std://bundle/data`、`type` 为 `basic`；
+  只 `standard`：`isSecureContext === false`，`fetch()` 以 `TypeError: Failed to fetch` 拒绝且**不调用处理器**，XHR 可用；`standard`+`secure` 无 `supportFetchAPI`：`fetch()` 拒绝、XHR 可用；
+  非 standard：`origin === 'null'`、`localStorage` 抛 `SecurityError`、XHR 也失败。处理器收到的请求头只有 `accept`（和用户设的、`content-type`），`referrer` 为空。
+- `session.fromPartition`：`''` 是默认会话；同名同对象；`persist:per` 的存储路径是 `<userData>/Partitions/per`；内存分区 `getStoragePath()` 为 `null`、`isPersistent()` 为假；默认会话持久且路径就是 `userData`；
+  `fromPartition(5)` 抛 gin 的 `Error processing argument at index 0, conversion failure from `；默认 UA 形如 `Mozilla/5.0 (…) AppleWebKit/537.36 (KHTML, like Gecko) <app>/<version> Chrome/142.0.7444.265 Electron/39.8.10 Safari/537.36`。
+- `net.resolveHost('localhost')`：`{ endpoints: [{ address: '::1', family: 'ipv6' }, { address: '127.0.0.1', family: 'ipv4' }] }`。
+
+**未观察（没有对 Electron 39.8.10 探针，所以不算冻结）**：处理器自定义的 `statusText` 是否原样转给页面；standard scheme 的页面用 XHR 访问另一个自定义 scheme（跨源）；
+无 origin 的（`bare`）页面在有 `supportFetchAPI` 时的 `fetch()`。P20 的 `page_has_node` 不看 `sandbox`（只决定页面脚本看到什么），而 `preload::permissions_for` 看：`!sandbox && (nodeIntegration || preload)`。
+
+**已知缺口**：`localStorage` 在不透明 origin 上没有分区；处理器收不到 `accept`（探针 `std` 里有）；`new URL('app://…').origin` 对 standard scheme 仍是 `"null"`；
+`file:` 应答没有 `last-modified`；页面载入别的文档时，主进程里仍在服务的处理器应答（`Served`）与读者没有被取消（阶段 2a 补）；Worker 没有 BrowserNet，也拿不到网络
+（页面的 `Worker` 是完整的 Verve runtime，磁盘不受限，早于本包，登记给 P20/P41）；`fromPath` 与 `getStandardSchemes` 的文本未观察；session/protocol 在 ready 之前的限制未实施；
+`registerHttpProtocol` 在 Verve 里成功，Electron 探针给的是 `ERR_UNEXPECTED`。
+
+**第三轮**：`net.request('nonsense')` 抛带 `code` 的 `TypeError`；`session.getStoragePath()` 返回原生路径；自定义 scheme 应答的拉取是一块一次
+（宿主在 `pull` 里还没给出块时，流不再重复拉取，`tests/browser_net.rs` 的拉取数恢复为精确的 4）；渲染器权限如上；`session.protocol` 是 `Protocol` 类的实例；
+`IncomingMessage` 的读取状态在 `Requests` 里，不在脚本可见的属性上；页面关闭或渲染进程消失时取消它的 `protocol.handle` 应答；页面 XHR 对无 origin 的
+自定义 scheme 页面失败（探针 3 `bare`）；`loadFile` + `file` 处理器、不带 Node 的页面读不了 `file:`、asar 内 `protocol.handle` + `net.fetch` 都有了测试；
+探针 4（Electron 39.8.10）：`net.fetch` 的 `statusText` 对 `file:` 与 http 都是 `OK`；`file` 处理器 + `bypassCustomProtocolHandlers` 读到文件。
+**还没做**：`last-modified`（阶段 2a 补）。电子包与内核的大提交已拆成小提交。
+
+**给其他包的备注**
+
+- **P23**：verve-dom 新增 `Options::{standard_schemes, secure_schemes}`、`window.isSecureContext` 改为按地址计算的 getter、`location.origin`/`a.origin`/`pushState` 同源判断经 `Schemes`、`Loader::{forwards, allows_fetch}`。
+- **P30**：verve-dom 的 `Options` 搬到了 `crates/verve-dom/src/options.rs`（`lib.rs` 仍 `pub use`），并发改 `Options` 的请改那里。
+
+- **P20**：页面 `fetch`/XHR 对自定义 scheme 现在带 headers、body 与 abort（走内核 `fetch`），你登记的“fetch 的 body 与 headers 没有传给处理器”已解决。
+- **P30**：`renderer_guest.rs` 我只加了 `renderer_net::install`、`scheme_names` 和两个 `Options` 字段、三条 `ToRenderer` 分支。
+- **阶段 2 的人**：`RendererNet` 的 `before_send`/`headers_received`/`notify` 还是默认实现；cookie 与 webRequest 在它们里面接，`MainNet` 同理（主进程那份有 `cx`，可直接跑监听者）。
+
+**要跑的命令（逐个跑）**
+
+```
+cargo test -p verve --test browser_net
+cargo test -p verve --test fetch --test fetch_network
+cargo test -p verve --lib browser_net
+cargo test -p verve-dom --lib schemes
+cargo test -p verve-dom --test fetch --test load
+cargo test -p verve-electron --lib
+cargo test -p verve-electron --test protocol
+cargo test -p verve-electron --test net
+cargo test -p verve-electron --test page_load
+```
+
