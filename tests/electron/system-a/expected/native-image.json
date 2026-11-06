@@ -1,0 +1,181 @@
+
+{
+ "size": {
+  "width": 4,
+  "height": 2
+ },
+ "empty": false,
+ "aspect": 2,
+ "scaleFactors": [
+  1
+ ],
+ "bitmap": "000000000000808000ff00ffff0000ffffffffff000000ff646464ff40000040",
+ "bitmapGet": "000000000000808000ff00ffff0000ffffffffff000000ff646464ff40000040",
+ "dataURLPrefix": "data:image/png;base64,iVBORw0K",
+ "pngRoundTripBitmap": "000000000000808000ff00ffff0000ffffffffff000000ff646464ff40000040",
+ "jpegSize": {
+  "width": 4,
+  "height": 2
+ },
+ "fromDataURL": "000000000000808000ff00ffff0000ffffffffff000000ff646464ff40000040",
+ "fromBitmap": {
+  "size": {
+   "width": 4,
+   "height": 2
+  },
+  "bitmap": "000000000000808000ff00ffff0000ffffffffff000000ff646464ff40000040"
+ },
+ "fromBitmapScaled": {
+  "size": {
+   "width": 2,
+   "height": 1
+  },
+  "at2": {
+   "width": 2,
+   "height": 1
+  },
+  "factors": [
+   2
+  ]
+ },
+ "crop": {
+  "size": {
+   "width": 2,
+   "height": 2
+  },
+  "bitmap": "0000808000ff00ff000000ff646464ff"
+ },
+ "cropPartlyOutside": {
+  "width": 1,
+  "height": 1
+ },
+ "cropAllOutside": {
+  "width": 0,
+  "height": 0
+ },
+ "resize": {
+  "size": {
+   "width": 8,
+   "height": 4
+  },
+  "len": 128
+ },
+ "resizeWidthOnly": {
+  "width": 8,
+  "height": 4
+ },
+ "resizeNone": {
+  "width": 4,
+  "height": 2
+ },
+ "emptyImage": {
+  "empty": true,
+  "size": {
+   "width": 0,
+   "height": 0
+  },
+  "png": "",
+  "jpeg": "",
+  "bitmap": "",
+  "dataURL": "data:image/png;base64,",
+  "aspect": 1,
+  "factors": []
+ },
+ "badBuffer": true,
+ "missingPath": true,
+ "badDataURL": true,
+ "template": {
+  "before": false,
+  "after": false,
+  "mac": false
+ },
+ "multi": {
+  "size": {
+   "width": 4,
+   "height": 2
+  },
+  "factors": [
+   1,
+   2
+  ],
+  "at2": {
+   "width": 4,
+   "height": 2
+  },
+  "bitmap1": "0000000000008080",
+  "bitmap2": "9d9d9dc89d9d9dc8",
+  "len2": 128
+ },
+ "solo": {
+  "size": {
+   "width": 4,
+   "height": 2
+  },
+  "factors": [
+   2
+  ],
+  "len1": 128
+ },
+ "added": {
+  "empty": false,
+  "size": {
+   "width": 4,
+   "height": 2
+  },
+  "factors": [
+   2
+  ]
+ },
+ "types": {
+  "ctor": "NativeImage",
+  "keys": [
+   "createEmpty",
+   "createFromBitmap",
+   "createFromBuffer",
+   "createFromDataURL",
+   "createFromNamedImage",
+   "createFromPath",
+   "createThumbnailFromPath"
+  ],
+  "protoKeys": [
+   "constructor"
+  ],
+  "str": "[object Object]"
+ },
+ "call_createFromBuffer": {
+  "name": "Error",
+  "message": "buffer must be a node Buffer"
+ },
+ "call_createFromBufferNoArg": {
+  "name": "TypeError",
+  "message": "Insufficient number of arguments."
+ },
+ "call_createFromPath": {
+  "name": "TypeError",
+  "message": "Error processing argument at index 0, conversion failure from "
+ },
+ "call_createFromDataURL": {
+  "name": "TypeError",
+  "message": "Error processing argument at index 0, conversion failure from "
+ },
+ "call_createFromBitmapShort": {
+  "name": "Error",
+  "message": "invalid buffer size"
+ },
+ "call_createFromBitmapNoOpts": {
+  "name": "TypeError",
+  "message": "Insufficient number of arguments."
+ },
+ "call_resizeNoArg": {
+  "name": "TypeError",
+  "message": "Insufficient number of arguments."
+ },
+ "call_cropNoArg": {
+  "name": "TypeError",
+  "message": "Insufficient number of arguments."
+ },
+ "call_toJPEGNoArg": {
+  "name": "TypeError",
+  "message": "Insufficient number of arguments."
+ }
+}

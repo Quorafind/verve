@@ -6828,7 +6828,6 @@ version = "0.1.0"
 dependencies = [
  "boa_engine",
  "boa_gc",
- "getrandom 0.3.4",
  "image",
  "serde_json",
  "sha2",

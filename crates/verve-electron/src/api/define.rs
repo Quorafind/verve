@@ -272,20 +272,34 @@ impl<'a> Args<'a> {
             Dialect::Node => {
                 invalid_arg_type(context, name, &format!("of type {expected}"), &value)
             }
-            Dialect::Gin if at >= self.values.len() => {
-                native::type_error("Insufficient number of arguments.")
-            }
-            Dialect::Gin => {
-                let from = if value.is_null_or_undefined() || value.is_string() {
-                    verve::print(&value)
-                } else {
-                    String::new()
-                };
-                native::type_error(format!(
-                    "Error processing argument at index {at}, conversion failure from {from}"
-                ))
-            }
+            Dialect::Gin => self.conversion_failure(at),
         }
+    }
+
+    /// Electron's gin error for argument `at`: `Insufficient number of arguments.` when it was not
+    /// given, else a conversion failure that names the value only for `null`, `undefined` and
+    /// strings.
+    pub fn conversion_failure(&self, at: usize) -> JsError {
+        if at >= self.values.len() {
+            return native::type_error("Insufficient number of arguments.");
+        }
+        let value = arg(self.values, at);
+        let from = if value.is_null_or_undefined() || value.is_string() {
+            verve::print(&value)
+        } else {
+            String::new()
+        };
+        native::type_error(format!(
+            "Error processing argument at index {at}, conversion failure from {from}"
+        ))
+    }
+
+    /// `Insufficient number of arguments.` unless `count` arguments were given.
+    pub fn require(&self, count: usize) -> JsResult<()> {
+        if self.values.len() < count {
+            return Err(native::type_error("Insufficient number of arguments."));
+        }
+        Ok(())
     }
 
     /// A string.
@@ -551,4 +565,18 @@ impl<'a> Fields<'a> {
             )),
         }
     }
+}
+
+/// A `Buffer` of `bytes`.
+///
+/// # Errors
+///
+/// The realm has no `Buffer`.
+pub fn buffer_of(context: &mut Context, bytes: Vec<u8>) -> JsResult<JsValue> {
+    let array: JsObject =
+        boa_engine::object::builtins::JsUint8Array::from_iter(bytes, context)?.into();
+    let class = native::global(context, "Buffer")?;
+    let prototype = native::get(&class, "prototype", context)?;
+    array.set_prototype(prototype.as_object());
+    Ok(array.into())
 }
