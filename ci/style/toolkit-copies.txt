@@ -28,10 +28,3 @@ src/wasm.rs instance
 src/wasm.rs js_text
 src/wasm.rs list_of
 src/wasm.rs object
-src/web.rs arg
-src/web.rs class
-src/web.rs function
-src/web.rs js_text
-src/web.rs object
-src/web.rs text_of
-src/web.rs type_error

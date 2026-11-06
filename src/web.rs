@@ -2,8 +2,7 @@
 //! `structuredClone`, `performance`, `Blob` and `File`.
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
-    js_string,
+    Context, JsError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string,
     native_function::NativeFunctionPointer,
     object::{
         FunctionObjectBuilder,
@@ -14,38 +13,7 @@ use boa_engine::{
     property::{Attribute, PropertyDescriptor},
 };
 
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
-
-fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
-    Ok(value.to_string(context)?.to_std_string_escaped())
-}
-
-fn js_text(text: &str) -> JsValue {
-    JsString::from(text).into()
-}
-
-fn type_error(message: impl Into<String>) -> JsError {
-    JsNativeError::typ().with_message(message.into()).into()
-}
-
-fn object(context: &mut Context) -> JsObject {
-    JsObject::with_object_proto(context.intrinsics())
-}
-
-fn function(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
-}
+use crate::native::{arg, function, js_text, object, text_of, type_error};
 
 fn constructor(
     context: &mut Context,
@@ -73,7 +41,7 @@ fn made_by(this: &JsValue, context: &mut Context) -> JsResult<JsObject> {
 }
 
 /// A class: its constructor, its prototype with `methods` and `getters`, as a global.
-fn class(
+fn define_class(
     context: &mut Context,
     name: &str,
     construct: NativeFunctionPointer,
@@ -772,8 +740,8 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
     )?;
 
-    let (_, blob_proto) = class(context, "Blob", construct_blob, BLOB_METHODS, &[])?;
-    let (_, file_proto) = class(context, "File", construct_file, &[], &[])?;
+    let (_, blob_proto) = define_class(context, "Blob", construct_blob, BLOB_METHODS, &[])?;
+    let (_, file_proto) = define_class(context, "File", construct_file, &[], &[])?;
     file_proto.set_prototype(Some(blob_proto));
     Ok(())
 }
