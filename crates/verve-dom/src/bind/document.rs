@@ -5,12 +5,12 @@ use boa_engine::{Context, JsResult, JsValue, js_string};
 
 use super::node::{PARENT_NODE_ACCESSORS, PARENT_NODE_METHODS, read_dom, with_dom, wrap, wrap_opt};
 use super::{
-    Accessor, ClassSpec, Kind, Method, arg, arg_string, class, constructor_of, dom_error,
-    extend_prototype, illegal_constructor, instance, native_instance, node_id, node_of, opt_string,
-    string, text, type_error,
+    Accessor, ClassSpec, Kind, Method, class, constructor_of, dom_error, extend_prototype,
+    illegal_constructor, instance, native_instance, node_id, node_of, opt_string, string,
 };
 use crate::dom::{Dom, Namespace, NodeId, NodeKind};
 use crate::state::shared;
+use verve::native::{arg, function, hidden, js_text, text_of, type_error};
 
 /// The document a document's member is asked of: a parsed one, or the window's.
 fn document_of(this: &JsValue, context: &Context) -> NodeId {
@@ -66,22 +66,22 @@ pub fn create_element(context: &mut Context, tag: &str, namespace: Namespace) ->
 const DOCUMENT_METHODS: &[Method] = &[
     ("getAnimations", 0, super::animation::document_animations),
     ("createElement", 2, |_, args, cx| {
-        let tag = arg_string(args, 0, cx)?;
+        let tag = text_of(&arg(args, 0), cx)?;
         create_element(cx, &tag, Namespace::Html)
     }),
     ("createElementNS", 3, |_, args, cx| {
         let namespace = opt_string(args, 0, cx)?;
-        let name = arg_string(args, 1, cx)?;
+        let name = text_of(&arg(args, 1), cx)?;
         let local = name.rsplit(':').next().unwrap_or(&name).to_owned();
         create_element(cx, &local, Namespace::from_uri(namespace.as_deref()))
     }),
     ("createTextNode", 1, |_, args, cx| {
-        let content = arg_string(args, 0, cx)?;
+        let content = text_of(&arg(args, 0), cx)?;
         let id = with_dom(cx, |dom| dom.create_text(&content));
         Ok(wrap(cx, id))
     }),
     ("createCDATASection", 1, |_, args, cx| {
-        let content = arg_string(args, 0, cx)?;
+        let content = text_of(&arg(args, 0), cx)?;
         let id = with_dom(cx, |dom| dom.create_text(&content));
         Ok(wrap(cx, id))
     }),
@@ -100,12 +100,12 @@ const DOCUMENT_METHODS: &[Method] = &[
         Ok(wrap(cx, id))
     }),
     ("createAttribute", 1, |this, args, cx| {
-        let name = arg_string(args, 0, cx)?;
+        let name = text_of(&arg(args, 0), cx)?;
         super::platform::attr_object(cx, &JsValue::null(), &name.to_ascii_lowercase(), "", this)
     }),
     // The old way to make an event: of the class named, made ready by its `init…Event`.
     ("createEvent", 1, |_, args, cx| {
-        let named = arg_string(args, 0, cx).unwrap_or_default();
+        let named = text_of(&arg(args, 0), cx).unwrap_or_default();
         let class = match named.trim_end_matches('s').to_ascii_lowercase().as_str() {
             "customevent" => "CustomEvent",
             "mouseevent" => "MouseEvent",
@@ -135,7 +135,7 @@ const DOCUMENT_METHODS: &[Method] = &[
             .get(boa_engine::JsString::from(class), cx)?
             .as_object()
             .ok_or_else(|| type_error("no such event class"))?;
-        Ok(constructor.construct(&[text("")], None, cx)?.into())
+        Ok(constructor.construct(&[js_text("")], None, cx)?.into())
     }),
     ("createRange", 0, |_, _, cx| super::platform::new_range(cx)),
     ("createNodeIterator", 3, |_, args, cx| {
@@ -145,7 +145,7 @@ const DOCUMENT_METHODS: &[Method] = &[
         super::traversal::create(args, cx, true)
     }),
     ("getElementById", 1, |this, args, cx| {
-        let wanted = arg_string(args, 0, cx)?;
+        let wanted = text_of(&arg(args, 0), cx)?;
         let doc = document_of(this, cx);
         let found = read_dom(cx, |dom| {
             dom.descendants(doc)
@@ -155,7 +155,7 @@ const DOCUMENT_METHODS: &[Method] = &[
         Ok(wrap_opt(cx, found))
     }),
     ("getElementsByName", 1, |this, args, cx| {
-        let wanted = arg_string(args, 0, cx)?;
+        let wanted = text_of(&arg(args, 0), cx)?;
         let doc = document_of(this, cx);
         let found = read_dom(cx, |dom| {
             dom.descendants(doc)
@@ -254,7 +254,7 @@ const DOCUMENT_METHODS: &[Method] = &[
     }),
     ("writeln", 1, |this, args, cx| {
         let mut with_newline = args.to_vec();
-        with_newline.push(text("\n"));
+        with_newline.push(js_text("\n"));
         super::call_method(this, "write", &with_newline, cx)
     }),
     ("open", 0, |this, _, cx| {
@@ -269,7 +269,7 @@ const DOCUMENT_METHODS: &[Method] = &[
     ("close", 0, |_, _, _| Ok(JsValue::undefined())),
     // The old editing commands: answered as a page without a focused editable region answers.
     ("execCommand", 3, |_, args, cx| {
-        let command = arg_string(args, 0, cx)?.to_ascii_lowercase();
+        let command = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
         if command == "copy" {
             let selected =
                 super::call_method(&super::platform::selection(cx)?, "toString", &[], cx)?;
@@ -285,7 +285,7 @@ const DOCUMENT_METHODS: &[Method] = &[
         Ok(false.into())
     }),
     ("queryCommandSupported", 1, |_, args, cx| {
-        let command = arg_string(args, 0, cx)?.to_ascii_lowercase();
+        let command = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
         Ok(matches!(
             command.as_str(),
             "copy" | "cut" | "paste" | "inserttext" | "delete" | "selectall" | "undo" | "redo"
@@ -294,7 +294,7 @@ const DOCUMENT_METHODS: &[Method] = &[
     }),
     ("queryCommandEnabled", 1, |_, _, _| Ok(true.into())),
     ("queryCommandState", 1, |_, _, _| Ok(false.into())),
-    ("queryCommandValue", 1, |_, _, _| Ok(text(""))),
+    ("queryCommandValue", 1, |_, _, _| Ok(js_text(""))),
     ("startViewTransition", 1, |_, args, cx| {
         let update = arg(args, 0);
         if update.is_callable() {
@@ -305,7 +305,7 @@ const DOCUMENT_METHODS: &[Method] = &[
         for key in ["finished", "ready", "updateCallbackDone"] {
             super::set(&transition, key, done.clone(), cx)?;
         }
-        let skip = super::function(cx, "skipTransition", 0, |_, _, _| Ok(JsValue::undefined()));
+        let skip = function(cx, "skipTransition", 0, |_, _, _| Ok(JsValue::undefined()));
         super::set(&transition, "skipTransition", skip, cx)?;
         Ok(transition.into())
     }),
@@ -402,13 +402,13 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
                             .join(" ")
                     })
             });
-            Ok(text(&title.unwrap_or_else(|| {
+            Ok(js_text(&title.unwrap_or_else(|| {
                 shared(cx).borrow().title_fallback.clone()
             })))
         }),
         Some(|this, args, cx| {
             let doc = document_of(this, cx);
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| {
                 let found = dom
                     .descendants(doc)
@@ -443,36 +443,36 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
             cx.global_object().get(js_string!("location"), cx)
         }),
         Some(|_, args, cx| {
-            let href = arg_string(args, 0, cx)?;
+            let href = text_of(&arg(args, 0), cx)?;
             super::window::navigate(cx, &href, false)?;
             Ok(JsValue::undefined())
         }),
     ),
     (
         "URL",
-        Some(|_, _, cx| Ok(text(shared(cx).borrow().url.as_str()))),
+        Some(|_, _, cx| Ok(js_text(shared(cx).borrow().url.as_str()))),
         None,
     ),
     (
         "documentURI",
-        Some(|_, _, cx| Ok(text(shared(cx).borrow().url.as_str()))),
+        Some(|_, _, cx| Ok(js_text(shared(cx).borrow().url.as_str()))),
         None,
     ),
     (
         "domain",
-        Some(|_, _, cx| Ok(text(shared(cx).borrow().url.host_str().unwrap_or("")))),
+        Some(|_, _, cx| Ok(js_text(shared(cx).borrow().url.host_str().unwrap_or("")))),
         Some(|_, _, _| Ok(JsValue::undefined())),
     ),
-    ("referrer", Some(|_, _, _| Ok(text(""))), None),
+    ("referrer", Some(|_, _, _| Ok(js_text(""))), None),
     (
         "cookie",
         Some(|_, _, cx| {
             let global = cx.global_object();
             let jar = global.get(js_string!("__cookies"), cx)?;
-            Ok(if jar.is_undefined() { text("") } else { jar })
+            Ok(if jar.is_undefined() { js_text("") } else { jar })
         }),
         Some(|_, args, cx| {
-            let given = arg_string(args, 0, cx)?;
+            let given = text_of(&arg(args, 0), cx)?;
             let pair = given.split(';').next().unwrap_or("").trim().to_owned();
             let Some((name, _)) = pair.split_once('=') else {
                 return Ok(JsValue::undefined());
@@ -496,20 +496,25 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
             if !expired {
                 kept.push(pair);
             }
-            super::hidden(&global, js_string!("__cookies"), text(&kept.join("; ")), cx)?;
+            hidden(
+                &global,
+                js_string!("__cookies"),
+                js_text(&kept.join("; ")),
+                cx,
+            )?;
             Ok(JsValue::undefined())
         }),
     ),
     (
         "readyState",
-        Some(|_, _, cx| Ok(text(shared(cx).borrow().load.ready.name()))),
+        Some(|_, _, cx| Ok(js_text(shared(cx).borrow().load.ready.name()))),
         None,
     ),
     (
         "visibilityState",
         Some(|_, _, cx| {
             let hidden = shared(cx).borrow().hidden;
-            Ok(text(if hidden { "hidden" } else { "visible" }))
+            Ok(js_text(if hidden { "hidden" } else { "visible" }))
         }),
         None,
     ),
@@ -518,19 +523,27 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
         Some(|_, _, cx| Ok(shared(cx).borrow().hidden.into())),
         None,
     ),
-    ("compatMode", Some(|_, _, _| Ok(text("CSS1Compat"))), None),
-    ("characterSet", Some(|_, _, _| Ok(text("UTF-8"))), None),
-    ("charset", Some(|_, _, _| Ok(text("UTF-8"))), None),
-    ("inputEncoding", Some(|_, _, _| Ok(text("UTF-8"))), None),
-    ("contentType", Some(|_, _, _| Ok(text("text/html"))), None),
+    (
+        "compatMode",
+        Some(|_, _, _| Ok(js_text("CSS1Compat"))),
+        None,
+    ),
+    ("characterSet", Some(|_, _, _| Ok(js_text("UTF-8"))), None),
+    ("charset", Some(|_, _, _| Ok(js_text("UTF-8"))), None),
+    ("inputEncoding", Some(|_, _, _| Ok(js_text("UTF-8"))), None),
+    (
+        "contentType",
+        Some(|_, _, _| Ok(js_text("text/html"))),
+        None,
+    ),
     (
         "designMode",
-        Some(|_, _, _| Ok(text("off"))),
+        Some(|_, _, _| Ok(js_text("off"))),
         Some(|_, _, _| Ok(JsValue::undefined())),
     ),
     (
         "dir",
-        Some(|_, _, _| Ok(text(""))),
+        Some(|_, _, _| Ok(js_text(""))),
         Some(|_, _, _| Ok(JsValue::undefined())),
     ),
     (
@@ -666,8 +679,8 @@ fn tagged_collection(
 const DOM_PARSER_METHODS: &[Method] = &[
     // A document of its own, holding what `text` says: an HTML page, or an XML (an SVG's) root.
     ("parseFromString", 2, |_, args, cx| {
-        let markup = arg_string(args, 0, cx)?;
-        let kind = arg_string(args, 1, cx).unwrap_or_default();
+        let markup = text_of(&arg(args, 0), cx)?;
+        let kind = text_of(&arg(args, 1), cx).unwrap_or_default();
         let doc = with_dom(cx, |dom| {
             if kind == "text/html" {
                 let (doc, ..) = dom.create_html_document();
@@ -695,7 +708,7 @@ const DOM_PARSER_METHODS: &[Method] = &[
 
 const SERIALIZER_METHODS: &[Method] = &[("serializeToString", 1, |_, args, cx| {
     let id = node_of(&arg(args, 0))?;
-    Ok(text(&read_dom(cx, |dom| {
+    Ok(js_text(&read_dom(cx, |dom| {
         match dom.get(id).map(|n| &n.kind) {
             Some(NodeKind::Document | NodeKind::Fragment) => crate::html::inner(dom, id),
             Some(_) => crate::html::outer(dom, id),
@@ -740,7 +753,7 @@ const IMPLEMENTATION_METHODS: &[Method] = &[
         Ok(wrap(cx, doc))
     }),
     ("createDocumentType", 3, |_, args, cx| {
-        let name = arg_string(args, 0, cx)?;
+        let name = text_of(&arg(args, 0), cx)?;
         let id = with_dom(cx, |dom| dom.create_doctype(&name));
         Ok(wrap(cx, id))
     }),

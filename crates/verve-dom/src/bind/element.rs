@@ -16,13 +16,13 @@ use super::node::{
     with_dom, wrap, wrap_opt,
 };
 use super::{
-    Accessor, ClassSpec, Kind, Method, arg, arg_string, array, call_method, class, closure,
-    dom_error, extend_prototype, get, handle_of, illegal_constructor, native_instance, node_id,
-    node_of, opt_string, plain_object, set, string, text, type_error,
+    Accessor, ClassSpec, Kind, Method, call_method, class, dom_error, extend_prototype, handle_of,
+    illegal_constructor, native_instance, node_id, node_of, opt_string, plain_object, set, string,
 };
 use crate::dom::{Dom, NodeId, ShadowMode, camel_name, css_name};
 use crate::state::shared;
 use crate::{Align, Rect};
+use verve::native::{self, arg, closure, get, hidden, js_text, text_of, type_error};
 
 /// The class of an HTML element, by its tag.
 pub fn html_class(tag: &str) -> &'static str {
@@ -300,6 +300,7 @@ pub fn request_scroll(context: &mut Context, request: crate::ScrollRequest) {
         let fire = closure(
             context,
             "scroll",
+            0,
             |_, _, node: &JsValue, cx| {
                 let Some(id) = node_id(node) else {
                     return Ok(JsValue::undefined());
@@ -417,19 +418,20 @@ pub fn reflect(
         let getter = closure(
             context,
             &format!("get {property}"),
+            0,
             |this, _, r: &Reflected, cx| {
                 let id = node_of(this)?;
                 let name = r.0.to_std_string_escaped();
                 let value = read_dom(cx, |dom| dom.get_attr(id, &name));
                 Ok(match r.1 {
-                    0 => text(&value.unwrap_or_default()),
+                    0 => js_text(&value.unwrap_or_default()),
                     1 => value.is_some().into(),
                     2 => value
                         .and_then(|v| v.trim().parse::<i32>().ok())
                         .unwrap_or(r.2)
                         .into(),
-                    3 => text(&value.map_or(String::new(), |v| absolute_url(cx, v))),
-                    _ => text(
+                    3 => js_text(&value.map_or(String::new(), |v| absolute_url(cx, v))),
+                    _ => js_text(
                         &value
                             .map(|v| v.to_ascii_lowercase())
                             .filter(|v| !v.is_empty())
@@ -442,6 +444,7 @@ pub fn reflect(
         let setter = closure(
             context,
             &format!("set {property}"),
+            0,
             |this, args, r: &Reflected, cx| {
                 let id = node_of(this)?;
                 let name = r.0.to_std_string_escaped();
@@ -548,7 +551,7 @@ const CLASS_LIST_METHODS: &[Method] = &[
     }),
     ("contains", 1, |this, args, cx| {
         let id = list_node(this)?;
-        let class = arg_string(args, 0, cx)?;
+        let class = text_of(&arg(args, 0), cx)?;
         Ok(read_dom(cx, |dom| dom.get(id).is_some_and(|n| n.has_class(&class))).into())
     }),
     ("toggle", 2, |this, args, cx| {
@@ -575,8 +578,8 @@ const CLASS_LIST_METHODS: &[Method] = &[
     }),
     ("replace", 2, |this, args, cx| {
         let id = list_node(this)?;
-        let old = arg_string(args, 0, cx)?;
-        let fresh = arg_string(args, 1, cx)?;
+        let old = text_of(&arg(args, 0), cx)?;
+        let fresh = text_of(&arg(args, 1), cx)?;
         let replaced = with_dom(cx, |dom| {
             if !dom.get(id).is_some_and(|n| n.has_class(&old)) {
                 return false;
@@ -598,7 +601,7 @@ const CLASS_LIST_METHODS: &[Method] = &[
         Ok(read_dom(cx, |dom| {
             dom.get(id).and_then(|n| n.classes.get(index).cloned())
         })
-        .map_or(JsValue::null(), |c| text(&c)))
+        .map_or(JsValue::null(), |c| js_text(&c)))
     }),
     ("supports", 1, |_, _, _| Ok(true.into())),
     ("forEach", 1, |this, args, cx| {
@@ -611,14 +614,14 @@ const CLASS_LIST_METHODS: &[Method] = &[
                 cx,
                 &arg(args, 0),
                 &arg(args, 1),
-                &[text(class), index.into(), this.clone()],
+                &[js_text(class), index.into(), this.clone()],
             )?;
         }
         Ok(JsValue::undefined())
     }),
     ("toString", 0, |this, _, cx| {
         let id = list_node(this)?;
-        Ok(text(&read_dom(cx, |dom| {
+        Ok(js_text(&read_dom(cx, |dom| {
             dom.get(id).map(|n| n.classes.join(" ")).unwrap_or_default()
         })))
     }),
@@ -637,13 +640,13 @@ const CLASS_LIST_ACCESSORS: &[Accessor] = &[
         "value",
         Some(|this, _, cx| {
             let id = list_node(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 dom.get_attr(id, "class").unwrap_or_default()
             })))
         }),
         Some(|this, args, cx| {
             let id = list_node(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, "class", &value));
             Ok(JsValue::undefined())
         }),
@@ -664,7 +667,7 @@ fn class_list(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
                     return Ok(read_dom(cx, |dom| {
                         dom.get(id).and_then(|n| n.classes.get(index).cloned())
                     })
-                    .map_or(JsValue::undefined(), |c| text(&c)));
+                    .map_or(JsValue::undefined(), |c| js_text(&c)));
                 }
             }
             let value = match target.as_object() {
@@ -686,7 +689,7 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "tagName",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 crate::html::qualified_name(dom, id, true)
             })))
         }),
@@ -696,7 +699,7 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "localName",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 crate::html::qualified_name(dom, id, false)
             })))
         }),
@@ -708,7 +711,7 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
             let id = node_of(this)?;
             Ok(
                 read_dom(cx, |dom| dom.get(id).and_then(|n| n.namespace.uri()))
-                    .map_or(JsValue::null(), text),
+                    .map_or(JsValue::null(), js_text),
             )
         }),
         None,
@@ -718,13 +721,13 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "id",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 dom.get_attr(id, "id").unwrap_or_default()
             })))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, "id", &value));
             Ok(JsValue::undefined())
         }),
@@ -733,13 +736,13 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "className",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 dom.get_attr(id, "class").unwrap_or_default()
             })))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, "class", &value));
             Ok(JsValue::undefined())
         }),
@@ -752,7 +755,7 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, "class", &value));
             Ok(JsValue::undefined())
         }),
@@ -761,7 +764,7 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "slot",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 dom.get_attr(id, "slot").unwrap_or_default()
             })))
         }),
@@ -771,7 +774,7 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "innerHTML",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| crate::html::inner(dom, id))))
+            Ok(js_text(&read_dom(cx, |dom| crate::html::inner(dom, id))))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -784,11 +787,11 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
         "outerHTML",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| crate::html::outer(dom, id))))
+            Ok(js_text(&read_dom(cx, |dom| crate::html::outer(dom, id))))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let markup = arg_string(args, 0, cx)?;
+            let markup = text_of(&arg(args, 0), cx)?;
             let replaced = with_dom(cx, |dom| {
                 let parent = dom.parent(id)?;
                 let fragment = dom.create_fragment();
@@ -976,7 +979,7 @@ fn selector_list(
     context: &mut Context,
     method: &str,
 ) -> JsResult<crate::css::SelectorList> {
-    let selector = arg_string(args, 0, context)?;
+    let selector = text_of(&arg(args, 0), context)?;
     crate::css::SelectorList::parse(&selector).map_err(|error| {
         dom_error(
             context,
@@ -989,13 +992,13 @@ fn selector_list(
 const ELEMENT_METHODS: &[Method] = &[
     ("getAttribute", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let name = arg_string(args, 0, cx)?;
-        Ok(read_dom(cx, |dom| dom.get_attr(id, &name)).map_or(JsValue::null(), |v| text(&v)))
+        let name = text_of(&arg(args, 0), cx)?;
+        Ok(read_dom(cx, |dom| dom.get_attr(id, &name)).map_or(JsValue::null(), |v| js_text(&v)))
     }),
     ("setAttribute", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let name = arg_string(args, 0, cx)?;
-        let value = arg_string(args, 1, cx)?;
+        let name = text_of(&arg(args, 0), cx)?;
+        let value = text_of(&arg(args, 1), cx)?;
         if name.is_empty()
             || name.contains(|c: char| {
                 c.is_whitespace()
@@ -1020,18 +1023,18 @@ const ELEMENT_METHODS: &[Method] = &[
     }),
     ("removeAttribute", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let name = arg_string(args, 0, cx)?;
+        let name = text_of(&arg(args, 0), cx)?;
         with_dom(cx, |dom| dom.remove_attr(id, &name));
         Ok(JsValue::undefined())
     }),
     ("hasAttribute", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let name = arg_string(args, 0, cx)?;
+        let name = text_of(&arg(args, 0), cx)?;
         Ok(read_dom(cx, |dom| dom.get_attr(id, &name).is_some()).into())
     }),
     ("toggleAttribute", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let name = arg_string(args, 0, cx)?;
+        let name = text_of(&arg(args, 0), cx)?;
         let force = arg(args, 1);
         let on = with_dom(cx, |dom| {
             let has = dom.get_attr(id, &name).is_some();
@@ -1076,7 +1079,7 @@ const ELEMENT_METHODS: &[Method] = &[
     }),
     ("insertAdjacentElement", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let place = arg_string(args, 0, cx)?;
+        let place = text_of(&arg(args, 0), cx)?;
         let node = arg(args, 1);
         let child = super::node_arg(args, 1, "insertAdjacentElement", "Element")?;
         let placed = insert_adjacent(cx, id, &place, child)?;
@@ -1084,16 +1087,16 @@ const ELEMENT_METHODS: &[Method] = &[
     }),
     ("insertAdjacentText", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let place = arg_string(args, 0, cx)?;
-        let content = arg_string(args, 1, cx)?;
+        let place = text_of(&arg(args, 0), cx)?;
+        let content = text_of(&arg(args, 1), cx)?;
         let child = with_dom(cx, |dom| dom.create_text(&content));
         insert_adjacent(cx, id, &place, child)?;
         Ok(JsValue::undefined())
     }),
     ("insertAdjacentHTML", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let place = arg_string(args, 0, cx)?;
-        let markup = arg_string(args, 1, cx)?;
+        let place = text_of(&arg(args, 0), cx)?;
+        let markup = text_of(&arg(args, 1), cx)?;
         let fragment = with_dom(cx, |dom| {
             let fragment = dom.create_fragment();
             crate::html::parse_into(dom, fragment, &markup);
@@ -1116,7 +1119,7 @@ const ELEMENT_METHODS: &[Method] = &[
             .filter(|rect| *rect != Rect::default())
             .map(|rect| rect_object(cx, rect))
             .collect::<JsResult<_>>()?;
-        Ok(array(items, cx))
+        Ok(native::array(cx, items))
     }),
     ("scrollIntoView", 1, |this, args, cx| {
         let node = node_of(this)?;
@@ -1207,7 +1210,7 @@ fn style_node(this: &JsValue) -> JsResult<NodeId> {
 const STYLE_METHODS: &[Method] = &[
     ("setProperty", 3, |this, args, cx| {
         let id = style_node(this)?;
-        let name = arg_string(args, 0, cx)?;
+        let name = text_of(&arg(args, 0), cx)?;
         let name = if name.starts_with("--") {
             name
         } else {
@@ -1223,8 +1226,8 @@ const STYLE_METHODS: &[Method] = &[
     }),
     ("getPropertyValue", 1, |this, args, cx| {
         let id = style_node(this)?;
-        let name = arg_string(args, 0, cx)?;
-        Ok(text(&read_dom(cx, |dom| {
+        let name = text_of(&arg(args, 0), cx)?;
+        Ok(js_text(&read_dom(cx, |dom| {
             dom.get(id)
                 .and_then(|n| n.style_value(&name))
                 .unwrap_or("")
@@ -1233,15 +1236,15 @@ const STYLE_METHODS: &[Method] = &[
     }),
     ("getPropertyPriority", 1, |this, args, cx| {
         let id = style_node(this)?;
-        let name = arg_string(args, 0, cx)?;
+        let name = text_of(&arg(args, 0), cx)?;
         let important = read_dom(cx, |dom| {
             dom.get(id).is_some_and(|n| n.important.contains(&name))
         });
-        Ok(text(if important { "important" } else { "" }))
+        Ok(js_text(if important { "important" } else { "" }))
     }),
     ("removeProperty", 1, |this, args, cx| {
         let id = style_node(this)?;
-        let name = arg_string(args, 0, cx)?;
+        let name = text_of(&arg(args, 0), cx)?;
         let old = read_dom(cx, |dom| {
             dom.get(id)
                 .and_then(|n| n.style_value(&name))
@@ -1249,12 +1252,12 @@ const STYLE_METHODS: &[Method] = &[
                 .to_owned()
         });
         with_dom(cx, |dom| dom.set_style(id, &name, ""));
-        Ok(text(&old))
+        Ok(js_text(&old))
     }),
     ("item", 1, |this, args, cx| {
         let id = style_node(this)?;
         let at = arg(args, 0).to_number(cx)? as usize;
-        Ok(text(&read_dom(cx, |dom| {
+        Ok(js_text(&read_dom(cx, |dom| {
             dom.get(id)
                 .and_then(|n| n.style.get(at).map(|(k, _)| k.clone()))
                 .unwrap_or_default()
@@ -1290,7 +1293,7 @@ pub fn style_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
             }
             match name.as_str() {
                 "cssText" => {
-                    return Ok(text(&read_dom(cx, |dom| {
+                    return Ok(js_text(&read_dom(cx, |dom| {
                         dom.get_attr(id, "style").unwrap_or_default()
                     })));
                 }
@@ -1305,14 +1308,14 @@ pub fn style_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
                     dom.get(id)
                         .and_then(|n| n.style.get(index).map(|(k, _)| k.clone()))
                 })
-                .map_or(JsValue::undefined(), |k| text(&k)));
+                .map_or(JsValue::undefined(), |k| js_text(&k)));
             }
             let property = if name.contains('-') {
                 name
             } else {
                 css_name(&name)
             };
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 dom.get(id)
                     .and_then(|n| n.style_value(&property))
                     .unwrap_or("")
@@ -1373,7 +1376,7 @@ fn dataset_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
             let id = handle_of(&target, Kind::Dataset).unwrap_or_default();
             let attr = format!("data-{}", css_name(&name.to_std_string_escaped()));
             Ok(read_dom(cx, |dom| dom.get_attr(id, &attr))
-                .map_or(JsValue::undefined(), |v| text(&v)))
+                .map_or(JsValue::undefined(), |v| js_text(&v)))
         })
         .set(|_, args, cx| {
             let target = arg(args, 0);
@@ -1382,7 +1385,7 @@ fn dataset_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
             };
             let id = handle_of(&target, Kind::Dataset).unwrap_or_default();
             let attr = format!("data-{}", css_name(&name.to_std_string_escaped()));
-            let value = arg_string(args, 2, cx)?;
+            let value = text_of(&arg(args, 2), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, &attr, &value));
             Ok(true.into())
         })
@@ -1412,10 +1415,10 @@ fn dataset_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
                 dom.attributes(id)
                     .into_iter()
                     .filter_map(|(k, _)| k.strip_prefix("data-").map(camel_name))
-                    .map(|k| text(&k))
+                    .map(|k| js_text(&k))
                     .collect()
             });
-            Ok(array(names, cx))
+            Ok(native::array(cx, names))
         })
         .get_own_property_descriptor(|_, args, cx| {
             let target = arg(args, 0);
@@ -1427,7 +1430,7 @@ fn dataset_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
             match read_dom(cx, |dom| dom.get_attr(id, &attr)) {
                 Some(value) => {
                     let descriptor = plain_object(cx);
-                    set(&descriptor, "value", text(&value), cx)?;
+                    set(&descriptor, "value", js_text(&value), cx)?;
                     set(&descriptor, "writable", true, cx)?;
                     set(&descriptor, "enumerable", true, cx)?;
                     set(&descriptor, "configurable", true, cx)?;
@@ -1450,7 +1453,7 @@ const STYLED_ACCESSORS: &[Accessor] = &[
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, "style", &value));
             Ok(JsValue::undefined())
         }),
@@ -1492,7 +1495,7 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
         "innerText",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&super::computed::rendered_text(cx, id)))
+            Ok(js_text(&super::computed::rendered_text(cx, id)))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -1505,7 +1508,7 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
         "outerText",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&super::computed::rendered_text(cx, id)))
+            Ok(js_text(&super::computed::rendered_text(cx, id)))
         }),
         None,
     ),
@@ -1558,7 +1561,7 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
         "contentEditable",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 match dom.get_attr(id, "contenteditable").as_deref() {
                     Some("" | "true") => "true".to_owned(),
                     Some("false") => "false".to_owned(),
@@ -1569,7 +1572,7 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?.to_ascii_lowercase();
+            let value = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
             with_dom(cx, |dom| {
                 if value == "inherit" {
                     dom.remove_attr(id, "contenteditable")
@@ -1710,7 +1713,7 @@ const FIELD_ACCESSORS: &[Accessor] = &[
         "value",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| dom.value(id))))
+            Ok(js_text(&read_dom(cx, |dom| dom.value(id))))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
@@ -1734,7 +1737,7 @@ const FIELD_ACCESSORS: &[Accessor] = &[
         "defaultValue",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 if dom.get(id).and_then(|n| n.tag()) == Some("textarea") {
                     dom.text_content(id)
                 } else {
@@ -1744,7 +1747,7 @@ const FIELD_ACCESSORS: &[Accessor] = &[
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| {
                 if dom.get(id).and_then(|n| n.tag()) == Some("textarea") {
                     dom.set_text(id, &value)
@@ -1779,7 +1782,7 @@ const FIELD_ACCESSORS: &[Accessor] = &[
         "selectionDirection",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(read_dom(cx, |dom| {
+            Ok(js_text(read_dom(cx, |dom| {
                 if dom
                     .get(id)
                     .and_then(|n| n.draft.as_ref())
@@ -1804,7 +1807,7 @@ const FIELD_ACCESSORS: &[Accessor] = &[
     ("form", Some(|this, _, cx| form_of(this, cx)), None),
     ("labels", Some(|this, _, cx| labels_of(this, cx)), None),
     ("validity", Some(|_, _, cx| validity(cx)), None),
-    ("validationMessage", Some(|_, _, _| Ok(text(""))), None),
+    ("validationMessage", Some(|_, _, _| Ok(js_text(""))), None),
     ("willValidate", Some(|_, _, _| Ok(true.into())), None),
 ];
 
@@ -1829,7 +1832,7 @@ const FIELD_METHODS: &[Method] = &[
     }),
     ("setRangeText", 4, |this, args, cx| {
         let id = node_of(this)?;
-        let replacement = arg_string(args, 0, cx)?;
+        let replacement = text_of(&arg(args, 0), cx)?;
         let (start, end) = (arg(args, 1), arg(args, 2));
         with_dom(cx, |dom| {
             ensure_draft(dom, id);
@@ -1949,7 +1952,7 @@ const INPUT_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| get(this, "__indeterminate", cx).map(|v| v.to_boolean().into())),
         Some(|this, args, cx| {
             if let Some(object) = this.as_object() {
-                super::hidden(
+                hidden(
                     &object,
                     js_string!("__indeterminate"),
                     arg(args, 0).to_boolean(),
@@ -1963,11 +1966,11 @@ const INPUT_ACCESSORS: &[Accessor] = &[
         "type",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| input_type(dom, id))))
+            Ok(js_text(&read_dom(cx, |dom| input_type(dom, id))))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, "type", &value));
             Ok(JsValue::undefined())
         }),
@@ -1999,7 +2002,7 @@ const INPUT_ACCESSORS: &[Accessor] = &[
     ),
     (
         "files",
-        Some(|_, _, cx| Ok(array(Vec::new(), cx))),
+        Some(|_, _, cx| Ok(native::array(cx, Vec::new()))),
         Some(|_, _, _| Ok(JsValue::undefined())),
     ),
     (
@@ -2060,7 +2063,7 @@ const INPUT_REFLECTED: &[(&str, &str, Reflect)] = &[
     ("height", "height", Reflect::Number(0)),
 ];
 
-const TEXTAREA_ACCESSORS: &[Accessor] = &[("type", Some(|_, _, _| Ok(text("textarea"))), None)];
+const TEXTAREA_ACCESSORS: &[Accessor] = &[("type", Some(|_, _, _| Ok(js_text("textarea"))), None)];
 
 const TEXTAREA_REFLECTED: &[(&str, &str, Reflect)] = &[
     ("name", "name", Reflect::Text),
@@ -2134,7 +2137,7 @@ const SELECT_ACCESSORS: &[Accessor] = &[
         "value",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 if is_multiple(dom, id) {
                     dom.options(id)
                         .into_iter()
@@ -2148,7 +2151,7 @@ const SELECT_ACCESSORS: &[Accessor] = &[
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| {
                 if is_multiple(dom, id) {
                     for option in dom.options(id) {
@@ -2226,7 +2229,7 @@ const SELECT_ACCESSORS: &[Accessor] = &[
         "type",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(if read_dom(cx, |dom| is_multiple(dom, id)) {
+            Ok(js_text(if read_dom(cx, |dom| is_multiple(dom, id)) {
                 "select-multiple"
             } else {
                 "select-one"
@@ -2295,11 +2298,11 @@ const OPTION_ACCESSORS: &[Accessor] = &[
         "value",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| dom.option_value(id))))
+            Ok(js_text(&read_dom(cx, |dom| dom.option_value(id))))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, "value", &value));
             Ok(JsValue::undefined())
         }),
@@ -2308,7 +2311,7 @@ const OPTION_ACCESSORS: &[Accessor] = &[
         "text",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 dom.text_content(id)
                     .split_whitespace()
                     .collect::<Vec<_>>()
@@ -2317,7 +2320,7 @@ const OPTION_ACCESSORS: &[Accessor] = &[
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_text(id, &value));
             Ok(JsValue::undefined())
         }),
@@ -2326,14 +2329,14 @@ const OPTION_ACCESSORS: &[Accessor] = &[
         "label",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 dom.get_attr(id, "label")
                     .unwrap_or_else(|| dom.text_content(id).trim().to_owned())
             })))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, "label", &value));
             Ok(JsValue::undefined())
         }),
@@ -2379,7 +2382,7 @@ const BUTTON_ACCESSORS: &[Accessor] = &[
         "type",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 match dom
                     .get_attr(id, "type")
                     .map(|t| t.to_ascii_lowercase())
@@ -2394,7 +2397,7 @@ const BUTTON_ACCESSORS: &[Accessor] = &[
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, "type", &value));
             Ok(JsValue::undefined())
         }),
@@ -2551,7 +2554,7 @@ fn set_anchor_part(
     part: fn(&mut url::Url, &str),
 ) -> JsResult<JsValue> {
     let id = node_of(this)?;
-    let value = arg_string(args, 0, context)?;
+    let value = text_of(&arg(args, 0), context)?;
     if let Some(mut url) = anchor_url(this, context) {
         part(&mut url, &value);
         with_dom(context, |dom| dom.set_attr(id, "href", url.as_str()));
@@ -2565,7 +2568,7 @@ macro_rules! url_part {
             $name,
             Some(|this, _, cx| {
                 let part: fn(&url::Url) -> String = $get;
-                Ok(text(
+                Ok(js_text(
                     &anchor_url(this, cx).map(|u| part(&u)).unwrap_or_default(),
                 ))
             }),
@@ -2612,17 +2615,17 @@ const ANCHOR_ACCESSORS: &[Accessor] = &[
     (
         "href",
         Some(|this, _, cx| match anchor_url(this, cx) {
-            Some(url) => Ok(text(url.as_str())),
+            Some(url) => Ok(js_text(url.as_str())),
             None => {
                 let id = node_of(this)?;
-                Ok(text(
+                Ok(js_text(
                     &read_dom(cx, |dom| dom.get_attr(id, "href")).unwrap_or_default(),
                 ))
             }
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_attr(id, "href", &value));
             Ok(JsValue::undefined())
         }),
@@ -2643,7 +2646,7 @@ const ANCHOR_ACCESSORS: &[Accessor] = &[
     (
         "origin",
         Some(|this, _, cx| {
-            Ok(text(
+            Ok(js_text(
                 &anchor_url(this, cx)
                     .map(|u| u.origin().ascii_serialization())
                     .unwrap_or_default(),
@@ -2655,11 +2658,11 @@ const ANCHOR_ACCESSORS: &[Accessor] = &[
         "text",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| dom.text_content(id))))
+            Ok(js_text(&read_dom(cx, |dom| dom.text_content(id))))
         }),
         Some(|this, args, cx| {
             let id = node_of(this)?;
-            let value = arg_string(args, 0, cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| dom.set_text(id, &value));
             Ok(JsValue::undefined())
         }),
@@ -2667,7 +2670,7 @@ const ANCHOR_ACCESSORS: &[Accessor] = &[
 ];
 
 const ANCHOR_METHODS: &[Method] = &[("toString", 0, |this, _, cx| {
-    Ok(text(
+    Ok(js_text(
         &anchor_url(this, cx)
             .map(|u| u.to_string())
             .unwrap_or_default(),
@@ -2715,7 +2718,7 @@ const DIALOG_METHODS: &[Method] = &[
         if let Some(value) = opt_string(args, 0, cx)?
             && let Some(object) = this.as_object()
         {
-            super::hidden(&object, js_string!("__returnValue"), text(&value), cx)?;
+            hidden(&object, js_string!("__returnValue"), js_text(&value), cx)?;
         }
         with_dom(cx, |dom| dom.remove_attr(id, "open"));
         if was_open {
@@ -2733,15 +2736,15 @@ const DIALOG_ACCESSORS: &[Accessor] = &[(
     Some(|this, _, cx| {
         let value = get(this, "__returnValue", cx)?;
         Ok(if value.is_undefined() {
-            text("")
+            js_text("")
         } else {
             value
         })
     }),
     Some(|this, args, cx| {
         if let Some(object) = this.as_object() {
-            let value = arg_string(args, 0, cx)?;
-            super::hidden(&object, js_string!("__returnValue"), text(&value), cx)?;
+            let value = text_of(&arg(args, 0), cx)?;
+            hidden(&object, js_string!("__returnValue"), js_text(&value), cx)?;
         }
         Ok(JsValue::undefined())
     }),
@@ -3589,13 +3592,13 @@ pub fn install(context: &mut Context) -> JsResult<()> {
                 Some(
                     (|this, _, cx| {
                         let id = node_of(this)?;
-                        Ok(text(&read_dom(cx, |dom| dom.text_content(id))))
+                        Ok(js_text(&read_dom(cx, |dom| dom.text_content(id))))
                     }) as boa_engine::native_function::NativeFunctionPointer,
                 ),
                 Some(
                     (|this, args, cx| {
                         let id = node_of(this)?;
-                        let value = arg_string(args, 0, cx)?;
+                        let value = text_of(&arg(args, 0), cx)?;
                         with_dom(cx, |dom| dom.set_text(id, &value));
                         Ok(JsValue::undefined())
                     }) as boa_engine::native_function::NativeFunctionPointer,
@@ -3609,13 +3612,13 @@ pub fn install(context: &mut Context) -> JsResult<()> {
                 Some(
                     (|this, _, cx| {
                         let id = node_of(this)?;
-                        Ok(text(&read_dom(cx, |dom| dom.text_content(id))))
+                        Ok(js_text(&read_dom(cx, |dom| dom.text_content(id))))
                     }) as boa_engine::native_function::NativeFunctionPointer,
                 ),
                 Some(
                     (|this, args, cx| {
                         let id = node_of(this)?;
-                        let value = arg_string(args, 0, cx)?;
+                        let value = text_of(&arg(args, 0), cx)?;
                         with_dom(cx, |dom| dom.set_text(id, &value));
                         Ok(JsValue::undefined())
                     }) as boa_engine::native_function::NativeFunctionPointer,
@@ -3704,13 +3707,14 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         let values = closure(
             context,
             "values",
+            0,
             |this, _, _: &(), cx| {
                 let id = list_node(this)?;
                 let classes = read_dom(cx, |dom| {
                     dom.get(id).map(|n| n.classes.clone()).unwrap_or_default()
                 });
-                let items: Vec<JsValue> = classes.iter().map(|c| text(c)).collect();
-                let list = array(items, cx);
+                let items: Vec<JsValue> = classes.iter().map(|c| js_text(c)).collect();
+                let list = native::array(cx, items);
                 call_method(&list, "values", &[], cx)
             },
             (),
