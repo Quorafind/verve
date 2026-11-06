@@ -158,6 +158,13 @@ fn close(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<Js
     Ok(JsValue::undefined())
 }
 
+/// `forcefullyCrashRenderer()`: the page's process ends, and a load makes it again.
+fn force_crash(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let record = record_of(this, context)?;
+    shared(context).hub.kill_renderer(record.page.contents);
+    Ok(JsValue::undefined())
+}
+
 fn reload(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let record = record_of(this, context)?;
     navigation::reload(context, &record)?;
@@ -273,6 +280,7 @@ const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("stop", 0, |this, _, cx| {
         read(this, cx, |_| JsValue::undefined())
     }),
+    ("forcefullyCrashRenderer", 0, force_crash),
     ("close", 0, close),
     ("focus", 0, focus),
     ("getUserAgent", 0, user_agent),

@@ -16,11 +16,11 @@ use verve::native::{self, js_text};
 
 use super::navigation::{emit_navigation, settle_load};
 use super::page_state::Intent;
-use super::windows::WindowRecord;
-use super::{contents_ipc, define, shared, window_events};
+use super::windows::{Closing, WindowRecord};
+use super::{contents_ipc, define, shared, window_events, window_lifecycle};
 use crate::ids::ContentsId;
 use crate::ipc::{self, MAIN_FRAME};
-use crate::msg::PageEvent;
+use crate::msg::{GoneReason, PageEvent};
 
 /// The status Electron reports for a document it committed: 200 `OK`, for files and data too.
 const OK: (i32, &str) = (200, "OK");
@@ -181,5 +181,73 @@ impl Page<'_> {
         }
         settle_load(context, self.record, Err((code, description, url)));
         self.finished(context, true);
+    }
+}
+
+/// Page `contents`' process ended: `render-process-gone`, the scripts it was asked fail, and a
+/// window that was closing and waited for the page closes.
+pub(crate) fn render_process_gone(
+    context: &mut Context,
+    contents: ContentsId,
+    reason: &GoneReason,
+) {
+    let state = shared(context);
+    if let Some(record) = state.showing(contents) {
+        record.page_state.crashed.set(true);
+        record.page_state.unresponsive.set(false);
+        record.page_state.loading.set(false);
+        state.calls.fail(context, contents);
+        let (name, exit_code) = gone_reason(reason);
+        let details = define::record(
+            context,
+            &[("reason", js_text(name)), ("exitCode", exit_code.into())],
+        );
+        if let (Ok(object), Ok(details)) =
+            (contents_ipc::contents_object(context, contents), details)
+        {
+            define::emit_reporting(context, &object, "render-process-gone", &[details.into()]);
+        }
+    }
+    window_lifecycle::page_gone(context, contents);
+}
+
+/// The name Electron gives a reason, and the exit code it reports (Electron 39.8.10 says `crashed`
+/// with `2` for `forcefullyCrashRenderer()`).
+fn gone_reason(reason: &GoneReason) -> (&'static str, i32) {
+    match reason {
+        GoneReason::CleanExit => ("clean-exit", 0),
+        GoneReason::AbnormalExit => ("abnormal-exit", 1),
+        GoneReason::Killed => ("killed", 1),
+        GoneReason::Crashed => ("crashed", 2),
+        GoneReason::OutOfMemory => ("oom", 2),
+        GoneReason::LaunchFailed => ("launch-failed", 2),
+        GoneReason::IntegrityFailure => ("integrity-failure", 2),
+    }
+}
+
+/// How long a page may leave input or a close unanswered, while it runs one script, before the main
+/// process calls it unresponsive.
+pub(crate) const UNRESPONSIVE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Asks every page whether it still answers: one that has had input (or a close) waiting for
+/// [`UNRESPONSIVE_AFTER`] while running one script is `unresponsive` (its `webContents` says so, then
+/// its window), and `responsive` once it takes it. A long script nobody waits on is no hang, as in
+/// Chromium.
+pub(crate) fn heartbeat(context: &mut Context) {
+    let state = shared(context);
+    for record in state.windows.newest_first() {
+        let busy = state.hub.renderer_busy_for(record.page.contents);
+        let input = state.hub.input_waiting_for(record.page.contents);
+        let waited = input.is_some_and(|waited| waited >= UNRESPONSIVE_AFTER)
+            || record.closing.get() != Closing::Idle;
+        let stuck = waited && busy.is_some_and(|busy| busy >= UNRESPONSIVE_AFTER);
+        if record.page_state.unresponsive.replace(stuck) == stuck {
+            continue;
+        }
+        let name = if stuck { "unresponsive" } else { "responsive" };
+        if let Ok(object) = contents_ipc::contents_object(context, record.page.contents) {
+            define::emit_reporting(context, &object, name, &[]);
+        }
+        define::emit_reporting(context, &record.object, name, &[]);
     }
 }

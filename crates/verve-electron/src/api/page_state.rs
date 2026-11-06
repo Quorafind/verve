@@ -142,6 +142,8 @@ pub(crate) struct PageState {
     pub zoom_factor: Cell<Option<f64>>,
     /// The page's process ended and no load has made a new one.
     pub crashed: Cell<bool>,
+    /// The page has been busy longer than the heartbeat allows.
+    pub unresponsive: Cell<bool>,
     /// `setWindowOpenHandler`'s function.
     pub open_handler: RefCell<Option<JsObject>>,
     /// The page that opened this one with `window.open`, and whether this one stays when it goes.

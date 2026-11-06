@@ -36,6 +36,8 @@ pub struct MainGuest {
     failed: Option<i32>,
     /// When the collector next looks for `sendSync` events let go without an answer.
     sweep_at: Option<Instant>,
+    /// When the pages are next asked whether they are still answering.
+    beat_at: Instant,
 }
 
 impl MainGuest {
@@ -58,6 +60,7 @@ impl MainGuest {
             api,
             failed: None,
             sweep_at: None,
+            beat_at: Instant::now() + HEARTBEAT,
         }
     }
 
@@ -247,11 +250,21 @@ impl MainGuest {
             }
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
-                window_lifecycle::page_gone(context, contents);
+                page_events::render_process_gone(context, contents, &reason);
             }
             _ => return,
         }
         self.runtime.run_microtasks();
+    }
+
+    /// Asks the pages whether they still answer, once a [`HEARTBEAT`]; whether it did.
+    fn take_beat(&mut self) -> bool {
+        if Instant::now() < self.beat_at {
+            return false;
+        }
+        self.beat_at = Instant::now() + HEARTBEAT;
+        page_events::heartbeat(self.runtime.context());
+        true
     }
 
     /// A window `destroy()` was called on is gone: its `'closed'` is heard, after the turn of the
@@ -267,6 +280,10 @@ impl MainGuest {
         self.runtime.run_microtasks();
     }
 }
+
+/// How often the pages are asked whether they still answer; one that has been busy for
+/// [`page_events::UNRESPONSIVE_AFTER`] is `'unresponsive'`.
+const HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// The `code` of a thrown error, as `err.code` reads it.
 fn error_code(context: &mut boa_engine::Context, error: &boa_engine::JsError) -> Option<String> {
@@ -331,9 +348,10 @@ impl Guest for MainGuest {
         if self.sweep_at.is_some() {
             self.sweep_at = api::ipc_main::sweep(self.runtime.context());
         }
+        let beat = self.take_beat();
         let closed = window_lifecycle::close_overdue(self.runtime.context());
         let pumped = api::message_port_main::pump(self.runtime.context());
-        if closed || pumped {
+        if beat || closed || pumped {
             self.runtime.run_microtasks();
         }
         if let Some(code) = self.failed {
@@ -350,7 +368,12 @@ impl Guest for MainGuest {
             .windows
             .next_overdue()
             .map(|at| at.saturating_duration_since(Instant::now()));
-        [beat::next_due(&self.runtime), sweep, closing]
+        let pages = self
+            .api
+            .windows
+            .any_live()
+            .then(|| self.beat_at.saturating_duration_since(Instant::now()));
+        [beat::next_due(&self.runtime), sweep, closing, pages]
             .into_iter()
             .flatten()
             .min()

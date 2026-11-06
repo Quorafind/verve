@@ -99,6 +99,9 @@ struct RendererSlot {
     gone: AtomicBool,
     /// Whether the shell hands the page's keys to the main process first (`before-input-event`).
     intercept_keys: AtomicBool,
+    /// When each input sent to the page and not yet taken by it was sent, oldest first. Emptied when
+    /// the isolate goes: the jobs it had queued go with it.
+    input: Mutex<std::collections::VecDeque<std::time::Instant>>,
 }
 
 impl RendererSlot {
@@ -357,6 +360,7 @@ impl Hub {
             gone: AtomicBool::new(false),
             loaded: AtomicBool::new(false),
             intercept_keys: AtomicBool::new(false),
+            input: Mutex::new(std::collections::VecDeque::new()),
             generation: Arc::new(AtomicU64::new(0)),
         });
         // Registered first: what the page says while its isolate is made is heard.
@@ -416,6 +420,7 @@ impl Hub {
             return false;
         }
         stop(&slot);
+        lock(&slot.input).clear();
         // Nothing the old document said from here on is heard, nor what is said for it.
         slot.generation.fetch_add(1, Ordering::SeqCst);
         *lock(&slot.view) = None;
@@ -578,7 +583,26 @@ impl Hub {
             }
             other => other,
         };
-        self.on_renderer(contents, move |guest| guest.input(msg));
+        // Only what a person does is waited for: frames and layouts queued behind a hang are no sign
+        // the page is being asked anything.
+        let by_person = matches!(
+            msg,
+            ToRendererInput::Pointer { .. }
+                | ToRendererInput::Wheel { .. }
+                | ToRendererInput::Key { .. }
+                | ToRendererInput::Text(_)
+        );
+        let slot = lock(&self.renderers).get(&contents).cloned();
+        let slot = slot.filter(|_| by_person && self.has_renderer(contents));
+        if let Some(slot) = &slot {
+            lock(&slot.input).push_back(std::time::Instant::now());
+        }
+        self.on_renderer(contents, move |guest| {
+            guest.input(msg);
+            if let Some(slot) = slot {
+                lock(&slot.input).pop_front();
+            }
+        });
     }
 
     /// The displays the shell last reported.
@@ -642,6 +666,14 @@ impl Hub {
         slot.is_some_and(|slot| !slot.gone.load(Ordering::SeqCst) && lock(&slot.isolate).is_some())
     }
 
+    /// How long the oldest input sent to page `contents` has waited for the page to take it, if
+    /// any has: with a script that has run as long, the page is not answering (Chromium's hang rule).
+    pub fn input_waiting_for(&self, contents: ContentsId) -> Option<Duration> {
+        let slot = lock(&self.renderers).get(&contents).cloned()?;
+        let since = lock(&slot.input).front().copied();
+        since.map(|since| since.elapsed())
+    }
+
     /// How long the script page `contents` runs has been running, when it runs one: what the main
     /// process's heartbeat reads for `'unresponsive'`.
     pub fn renderer_busy_for(&self, contents: ContentsId) -> Option<Duration> {
@@ -659,6 +691,7 @@ impl Hub {
         slot.loaded.store(true, Ordering::SeqCst);
         if !slot.gone.swap(true, Ordering::SeqCst) {
             stop(&slot);
+            lock(&slot.input).clear();
             let generation = slot.generation.load(Ordering::SeqCst);
             let reason = GoneReason::Crashed;
             self.from_renderer(contents, generation, FromRenderer::Gone { reason });

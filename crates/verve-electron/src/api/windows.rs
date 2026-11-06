@@ -150,6 +150,14 @@ impl Windows {
         records.values().filter(due).cloned().collect()
     }
 
+    /// Whether any window can still be used by a script.
+    pub(crate) fn any_live(&self) -> bool {
+        self.records
+            .borrow()
+            .values()
+            .any(|record| !record.dead.get())
+    }
+
     /// The windows `window.open` made from page `contents`, which go with it unless they outlive it.
     pub(crate) fn opened_by(&self, contents: ContentsId) -> Vec<Rc<WindowRecord>> {
         let records = self.records.borrow();

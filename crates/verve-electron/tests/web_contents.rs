@@ -10,7 +10,9 @@
 
 mod support;
 
-use support::{App, TIMEOUT, run, run_main, run_with};
+use std::time::Duration;
+
+use support::{App, TIMEOUT, run, run_main, run_with, run_within};
 use verve_dom::Key;
 use verve_electron::msg::FromShell;
 
@@ -418,6 +420,56 @@ fn window_open_follows_the_handler_and_makes_a_child_window() {
 }
 
 #[test]
+fn a_crashed_page_says_so_fails_its_scripts_and_comes_back_on_reload() {
+    // Electron 39.8.10: forcefullyCrashRenderer() says render-process-gone with reason 'crashed'
+    // and exitCode 2; isCrashed() is true until the page loads again.
+    let lines = run(r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await load(win, '<p>c</p>');
+    wc.on('render-process-gone', (e, details) => log('gone', details));
+    wc.forcefullyCrashRenderer();
+    await sleep(200);
+    log('crashed', wc.isCrashed(), BrowserWindow.getAllWindows().length);
+    log(await wc.executeJavaScript('1').catch((e) => 'rejected'));
+    await new Promise((resolve) => { wc.once('did-finish-load', resolve); wc.reload(); });
+    log('back', wc.isCrashed(), await wc.executeJavaScript('1 + 1'));
+    "#);
+    assert_eq!(lines[0], "gone {\"reason\":\"crashed\",\"exitCode\":2}");
+    assert_eq!(lines[1], "crashed true 1");
+    assert_eq!(lines[2], "rejected");
+    assert_eq!(lines[3], "back false 2");
+}
+
+#[test]
+fn a_page_stuck_in_a_script_is_unresponsive() {
+    // A page running one script for more than 5 s is 'unresponsive', on its webContents and then
+    // its window (the main process asks once a second); ending it says render-process-gone.
+    let lines = run_within(
+        r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await load(win, '<p>u</p>');
+    wc.on('unresponsive', () => log('wc unresponsive'));
+    win.on('unresponsive', () => log('window unresponsive'));
+    wc.executeJavaScript('for (;;) {}').catch(() => {});
+    wc.sendInputEvent({ type: 'mouseMove', x: 1, y: 1 });
+    await new Promise((resolve) => wc.once('unresponsive', resolve));
+    await sleep(50);
+    wc.on('render-process-gone', (e, d) => log('gone', d.reason));
+    wc.forcefullyCrashRenderer();
+    await sleep(200);
+    "#,
+        &[],
+        Duration::from_secs(40),
+    );
+    assert_eq!(
+        lines,
+        ["wc unresponsive", "window unresponsive", "gone crashed"]
+    );
+}
+
+#[test]
 fn before_input_event_can_keep_a_key_from_the_page() {
     // While a `before-input-event` listener exists the Hub says the shell is to hand the page's keys
     // to the main process (`intercepts_keys`); the listener gets { type, key, code, … }, and a key it
@@ -558,4 +610,29 @@ fn a_script_asked_of_a_load_that_is_replaced_before_it_commits_fails() {
     log('script', await script);
     "#);
     assert_eq!(lines, ["script Script failed to exe"]);
+}
+
+#[test]
+fn input_dropped_by_a_load_does_not_make_a_later_long_script_a_hang() {
+    // Input still queued when a load replaces the page is gone with the page; it must not leave the
+    // page counted as having input waiting, so a long script afterwards, with nobody waiting, is no
+    // hang.
+    let lines = run_within(
+        r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await load(win, '<p>a</p>');
+    wc.on('unresponsive', () => log('unresponsive'));
+    wc.executeJavaScript('const t = Date.now() + 400; while (Date.now() < t) {}').catch(() => {});
+    for (let i = 0; i < 20; i++) wc.sendInputEvent({ type: 'mouseMove', x: i, y: 1 });
+    await win.loadURL('data:text/html,second');
+    await sleep(6500);
+    wc.executeJavaScript('const end = Date.now() + 5500; while (Date.now() < end) {}').catch(() => {});
+    await sleep(2500);
+    log('done');
+    "#,
+        &[],
+        std::time::Duration::from_secs(40),
+    );
+    assert_eq!(lines, ["done"]);
 }
