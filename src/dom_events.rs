@@ -20,7 +20,6 @@
 //! `type`.
 
 use std::cell::Cell;
-use std::rc::Rc;
 
 use boa_engine::{
     Context, Finalize, JsData, JsError, JsObject, JsResult, JsString, JsSymbol, JsValue,
@@ -33,10 +32,12 @@ use boa_gc::{Gc, GcRefCell};
 
 mod abort;
 mod hooks;
+mod worlds;
 
 use abort::{SIGNAL_ACCESSORS, SIGNAL_METHODS, SIGNAL_STATICS};
 pub(crate) use abort::{abort, iterate, new_signal};
 pub use hooks::{EventParent, EventScope, is_composed, set_event_parent, set_event_scope};
+pub use worlds::{Counterpart, set_world_counterpart};
 
 use crate::native::{arg, closure, function, get, hidden, js_text, object, text_of, type_error};
 
@@ -54,6 +55,8 @@ pub(crate) struct Listener {
     /// An `on…` attribute's place in the list: what it calls is the attribute's value then.
     handler: bool,
     removed: Cell<bool>,
+    /// The world that added it: the one its callback is called in.
+    world: crate::WorldId,
 }
 
 /// What a target is, beyond its listeners.
@@ -96,7 +99,9 @@ pub(crate) enum Kind {
 
 #[derive(Trace, Finalize, JsData)]
 pub(crate) struct TargetData {
-    listeners: GcRefCell<Vec<Gc<Listener>>>,
+    /// The listeners, in the order they were added; the list a node's objects in other worlds
+    /// share.
+    listeners: Gc<GcRefCell<Vec<Gc<Listener>>>>,
     /// The `on…` attributes set, by event type.
     handlers: GcRefCell<Vec<(String, JsValue)>>,
     pub(crate) kind: GcRefCell<Kind>,
@@ -105,14 +110,23 @@ pub(crate) struct TargetData {
 impl TargetData {
     pub(crate) fn new(kind: Kind) -> Self {
         TargetData {
-            listeners: GcRefCell::new(Vec::new()),
+            listeners: Gc::new(GcRefCell::new(Vec::new())),
+            handlers: GcRefCell::new(Vec::new()),
+            kind: GcRefCell::new(kind),
+        }
+    }
+
+    /// A target of `kind` hearing the same listeners as this one: the same node in another world.
+    pub(crate) fn sharing(&self, kind: Kind) -> Self {
+        TargetData {
+            listeners: self.listeners.clone(),
             handlers: GcRefCell::new(Vec::new()),
             kind: GcRefCell::new(kind),
         }
     }
 }
 
-#[derive(Trace, Finalize)]
+#[derive(Clone, Trace, Finalize)]
 struct EventState {
     kind: String,
     bubbles: bool,
@@ -146,6 +160,7 @@ pub(crate) struct DomExceptionData {
 }
 
 /// The realm's own classes, held apart from the globals the host may replace.
+#[derive(Trace, Finalize)]
 pub(crate) struct Dom {
     pub(crate) event_target: JsObject,
     pub(crate) event: JsObject,
@@ -165,11 +180,11 @@ pub(crate) struct Dom {
 }
 
 /// The classes of the running world, made the first time any of them is needed.
-pub(crate) fn dom(context: &mut Context) -> JsResult<Rc<Dom>> {
-    if let Some(dom) = crate::world::realm_data::<Rc<Dom>>(context) {
+pub(crate) fn dom(context: &mut Context) -> JsResult<Gc<Dom>> {
+    if let Some(dom) = crate::world::realm_data::<Gc<Dom>>(context) {
         return Ok(dom);
     }
-    let dom = Rc::new(make_classes(context)?);
+    let dom = Gc::new(make_classes(context)?);
     crate::world::set_realm_data(context, dom.clone());
     Ok(dom)
 }
@@ -255,6 +270,7 @@ pub fn web_class(
             .configurable(false),
         context,
     )?;
+    worlds::register_class(context, &prototype, name);
     Ok((constructor, prototype))
 }
 
@@ -785,20 +801,17 @@ pub(crate) fn new_event_of(
 
 /// The window's own listeners, once a host made the global object a target; see
 /// [`install_window_target`].
-#[derive(Clone)]
+#[derive(Clone, Trace, Finalize)]
 struct WindowTarget(JsObject);
 
 /// The object holding `this`'s listeners: `this` itself, or — for the global object, or no
 /// `this` at all, as `addEventListener(…)` called bare has — the window's, when there is one.
 fn holder(this: &JsValue, context: &Context) -> Option<JsObject> {
+    let window = || crate::world::realm_data::<WindowTarget>(context).map(|w| w.0.clone());
     match this.as_object() {
         Some(object) if object.downcast_ref::<TargetData>().is_some() => Some(object.clone()),
-        Some(object) => crate::world::realm_data::<WindowTarget>(context)
-            .filter(|_| JsObject::equals(&object, &context.global_object()))
-            .map(|window| window.0),
-        None if this.is_undefined() => {
-            crate::world::realm_data::<WindowTarget>(context).map(|w| w.0)
-        }
+        Some(object) => window().filter(|_| JsObject::equals(&object, &context.global_object())),
+        None if this.is_undefined() => window(),
         None => None,
     }
 }
@@ -857,10 +870,15 @@ fn add_listener(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     if signal.is_object() && get(&signal, "aborted", context)?.to_boolean() {
         return Ok(JsValue::undefined());
     }
+    let world = crate::world::current_world(context);
     let listener = with_holder(this, context, |data| {
         let mut listeners = data.listeners.borrow_mut();
         let present = listeners.iter().any(|l| {
-            !l.handler && l.kind == kind && l.capture == capture && l.callback == callback
+            !l.handler
+                && l.kind == kind
+                && l.capture == capture
+                && l.callback == callback
+                && l.world == world
         });
         if present {
             return None;
@@ -873,6 +891,7 @@ fn add_listener(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
             passive,
             handler: false,
             removed: Cell::new(false),
+            world,
         });
         listeners.push(listener.clone());
         Some(listener)
@@ -936,10 +955,14 @@ fn remove_listener(this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     let kind = text_of(&arg(args, 0), context)?;
     let callback = arg(args, 1);
     let (capture, ..) = listener_options(&arg(args, 2), context)?;
+    let world = crate::world::current_world(context);
     with_holder(this, context, |data| {
         data.listeners.borrow_mut().retain(|l| {
-            let same =
-                !l.handler && l.kind == kind && l.capture == capture && l.callback == callback;
+            let same = !l.handler
+                && l.kind == kind
+                && l.capture == capture
+                && l.callback == callback
+                && l.world == world;
             if same {
                 l.removed.set(true);
             }
@@ -1075,6 +1098,7 @@ fn invoke(
     if listeners.is_empty() {
         return Ok(false);
     }
+    let world = crate::world::current_world(context);
     for pass in [true, false] {
         for listener in listeners.iter().filter(|l| l.capture == pass) {
             if listener.removed.get() {
@@ -1087,22 +1111,10 @@ fn invoke(
                 let data = event.downcast_ref::<EventData>().expect("an event");
                 data.0.borrow_mut().passive = listener.passive;
             }
-            let outcome = if listener.handler {
-                call_handler(holder, this, kind, event, context)
-            } else if listener.callback.is_callable() {
-                crate::call(context, &listener.callback, this, &[event.clone().into()])
+            let outcome = if ours && listener.world != world {
+                worlds::call_in_world(listener, this, kind, event, context)
             } else {
-                // An object with `handleEvent`, called on that object.
-                match get(&listener.callback, "handleEvent", context) {
-                    Ok(handle) if handle.is_callable() => crate::call(
-                        context,
-                        &handle,
-                        &listener.callback,
-                        &[event.clone().into()],
-                    ),
-                    Ok(_) => Err(type_error("The listener's handleEvent is not a function")),
-                    Err(error) => Err(error),
-                }
+                call_listener(listener, holder, this, kind, event, context)
             };
             match outcome {
                 Err(error) => crate::report(context, &error),
@@ -1120,6 +1132,34 @@ fn invoke(
         }
     }
     Ok(false)
+}
+
+/// `listener` called with `event` as the target `this` hears it, `holder` keeping its listeners.
+fn call_listener(
+    listener: &Listener,
+    holder: &JsObject,
+    this: &JsValue,
+    kind: &str,
+    event: &JsObject,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if listener.handler {
+        call_handler(holder, this, kind, event, context)
+    } else if listener.callback.is_callable() {
+        crate::call(context, &listener.callback, this, &[event.clone().into()])
+    } else {
+        // An object with `handleEvent`, called on that object.
+        match get(&listener.callback, "handleEvent", context) {
+            Ok(handle) if handle.is_callable() => crate::call(
+                context,
+                &handle,
+                &listener.callback,
+                &[event.clone().into()],
+            ),
+            Ok(_) => Err(type_error("The listener's handleEvent is not a function")),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// When `value` is a promise, its rejection reported as an uncaught error.
@@ -1186,11 +1226,17 @@ fn handler_in(data: &TargetData, kind: &str) -> JsValue {
 }
 
 /// Sets the `on…` attribute for `kind`: the first time, it takes its place among the listeners.
-pub(crate) fn set_handler(target: &JsValue, kind: &str, value: JsValue) -> JsResult<()> {
-    with_target(target, |data| set_handler_in(data, kind, value))
+pub(crate) fn set_handler(
+    target: &JsValue,
+    kind: &str,
+    value: JsValue,
+    context: &Context,
+) -> JsResult<()> {
+    let world = crate::world::current_world(context);
+    with_target(target, |data| set_handler_in(data, kind, value, world))
 }
 
-fn set_handler_in(data: &TargetData, kind: &str, value: JsValue) {
+fn set_handler_in(data: &TargetData, kind: &str, value: JsValue, world: crate::WorldId) {
     let value = if value.is_callable() {
         value
     } else {
@@ -1209,6 +1255,7 @@ fn set_handler_in(data: &TargetData, kind: &str, value: JsValue) {
                 passive: false,
                 handler: true,
                 removed: Cell::new(false),
+                world,
             }));
         }
     }
@@ -1239,8 +1286,9 @@ pub fn handler_accessors(
             &format!("set on{kind}"),
             1,
             |this, args, kind: &JsString, cx| {
+                let world = crate::world::current_world(cx);
                 with_holder(this, cx, |data| {
-                    set_handler_in(data, &kind.to_std_string_escaped(), arg(args, 0))
+                    set_handler_in(data, &kind.to_std_string_escaped(), arg(args, 0), world)
                 })?;
                 Ok(JsValue::undefined())
             },
@@ -1470,6 +1518,20 @@ pub fn host_target(prototype: JsObject, id: u64) -> JsObject {
     )
 }
 
+/// [`host_target`] for a node that has an object in another world already: `sibling`, which the
+/// new one shares its listeners with, as every world's objects for a node hear the same events.
+pub fn host_target_beside(prototype: JsObject, id: u64, sibling: &JsObject) -> JsObject {
+    let kind = Kind::Host {
+        id,
+        held: Vec::new(),
+    };
+    let data = match sibling.downcast_ref::<TargetData>() {
+        Some(sibling) => sibling.sharing(kind),
+        None => TargetData::new(kind),
+    };
+    JsObject::from_proto_and_data(prototype, data)
+}
+
 /// The number a host target was made with, when `object` is one.
 pub fn host_id(object: &JsObject) -> Option<u64> {
     let data = object.downcast_ref::<TargetData>()?;
@@ -1495,10 +1557,21 @@ pub fn hold(object: &JsObject, f: impl FnOnce(&mut Vec<JsObject>)) {
 /// prototype, as a browser's `Window.prototype` inherits them from `EventTarget`).
 pub fn install_window_target(context: &mut Context) -> JsResult<JsObject> {
     if let Some(window) = crate::world::realm_data::<WindowTarget>(context) {
-        return Ok(window.0);
+        return Ok(window.0.clone());
     }
     let prototype = classes(context)?.event_target.1;
-    let target = JsObject::from_proto_and_data(prototype, TargetData::new(Kind::Plain));
+    // Every world's window is the one window: its listeners are one list.
+    let main = crate::world::world_realm(context, crate::world::MAIN_WORLD)
+        .and_then(|realm| crate::world::realm_data_of::<WindowTarget>(&realm))
+        .filter(|_| crate::world::current_world(context) != crate::world::MAIN_WORLD);
+    let data = match main
+        .as_ref()
+        .and_then(|main| main.0.downcast_ref::<TargetData>())
+    {
+        Some(main) => main.sharing(Kind::Plain),
+        None => TargetData::new(Kind::Plain),
+    };
+    let target = JsObject::from_proto_and_data(prototype, data);
     crate::world::set_realm_data(context, WindowTarget(target.clone()));
     Ok(target)
 }

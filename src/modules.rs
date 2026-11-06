@@ -63,10 +63,29 @@ pub(crate) fn is_builtin(context: &Context, name: &str) -> bool {
             .any(|(prefix, _)| bare.starts_with(prefix.as_str()))
 }
 
+/// The key `bare` is kept under. `events` is made for each world, its `EventEmitter` among that
+/// world's own built-ins, so that what extends it (a `process`, an `ipcRenderer`) does not reach
+/// the page's `Object.prototype` through it.
+fn per_world(bare: &str, context: &Context) -> String {
+    match crate::current_world(context) {
+        crate::MAIN_WORLD => bare.to_owned(),
+        world if bare == "events" => format!("{bare}:{world}"),
+        _ => bare.to_owned(),
+    }
+}
+
+/// Forgets what was made per world for `world`, which is gone: a world made later with its id must
+/// not find it.
+pub(crate) fn forget_world(context: &Context, world: crate::WorldId) {
+    let key = format!("events:{world}");
+    crate::shared(context).builtins.borrow_mut().remove(&key);
+}
+
 /// The built-in module `name`, made now if it has not been yet; `None` when there is none.
 pub(crate) fn builtin(context: &mut Context, name: &str) -> JsResult<Option<JsValue>> {
     let bare = bare_name(name);
-    if let Some(exports) = crate::shared(context).builtins.borrow().get(bare) {
+    let scoped = per_world(bare, context);
+    if let Some(exports) = crate::shared(context).builtins.borrow().get(&scoped) {
         return Ok(Some(exports.clone()));
     }
     // One the host said to make on first use: made now, and kept with the rest.
@@ -84,7 +103,7 @@ pub(crate) fn builtin(context: &mut Context, name: &str) -> JsResult<Option<JsVa
     let key = if crate::node::PREFIX_ONLY.contains(&bare) {
         format!("node:{bare}")
     } else {
-        bare.to_owned()
+        per_world(bare, context)
     };
     if let Some(exports) = crate::shared(context)
         .builtins

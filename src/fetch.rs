@@ -13,13 +13,11 @@
 //! `formData()` read either, once. `FormData` is sent as `multipart/form-data` and read back from
 //! that or from a urlencoded body.
 
-use std::rc::Rc;
-
 use boa_engine::{
     Context, JsData, JsObject, JsResult, JsSymbol, JsValue, builtins::promise::ResolvingFunctions,
     js_string, native_function::NativeFunctionPointer,
 };
-use boa_gc::{Finalize, Trace};
+use boa_gc::{Finalize, Gc, Trace};
 
 use crate::native::{arg, array, get, invoke, js_text, list_of, object, text_of, type_error};
 use crate::streams::{
@@ -29,6 +27,7 @@ use crate::streams::{
 
 // ─── The classes, made once ─────────────────────────────────────────────────────────────────
 
+#[derive(Trace, Finalize)]
 pub(crate) struct Classes {
     headers: JsObject,
     headers_proto: JsObject,
@@ -40,11 +39,11 @@ pub(crate) struct Classes {
     form_data_proto: JsObject,
 }
 
-fn classes(context: &mut Context) -> JsResult<Rc<Classes>> {
-    if let Some(classes) = crate::world::realm_data::<Rc<Classes>>(context) {
+fn classes(context: &mut Context) -> JsResult<Gc<Classes>> {
+    if let Some(classes) = crate::world::realm_data::<Gc<Classes>>(context) {
         return Ok(classes);
     }
-    let classes = Rc::new(make_classes(context)?);
+    let classes = Gc::new(make_classes(context)?);
     crate::world::set_realm_data(context, classes.clone());
     Ok(classes)
 }

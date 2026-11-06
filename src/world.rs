@@ -24,17 +24,12 @@ pub const MAIN_WORLD: WorldId = 0;
 /// The realms made, the first being the runtime's own.
 struct Worlds(RefCell<Vec<(Realm, JsObject)>>);
 
-/// What a realm keeps of the host's: a value the collector need not look into, since the
-/// handles inside it are roots of their own.
-#[derive(Finalize)]
-pub(crate) struct Held<T>(pub T);
+/// What a realm keeps of the host's. The collector traces into it, so the handles inside are
+/// the realm's own and not roots: a realm that kept them as roots would never be freed.
+#[derive(Trace, Finalize)]
+pub(crate) struct Held<T: Trace + 'static>(pub T);
 
-// SAFETY: a value held here is only ever a clone of handles that root themselves.
-unsafe impl<T> Trace for Held<T> {
-    boa_gc::empty_trace!();
-}
-
-impl<T> JsData for Held<T> {}
+impl<T: Trace + 'static> JsData for Held<T> {}
 
 /// The worlds made, each with its global object; the first is the running realm's when none was
 /// made.
@@ -58,6 +53,22 @@ pub fn current_world(context: &Context) -> WorldId {
         .map_or(MAIN_WORLD, |at| at as WorldId)
 }
 
+/// Runs `f` with `realm` as the running one, and the one that was running again after.
+pub fn in_realm<R>(context: &mut Context, realm: &Realm, f: impl FnOnce(&mut Context) -> R) -> R {
+    let outer = context.enter_realm(realm.clone());
+    let out = f(context);
+    context.enter_realm(outer);
+    out
+}
+
+/// Runs `f` with `world` the running one; with the running one still, if there is no such world.
+pub fn in_world<R>(context: &mut Context, world: WorldId, f: impl FnOnce(&mut Context) -> R) -> R {
+    match world_realm(context, world) {
+        Some(realm) => in_realm(context, &realm, f),
+        None => f(context),
+    }
+}
+
 /// The realm of `world`, if there is one.
 pub fn world_realm(context: &Context, world: WorldId) -> Option<Realm> {
     list(context)
@@ -72,33 +83,72 @@ pub fn world_global(context: &Context, world: WorldId) -> Option<JsObject> {
         .map(|(_, global)| global.clone())
 }
 
+/// The world whose global object `object` is.
+pub fn world_of_global(context: &Context, object: &JsObject) -> Option<WorldId> {
+    let at = list(context)
+        .iter()
+        .position(|(_, global)| JsObject::equals(global, object))?;
+    Some(at as WorldId)
+}
+
 /// How many worlds there are.
 pub(crate) fn count(context: &Context) -> usize {
     list(context).len()
 }
 
 /// What the running world kept as a `T`.
-pub(crate) fn realm_data<T: Clone + 'static>(context: &Context) -> Option<T> {
+pub(crate) fn realm_data<T: Clone + Trace + 'static>(context: &Context) -> Option<T> {
     realm_data_of(context.realm())
 }
 
 /// What `realm` kept as a `T`.
-pub(crate) fn realm_data_of<T: Clone + 'static>(realm: &Realm) -> Option<T> {
+pub(crate) fn realm_data_of<T: Clone + Trace + 'static>(realm: &Realm) -> Option<T> {
     let kept = realm.host_defined();
     kept.get::<Held<T>>().map(|held| held.0.clone())
 }
 
 /// Keeps `value` in the running world, as what [`realm_data`] answers.
-pub(crate) fn set_realm_data<T: 'static>(context: &Context, value: T) {
+pub(crate) fn set_realm_data<T: Trace + 'static>(context: &Context, value: T) {
     context.realm().host_defined_mut().insert(Held(value));
 }
 
 /// What every world kept as a `T`, the first world's first.
-pub(crate) fn every_world<T: Clone + 'static>(context: &Context) -> Vec<T> {
+pub(crate) fn every_world<T: Clone + Trace + 'static>(context: &Context) -> Vec<T> {
     list(context)
         .iter()
         .filter_map(|(realm, _)| realm_data_of::<T>(realm))
         .collect()
+}
+
+/// Makes a world, from code that has only the context: see [`Runtime::create_world`].
+///
+/// # Errors
+///
+/// A global that could not be installed.
+pub fn make_world(context: &mut Context) -> JsResult<WorldId> {
+    if context.get_data::<Worlds>().is_none() {
+        let first = (context.realm().clone(), context.global_object());
+        context.insert_data(Worlds(RefCell::new(vec![first])));
+    }
+    let realm = context.create_realm()?;
+    let previous = context.enter_realm(realm.clone());
+    // Made one of the worlds before the globals are installed, so that what the install makes
+    // from the world's built-ins (`events` for `process`) is this world's, not the page's.
+    let world = {
+        let worlds = context.get_data::<Worlds>().expect("the worlds are kept");
+        let mut worlds = worlds.0.borrow_mut();
+        worlds.push((realm, context.global_object()));
+        (worlds.len() - 1) as WorldId
+    };
+    let installed = globals::install(context);
+    context.enter_realm(previous);
+    if let Err(error) = installed {
+        let worlds = context.get_data::<Worlds>().expect("the worlds are kept");
+        worlds.0.borrow_mut().pop();
+        crate::modules::forget_world(context, world);
+        return Err(error);
+    }
+    Ok(world)
 }
 
 impl Runtime {
@@ -111,23 +161,7 @@ impl Runtime {
     ///
     /// A global that could not be installed.
     pub fn create_world(&mut self) -> JsResult<WorldId> {
-        if self.context.get_data::<Worlds>().is_none() {
-            let first = (self.context.realm().clone(), self.context.global_object());
-            self.context.insert_data(Worlds(RefCell::new(vec![first])));
-        }
-        let realm = self.context.create_realm()?;
-        let previous = self.context.enter_realm(realm.clone());
-        let installed = globals::install(&mut self.context);
-        let global = self.context.global_object();
-        self.context.enter_realm(previous);
-        installed?;
-        let worlds = self
-            .context
-            .get_data::<Worlds>()
-            .expect("the worlds are kept");
-        let mut worlds = worlds.0.borrow_mut();
-        worlds.push((realm, global));
-        Ok((worlds.len() - 1) as WorldId)
+        make_world(&mut self.context)
     }
 
     /// Makes `world` the one that runs from now on, answering the one that did, which
