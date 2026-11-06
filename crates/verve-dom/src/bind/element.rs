@@ -16,8 +16,9 @@ use super::node::{
     with_dom, wrap, wrap_opt,
 };
 use super::{
-    Accessor, ClassSpec, Kind, Method, call_method, class, dom_error, extend_prototype, handle_of,
-    illegal_constructor, native_instance, node_id, node_of, opt_string, plain_object, set, string,
+    Accessor, ClassSpec, Kind, Method, call_method, define_class, dom_error, extend_prototype,
+    handle_of, illegal_constructor, native_instance, node_id, node_of, opt_string, plain_object,
+    set, string,
 };
 use crate::dom::{Dom, NodeId, ShadowMode, camel_name, css_name};
 use crate::state::shared;
@@ -3159,7 +3160,7 @@ const CELL_REFLECTED: &[(&str, &str, Reflect)] = &[
 // ─── Installing ─────────────────────────────────────────────────────────────────────────────
 
 fn plain_class(context: &mut Context, name: &'static str, parent: &str) -> JsResult<JsObject> {
-    Ok(class(
+    Ok(define_class(
         context,
         ClassSpec {
             name,
@@ -3183,7 +3184,7 @@ fn full_class(
     accessors: &[Accessor],
     reflected: &[(&str, &str, Reflect)],
 ) -> JsResult<JsObject> {
-    let (_, prototype) = class(
+    let (_, prototype) = define_class(
         context,
         ClassSpec {
             name,
@@ -3217,7 +3218,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     )?;
     extend_prototype(context, &element, CHILD_NODE_METHODS, CHILD_NODE_ACCESSORS)?;
     // `HTMLElement` is constructed only as the `super()` of a custom element's class.
-    let (_, html) = class(
+    let (_, html) = define_class(
         context,
         ClassSpec {
             name: "HTMLElement",
@@ -3688,7 +3689,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     extend_prototype(context, &svg_svg, super::svg::SVG_SVG_METHODS, &[])?;
     plain_class(context, "MathMLElement", "Element")?;
     // What an element hands out.
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "DOMTokenList",
@@ -3734,7 +3735,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             )?;
         }
     }
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "CSSStyleDeclaration",
@@ -3747,7 +3748,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "DOMStringMap",

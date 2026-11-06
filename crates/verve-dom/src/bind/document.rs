@@ -5,8 +5,8 @@ use boa_engine::{Context, JsResult, JsValue, js_string};
 
 use super::node::{PARENT_NODE_ACCESSORS, PARENT_NODE_METHODS, read_dom, with_dom, wrap, wrap_opt};
 use super::{
-    Accessor, ClassSpec, Kind, Method, class, constructor_of, dom_error, extend_prototype,
-    illegal_constructor, instance, native_instance, node_id, node_of, opt_string, string,
+    Accessor, ClassSpec, Kind, Method, constructor_of, define_class, dom_error, extend_prototype,
+    handle_instance, illegal_constructor, native_instance, node_id, node_of, opt_string, string,
 };
 use crate::dom::{Dom, Namespace, NodeId, NodeKind};
 use crate::state::shared;
@@ -761,7 +761,7 @@ const IMPLEMENTATION_METHODS: &[Method] = &[
 ];
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let (_, document) = class(
+    let (_, document) = define_class(
         context,
         ClassSpec {
             name: "Document",
@@ -788,7 +788,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         PARENT_NODE_ACCESSORS,
     )?;
     for name in ["HTMLDocument", "XMLDocument"] {
-        class(
+        define_class(
             context,
             ClassSpec {
                 name,
@@ -802,12 +802,14 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             },
         )?;
     }
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "DOMParser",
             length: 0,
-            construct: |new_target, _, cx| Ok(instance(new_target, Kind::Plain, 0, cx)?.into()),
+            construct: |new_target, _, cx| {
+                Ok(handle_instance(new_target, Kind::Plain, 0, cx)?.into())
+            },
             parent: None,
             methods: DOM_PARSER_METHODS,
             accessors: &[],
@@ -815,12 +817,14 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "XMLSerializer",
             length: 0,
-            construct: |new_target, _, cx| Ok(instance(new_target, Kind::Plain, 0, cx)?.into()),
+            construct: |new_target, _, cx| {
+                Ok(handle_instance(new_target, Kind::Plain, 0, cx)?.into())
+            },
             parent: None,
             methods: SERIALIZER_METHODS,
             accessors: &[],
@@ -828,7 +832,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "DOMImplementation",

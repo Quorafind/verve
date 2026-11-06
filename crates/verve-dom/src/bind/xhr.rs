@@ -8,7 +8,7 @@
 
 use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
 
-use super::{Accessor, ClassSpec, Method, call_method, class, plain_object, set, string};
+use super::{Accessor, ClassSpec, Method, call_method, define_class, plain_object, set, string};
 use crate::state::shared;
 use verve::native::{self, arg, closure, get, js_text, list_of, text_of, type_error};
 
@@ -357,7 +357,7 @@ fn failed(xhr: &JsValue, kind: &str, context: &mut Context) -> JsResult<JsValue>
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let (constructor, prototype) = class(
+    let (constructor, prototype) = define_class(
         context,
         ClassSpec {
             name: "XMLHttpRequest",
@@ -381,7 +381,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         constructor.set(boa_engine::JsString::from(name), value, false, context)?;
         prototype.set(boa_engine::JsString::from(name), value, false, context)?;
     }
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "XMLHttpRequestEventTarget",

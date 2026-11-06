@@ -30,12 +30,12 @@ pub mod window;
 pub mod xhr;
 
 use boa_engine::{
-    Context, Finalize, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue,
-    NativeFunction, Trace, js_string,
+    Context, Finalize, JsData, JsError, JsObject, JsResult, JsString, JsValue, NativeFunction,
+    Trace, js_string,
     native_function::NativeFunctionPointer,
-    object::{FunctionObjectBuilder, builtins::JsFunction},
-    property::{Attribute, PropertyDescriptor, PropertyKey},
+    property::{Attribute, PropertyDescriptor},
 };
+use verve::native::{arg, function, get, js_text, type_error};
 
 use crate::dom::NodeId;
 use crate::state::shared;
@@ -120,10 +120,6 @@ pub fn handle_of(value: &JsValue, kind: Kind) -> Option<u32> {
     handle(value).filter(|(k, _)| *k == kind).map(|(_, id)| id)
 }
 
-pub fn type_error(message: impl Into<String>) -> JsError {
-    JsNativeError::typ().with_message(message.into()).into()
-}
-
 /// A `DOMException` of `name` (`NotFoundError`, `HierarchyRequestError`, `SyntaxError`…).
 pub fn dom_error(context: &mut Context, message: &str, name: &str) -> JsError {
     verve::dom_events::exception(context, message, name)
@@ -149,16 +145,8 @@ pub fn node_arg(args: &[JsValue], index: usize, method: &str, class: &str) -> Js
     })
 }
 
-pub fn arg(args: &[JsValue], index: usize) -> JsValue {
-    args.get(index).cloned().unwrap_or_default()
-}
-
 pub fn string(value: &JsValue, context: &mut Context) -> JsResult<String> {
     Ok(value.to_string(context)?.to_std_string_escaped())
-}
-
-pub fn arg_string(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<String> {
-    string(&arg(args, index), context)
 }
 
 /// The argument as a string, or `None` when it is `undefined` or `null`.
@@ -174,17 +162,6 @@ pub fn opt_string(
     Ok(Some(string(&value, context)?))
 }
 
-pub fn text(s: &str) -> JsValue {
-    JsString::from(s).into()
-}
-
-pub fn get(object: &JsValue, key: &str, context: &mut Context) -> JsResult<JsValue> {
-    match object.as_object() {
-        Some(object) => object.get(JsString::from(key), context),
-        None => Ok(JsValue::undefined()),
-    }
-}
-
 pub fn set(
     object: &JsObject,
     key: &str,
@@ -192,25 +169,6 @@ pub fn set(
     context: &mut Context,
 ) -> JsResult<()> {
     object.set(JsString::from(key), value.into(), true, context)?;
-    Ok(())
-}
-
-/// A property that is there but not listed.
-pub fn hidden(
-    object: &JsObject,
-    key: impl Into<PropertyKey>,
-    value: impl Into<JsValue>,
-    context: &mut Context,
-) -> JsResult<()> {
-    object.define_property_or_throw(
-        key,
-        PropertyDescriptor::builder()
-            .value(value)
-            .writable(true)
-            .enumerable(false)
-            .configurable(true),
-        context,
-    )?;
     Ok(())
 }
 
@@ -229,54 +187,8 @@ pub fn call_method(
     }
 }
 
-pub fn function(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsFunction {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-}
-
-/// A function that carries `captures` with it.
-pub fn closure<T: Trace + 'static>(
-    context: &mut Context,
-    name: &str,
-    f: fn(&JsValue, &[JsValue], &T, &mut Context) -> JsResult<JsValue>,
-    captures: T,
-) -> JsFunction {
-    FunctionObjectBuilder::new(
-        context.realm(),
-        NativeFunction::from_copy_closure_with_captures(f, captures),
-    )
-    .name(JsString::from(name))
-    .build()
-}
-
 pub fn plain_object(context: &mut Context) -> JsObject {
     JsObject::with_object_proto(context.intrinsics())
-}
-
-pub fn array(values: Vec<JsValue>, context: &mut Context) -> JsValue {
-    boa_engine::object::builtins::JsArray::from_iter(values, context).into()
-}
-
-/// The items of an array-like.
-pub fn list(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
-    let Some(object) = value.as_object() else {
-        return Ok(Vec::new());
-    };
-    let length = object
-        .get(js_string!("length"), context)?
-        .to_length(context)?;
-    let mut out = Vec::with_capacity(length as usize);
-    for at in 0..length {
-        out.push(object.get(at, context)?);
-    }
-    Ok(out)
 }
 
 /// A promise already settled with `value`.
@@ -307,7 +219,7 @@ pub struct ClassSpec<'a> {
 }
 
 /// Makes a class and remembers it by name.
-pub fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, JsObject)> {
+pub fn define_class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, JsObject)> {
     let parent = spec.parent.map(|name| {
         crate::state::class_of(context, name)
             .unwrap_or_else(|| panic!("the parent class {name} is made first"))
@@ -337,7 +249,7 @@ pub fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, 
     prototype.define_property_or_throw(
         boa_engine::JsSymbol::to_string_tag(),
         PropertyDescriptor::builder()
-            .value(text(spec.name))
+            .value(js_text(spec.name))
             .writable(false)
             .enumerable(false)
             .configurable(true),
@@ -394,7 +306,7 @@ pub fn extend_prototype(
 
 /// The object a native constructor builds for something that is no node: on `new_target`'s
 /// prototype, so a subclass's methods are found on it, holding `kind` and `id`.
-pub fn instance(
+pub fn handle_instance(
     new_target: &JsValue,
     kind: Kind,
     id: u32,

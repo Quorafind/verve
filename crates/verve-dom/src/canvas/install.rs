@@ -5,8 +5,8 @@ use boa_engine::property::Attribute;
 use boa_engine::{Context, JsResult, JsValue, js_string, native_function::NativeFunctionPointer};
 
 use crate::bind::{
-    self, Accessor, ClassSpec, Kind, Method, class, dom_error, extend_prototype,
-    illegal_constructor, instance,
+    self, Accessor, ClassSpec, Kind, Method, define_class, dom_error, extend_prototype,
+    handle_instance, illegal_constructor,
 };
 use crate::canvas::bitmap::{
     BITMAP_ACCESSORS, BITMAP_METHODS, BITMAP_RENDERER_METHODS, OFFSCREEN_ACCESSORS,
@@ -101,7 +101,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             statics: &[],
             global: true,
         };
-        let (_, prototype) = class(context, spec)?;
+        let (_, prototype) = define_class(context, spec)?;
         extend_prototype(context, &prototype, entry.shared, &[])?;
         if entry.name == "CanvasRenderingContext2D" {
             install_properties(context, &prototype)?;
@@ -130,7 +130,7 @@ fn construct_path(
             .unwrap_or_default()
     };
     let id = shared(context).borrow_mut().canvas.add_path(builder);
-    Ok(instance(new_target, Kind::Path, id, context)?.into())
+    Ok(handle_instance(new_target, Kind::Path, id, context)?.into())
 }
 
 fn add_color_stop(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

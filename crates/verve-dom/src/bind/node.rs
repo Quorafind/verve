@@ -13,8 +13,8 @@
 use boa_engine::{Context, JsObject, JsResult, JsValue};
 
 use super::{
-    Accessor, ClassSpec, Method, class, dom_error, illegal_constructor, node_arg, node_id, node_of,
-    opt_string, prototype_of_target,
+    Accessor, ClassSpec, Method, define_class, dom_error, illegal_constructor, node_arg, node_id,
+    node_of, opt_string, prototype_of_target,
 };
 use crate::dom::{Dom, Namespace, Node, NodeId, NodeKind};
 use crate::state::shared;
@@ -1265,7 +1265,7 @@ const DOCTYPE_ACCESSORS: &[Accessor] = &[
 ];
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "Node",
@@ -1311,7 +1311,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             )?;
         }
     }
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "CharacterData",
@@ -1331,7 +1331,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         CHILD_NODE_METHODS,
         CHILD_NODE_ACCESSORS,
     )?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "Text",
@@ -1347,7 +1347,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "CDATASection",
@@ -1360,7 +1360,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "Comment",
@@ -1376,7 +1376,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "DocumentFragment",
@@ -1405,7 +1405,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         })],
         &[],
     )?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "DocumentType",
@@ -1424,7 +1424,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ("NodeList", LIST_METHODS),
         ("HTMLCollection", COLLECTION_METHODS),
     ] {
-        let (_, prototype) = class(
+        let (_, prototype) = define_class(
             context,
             ClassSpec {
                 name,

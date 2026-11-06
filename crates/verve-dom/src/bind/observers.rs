@@ -15,7 +15,8 @@ use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 
 use super::node::{node_list, read_dom, wrap, wrap_opt};
 use super::{
-    ClassSpec, Kind, Method, class, handle_of, instance, node_of, plain_object, set, string,
+    ClassSpec, Kind, Method, define_class, handle_instance, handle_of, node_of, plain_object, set,
+    string,
 };
 use crate::Rect;
 use crate::dom::{Mutation, NodeId};
@@ -35,7 +36,7 @@ fn construct(
         ));
     }
     let id = shared(context).borrow_mut().id();
-    let object = instance(new_target, Kind::Plain, id, context)?;
+    let object = handle_instance(new_target, Kind::Plain, id, context)?;
     if watch == Watch::Intersection {
         let options = arg(args, 1);
         let root = get(&options, "root", context)?;
@@ -744,7 +745,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             construct(t, a, c, Watch::Intersection)
         }),
     ] {
-        class(
+        define_class(
             context,
             ClassSpec {
                 name,
@@ -771,7 +772,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         "IntersectionObserverEntry",
         "ResizeObserverSize",
     ] {
-        class(
+        define_class(
             context,
             ClassSpec {
                 name,

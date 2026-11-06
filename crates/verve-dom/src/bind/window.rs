@@ -14,7 +14,7 @@ use boa_engine::{
 
 use super::node::{read_dom, wrap};
 use super::{
-    Accessor, ClassSpec, Kind, Method, class, dom_error, extend_prototype, handle_of,
+    Accessor, ClassSpec, Kind, Method, define_class, dom_error, extend_prototype, handle_of,
     illegal_constructor, native_instance, node_of, opt_string, plain_object, set, string,
 };
 use crate::css::MediaQuery;
@@ -1123,7 +1123,7 @@ pub fn form_entries(
 pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> {
     // `Window`, the window's class: `window instanceof Window`, and `EventTarget`'s methods
     // reached through it as a browser's window reaches them.
-    let (_, window) = class(
+    let (_, window) = define_class(
         context,
         ClassSpec {
             name: "Window",
@@ -1172,7 +1172,7 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
             context,
         )?;
     }
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "Location",
@@ -1191,7 +1191,7 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
         location,
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
     )?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "History",
@@ -1206,7 +1206,7 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
     )?;
     let history = native_instance(context, "History", Kind::Plain, 0);
     context.register_global_property(js_string!("history"), history, Attribute::all())?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "Storage",
@@ -1223,7 +1223,7 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
     context.register_global_property(js_string!("localStorage"), local, Attribute::all())?;
     let session = storage(context, 1)?;
     context.register_global_property(js_string!("sessionStorage"), session, Attribute::all())?;
-    class(
+    define_class(
         context,
         ClassSpec {
             name: "MediaQueryList",

@@ -19,7 +19,9 @@ use boa_engine::{Context, JsObject, JsResult, JsValue, NativeFunction};
 use verve::native::{self, arg, coded_error, get, js_text, list_of, text_of, type_error};
 
 use super::node::with_dom;
-use super::{Accessor, ClassSpec, Method, class, illegal_constructor, node_of, queue_microtask};
+use super::{
+    Accessor, ClassSpec, Method, define_class, illegal_constructor, node_of, queue_microtask,
+};
 use crate::css::{
     AnimationOutcome, Declaration, Direction, Easing, Fill, Keyframes, PlayState, Timing,
 };
@@ -41,16 +43,16 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         statics: &[],
         global: true,
     };
-    let (_, prototype) = class(
+    let (_, prototype) = define_class(
         context,
         spec("Animation", Some("EventTarget"), METHODS, ACCESSORS),
     )?;
     verve::dom_events::handler_accessors(context, &prototype, &["finish", "cancel", "remove"])?;
-    class(
+    define_class(
         context,
         spec("CSSAnimation", Some("Animation"), &[], NAME_OF_ANIMATION),
     )?;
-    class(
+    define_class(
         context,
         spec("CSSTransition", Some("Animation"), &[], NAME_OF_TRANSITION),
     )?;

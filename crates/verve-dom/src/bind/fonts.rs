@@ -17,7 +17,7 @@ use boa_engine::{
 use boa_gc::GcRefCell;
 
 use super::{
-    Accessor, ClassSpec, Method, call_method, class, constructor_of, dom_error,
+    Accessor, ClassSpec, Method, call_method, constructor_of, define_class, dom_error,
     illegal_constructor, prototype_of_target, resolved, string,
 };
 use crate::state::shared;
@@ -480,7 +480,7 @@ const FACE_METHODS: &[Method] = &[("load", 0, |this, _, cx| {
 
 /// Makes `FontFace` and `FontFaceSet`, whose one instance is `document.fonts`.
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let (_, face) = class(
+    let (_, face) = define_class(
         context,
         ClassSpec {
             name: "FontFace",
@@ -494,7 +494,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         },
     )?;
     super::extend_prototype(context, &face, &[], FACE_STATE)?;
-    let (_, set) = class(
+    let (_, set) = define_class(
         context,
         ClassSpec {
             name: "FontFaceSet",

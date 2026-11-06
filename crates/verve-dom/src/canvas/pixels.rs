@@ -6,7 +6,7 @@ use boa_engine::object::builtins::JsUint8ClampedArray;
 use boa_engine::{Context, JsObject, JsResult, JsValue};
 use tiny_skia::Pixmap;
 
-use crate::bind::{Kind, instance, native_instance, set};
+use crate::bind::{Kind, handle_instance, native_instance, set};
 use crate::canvas::context2d::Canvas2d;
 use crate::canvas::image::{premultiply, unpremultiply};
 use verve::native::{arg, get, js_text};
@@ -93,7 +93,7 @@ pub fn construct_image_data(
             (bytes.into(), width, height)
         }
     };
-    let object = instance(new_target, Kind::Plain, 0, context)?;
+    let object = handle_instance(new_target, Kind::Plain, 0, context)?;
     fill_image_data(&object, width, height, data, context)?;
     Ok(object.into())
 }

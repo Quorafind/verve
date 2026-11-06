@@ -21,8 +21,8 @@ use boa_engine::{
 
 use super::node::{ancestry, read_dom, with_dom, wrap, wrap_opt};
 use super::{
-    Accessor, ClassSpec, Kind, Method, class, constructor_of, handle_of, illegal_constructor,
-    instance, native_instance, node_id, node_of, opt_string, plain_object, set, string,
+    Accessor, ClassSpec, Kind, Method, constructor_of, define_class, handle_instance, handle_of,
+    illegal_constructor, native_instance, node_id, node_of, opt_string, plain_object, set, string,
 };
 use crate::dom::{Dom, NodeId, NodeKind, ShadowMode, SlotAssignment};
 use crate::state::shared;
@@ -686,7 +686,7 @@ fn construct_sheet(
         state.constructed_sheets.insert(id, Vec::new());
         id
     };
-    Ok(instance(new_target, Kind::Constructed, id, context)?.into())
+    Ok(handle_instance(new_target, Kind::Constructed, id, context)?.into())
 }
 
 const CSS_FUNCTIONS: &[Method] = &[
@@ -738,7 +738,7 @@ fn construct_range(
     _: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let range = instance(new_target, Kind::Plain, 0, context)?;
+    let range = handle_instance(new_target, Kind::Plain, 0, context)?;
     let document = context
         .global_object()
         .get(js_string!("document"), context)?;
@@ -1484,7 +1484,7 @@ fn construct_matrix(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let m = matrix_from_init(&arg(args, 0), context)?;
-    let object = instance(new_target, Kind::Plain, 0, context)?;
+    let object = handle_instance(new_target, Kind::Plain, 0, context)?;
     set_matrix(&object, &m, context)?;
     Ok(object.into())
 }
@@ -1587,7 +1587,7 @@ fn simple_class(
     accessors: &[Accessor],
     global: bool,
 ) -> JsResult<JsObject> {
-    Ok(class(
+    Ok(define_class(
         context,
         ClassSpec {
             name,
@@ -1827,7 +1827,7 @@ fn construct_point(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let object = instance(new_target, Kind::Plain, 0, context)?;
+    let object = handle_instance(new_target, Kind::Plain, 0, context)?;
     for (i, (key, default)) in [("x", 0.), ("y", 0.), ("z", 0.), ("w", 1.)]
         .into_iter()
         .enumerate()
@@ -1869,7 +1869,7 @@ fn construct_rect(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let object = instance(new_target, Kind::Plain, 0, context)?;
+    let object = handle_instance(new_target, Kind::Plain, 0, context)?;
     let mut numbers = [0.; 4];
     for (i, slot) in numbers.iter_mut().enumerate() {
         *slot = number_arg(args, i, 0., context)?;
@@ -1902,7 +1902,7 @@ fn construct_data_transfer(
     _: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let transfer = instance(new_target, Kind::Plain, 0, context)?;
+    let transfer = handle_instance(new_target, Kind::Plain, 0, context)?;
     let data = plain_object(context);
     hidden(&transfer, js_string!("__data"), data, context)?;
     set(&transfer, "dropEffect", js_text("none"), context)?;
