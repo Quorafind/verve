@@ -23,12 +23,14 @@ use crate::{ElectronOptions, MainGuest};
 
 mod records;
 mod renderers;
+mod sessions;
 mod shell;
 mod windows;
 
 pub use records::ConsoleLine;
 pub use renderers::RendererHandle;
 use renderers::{RendererSlot, stop};
+pub use sessions::{Privileged, Privileges, Session};
 pub use shell::ShellPort;
 use shell::{ShellObserver, Theme};
 
@@ -97,6 +99,8 @@ pub struct Hub {
     /// process is up is still there when `screen` is first asked.
     displays: Mutex<Vec<Display>>,
     theme: Mutex<Theme>,
+    /// The app's sessions and the schemes it made privileged.
+    sessions: Mutex<sessions::Registry>,
 }
 
 impl Hub {
@@ -122,6 +126,7 @@ impl Hub {
             observer: Mutex::new(None),
             displays: Mutex::new(Vec::new()),
             theme: Mutex::new(theme),
+            sessions: Mutex::default(),
         })
     }
 
