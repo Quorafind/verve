@@ -216,6 +216,20 @@ impl MainGuest {
             // A page that goes to another address (`location.href`, a link, a form) asks the
             // main process, which lets it.
             FromRenderer::Reload { url } => self.page_reloads(contents, url),
+            FromRenderer::PreloadError {
+                path,
+                name,
+                message,
+            } => api::contents_ipc::preload_error(
+                self.runtime.context(),
+                contents,
+                path,
+                name,
+                message,
+            ),
+            // The shell's scaling and `webContents.getZoomFactor` are P13's and P30's; whoever
+            // does them keeps the factor, which nothing here reads.
+            FromRenderer::ZoomChanged(_) => {}
             FromRenderer::Dom(verve_dom::Request::Navigate { url, .. }) => {
                 self.page_navigates(contents, url);
             }
