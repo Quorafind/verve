@@ -6857,6 +6857,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "verve-layout"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "taffy",
+ "verve",
+ "verve-dom",
+]
+
+[[package]]
 name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

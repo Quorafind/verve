@@ -18,7 +18,8 @@ path = "src/bin/verve.rs"
 # `verve-dom`: a document for the realm, opt-in — see its README.
 # `verve-electron`: Electron on Verve, the app's processes and the messages between them.
 # `verve-gpui`: the shell those processes' windows are drawn by, and the `electron` binary.
-members = ["crates/verve-dom", "crates/verve-asar", "crates/verve-electron", "crates/verve-gpui"]
+# `verve-layout`: the boxes of a page, laid out on its own thread, and the display list that draws them.
+members = ["crates/verve-dom", "crates/verve-asar", "crates/verve-electron", "crates/verve-gpui", "crates/verve-layout"]
 # Boa keeps its own workspace, as upstream has it, so `git subtree pull` stays a plain merge.
 exclude = ["boa"]
 
