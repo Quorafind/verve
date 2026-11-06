@@ -348,10 +348,7 @@ fn when_ready(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsV
 fn focus(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let hub = Arc::clone(&shared(context).hub);
     if let Some(window) = hub.windows().last() {
-        hub.to_shell(crate::msg::ToShell::Window {
-            window: *window,
-            op: crate::msg::WindowOp::Focus,
-        });
+        hub.to_window(*window, crate::msg::WindowOp::Focus);
     }
     Ok(JsValue::undefined())
 }

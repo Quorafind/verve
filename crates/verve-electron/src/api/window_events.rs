@@ -16,7 +16,7 @@ use super::window_lifecycle::begin_close;
 use super::windows::WindowRecord;
 use super::{app, contents_ipc, shared};
 use crate::ids::WindowId;
-use crate::msg::{ToShell, WindowEvent, WindowOp};
+use crate::msg::{WindowEvent, WindowOp};
 
 /// What the shell says happened to `window`.
 pub(crate) fn shell_event(context: &mut Context, window: WindowId, event: WindowEvent) {
@@ -80,10 +80,9 @@ pub(crate) fn page_title(context: &mut Context, record: &WindowRecord, title: &s
     let prevented = define::emit_reporting(context, &record.object, "page-title-updated", &args);
     if !prevented {
         record.state.borrow_mut().title = title.to_owned();
-        shared.hub.to_shell(ToShell::Window {
-            window: record.id,
-            op: WindowOp::SetTitle(title.to_owned()),
-        });
+        shared
+            .hub
+            .to_window(record.id, WindowOp::SetTitle(title.to_owned()));
     }
     if let Ok(object) = contents_ipc::contents_object(context, record.page.contents) {
         define::emit_reporting(context, &object, "page-title-updated", &args);

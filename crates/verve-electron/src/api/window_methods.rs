@@ -29,7 +29,7 @@ use super::window_geometry;
 use super::window_lifecycle::destroy;
 use super::window_options::parse_color;
 use super::windows::WindowRecord;
-use crate::msg::{ToShell, WindowOp};
+use crate::msg::WindowOp;
 use crate::window_state::{Flag, WindowState};
 
 /// The window `this` stands for, while a script can use it: `Object has been destroyed` once it
@@ -53,10 +53,7 @@ pub(crate) fn act(context: &mut Context, record: &WindowRecord, op: WindowOp) {
 
 /// Tells the shell to do `op`, which has no effect on the cache.
 fn send(context: &mut Context, record: &WindowRecord, op: WindowOp) {
-    shared(context).hub.to_shell(ToShell::Window {
-        window: record.id,
-        op,
-    });
+    shared(context).hub.to_window(record.id, op);
 }
 
 /// Methods that do one thing to the window and take nothing.

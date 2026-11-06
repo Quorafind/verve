@@ -1,6 +1,7 @@
 //! The registry of open windows and the page each shows.
 
 use super::{ContentsId, Hub, WindowId, lock, stop};
+use crate::msg::{ToShell, WindowOp};
 
 impl Hub {
     /// The ids of a window about to be made and of the page it shows.
@@ -12,6 +13,11 @@ impl Hub {
     /// Records a window the main process made, with the page it shows.
     pub fn add_window(&self, window: WindowId, contents: ContentsId) {
         lock(&self.windows).insert(window, contents);
+    }
+
+    /// Asks the shell to do `op` to `window`.
+    pub fn to_window(&self, window: WindowId, op: WindowOp) {
+        self.to_shell(ToShell::Window { window, op });
     }
 
     /// The windows still open.
