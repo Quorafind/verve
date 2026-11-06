@@ -5,14 +5,15 @@
 //! shown by [`open`] once it has its frame, place and limits, so it never appears in any other.
 
 use std::cell::Cell;
+use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AppContext as _, AsyncApp, Bounds, Rgba, TitlebarOptions, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions as GpuiOptions, point,
-    px, rgba, size,
+    AppContext as _, AsyncApp, Bounds, PromptButton, PromptLevel, Rgba, TitlebarOptions,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowOptions as GpuiOptions, point, px, rgba, size,
 };
 use verve_electron::Hub;
 use verve_electron::ids::{ContentsId, WindowId};
@@ -324,6 +325,22 @@ impl Window {
             update(view);
             cx.notify();
         });
+    }
+
+    /// Shows a prompt over the window; the answer is the index of the button pressed, `None` when
+    /// the prompt went away unanswered. `None` at once for a window that is gone.
+    pub fn prompt(
+        &self,
+        level: PromptLevel,
+        message: &str,
+        detail: Option<&str>,
+        answers: &[PromptButton],
+        cx: &mut AsyncApp,
+    ) -> Option<impl Future<Output = Option<usize>> + use<>> {
+        let asked = self.handle.update(cx, |_, window, cx| {
+            window.prompt(level, message, detail, answers, cx)
+        });
+        asked.ok().map(|chosen| async move { chosen.await.ok() })
     }
 
     /// Sets the regions the window is dragged by.
