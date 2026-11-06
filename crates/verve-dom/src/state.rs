@@ -19,6 +19,7 @@ use crate::bind::slot::Slots;
 use crate::css::{AnimationStore, Environment, MediaQuery, Origin, Sheet, Styler};
 use crate::dom::{Dom, NodeId};
 use crate::{Rect, Request, StorageBackend};
+use verve::WorldId;
 
 pub type Shared = Rc<RefCell<State>>;
 
@@ -36,6 +37,9 @@ pub enum SheetOwner {
     UserAgent,
     /// One the embedder added, by the name it gave.
     Embedder(String),
+    /// One the embedder added as the user's own (`webFrame.insertCSS` with `cssOrigin: 'user'`):
+    /// in the cascade between the user agent's and the page's.
+    User(String),
     /// A `<style>` element in the document.
     Element(NodeId),
     /// A `new CSSStyleSheet()` adopted by the document, by its number.
@@ -52,6 +56,8 @@ pub struct ObserverRecord {
     pub id: u32,
     pub watch: Watch,
     pub object: WeakJsObject,
+    /// The world the observer was made in: its records are made, and it is told, there.
+    pub world: verve::WorldId,
     /// 只有待交付记录临时保活观察者和记录引用的节点。
     pub kept: Vec<JsObject>,
     pub transient: Vec<(NodeId, MutationOptions)>,
@@ -124,12 +130,16 @@ pub struct State {
     pub dom: Dom,
     pub url: url::Url,
     pub title_fallback: String,
-    /// Each node's object, held without keeping it alive.
-    pub wrappers: HashMap<NodeId, WeakJsObject>,
+    /// What the window's `navigator` was given (user agent, language), for a world made later.
+    pub navigator: (Option<String>, Option<String>),
+    /// Each node's object in each world, held without keeping it alive.
+    pub wrappers: HashMap<(WorldId, NodeId), WeakJsObject>,
     /// The parent each object was linked to (see `bind::node::relink`).
-    pub links: HashMap<NodeId, NodeId>,
-    /// The classes made, by name: constructor and prototype.
-    pub classes: HashMap<&'static str, (JsObject, JsObject)>,
+    pub links: HashMap<(WorldId, NodeId), NodeId>,
+    /// The classes each world made, by name: constructor and prototype.
+    pub classes: HashMap<(WorldId, &'static str), (JsObject, JsObject)>,
+    /// How many worlds there are: the page's, and the isolated ones made for it.
+    pub worlds: WorldId,
     pub sheets: Vec<SheetRecord>,
     /// Moves when a sheet comes, goes or changes.
     pub sheets_key: u64,
@@ -206,9 +216,11 @@ impl State {
             history: vec![(JsValue::null(), url.to_string())],
             url,
             title_fallback: String::new(),
+            navigator: (None, None),
             wrappers: HashMap::new(),
             links: HashMap::new(),
             classes: HashMap::new(),
+            worlds: 1,
             sheets: Vec::new(),
             sheets_key: 1,
             style_texts: Vec::new(),
@@ -281,15 +293,20 @@ impl State {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    pub fn class(&self, name: &str) -> Option<(JsObject, JsObject)> {
-        self.classes.get(name).cloned()
+    pub fn class(&self, world: WorldId, name: &str) -> Option<(JsObject, JsObject)> {
+        self.classes.get(&(world, name)).cloned()
     }
 
-    pub fn prototype(&self, name: &str) -> JsObject {
+    pub fn prototype(&self, world: WorldId, name: &str) -> JsObject {
         self.classes
-            .get(name)
+            .get(&(world, name))
             .map(|(_, p)| p.clone())
             .unwrap_or_else(|| panic!("the class {name} is installed"))
+    }
+
+    /// Whether some world has an object for the node alive.
+    pub fn has_object(&self, id: NodeId) -> bool {
+        (0..self.worlds).any(|w| self.wrappers.get(&(w, id)).is_some_and(|o| o.is_alive()))
     }
 
     /// Reads the `<style>` elements and the adopted sheets again, when what they hold changed:
@@ -370,7 +387,7 @@ impl State {
     pub(crate) fn order_sheets(&mut self) {
         let dom = &self.dom;
         let group = |owner: &SheetOwner| match owner {
-            SheetOwner::UserAgent | SheetOwner::Embedder(_) => 0,
+            SheetOwner::UserAgent | SheetOwner::Embedder(_) | SheetOwner::User(_) => 0,
             SheetOwner::Element(_) | SheetOwner::Link(_) | SheetOwner::Import(..) => 1,
             SheetOwner::Adopted(_) => 2,
         };
@@ -397,6 +414,32 @@ impl State {
         }
     }
 
+    /// Adds the embedder's sheet `owner`, or replaces it: after the user agent's and before the
+    /// page's.
+    pub fn put_sheet(&mut self, owner: SheetOwner, css: &str) {
+        let sheet = Sheet::parse(css);
+        match self.sheets.iter_mut().find(|r| r.owner == owner) {
+            Some(record) => record.sheet = sheet,
+            None => {
+                let at = self
+                    .sheets
+                    .iter()
+                    .position(|r| {
+                        matches!(r.owner, SheetOwner::Element(_) | SheetOwner::Adopted(_))
+                    })
+                    .unwrap_or(self.sheets.len());
+                let tree = self.dom.document;
+                self.sheets.insert(at, SheetRecord { owner, sheet, tree });
+            }
+        }
+        self.sheets_changed();
+    }
+
+    pub fn drop_sheet(&mut self, owner: &SheetOwner) {
+        self.sheets.retain(|r| r.owner != *owner);
+        self.sheets_changed();
+    }
+
     pub fn sheets_changed(&mut self) {
         self.sheets_key = self.sheets_key.wrapping_add(1);
         self.touch();
@@ -414,10 +457,10 @@ impl State {
             .sheets
             .iter()
             .map(|r| {
-                let origin = if r.owner == SheetOwner::UserAgent {
-                    Origin::UserAgent
-                } else {
-                    Origin::Author
+                let origin = match r.owner {
+                    SheetOwner::UserAgent => Origin::UserAgent,
+                    SheetOwner::User(_) => Origin::User,
+                    _ => Origin::Author,
                 };
                 (origin, &r.sheet, r.tree)
             })
@@ -452,6 +495,24 @@ fn import_order(a: &[usize], b: &[usize]) -> std::cmp::Ordering {
     }
 }
 
+/// The class `name` of the world that is running: constructor and prototype.
+pub fn class_of(context: &Context, name: &str) -> Option<(JsObject, JsObject)> {
+    shared(context)
+        .borrow()
+        .class(verve::current_world(context), name)
+}
+
+/// The prototype of the class `name` of the world that is running.
+///
+/// # Panics
+///
+/// The class is not installed.
+pub fn class_prototype(context: &Context, name: &str) -> JsObject {
+    shared(context)
+        .borrow()
+        .prototype(verve::current_world(context), name)
+}
+
 pub fn shared(context: &Context) -> Shared {
     context
         .get_data::<Shared>()
@@ -469,9 +530,7 @@ impl State {
     /// alive, or the arena pins one, or a template keeps them through its content.
     pub fn reachable(&self, roots: &[NodeId]) -> HashSet<NodeId> {
         let mut alive = HashSet::from([self.dom.document]);
-        let in_use = |id: &NodeId| {
-            self.dom.is_pinned(*id) || self.wrappers.get(id).is_some_and(|w| w.is_alive())
-        };
+        let in_use = |id: &NodeId| self.dom.is_pinned(*id) || self.has_object(*id);
         for root in roots {
             if self.dom.shadow_including_tree(*root).iter().any(in_use) {
                 alive.insert(*root);
@@ -500,8 +559,10 @@ impl State {
     /// Forgets what is kept against the nodes `freed`, which a sweep has freed.
     pub fn forget_nodes(&mut self, freed: &[NodeId], gone: &HashSet<NodeId>) {
         for id in freed {
-            self.wrappers.remove(id);
-            self.links.remove(id);
+            for world in 0..self.worlds {
+                self.wrappers.remove(&(world, *id));
+                self.links.remove(&(world, *id));
+            }
             self.rects.remove(id);
             self.fragments.remove(id);
             self.scroll_offsets.remove(id);

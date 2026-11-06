@@ -127,7 +127,23 @@ pub fn read_dom<R>(context: &Context, f: impl FnOnce(&Dom) -> R) -> R {
 
 /// The node's object, if it still has one.
 pub fn existing_wrapper(context: &Context, id: NodeId) -> Option<JsObject> {
-    shared(context).borrow().wrappers.get(&id)?.upgrade()
+    let world = verve::current_world(context);
+    shared(context)
+        .borrow()
+        .wrappers
+        .get(&(world, id))?
+        .upgrade()
+}
+
+/// The node's object in any other world, if one is alive: the one whose listeners the node's
+/// object here shares.
+fn sibling_wrapper(context: &Context, id: NodeId) -> Option<JsObject> {
+    let world = verve::current_world(context);
+    let state = shared(context);
+    let state = state.borrow();
+    (0..state.worlds)
+        .filter(|other| *other != world)
+        .find_map(|other| state.wrappers.get(&(other, id))?.upgrade())
 }
 
 /// The class a node's object is made of.
@@ -170,20 +186,24 @@ pub fn wrap(context: &mut Context, id: NodeId) -> JsValue {
 }
 
 fn make_wrapper(context: &mut Context, id: NodeId) -> Option<JsObject> {
+    let world = verve::current_world(context);
     let prototype = {
         let state = shared(context);
         let state = state.borrow();
         if state.dom.is_shadow_root(id) {
-            state.prototype("ShadowRoot")
+            state.prototype(world, "ShadowRoot")
         } else {
-            state.prototype(class_name(&state.dom, id)?)
+            state.prototype(world, class_name(&state.dom, id)?)
         }
     };
-    let object = verve::dom_events::host_target(prototype, host_id_of(id));
+    let object = match sibling_wrapper(context, id) {
+        Some(sibling) => verve::dom_events::host_target_beside(prototype, host_id_of(id), &sibling),
+        None => verve::dom_events::host_target(prototype, host_id_of(id)),
+    };
     shared(context)
         .borrow_mut()
         .wrappers
-        .insert(id, object.downgrade());
+        .insert((world, id), object.downgrade());
     Some(object)
 }
 
@@ -203,7 +223,7 @@ fn list_of(ids: Vec<NodeId>, class: &str, context: &mut Context) -> JsValue {
     let values = ids.into_iter().map(|id| wrap(context, id)).collect();
     let list = array(values, context);
     if let Some(object) = list.as_object() {
-        let prototype = shared(context).borrow().prototype(class);
+        let prototype = crate::state::class_prototype(context, class);
         object.set_prototype(Some(prototype));
     }
     list
@@ -211,18 +231,20 @@ fn list_of(ids: Vec<NodeId>, class: &str, context: &mut Context) -> JsValue {
 
 /// Remembers `object` as the node's object, linked to its parent's.
 pub fn adopt(context: &mut Context, id: NodeId, object: &JsObject) {
+    let world = verve::current_world(context);
     shared(context)
         .borrow_mut()
         .wrappers
-        .insert(id, object.downgrade());
+        .insert((world, id), object.downgrade());
     link(context, id, object);
 }
 
 fn link(context: &mut Context, mut id: NodeId, object: &JsObject) {
+    let world = verve::current_world(context);
     let mut object = object.clone();
     loop {
         let Some(parent) = read_dom(context, |dom| dom.parent(id)) else {
-            shared(context).borrow_mut().links.remove(&id);
+            shared(context).borrow_mut().links.remove(&(world, id));
             break;
         };
         let existing = existing_wrapper(context, parent);
@@ -232,7 +254,10 @@ fn link(context: &mut Context, mut id: NodeId, object: &JsObject) {
         };
         verve::dom_events::hold(&object, |held| held.push(parent_object.clone()));
         verve::dom_events::hold(&parent_object, |held| held.push(object.clone()));
-        shared(context).borrow_mut().links.insert(id, parent);
+        shared(context)
+            .borrow_mut()
+            .links
+            .insert((world, id), parent);
         if !fresh {
             break;
         }
@@ -245,6 +270,18 @@ fn link(context: &mut Context, mut id: NodeId, object: &JsObject) {
 /// linked to the new one's.
 pub fn relink(context: &mut Context) {
     let moved = shared(context).borrow_mut().dom.take_relinked();
+    if moved.is_empty() {
+        return;
+    }
+    let worlds = shared(context).borrow().worlds;
+    for world in 0..worlds {
+        verve::in_world(context, world, |cx| relink_world(cx, moved.clone()));
+    }
+}
+
+/// [`relink`] for the objects of the world that is running.
+fn relink_world(context: &mut Context, moved: Vec<NodeId>) {
+    let world = verve::current_world(context);
     let mut seen = std::collections::HashSet::new();
     let mut due = Vec::new();
     let mut removed =
@@ -259,7 +296,7 @@ pub fn relink(context: &mut Context) {
         let (old, new) = {
             let state = shared(context);
             let state = state.borrow();
-            (state.links.get(&id).copied(), state.dom.parent(id))
+            (state.links.get(&(world, id)).copied(), state.dom.parent(id))
         };
         if old == new {
             continue;
@@ -1240,7 +1277,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    let (node, node_proto) = shared(context).borrow().class("Node").expect("made");
+    let (node, node_proto) = crate::state::class_of(context, "Node").expect("made");
     for (key, value) in [
         ("ELEMENT_NODE", 1),
         ("ATTRIBUTE_NODE", 2),
@@ -1286,10 +1323,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    let (_, character_data) = shared(context)
-        .borrow()
-        .class("CharacterData")
-        .expect("made");
+    let (_, character_data) = crate::state::class_of(context, "CharacterData").expect("made");
     super::extend_prototype(
         context,
         &character_data,
@@ -1354,10 +1388,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    let (_, fragment) = shared(context)
-        .borrow()
-        .class("DocumentFragment")
-        .expect("made");
+    let (_, fragment) = crate::state::class_of(context, "DocumentFragment").expect("made");
     super::extend_prototype(
         context,
         &fragment,

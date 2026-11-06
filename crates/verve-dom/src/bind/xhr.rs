@@ -33,9 +33,7 @@ fn record(this: &JsValue, context: &mut Context) -> JsResult<JsObject> {
 }
 
 fn construct(new_target: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let target = shared(context)
-        .borrow()
-        .class("EventTarget")
+    let target = crate::state::class_of(context, "EventTarget")
         .expect("made")
         .0;
     let object = target.construct(&[], new_target.as_object().as_ref(), context)?;

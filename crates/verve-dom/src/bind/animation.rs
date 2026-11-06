@@ -105,7 +105,7 @@ fn object_of(context: &mut Context, id: u32) -> JsObject {
                 "CSSAnimation"
             }
         });
-    let prototype = shared(context).borrow().prototype(class);
+    let prototype = crate::state::class_prototype(context, class);
     let object = verve::dom_events::host_target(prototype, TAG | u64::from(id));
     let finished = pending(context);
     shared(context).borrow_mut().animation_records.insert(

@@ -309,7 +309,7 @@ pub fn font_set(context: &mut Context) -> JsResult<JsValue> {
     }
     let target = constructor_of(context, "EventTarget").expect("made");
     let set = target.construct(&[], None, context)?;
-    let prototype = shared(context).borrow().prototype("FontFaceSet");
+    let prototype = crate::state::class_prototype(context, "FontFaceSet");
     set.set_prototype(Some(prototype));
     let ready = resolved(set.clone().into(), context)?;
     let state = shared(context);

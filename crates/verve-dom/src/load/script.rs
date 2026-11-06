@@ -421,7 +421,7 @@ pub(super) fn heard(context: &mut Context, outcome: boa_engine::JsResult<bool>) 
 
 /// `script.async`: setting it false asks for the order the scripts were put in the page in.
 pub(crate) fn install(context: &mut Context) -> boa_engine::JsResult<()> {
-    let prototype = shared(context).borrow().prototype("HTMLScriptElement");
+    let prototype = crate::state::class_prototype(context, "HTMLScriptElement");
     let accessors: &[Accessor] = &[("async", Some(async_get), Some(async_set))];
     extend_prototype(context, &prototype, &[], accessors)
 }

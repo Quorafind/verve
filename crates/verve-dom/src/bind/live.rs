@@ -17,7 +17,6 @@ use boa_engine::{
 use super::node::{read_dom, wrap};
 use super::{arg, hidden};
 use crate::dom::{Dom, NodeId};
-use crate::state::shared;
 
 type Query = Rc<dyn Fn(&Dom) -> Vec<NodeId>>;
 
@@ -66,7 +65,7 @@ pub fn collection(
 }
 
 fn build(context: &mut Context, class: &str, query: Query, named: bool) -> JsResult<JsValue> {
-    let prototype = shared(context).borrow().prototype(class);
+    let prototype = crate::state::class_prototype(context, class);
     let live = Live {
         query,
         found: RefCell::default(),
