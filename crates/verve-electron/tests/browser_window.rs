@@ -5,47 +5,7 @@
 
 mod support;
 
-use support::{App, TIMEOUT};
-
-/// Runs `body` — the body of an async function in the main process, with `app`, `BrowserWindow`,
-/// `sleep`, `log` and `load(win, html)` at hand — and answers what the app logged, up to the
-/// `DONE` it logs when `body` has finished. A throw is logged as `THREW <message>`.
-fn run(body: &str) -> Vec<String> {
-    let script = format!(
-        r#"const {{ app, BrowserWindow }} = require('electron');
-app.on('window-all-closed', () => {{}});
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const log = (...parts) => console.log(parts.map((p) => (typeof p === 'string' ? p : p === undefined ? 'undefined' : JSON.stringify(p))).join(' '));
-const load = (win, html) => new Promise((resolve) => {{
-  win.webContents.once('did-finish-load', resolve);
-  win.loadURL('data:text/html,' + encodeURIComponent(html));
-}});
-const watch = (tag, emitter, names) => names.forEach((n) => emitter.on(n, () => log(tag, n)));
-app.whenReady().then(async () => {{
-  try {{
-{body}
-  }} catch (error) {{ log('THREW', error.message); }}
-  log('DONE');
-}});"#
-    );
-    let app = App::launch_script(&script, &[]);
-    assert!(
-        app.run_until(
-            |app| app.console().iter().any(|line| line == "DONE"),
-            TIMEOUT
-        ),
-        "the script did not finish: {:?}",
-        app.console()
-    );
-    let mut lines = app.console();
-    lines.truncate(
-        lines
-            .iter()
-            .position(|line| line == "DONE")
-            .unwrap_or(lines.len()),
-    );
-    lines
-}
+use support::{App, TIMEOUT, run};
 
 #[test]
 fn a_window_has_electrons_defaults() {
@@ -996,4 +956,39 @@ app.whenReady().then(async () => {{
     assert!(!lines.contains(&"will-quit".to_owned()), "{lines:?}");
     assert!(lines.contains(&"still 1".to_owned()), "{lines:?}");
     assert_eq!(app.shell.exit_code(), None);
+}
+
+#[test]
+fn a_window_and_its_web_contents_belong_together() {
+    // Electron 39.8.10: `webContents` is the same object each time, an `EventEmitter` of the class
+    // `WebContents`, and `BrowserWindow.fromWebContents` finds the window again.
+    let lines = run(r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    log(wc === win.webContents, wc.constructor.name, wc instanceof require('events'), BrowserWindow.fromWebContents(wc) === win, wc.isDestroyed());
+    win.destroy();
+    log(wc.isDestroyed());
+    "#);
+    assert_eq!(lines, ["true WebContents true true false", "true"]);
+}
+
+#[test]
+fn the_window_loads_and_reloads_through_its_web_contents() {
+    // `win.loadURL` and `win.loadFile` are `webContents`'; a reload loads the same address as the
+    // same entry (Electron 39.8.10: no new entry, did-start-navigation, did-navigate, then
+    // did-finish-load).
+    let lines = run(r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await load(win, '<title>R</title>r');
+    watch('wc', wc, ['did-navigate', 'did-finish-load']);
+    await new Promise((resolve) => { wc.once('did-finish-load', resolve); win.reload(); });
+    log(wc.navigationHistory.length(), wc.getTitle());
+    const error = await win.loadURL('file:///definitely/not/here.html').catch((e) => e.code);
+    log(error);
+    "#);
+    assert_eq!(lines[0], "wc did-navigate");
+    assert_eq!(lines[1], "wc did-finish-load");
+    assert_eq!(lines[2], "1 R");
+    assert_eq!(lines.last().map(String::as_str), Some("ERR_FILE_NOT_FOUND"));
 }

@@ -98,7 +98,9 @@ impl ElectronLoader {
 
     fn read_file(&self, url: Url) -> LoadResult {
         let Ok(path) = url.to_file_path() else {
-            return LoadResult::failed(url, -300, "ERR_INVALID_URL");
+            // Chromium resolves a path the system has no such file for (no drive letter on
+            // Windows) and finds nothing there.
+            return LoadResult::failed(url, -6, "ERR_FILE_NOT_FOUND");
         };
         let packed = self
             .overlay

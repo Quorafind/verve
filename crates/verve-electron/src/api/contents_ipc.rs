@@ -1,13 +1,14 @@
 //! The IPC members of a page's `webContents` object — `send`, `sendToFrame`, `postMessage`, `ipc`
 //! and `mainFrame` — and the sending behind them, which `webFrameMain` and `event.reply` share.
 //!
-//! P13 makes `webContents` a class of its own; its method table takes [`METHODS`] and
-//! [`ACCESSORS`] as they are, and keeps [`WEB_CONTENTS`] as the kind of the objects it makes.
+//! `webContents` is a class of its own ([`web_contents`](super::web_contents)); its prototype takes
+//! [`METHODS`] and [`ACCESSORS`] as they are, and [`WEB_CONTENTS`] is the kind of the objects it makes.
 
 use boa_engine::native_function::NativeFunctionPointer;
 use boa_engine::{Context, JsObject, JsResult, JsValue};
 use verve::native::{self, arg, js_text};
 
+use super::contents_history;
 use super::define::{self, Args, Kind};
 use super::ipc_main::{self, console};
 use super::message_port_main;
@@ -24,6 +25,7 @@ pub(crate) const WEB_CONTENTS: Kind = Kind("WebContents");
 #[derive(Clone)]
 pub(crate) struct Contents {
     pub(crate) object: JsObject,
+    pub(crate) history: JsObject,
     pub(crate) ipc: JsObject,
     pub(crate) frame: JsObject,
     pub(crate) frame_ipc: JsObject,
@@ -62,15 +64,13 @@ pub(crate) fn contents_object(context: &mut Context, id: ContentsId) -> JsResult
     if let Some(page) = page(context, id)? {
         return Ok(page.object);
     }
-    let object = define::emitter(context)?.construct(&[], None, context)?;
-    object.set(boa_engine::js_string!("id"), id, false, context)?;
+    let object = super::web_contents::construct(context)?;
     define::bind(&object, WEB_CONTENTS, id, context);
-    native::methods(context, &object, METHODS)?;
-    native::accessors(context, &object, ACCESSORS)?;
     let ipc = ipc_main::new_ipc(context)?;
     native::hidden(&object, boa_engine::js_string!("ipc"), ipc.clone(), context)?;
     let page = Contents {
         object: object.clone(),
+        history: contents_history::make(context, id)?,
         ipc,
         frame: web_frame_main::make(context, id)?,
         frame_ipc: ipc_main::new_ipc(context)?,

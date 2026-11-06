@@ -16,14 +16,15 @@ use verve::isolate::{Guest, InterruptHandle, Outbox};
 use verve::native;
 use verve::{Level, ProcessInfo, Runtime, UncaughtBehavior};
 
-use crate::api::{self, MainState, app, define, window_events, window_lifecycle};
+use crate::api::{
+    self, MainState, app, define, navigation, page_events, web_contents, window_events,
+    window_lifecycle,
+};
 use crate::beat;
 use crate::hub::{Hub, Program};
 use crate::ids::{ContentsId, WindowId};
 use crate::launcher::Target;
-use crate::msg::{
-    AppEvent, FromRenderer, FromShell, LoadOptions, PageEvent, ToRenderer, WindowEvent,
-};
+use crate::msg::{AppEvent, FromRenderer, FromShell, PageEvent, WindowEvent};
 use crate::probe;
 
 /// The browser process: its runtime, the API the app's script calls, and what ends the app.
@@ -184,90 +185,53 @@ impl MainGuest {
         }
     }
 
-    /// What a page said, told to the window that shows it. What `webContents` reports of a page's
-    /// lifecycle is P13's second half (the window's title and `ready-to-show` are heard now); its
-    /// messages are heard as events at once, each with the microtask checkpoint a task of
-    /// Electron's main process ends with.
+    /// What a page said, told to the window that shows it and heard as the events of its
+    /// `webContents`, each with the microtask checkpoint a task of Electron's main process ends
+    /// with.
     pub fn from_renderer(&mut self, contents: ContentsId, event: FromRenderer) {
+        let context = self.runtime.context();
         match event {
             FromRenderer::Ipc { .. }
             | FromRenderer::Invoke { .. }
             | FromRenderer::SendSync { .. }
             | FromRenderer::Post { .. } => {
-                api::ipc_main::receive(self.runtime.context(), contents, event);
+                api::ipc_main::receive(context, contents, event);
                 self.runtime.run_microtasks();
                 self.sweep_at = api::ipc_main::watch_unanswered(self.runtime.context());
+                return;
             }
             // The window is titled by its page, as in Electron, unless a listener of the window's
             // 'page-title-updated' says otherwise.
             FromRenderer::Dom(verve_dom::Request::Title(title)) => {
-                self.page_event(contents, PageEvent::TitleUpdated(title));
+                page_events::page_event(context, contents, PageEvent::TitleUpdated(title));
             }
-            FromRenderer::Lifecycle(event) => self.page_event(contents, event),
+            FromRenderer::Lifecycle(event) => page_events::page_event(context, contents, event),
             FromRenderer::BeforeUnloadReply { call, proceed } => {
-                let context = self.runtime.context();
                 window_lifecycle::before_unload_reply(context, contents, call, proceed);
-                self.runtime.run_microtasks();
             }
             FromRenderer::UnloadReply { call } => {
-                window_lifecycle::unload_reply(self.runtime.context(), contents, call);
-                self.runtime.run_microtasks();
+                window_lifecycle::unload_reply(context, contents, call);
             }
             // A page that goes to another address (`location.href`, a link, a form) asks the
-            // main process, which lets it.
-            FromRenderer::Reload { url } => self.page_reloads(contents, url),
+            // main process, whose `will-navigate` listeners may refuse.
+            FromRenderer::Dom(verve_dom::Request::Navigate { url, replace }) => {
+                navigation::page_navigates(context, contents, url, replace);
+            }
+            FromRenderer::Reload { url } => navigation::page_reloads(context, contents, url),
             FromRenderer::PreloadError {
                 path,
                 name,
                 message,
-            } => api::contents_ipc::preload_error(
-                self.runtime.context(),
-                contents,
-                path,
-                name,
-                message,
-            ),
-            // The shell's scaling and `webContents.getZoomFactor` are P13's and P30's; whoever
-            // does them keeps the factor, which nothing here reads.
-            FromRenderer::ZoomChanged(_) => {}
-            FromRenderer::Dom(verve_dom::Request::Navigate { url, .. }) => {
-                self.page_navigates(contents, url);
+            } => api::contents_ipc::preload_error(context, contents, path, name, message),
+            FromRenderer::ZoomChanged(factor) => {
+                web_contents::zoom_changed(context, contents, factor)
             }
-            // `'render-process-gone'` is `webContents`' event, P13's second half; a window that was
-            // closing and has nobody left to ask closes.
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
-                window_lifecycle::page_gone(self.runtime.context(), contents);
+                window_lifecycle::page_gone(context, contents);
             }
-            _ => {}
+            _ => return,
         }
-    }
-
-    /// Page `contents` asks to go to `url`: the main process's say in it. P13 wraps this in
-    /// `will-frame-navigate` and `will-navigate`, which a listener may cancel; until then every
-    /// navigation goes through, and the page is given a document of its own.
-    fn page_navigates(&mut self, contents: ContentsId, url: String) {
-        self.load_for_page(contents, url);
-    }
-
-    /// Page `contents` asks to be loaded again (`location.reload()`): no `will-navigate`, which
-    /// P13 leaves out for a reload as Electron does, and a document of its own all the same.
-    fn page_reloads(&mut self, contents: ContentsId, url: String) {
-        self.load_for_page(contents, url);
-    }
-
-    /// Has page `contents` load `url` in a document of its own.
-    fn load_for_page(&mut self, contents: ContentsId, url: String) {
-        let load = ToRenderer::Load {
-            url,
-            options: LoadOptions::default(),
-        };
-        self.hub.to_renderer(contents, load);
-    }
-
-    /// What a page's lifecycle says, heard as the events of its window and `webContents`.
-    fn page_event(&mut self, contents: ContentsId, event: PageEvent) {
-        window_events::page_event(self.runtime.context(), contents, event);
         self.runtime.run_microtasks();
     }
 

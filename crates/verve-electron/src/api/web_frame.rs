@@ -20,7 +20,7 @@ use crate::preload::{self, setup};
 pub(crate) const SCRIPT_FAILED: &str = "Script failed to execute, this normally means an error was thrown. Check the renderer console for the error.";
 
 /// The ratio between zoom levels.
-const LEVEL_STEP: f64 = 1.2;
+pub(crate) const LEVEL_STEP: f64 = 1.2;
 
 /// `require('electron').webFrame`.
 pub(crate) fn make(context: &mut Context) -> JsResult<JsObject> {

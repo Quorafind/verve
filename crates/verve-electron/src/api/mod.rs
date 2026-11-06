@@ -6,6 +6,7 @@ pub(crate) mod app;
 pub(crate) mod browser_window;
 pub(crate) mod clipboard;
 pub(crate) mod command_line;
+pub(crate) mod contents_history;
 pub(crate) mod contents_ipc;
 pub(crate) mod context_bridge;
 pub mod define;
@@ -15,13 +16,17 @@ pub(crate) mod ipc_renderer;
 pub(crate) mod message_port_main;
 pub(crate) mod native_image;
 pub(crate) mod native_theme;
+pub(crate) mod navigation;
 pub(crate) mod notification;
+pub(crate) mod page_events;
+pub(crate) mod page_state;
 pub(crate) mod power;
 pub(crate) mod process;
 pub(crate) mod safe_storage;
 pub(crate) mod screen;
 pub(crate) mod shell;
 pub(crate) mod system_preferences;
+pub(crate) mod web_contents;
 pub(crate) mod web_frame;
 pub(crate) mod web_frame_main;
 pub(crate) mod web_preferences;
@@ -54,6 +59,8 @@ pub(crate) struct MainState {
     pub(crate) windows: windows::Windows,
     /// The dialogs asked for and not yet answered.
     pub(crate) dialogs: dialog::Pending,
+    /// The legacy `webContents` methods already warned about.
+    pub(crate) deprecated: std::cell::RefCell<Vec<String>>,
 }
 
 impl MainState {
@@ -63,6 +70,7 @@ impl MainState {
             app,
             windows: windows::Windows::default(),
             dialogs: dialog::Pending::default(),
+            deprecated: std::cell::RefCell::new(Vec::new()),
         })
     }
 
@@ -72,6 +80,11 @@ impl MainState {
     pub(crate) fn page(&self, window: WindowId) -> Option<RendererHandle> {
         self.hub.contents_of(window)?;
         Some(self.windows.live(window)?.page.clone())
+    }
+
+    /// The record of the window that shows page `contents`, while a script can use it.
+    pub(crate) fn showing(&self, contents: ContentsId) -> Option<Rc<windows::WindowRecord>> {
+        self.windows.live(self.hub.window_of(contents)?)
     }
 }
 
@@ -135,7 +148,8 @@ fn main_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     exports.set(js_string!("BrowserWindow"), window, false, context)?;
     exports.set(js_string!("app"), app::make(context)?, false, context)?;
     ipc_main::add_exports(context, &exports)?;
-    let modules: [(&str, ModuleMaker); 11] = [
+    let modules: [(&str, ModuleMaker); 12] = [
+        ("webContents", web_contents::make_module),
         ("dialog", dialog::make),
         ("Notification", notification::make),
         ("shell", shell::make),

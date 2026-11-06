@@ -238,18 +238,21 @@ fn before_ready(
     Ok(JsValue::undefined())
 }
 
-fn get_user_agent(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+/// `app.userAgentFallback`: what a page sends as `User-Agent` unless it was given one of its own.
+pub(crate) fn user_agent(context: &Context) -> String {
     let state = shared(context);
     if let Some(agent) = state.app.settings.borrow().user_agent.clone() {
-        return Ok(js_text(&agent));
+        return agent;
     }
     let (name, version) = (
         state.app.name().replace(' ', ""),
         state.app.version.borrow().clone(),
     );
-    Ok(js_text(&verve::electron_user_agent(Some((
-        &name, &version,
-    )))))
+    verve::electron_user_agent(Some((&name, &version)))
+}
+
+fn get_user_agent(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(js_text(&user_agent(context)))
 }
 
 fn set_user_agent(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

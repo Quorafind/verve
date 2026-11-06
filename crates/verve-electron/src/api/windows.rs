@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use boa_engine::JsObject;
 
+use super::page_state::PageState;
 use crate::hub::RendererHandle;
 use crate::ids::WindowId;
 use crate::window_state::WindowState;
@@ -67,8 +68,8 @@ pub(crate) struct WindowRecord {
     /// Whether the page's `webContents` has said `'destroyed'`.
     pub contents_destroyed: Cell<bool>,
     pub ready: Cell<Ready>,
-    /// The address the page last committed: what `reload()` loads again.
-    pub url: RefCell<String>,
+    /// The page: where it is, its history and the load it is in.
+    pub page_state: PageState,
     /// `accessibleTitle`, when the window's own is not the title.
     pub accessible_title: RefCell<Option<String>>,
 }

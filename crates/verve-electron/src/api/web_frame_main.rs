@@ -95,3 +95,8 @@ fn ipc_of(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsVa
         None => Err(define::destroyed()),
     }
 }
+
+/// The page whose main frame `frame` is.
+pub(crate) fn contents_of(frame: &JsValue, context: &mut Context) -> Option<ContentsId> {
+    define::id_of(frame, FRAME, context)
+}

@@ -14,7 +14,7 @@ use std::time::Instant;
 use boa_engine::Context;
 
 use super::windows::{CLOSE_PATIENCE, Closing, WindowRecord};
-use super::{MainState, app, contents_ipc, define, shared};
+use super::{MainState, app, contents_ipc, define, navigation, shared};
 use crate::ids::{ContentsId, WindowId};
 use crate::msg::{ToRenderer, ToShell, WindowOp};
 
@@ -40,7 +40,7 @@ pub(crate) fn begin_close(context: &mut Context, window: WindowId) {
 
 /// Asks the window's page for its `beforeunload`, unless that is under way: the page answers
 /// [`before_unload_reply`]. A page that is not there closes the window at once.
-fn ask_page(context: &mut Context, record: &WindowRecord) {
+pub(crate) fn ask_page(context: &mut Context, record: &WindowRecord) {
     if record.closing.get() != Closing::Idle {
         return;
     }
@@ -66,12 +66,6 @@ fn refuse(context: &mut Context, record: &WindowRecord) {
     });
 }
 
-/// The record of the window that shows page `contents`, while a script can use it.
-fn showing(context: &mut Context, contents: ContentsId) -> Option<std::rc::Rc<WindowRecord>> {
-    let state = shared(context);
-    state.windows.live(state.hub.window_of(contents)?)
-}
-
 /// The page answered `beforeunload`: `proceed` is `false` when a handler of its refused.
 pub(crate) fn before_unload_reply(
     context: &mut Context,
@@ -79,7 +73,7 @@ pub(crate) fn before_unload_reply(
     call: u64,
     proceed: bool,
 ) {
-    let Some(record) = showing(context, contents) else {
+    let Some(record) = shared(context).showing(contents) else {
         return;
     };
     if record.closing.get() != Closing::Asking(call) {
@@ -102,7 +96,7 @@ pub(crate) fn before_unload_reply(
 
 /// The page has unloaded: the window goes.
 pub(crate) fn unload_reply(context: &mut Context, contents: ContentsId, call: u64) {
-    if let Some(record) = showing(context, contents)
+    if let Some(record) = shared(context).showing(contents)
         && record.closing.get() == Closing::Unloading(call)
     {
         finish_close(context, &record);
@@ -111,7 +105,7 @@ pub(crate) fn unload_reply(context: &mut Context, contents: ContentsId, call: u6
 
 /// The page of a window that is closing is gone: there is nothing left to ask, and the window goes.
 pub(crate) fn page_gone(context: &mut Context, contents: ContentsId) {
-    if let Some(record) = showing(context, contents)
+    if let Some(record) = shared(context).showing(contents)
         && record.closing.get() != Closing::Idle
     {
         finish_close(context, &record);
@@ -136,7 +130,7 @@ pub(crate) fn close_overdue(context: &mut Context) -> bool {
 
 /// The close was not refused: the page's `webContents` is destroyed, the shell closes the
 /// window, and the window is closed.
-fn finish_close(context: &mut Context, record: &WindowRecord) {
+pub(crate) fn finish_close(context: &mut Context, record: &WindowRecord) {
     let state = shared(context);
     if let Ok(object) = contents_ipc::contents_object(context, record.page.contents)
         && !record.contents_destroyed.replace(true)
@@ -188,6 +182,7 @@ impl MainState {
             return;
         };
         self.mark_dead(&record);
+        self.give_up_on_page(context, &record);
         for child in self.windows.children_of(window) {
             self.hub.to_shell(ToShell::Window {
                 window: child.id,
@@ -208,6 +203,13 @@ impl MainState {
             contents_ipc::forget(context, contents);
         }
         app::quit::window_closed(context);
+    }
+
+    /// The window is gone: a `loadURL` still waiting fails as `ERR_FAILED (-2)` (Electron's answer
+    /// for a destroyed page).
+    fn give_up_on_page(&self, context: &mut Context, record: &WindowRecord) {
+        let url = record.page_state.target.borrow().clone();
+        navigation::settle_load(context, record, Err((-2, "ERR_FAILED".into(), url)));
     }
 
     /// A modal window blocks its parent while it can be seen: the parent takes input again once
