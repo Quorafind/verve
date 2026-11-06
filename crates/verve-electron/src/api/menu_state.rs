@@ -438,6 +438,7 @@ pub(crate) fn sync(context: &mut Context) {
         .inner()
         .items
         .retain(|_, weak| weak.upgrade().is_some());
+    super::tray::sync(context);
 }
 
 /// A menu the shell opens: `'menu-will-show'`, after the radio groups are settled.

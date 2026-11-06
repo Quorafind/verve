@@ -68,6 +68,18 @@ pub(crate) fn wrap(context: &mut Context, image: NativeImage) -> JsResult<JsValu
     Ok(JsObject::from_proto_and_data(prototype, data).into())
 }
 
+/// The image `value` stands for where an API takes "a path or a `NativeImage`" (the tray's
+/// icons): the picture at the path, or the image the object holds.
+pub(crate) fn image_arg(value: &JsValue) -> Option<std::sync::Arc<NativeImage>> {
+    if let Some(path) = value.as_string() {
+        let path = path.to_std_string_escaped();
+        return Some(std::sync::Arc::new(NativeImage::from_path(
+            std::path::Path::new(&path),
+        )));
+    }
+    image_of(value).map(std::sync::Arc::new)
+}
+
 /// The image a `NativeImage` object holds, when `value` is one.
 pub(crate) fn image_of(value: &JsValue) -> Option<NativeImage> {
     let object = value.as_object()?;

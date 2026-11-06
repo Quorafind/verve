@@ -36,6 +36,7 @@ pub(crate) mod safe_storage;
 pub(crate) mod screen;
 pub(crate) mod shell;
 pub(crate) mod system_preferences;
+pub(crate) mod tray;
 pub(crate) mod web_contents;
 pub(crate) mod web_frame;
 pub(crate) mod web_frame_main;
