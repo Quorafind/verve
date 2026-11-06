@@ -222,3 +222,65 @@ impl Document {
 3. 主 world 删除节点后，隔离 world 持有的对象仍读得到 `isConnected === false`；`Document::sweep` 看所有 world 的对象（`State::has_object`），任一 world 持有就不回收；两边都放手后才回收（`a_node_an_isolated_world_holds_stays_after_the_page_removes_it`）。
 
 一个 world 的 `State.wrappers`/`links`/`classes` 键里带 `WorldId`，当前 world 取自 `verve::current_world(context)`（当前正在运行的函数所属的 Realm），不是调用者的。
+
+
+### 做了什么
+
+**内核（`src/`，每项一个 `feat(kernel)` 提交，测试都在 `tests/` 里只用 `verve::native` 工具箱）**
+
+- `Runtime::create_world` / `enter_world` / `world_global` 与自由函数 `make_world`（给在原生函数里只有 `Context` 的宿主用）、`current_world`、`world_realm`、`world_of_global`（`src/world.rs`）：建一个 Realm，在其中重装 Verve 的全部 web 全局（`globals::install`），事件循环、定时器队列、微任务队列共享。以前存在 `Context` 数据里、按类型取的几份类（`dom_events::Dom`、`WindowTarget`、`fetch`/`streams` 的 `Classes`）改存在 Realm 的 host-defined 里，由当前 Realm 取；`messaging::poll` 逐 world 轮询各自的端口。**`AbortController` 搬到 `src/dom_events/abort.rs`**，让 `dom_events.rs` 不超过 `ci/style/large-files.txt` 记的行数（并把该行数改小）。
+- 跨 world 的监听器顺序：同一节点在各 world 的对象共用一份监听器列表（见 Spike），`dom_events/worlds.rs` 管跨 world 调用与事件镜像；`host_target_beside`、`set_world_counterpart` 是给宿主的入口。没有另编「全局注册序号」：共用一份列表就是添加序。
+- `verve::blob::{file_with_path, path_of_file}`（`web.rs` 里实现，经 `blob` 模块公开；与任务书的签名相比多了 `kind`，且 `path_of_file` 要 `&mut Context`，因为路径存在只有 Rust 读得到的 `JsWeakMap` 里，脚本从 `File` 上找不到它）。给 P24（拖入文件）与 P32（`<input type=file>`）造带路径的 `File`。
+- 动了的 `src/` 文件：`world.rs`（新）、`dom_events.rs`、`dom_events/{worlds,abort}.rs`、`fetch.rs`、`streams.rs`、`messaging.rs`、`web.rs`、`blob.rs`、`lib.rs`（导出）。除 `README` 允许的三项外没有别的改动。
+
+**verve-dom**
+
+- `Document::create_world` / `verve_dom::create_world(context)`：新 world 里重装窗口的全部类、`window`、`document`；`State.wrappers/links/classes` 键里带 `WorldId`；`State::class_of` / `class_prototype` 取当前 world 的类；`bind::node::relink` 对每个 world 各做一遍；`sweep` 看所有 world（`State::has_object`）。
+- `Document::navigate_initial_with(runtime, url, before)`：在文档已是 `loading`、还什么都没取的时候先跑 `before`，preload 就挂在这里（`document.readyState === 'loading'`）。**这是 `load.rs` 里一处任务书没列的小改动**。
+- `css/cascade.rs` 的 `Origin::User`（`insertCSS(css, { cssOrigin: 'user' })`）：夹在用户代理和作者之间，`!important` 在作者之上、用户代理之下；`SheetOwner::User`。单独一个提交。
+- `verve_dom::{insert_stylesheet, remove_stylesheet}`（`webFrame.insertCSS` 用）。
+
+**verve-electron**
+
+- `preload.rs`：`prepare`（装页面的设置、去掉没有 Node 的页面上的 Node 全局、为 `contextIsolation` 的页面建 preload 的 world）与 `run`（文档开始加载时跑 preload；失败发 `FromRenderer::PreloadError`，控制台先写 `Unable to load preload script: <path>` 再写错误）。沙箱 preload：`require` 只认 `electron`（及 `electron/renderer`、`electron/common`）与 `events`/`timers`/`url`（及 `node:` 前缀），其余抛 `Error: module not found: <name>`；`process` 是裁剪过的（键与 Electron 39.8.10 观察到的一致，`env` 是真实环境）；`this` 是 `window`；`__filename` 未定义。非沙箱：Node 的 `require`（相对 preload 所在目录），`this` 是 `exports`。相对路径的 `preload` 不跑（Electron 同，且没有 `preload-error`）。`additionalArguments` 追加到 `process.argv`。
+- `api/context_bridge.rs`：`exposeInMainWorld`、`exposeInIsolatedWorld`、`executeInMainWorld` 与 `bridge_value`（规则见代码头注释，数据来自 `bridge-matrix` 的 Electron 39.8.10 记录：暴露的 API 深度冻结、属性 `writable: false, configurable: false, enumerable: true`；函数是目标 world 里的新函数、参数与返回值反向/正向穿越、`this` 丢弃、回程还原为原函数、每次穿越新建；Promise 代理；错误一律成目标 world 的 `Error`（只带 `message`、`stack`）；抛出非 Error 变 `An unknown exception occurred in the isolated context…`；返回值穿越失败的错误带 `Uncaught ` 前缀；对象深拷贝自有可枚举键（含 Symbol 键）、getter 取值、原型丢失、环与共享引用保持；稀疏数组的洞变 `undefined`；深度上限 1000；`WeakMap`/`Proxy` 抛 `An object could not be cloned.`；DOM 节点是目标 world 里同一节点的对象；日期、正则、Map、Set、ArrayBuffer、Blob、`File`（带路径的仍带路径）按结构化克隆）。
+- `api/web_frame.rs`：缩放（`setZoomFactor`/`setZoomLevel` 发 `FromRenderer::ZoomChanged`，主进程收到后不记（没有人读，所以没有字段）；`getZoomFactor`/`zoom-changed` 与 Shell 的缩放是 P13/P30 的，它们要用就自己在 `main_guest` 的 `ZoomChanged` 分支里留）、`insertCSS`/`removeInsertedCSS`（含 `cssOrigin: 'user'`）、`executeJavaScript`/`executeJavaScriptInIsolatedWorld`、`setIsolatedWorldInfo`（记录）、`getResourceUsage`、`clearCache`、框架树（只有顶层：`top` 每次是新对象，但类每个 world 只造一次，其余 `null`）、拼写检查相关抛不支持。`api/web_utils.rs`：`getPathForFile`。
+- `nodeIntegration: true` 且 `contextIsolation: false` 的页面：`require`（相对页面所在目录）、`module`、`__filename`、`__dirname`、`process`、`Buffer`、`global`、`setImmediate`；`nodeIntegration` 但有隔离时 Node 只在 preload 的 world 里；页面没有 Node 时 `process`/`Buffer`/`global`/`setImmediate`/`clearImmediate` 从页面的全局上删掉（沙箱 preload 在页面 world 里跑时拿着它们的引用）。`Runtime::set_web_modules` 改为「页面有 Node 则关」。
+- `ipcRenderer` 每个 world 一个（在该 world 里造，主进程发来的消息逐 world 触发，`invoke` 的结果在发起调用的 world 里造）。`event.sender` 是各 world 自己的 `ipcRenderer`，它的方法在原型上、自有可枚举键只有 `_events…`，所以经 `contextBridge` 暴露 `ipcRenderer.on` 的回调时，回调拿到的 `event.sender` 拷贝里没有方法（与 Electron 一样）。
+- `FromRenderer::{PreloadError, ZoomChanged}`、`WebPreferences.additional_arguments`（`browser_window.rs::web_preferences` 里几行；P13 把解析搬进 `api/web_preferences.rs` 时顺手搬走）。
+- 主进程：`contents_ipc::preload_error` 在 P12 的 `contents_object` 上发 `preload-error(event, path, error)`。
+
+### 没做 / 与 Electron 的已知差异
+
+- **electron-vite 默认模板的夹具**：没做。脚手架要从 npm 下载并执行远端的生成器，被环境的权限拒绝，没有绕过。
+- `.mjs` preload（仅 `sandbox: false`）：没做。`exposeInIsolatedWorld` 对 999 以外的编号会按需建 world，但没有 `setIsolatedWorldInfo` 的 CSP/来源执行。
+- 缩放只记录：文档视口不随 `webFrame` 缩放重算，Shell 的缩放等 P30。
+- `crashReporter` 只有 `addExtraParameter`/`removeExtraParameter`/`getParameters` 三个空实现；`nativeImage` 已接上（P14 合并后，`preload.rs::electron_exports` 用 `api::native_image::make`），桥矩阵里 `require('electron')` 的键与 Electron 一致，不再有已知差异。
+- 沙箱 `process` 的 `getHeapStatistics`/`getCPUUsage`/`getProcessMemoryInfo`/`getSystemMemoryInfo`/`getBlinkMemoryInfo` 返回全 0 的记录，`uptime()` 为 0，`getCreationTime()` 为 `null`；`argv` 是原 `argv` 加 `additionalArguments`（Electron 的 argv 里还有 Chromium 的开关）。
+- Node 的内置模块里只有 `events` 每个 world 一份（`modules.rs` 的缓存按 world 分键；沙箱 `require('events')` 与 `process`、`ipcRenderer` 继承的 `EventEmitter` 都是 preload world 自己的，所以页面的 `Object.prototype` 不在它们的原型链上）。`Buffer`、`setImmediate`、`process` 等全局每个 world 自己造。其余 Node 内置（`fs`、`path`、`stream`…）的 `require` 缓存仍所有 world 共用页面 Realm 造的那一份：页面改 `Function.prototype` 之类的 getter，仍可能在 `sandbox: false` 的 preload `require` 它们并用到时，以 preload 的对象为 `this` 运行。沙箱 preload 的 `require` 只放行 `events` 与 `timers`/`url`，碰不到这个口子。
+- 经桥的值：带偏移的类型化数组视图只拷贝视图覆盖的字节（Electron 拷贝整个底层 buffer 并保留偏移）；`Event` 没有自有的 `isTrusted`；`window` 经桥不会被深拷贝（给目标 world 自己的 `window`）；`Number`/`String` 包装对象按结构化克隆。
+- 事件镜像：跨 world 的监听器拿到的是该 world 里同类的另一个 `Event` 对象（状态拷贝，`preventDefault`/`stopPropagation`/`stopImmediatePropagation` 带回；`composedPath` 等按拷贝时的路径）。
+- 没有 `about:blank` 初始文档的 preload：preload 在 `Load` 到来、文档开始加载时才跑，没有 `Load` 的页面不跑。
+- 其他 world 里的观察器（`MutationObserver` 等）：回调在创建它的 world 里调用，但交付的记录对象的类取的是交付时当前 world 的，混用 world 时可能是页面的类。
+
+### 给其他包的备注
+
+- **P13**：`executeJavaScriptInIsolatedWorld` 用 `preload::world_numbered(number, context)` 取（按需建）world，再用 `api::web_frame::evaluate(code, world, context)`（在该 world 里求值并报告错误）；`webContents.getZoomFactor`/`zoom-changed` 要自己在 `main_guest` 的 `FromRenderer::ZoomChanged` 分支里记因子（P21 不记）；`renderer_guest.rs` 里 P21 只多了 `preload::prepare`（`new`）、`preload::run`（经 `navigate_initial_with`）与 `require_from` 里一处，`BeforeUnload`/`Unload` 的分支互不相干。`WebPreferences` 解析搬走时带上 `additional_arguments`。
+- **P14**：`nativeImage` 已在 `preload.rs::electron_exports` 里接上；非沙箱 `nodeIntegration` 页面的 `clipboard`/`nativeImage` 走 `renderer_module`（也是 `electron_exports`）。
+- **P16**：`session.setPreloads`/`registerPreloadScript` 的注册表接在 `preload::run`：现在只读 `webPreferences.preload`，把它们的路径列表放在它前面逐个 `run_preload` 即可（`ran` 标志按「整批」算）。
+- **P24 / P32**：造带路径的 `File` 用 `verve::blob::file_with_path(context, bytes, name, kind, path)`（在要交给的 world 里调用）；`webUtils.getPathForFile` 就读它；经 `contextBridge` 的 `File` 保留路径。
+- **P41**：「没做 / 已知差异」每一条；`tests/preload.rs` 的 `KNOWN_DIFFERENCES` 是矩阵里还不一样的行。
+- **P22 / P23**：`Origin::User`；`SheetOwner::User`。
+
+### 验证与体积（未完成的部分）
+
+- 开发时在本机跑过并通过：`cargo test -p verve --test worlds --test file_path` 与相关内核测试、`cargo test -p verve-dom`（全部）、`cargo test -p verve-electron --test preload`（12 个，含 289 行的 bridge-matrix，`KNOWN_DIFFERENCES` 之外逐行一致）、`tests/fixtures.rs`（`preload-isolated`、`preload-node` 取消忽略并通过，`quick-start` 现在检查版本号被 preload 填上）、`cargo clippy --workspace --all-targets -- -D warnings`（干净）。
+- **没有跑**：`cargo test -p verve`（含 `--features jit`）、`-p verve-gpui` 的全量、release 体积（`electron.exe` 的字节数未测）。机器过载，协调者统一跑。
+- `tests/pipeline.rs::a_main_script_that_never_returns_is_interrupted_by_shutdown` 在本机负载下失败（`for(;;){}` 的主脚本没被中断）；与本包无关的竞态嫌疑（关停在脚本开始前就发出），未在基线上对照。
+
+### 复审后改的（隔离与结构）
+
+- 隔离：桥的拷贝一律在**来源** world 里读（`is_enumerable`、`Cloned::from_value`、blob、`promise.then` 都在来源 world 里跑，不再对页面可改的目的 world 内置传来源对象）；`DomEvents` 跨 world 镜像事件时，`detail`/`data`/`error`/`reason`/`promise`/`ports` 等字段按结构化克隆进目的 world（克隆不了则 `null`），类按来源事件自己的 Web 类名（`web_class` 登记的原型）在目的 world 里找，不读页面的 `constructor.name`；观察器（Mutation/Resize/Intersection）记下造它的 world，在那个 world 里造记录并回调。
+- 漏洞：非节点非窗口的目标（`matchMedia`、`document.fonts`）本来就属于监听者的 world，不再被跳过；`Held` 现在是真正的 `Trace`（`Dom`、`Classes`、`Messaging` 等派生 `Trace`，经 `Gc` 持有），丢弃 Runtime 能回收 Realm（`tests/worlds.rs::a_dropped_runtime_frees_its_realms`）。
+- 改了简报清单之外的文件，原因：`api/ipc_renderer.rs`（每 world 一个 `ipcRenderer`、按 world 触发与结算）、`api/contents_ipc.rs`（`preload-error` 事件；`zoom` 字段已删）、`main_guest.rs` 与 `msg.rs`（`PreloadError`/`ZoomChanged`/`additional_arguments` 的消息）、`api/browser_window.rs`（`additionalArguments` 的解析）、`api/mod.rs`（挂 `context_bridge`/`web_frame`/`web_utils`）；verve-dom 的 `bind/*.rs`、`css/cascade.rs`、`css/styler.rs`（`class(world, …)` 签名让每个 world 有自己的类和包装，用户样式表来源）、`load.rs`（`navigate_initial_with`）；内核的 `fetch.rs`、`streams.rs`、`messaging.rs`、`modules.rs`、`vm.rs`、`web.rs`、`blob.rs`、`native.rs`、`lib.rs`、`dom_events.rs` 与 `dom_events/{worlds,abort}.rs`（每 realm 的类数据、`in_world`/`in_realm`、`native::error`、`events` 按 world 分键）。
+- 公共辅助：`verve::in_world`/`verve::in_realm`（进 realm、运行、还原）取代各处手写；`native::error` 取代两处同样的 `Error` 构造；`preload::error_parts` 是错误名与消息的唯一读法。
