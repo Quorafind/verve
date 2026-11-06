@@ -276,3 +276,12 @@ jpeg, png, webp`), so `nativeImage` adds no codec; `getrandom` was in the graph 
 not added: the clipboard, DPAPI, `ShellExecuteW`, the recycle bin, the idle time and power queries are `windows-sys` calls (feature flags
 only), and the shell's dialogs are GPUI's own prompts. The per-piece split was not measured (`cargo bloat` was stopped by the coordinator
 to spare the shared machine); the whole figure is the only measurement, to be itemised by the main session if wanted.
+
+## P21: preload, contextBridge and isolated worlds; the P13/P14/P21 batch
+
+`docs/electron-plan` `60e86fd7`, with P13's first half, P14 and P21 merged: `cargo build --release -p verve-gpui --bin electron --features jit`
+is 34,431,488 bytes against 33,839,104 for `125d2d8c` before the batch, +592,384 bytes (+1.75 %). The cap (35,651,584) leaves 1.22 MB.
+
+P13's first half measured +110,592 and P14 +287,232 on their own branches, which leaves about 194,560 bytes (+0.57 %) for P21. P21 was not
+built on its own, to spare the shared machine. It adds no crate and changes no manifest: the worlds, the bridge's copy, the per-world classes
+and the mirrored events are kernel and `verve-dom` code.
