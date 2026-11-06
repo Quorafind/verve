@@ -213,4 +213,12 @@ impl Document {
 
 ## 状态
 
-（实现者完成后填写；Spike 结论写在这里）
+### Spike 结论（先于其余实现提交）
+
+**走方案 A（真隔离）。** 三项检查都通过，测试在 `crates/verve-dom/tests/worlds.rs`（`cargo test -p verve-dom --test worlds`，7 个）与内核的 `tests/worlds.rs`（5 个）：
+
+1. 隔离 world 里 `appendChild(createElement('div'))`，主 world 看得到这个节点，两边的对象不相等、expando 互不可见（`a_node_has_an_object_in_each_world_and_expandos_are_not_shared`）；`Array.prototype.push = null` 不影响另一个 world 的 `[].push`、`Node.prototype.marker` 也不串（`a_built_in_of_one_world_is_not_the_others`）。
+2. 跨 world 的监听器顺序：一个节点在各 world 的对象**共用同一份监听器列表**（`TargetData.listeners` 是 `Gc<…>`，`host_target_beside` 让新 world 的对象共用兄弟对象的那份），所以顺序就是添加顺序，不需要另编全局序号；每个监听器记下添加它的 world，分发时在该 world 里调用，`this`/`target` 换成该 world 的对象（`Counterpart` 钩子），`Event` 在该 world 里另做一个镜像（原型是该 world 的同名类），监听器对它做的 `preventDefault`/`stopPropagation` 带回原事件（`listeners_of_both_worlds_are_heard_in_the_order_they_were_added`、`a_listener_of_the_other_world_acts_on_the_event`）。`window` 的监听器与 `on…` 属性同理（`window_listeners_and_handlers_of_both_worlds_hear_an_event`）。
+3. 主 world 删除节点后，隔离 world 持有的对象仍读得到 `isConnected === false`；`Document::sweep` 看所有 world 的对象（`State::has_object`），任一 world 持有就不回收；两边都放手后才回收（`a_node_an_isolated_world_holds_stays_after_the_page_removes_it`）。
+
+一个 world 的 `State.wrappers`/`links`/`classes` 键里带 `WorldId`，当前 world 取自 `verve::current_world(context)`（当前正在运行的函数所属的 Realm），不是调用者的。
