@@ -218,8 +218,16 @@ Verve 的 HTTP 客户端流式写文件（`<path>.crdownload` 临时名，完成
 
 ### 10. 主进程权限
 
-Electron 主进程默认拥有全部网络权限：P10 为主进程 Runtime 设置 `Permissions::all()`，渲染器同样（Chromium 渲染器能访问
-任意网络）。本包不新增权限检查。
+Electron 主进程默认拥有全部网络权限：主进程 Runtime 设置 `Permissions::all()`。渲染器的权限由 `preload::permissions_for` 定：
+- 出站网络到任意主机（Chromium 渲染器能访问任意网络）；没有 `listen`，没有 `dns` 模块；
+- 磁盘与 Worker 保持内核默认（不受限，不是本包的改动）；
+- 页面带 Node（未沙盒的 `nodeIntegration` 或 preload）时才是 `Permissions::all()`；
+- Worker 拿不到网络（`set_worker_permissions` 没有被调用）。
+
+`file:` 不靠权限挡，而是 `ElectronLoader` 挡：对 `file:` 地址，先问发起者是不是 `file:` 页面（或浏览器自己的 `loadURL`，没有发起者）且主机是本机，
+不是就以 `ERR_ACCESS_DENIED (-10)` 拒绝，**即使 `file` 有处理器也一样**（Electron 39.8.10，探针 5：装了 `file` 处理器后，`app://` 页面对 `file:` 的 `fetch`、XHR、
+`<img>`、`<script>` 仍都失败，`loadFile` 的页面仍读得到）。所以 `Loader::forwards("file")` 恒为假：页面对 `file:` 的 `fetch`/XHR 走加载器的规则，再由加载器问处理器。
+本包不新增权限检查。
 
 ## 步骤
 
@@ -265,6 +273,45 @@ Electron 主进程默认拥有全部网络权限：P10 为主进程 Runtime 设�
 HTTP 缓存（`clearCache` resolve、`getCacheSize` 返回 0）、Chromium Cookie SQLite 迁移、公共后缀列表、`login` 事件与 HTTP 认证、
 `setCertificateVerifyProc` 以外的证书 UI、`serviceWorkers`、`extensions`、`setCodeCachePath`、`setBluetoothPairingHandler`、
 `setUSBProtectedClassesHandler`、`netLog`（对象存在，`startLogging` resolve，不写文件）、PAC 脚本、SOCKS 与 HTTPS 代理（受 Verve 现状限制）。
+
+## 契约修订（阶段 1 实现时确定；与上文冲突处以本节为准）
+
+### 内核钩子 `verve::browser_net`（P03 未实现，由本包落在 `src/browser_net.rs`）
+
+- `BrowserNet` 不是 `Send + Sync`：它属于一个 realm，以 `Rc<dyn BrowserNet>` 交给 `Runtime::set_browser_net`。会跑宿主脚本的方法
+  （`handle`、`pull`、`cancel`、`before_send`、`headers_received`、`notify`）都带 `cx: &mut Context`，在 realm 线程上被调用；
+  `custom`、`user_agent`、`failure_style` 不带。主进程的 `net.request`/`net.fetch` 因此可以直接在主 realm 里跑 `protocol.handle` 的处理器。
+- `Responder`、`Decider<T>` 是 `Send` 的，可在任何线程、任何时候（包括 `handle` 调用之内）使用；说的话进 realm 的信箱，下一拍（`run_due`）听见，
+  realm 的 waker 被唤醒。丢弃未答的 `Responder` 以 `net::ERR_FAILED` 失败；丢弃未答的 `Decider` 让请求原样通过。
+- 响应体按拉取驱动：新增 `BrowserNet::pull(id)`（响应流的读者要数据时调用，首次在头之后立即发生）与 `BrowserNet::cancel(id)`（读者放弃或 abort）。
+  宿主每收到一次 `pull` 只发一块，这就是背压。
+- `handle` 收到的请求体是整块 `Option<Vec<u8>>`（`fetch` 本来就先读完流式请求体再发送），所以**没有** `FromRenderer::ProtocolBody`。
+- 失败的样子由 `BrowserNet::failure_style()` 决定：`Undici`（默认，`TypeError: fetch failed` + `cause`）、`Chromium`（页面的 `fetch`：`TypeError: Failed to fetch`）、
+  `Net`（Electron 的 `net.fetch`：`Error: net::ERR_FILE_NOT_FOUND`，观察自 Electron 39.8.10）。
+- `fetch_internal(context, input, init, InternalFetch { net, resource_type, initiator }) -> JsObject`：全局 `fetch` 就是它加上 realm 自己的钩子；
+  `net.fetch` 显式传入主进程的 `BrowserNet`（每次请求一份，带 `bypassCustomProtocolHandlers`）；P20 的加载器仍用 `ProtocolRequest`，不经 `fetch_internal`。
+  是否认领一个地址由宿主的 `custom()` 决定，内核没有 bypass 开关。
+- `before_send` 的 `Decision::{Continue(RequestHead), Cancel, Redirect(url)}`，`headers_received` 的 `ResponseDecision::{Continue(ResponseHead), Cancel}`；
+  取消的请求以 `ERR_BLOCKED_BY_CLIENT` 失败。`notify` 的 `NetEvent::{Sent, Started, Redirected, Completed, Failed}` 对应 webRequest 的
+  `onSendHeaders`、`onResponseStarted`、`onBeforeRedirect`、`onCompleted`、`onErrorOccurred`。
+- WebSocket 握手不经 `before_send`，登记给 P41。
+
+### `msg/page.rs`
+
+- 追加（不重排）：`FromRenderer::{Protocol { call, session, request }, ProtocolPull { call }, ProtocolCancel { call }}`，
+  `ToRenderer::{ProtocolHead, ProtocolChunk, ProtocolEnd}`；`call` 就是内核的 `RequestHead::id`（进程内唯一）。`ProtoRequest` 带 `body: Option<Vec<u8>>`。
+- P20 的 `ProtocolRequest`/`ProtocolResponse`（整块应答）保留给页面自己的子资源加载（`<script>`、`<link>`、`<img>`、文档）；页面的 `fetch`/XHR 对自定义 scheme
+  改走内核 `fetch` 与 `BrowserNet`（流式、带 headers 与 body、可 abort）：verve-dom 的 `Loader` 新增 `forwards(scheme)` 与 `allows_fetch(scheme)`。
+  主进程用同一个“处理器引擎”服务两条路。
+
+### 对任务书的观察订正（Electron 39.8.10，见「状态」里的冻结清单）
+
+- 旧的 `register*Protocol`/`intercept*Protocol` **不发** deprecation 警告（`process.on('warning')` 与标准错误都没有；`lib/browser/api/protocol.ts` 里也没有）。
+  任务书与派发要求的“首次调用发一次警告”与观察不符，按观察不发。
+- 处理器抛错、拒绝、返回非 `Response` 都是 `net::ERR_UNEXPECTED`（-9），`Response.error()` 才是 `net::ERR_FAILED`（-2）；不是任务书写的“抛错 → ERR_FAILED”。
+- `net.fetch` 的 `Response` 没有 `url`（空串）、`type` 是 `default`、`redirected` 为假；它建在 `ClientRequest` 上，`redirect: 'manual'` 以 `Error: Redirect was cancelled` 失败。
+- `registerSchemesAsPrivileged` 在 ready 之后调用的错误是 `protocol.registerSchemesAsPrivileged should be called before app is ready`。
+- 页面的 `fetch()` 对没有 `supportFetchAPI` 的 scheme 以 `TypeError: Failed to fetch` 拒绝且不调用处理器，XHR 不受此限。
 
 ## 状态
 

@@ -144,6 +144,8 @@ pub struct Permissions { …, pub child_process: bool /* 默认 false */ }
 
 ### 4b. 浏览器网络钩子：`verve::browser_net`（P16/P20 用）
 
+> **已由 P16 实现，形状与下面的草案不同**（`Rc<dyn BrowserNet>`、方法带 `cx`、`pull`/`cancel`、`FailureStyle`、`fetch_internal(cx, input, init, InternalFetch)`）：以 `P16-protocol-session-net.md` 的「契约修订」为准。
+
 WHATWG `fetch`（以及 verve-dom 的 XHR）需要能接入自定义 scheme、cookie、webRequest 和 UA，但**不影响** Node 的 `http`/`https`。
 
 ```rust
@@ -292,7 +294,7 @@ asar 解析本身（P11）；子进程执行（P17）；Electron 模块（P10+�
 
 ### 没完成（任务书里有，本包范围外）
 
-- **`verve::browser_net`（契约 4b）**、**`ModuleSource`/`ImportMap`**、**`create_world`/`enter_world`**、
+- **`verve::browser_net`（契约 4b）已由 P16 实现**（见其「契约修订」）；**`ModuleSource`/`ImportMap`**、**`create_world`/`enter_world`**、
   **`web::file_with_path`/`path_of_file`**：未实现。P21 的 contextIsolation 依赖 `create_world`，P20 需要 `ModuleSource`，P16 需要 `browser_net`。
 - **`Overlay::cache_key` 只到定义处**：代码缓存仍按 `global_scope_fingerprint` 取键，接上会改变现有缓存行为，留 P11 决定。
 - **`watch`/`watchFile` 仍是「永不触发」的 watcher**，没有改成 `ENOTSUP`：会破坏现有插件行为与测试。

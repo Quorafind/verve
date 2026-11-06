@@ -306,6 +306,7 @@ P13 第二段另加两个类型（`msg/page.rs`）：`EditCommand`（`Undo` `Red
 | `FromRenderer::Font(..)`、`ToRendererInput::FontsChanged`（`@font-face` 注册到 GPUI 文字系统） | P31 |
 | `ToRendererInput::Choose { select, value }`（`<select>` 下拉弹层选中） | P32 |
 | `RendererView.images`、`PaintItem::Image.frame`、`DisplayList.chunks` | P35 / P33 |
+| `FromRenderer::{Protocol, ProtocolPull, ProtocolCancel}`、`ToRenderer::{ProtocolHead, ProtocolChunk, ProtocolEnd}`（页面 `fetch` 自定义 scheme，逐块拉取；见 P16 契约修订） | P16 |
 | `FromRenderer::{ProtocolRequest, ZoomChanged, PreloadError}`、`ToRenderer::ProtocolResponse` | P20 / P21 |
 | `ToRendererInput::{Drag, Paste, ClipboardContents}` | P24 |
 | `CompositionEvent` 具体化为 `Update { text, selection } \| Commit \| Cancel` | P24 |
