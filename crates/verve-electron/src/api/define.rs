@@ -136,6 +136,25 @@ pub fn report<T>(context: &mut Context, result: JsResult<T>) -> Option<T> {
     }
 }
 
+/// Runs `read` on the native data of type `T` that `this` carries: `TypeError: Illegal
+/// invocation` for anything else, as Electron's native classes answer a method called on a
+/// foreign object.
+///
+/// # Errors
+///
+/// That `TypeError`.
+pub fn with_data<T: boa_engine::object::NativeObject, R>(
+    this: &JsValue,
+    read: impl FnOnce(&T) -> R,
+) -> JsResult<R> {
+    let object = this.as_object();
+    let data = object
+        .as_ref()
+        .and_then(|o| o.downcast_ref::<T>())
+        .ok_or_else(|| native::type_error("Illegal invocation"))?;
+    Ok(read(&data))
+}
+
 /// Settles the promise `resolvers` belong to: `Ok` resolves it, `Err` rejects it.
 ///
 /// # Errors
