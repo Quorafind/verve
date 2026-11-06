@@ -25,27 +25,33 @@ ENCODING='hex|base64|unbase64|percent_decode|decode_base64|data_url'
 
 # Only the folders that exist: a crate without tests/ is not an error.
 existing() { for d in "$@"; do [ -d "$d" ] && echo "$d"; done; return 0; }
-sources() { existing src tests crates/*/src crates/*/tests | xargs -I{} find {} -name '*.rs' | sort; }
-library_sources() { existing src crates/*/src | xargs -I{} find {} -name '*.rs' | sort; }
+# The folder names hold no spaces, so the list splits into find's arguments as it is.
+sources() { find $(existing src tests crates/*/src crates/*/tests) -name '*.rs' | sort; }
+library_sources() { find $(existing src crates/*/src) -name '*.rs' | sort; }
 
+# Each check reads every file with one command rather than one command per file: on Windows a
+# process costs Git Bash a fork, and a few thousand of them per commit stall the machine.
+
+# "path lines" for each file longer than MAX_LINES; `wc` also prints "N total" lines, dropped.
 large_files() {
-    sources | while read -r f; do
-        n=$(wc -l < "$f" | tr -d ' ')
-        if [ "$n" -gt "$MAX_LINES" ]; then echo "$f $n"; fi
-    done
+    sources | tr '\n' '\0' | xargs -0 -r wc -l |
+        awk -v max="$MAX_LINES" '$2 != "total" && $1 > max { print $2, $1 }'
     return 0
 }
 
+# "path:fn name(" for each definition of one of `names` in the files named on stdin.
+definitions() {
+    local names=$1
+    xargs -0 -r grep -oHE "^(pub(\([a-z]+\))? )?fn ($names)\b *[<(]" || true
+}
+
 toolkit_copies() {
-    library_sources | while read -r f; do
-        case "$f" in
-            src/native.rs) names=$ENCODING ;;
-            src/encoding.rs) names=$NATIVE ;;
-            *) names="$NATIVE|$ENCODING" ;;
-        esac
-        { grep -oE "^(pub(\([a-z]+\))? )?fn ($names)\b *[<(]" "$f" || true; } |
-            sed -E 's/^.*fn ([a-z_0-9]+).*/\1/' | sort -u | sed "s|^|$f |"
-    done
+    {
+        library_sources | grep -xF src/native.rs | tr '\n' '\0' | definitions "$ENCODING"
+        library_sources | grep -xF src/encoding.rs | tr '\n' '\0' | definitions "$NATIVE"
+        library_sources | grep -vxE 'src/(native|encoding)\.rs' | tr '\n' '\0' |
+            definitions "$NATIVE|$ENCODING"
+    } | sed -E 's/^([^:]+):.*fn ([a-z_0-9]+).*/\1 \2/' | sort -u -k1,1 -k2,2
     return 0
 }
 
@@ -60,21 +66,21 @@ fi
 failed=0
 fail() { echo "style: $*" >&2; failed=1; }
 
-# 1. File length.
-while read -r f n; do
-    ceiling=$(awk -v f="$f" '$1 == f { print $2 }' "$LARGE")
-    if [ -z "$ceiling" ]; then
+# 1. File length. Each long file is joined to its ceiling in LARGE ("-" when it has none).
+while read -r f n ceiling; do
+    if [ "$ceiling" = "-" ]; then
         fail "$f has $n lines (new files: at most $MAX_LINES; split it by responsibility)"
     elif [ "$n" -gt "$ceiling" ]; then
         fail "$f grew to $n lines (it may not grow past $ceiling; move the new code to a module of its own)"
     fi
-done < <(large_files)
+done < <(large_files | awk -v table="$LARGE" '
+    BEGIN { while ((getline line < table) > 0) { split(line, field, " "); ceiling[field[1]] = field[2] } }
+    { print $1, $2, ($1 in ceiling ? ceiling[$1] : "-") }')
 
-# 2. One toolkit.
+# 2. One toolkit. A copy not listed in COPIES is new.
 while read -r f name; do
-    grep -qxF "$f $name" "$COPIES" ||
-        fail "$f defines its own \`$name\`: use verve::native / verve::encoding, or add what is missing there"
-done < <(toolkit_copies)
+    fail "$f defines its own \`$name\`: use verve::native / verve::encoding, or add what is missing there"
+done < <(toolkit_copies | grep -vxFf "$COPIES" || true)
 
 # 3. Banned macros and anonymous TODOs.
 while IFS= read -r hit; do
