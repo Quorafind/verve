@@ -519,7 +519,7 @@ impl Document {
                         .push(LoadEvent::Committed(url.to_string()));
                     state.url = url;
                 }
-                self.begin(&net::text(&bytes));
+                self.begin(&net::decoded_text(&bytes));
             }
         }
     }

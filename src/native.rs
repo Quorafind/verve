@@ -38,6 +38,11 @@ pub fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
     Ok(value.to_string(context)?.to_std_string_escaped())
 }
 
+/// The argument at `at` converted to a string as `String(value)` does: [`text_of`] of [`arg`].
+pub fn arg_text(args: &[JsValue], at: usize, context: &mut Context) -> JsResult<String> {
+    text_of(&arg(args, at), context)
+}
+
 /// `text` as a JavaScript string value.
 pub fn js_text(text: &str) -> JsValue {
     JsString::from(text).into()
@@ -46,6 +51,12 @@ pub fn js_text(text: &str) -> JsValue {
 /// A `TypeError` with `message`.
 pub fn type_error(message: impl Into<String>) -> JsError {
     JsNativeError::typ().with_message(message.into()).into()
+}
+
+/// A native constructor that refuses to construct: `new X` is a `TypeError`, as for an interface
+/// with no constructor.
+pub fn illegal_constructor(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Err(type_error("Illegal constructor"))
 }
 
 /// An `Error` with `message`.
@@ -274,6 +285,31 @@ pub fn list_of(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>>
         .get(js_string!("length"), context)?
         .to_length(context)?;
     (0..length).map(|at| object.get(at, context)).collect()
+}
+
+/// The items of anything `Array.from` takes (an iterable such as a `Set` or a `Map`'s entries
+/// as well as an array-like), as a list. Where [`list_of`] reads only indices, this runs the
+/// iterator.
+pub fn list_from(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
+    let from = context
+        .intrinsics()
+        .constructors()
+        .array()
+        .constructor()
+        .get(js_string!("from"), context)?;
+    let list = crate::call(
+        context,
+        &from,
+        &JsValue::undefined(),
+        std::slice::from_ref(value),
+    )?;
+    let Some(list) = list.as_object() else {
+        return Ok(Vec::new());
+    };
+    let list = JsArray::from_object(list)?;
+    (0..list.length(context)?)
+        .map(|at| list.get(at, context))
+        .collect()
 }
 
 /// A JavaScript array of `items`.
@@ -520,6 +556,80 @@ pub fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, 
         &prototype,
         js_string!("constructor"),
         class.clone(),
+        context,
+    )?;
+    Ok((class, prototype))
+}
+
+/// A native function `name` of `length` parameters that `new` can call.
+pub fn constructor(
+    context: &mut Context,
+    name: &str,
+    length: usize,
+    f: NativeFunctionPointer,
+) -> JsObject {
+    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
+        .name(JsString::from(name))
+        .length(length)
+        .constructor(true)
+        .build()
+        .into()
+}
+
+/// A plain class: what [`plain_class`] makes from this.
+///
+/// Unlike [`class`] it is not wrapped in a `Proxy`, so a call without `new` (or
+/// `Foo.call(this)`) runs `construct` with no `this`, and `construct` must refuse it itself.
+/// Its methods are not listed (`for..in` skips them) and its getters are.
+pub struct PlainClass<'a> {
+    /// The class's name: the constructor's `name`.
+    pub name: &'a str,
+    /// What `new` runs; it is handed `new.target` as `this`.
+    pub construct: NativeFunctionPointer,
+    /// The constructor's `length`.
+    pub length: usize,
+    /// The prototype the class's own prototype inherits (a prototype, not a constructor as
+    /// [`ClassSpec::parent`] is); `Object.prototype` when none.
+    pub parent: Option<JsObject>,
+    /// The prototype's methods: name, parameter count, function.
+    pub methods: &'a [(&'a str, usize, NativeFunctionPointer)],
+    /// The prototype's read-only accessors: name and getter.
+    pub getters: &'a [(&'a str, NativeFunctionPointer)],
+}
+
+/// The constructor and prototype of a [`PlainClass`], linked both ways. Putting the constructor
+/// somewhere (a global, a namespace) is the caller's.
+pub fn plain_class(context: &mut Context, spec: PlainClass<'_>) -> JsResult<(JsObject, JsObject)> {
+    let class = constructor(context, spec.name, spec.length, spec.construct);
+    let prototype = object(context);
+    if let Some(parent) = spec.parent {
+        prototype.set_prototype(Some(parent));
+    }
+    methods(context, &prototype, spec.methods)?;
+    for (name, f) in spec.getters {
+        let getter = function(context, &format!("get {name}"), 0, *f);
+        prototype.define_property_or_throw(
+            JsString::from(*name),
+            PropertyDescriptor::builder()
+                .get(getter)
+                .enumerable(true)
+                .configurable(true),
+            context,
+        )?;
+    }
+    hidden(
+        &prototype,
+        js_string!("constructor"),
+        class.clone(),
+        context,
+    )?;
+    class.define_property_or_throw(
+        js_string!("prototype"),
+        PropertyDescriptor::builder()
+            .value(prototype.clone())
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
         context,
     )?;
     Ok((class, prototype))

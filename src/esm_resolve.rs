@@ -385,7 +385,7 @@ fn map_match(
 }
 
 fn invalid_segments(path: &str) -> bool {
-    let decoded = percent_decode(path)
+    let decoded = decode_url_escapes(path)
         .unwrap_or_else(|_| path.into())
         .replace('\\', "/");
     decoded
@@ -523,25 +523,10 @@ pub(crate) fn finalize(view: &View, mut url: Url) -> Result<Url> {
     Ok(url)
 }
 
-pub(crate) fn percent_decode(text: &str) -> Result<String> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at] == b'%' {
-            if at + 2 >= bytes.len() {
-                return Err(error("ERR_INVALID_URL", "Incomplete percent escape"));
-            }
-            let hex = std::str::from_utf8(&bytes[at + 1..at + 3]).unwrap_or("");
-            out.push(
-                u8::from_str_radix(hex, 16)
-                    .map_err(|_| error("ERR_INVALID_URL", "Invalid percent escape"))?,
-            );
-            at += 3;
-        } else {
-            out.push(bytes[at]);
-            at += 1;
-        }
-    }
-    String::from_utf8(out).map_err(|_| error("ERR_INVALID_URL", "URL is not UTF-8"))
+/// `text` with its `%XX` escapes undone, as UTF-8; an escape or text that is not one is the
+/// resolution's `ERR_INVALID_URL`.
+pub(crate) fn decode_url_escapes(text: &str) -> Result<String> {
+    let bytes = crate::encoding::percent_decode_strict(text)
+        .map_err(|message| error("ERR_INVALID_URL", message))?;
+    String::from_utf8(bytes).map_err(|_| error("ERR_INVALID_URL", "URL is not UTF-8"))
 }

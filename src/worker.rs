@@ -19,14 +19,14 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
-    js_string,
+    Context, JsError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string,
     native_function::NativeFunctionPointer,
     object::{FunctionObjectBuilder, builtins::JsArray},
     property::{Attribute, PropertyDescriptor},
 };
 
 use crate::clone::{Cloned, entries};
+use crate::native::{arg, function, type_error};
 use crate::{Level, Runtime, shared};
 
 /// A worker, as its page holds it: the way to its thread, and what came back from it.
@@ -46,27 +46,6 @@ pub(crate) struct WorkerSlot {
 pub(crate) struct Port {
     pub outbox: Vec<JsValue>,
     pub closed: bool,
-}
-
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
-
-fn type_error(message: impl Into<String>) -> JsError {
-    JsNativeError::typ().with_message(message.into()).into()
-}
-
-fn function(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
 }
 
 // ─── The worker's own realm ─────────────────────────────────────────────────────────────────
@@ -450,14 +429,9 @@ fn script_of(url: &str, context: &Context) -> Option<String> {
     {
         return crate::fs::sys::read_to_string(&crate::vfs::View::of(context), &path).ok();
     }
-    let rest = url.strip_prefix("data:")?;
-    let (header, body) = rest.split_once(',')?;
-    if header.ends_with(";base64") {
-        let bytes = crate::encoding::unbase64(body)?;
-        Some(String::from_utf8_lossy(&bytes).into_owned())
-    } else {
-        crate::esm_resolve::percent_decode(body).ok()
-    }
+    let parsed = url::Url::parse(url).ok()?;
+    let (_, bytes) = crate::encoding::data_url(&parsed).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

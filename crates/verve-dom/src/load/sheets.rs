@@ -75,7 +75,7 @@ pub(super) fn fetched(doc: &Document, node: NodeId, blocking: bool, result: Load
             && ok
             && state.dom.is_connected(node)
         {
-            let text = net::text(bytes);
+            let text = net::decoded_text(bytes);
             let tree = state.dom.root_of(node);
             let sheet = Sheet::parse(&text);
             let owner = SheetOwner::Link(node);
@@ -131,7 +131,7 @@ fn take_import(
     if result.status >= 400 || !linked {
         return;
     }
-    let text = net::text(bytes);
+    let text = net::decoded_text(bytes);
     let tree = state.dom.root_of(node);
     let sheet = Sheet::parse(&text);
     let owner = SheetOwner::Import(node, rank.clone());

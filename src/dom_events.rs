@@ -39,7 +39,7 @@ pub(crate) use abort::{abort, iterate, new_signal};
 pub use hooks::{EventParent, EventScope, is_composed, set_event_parent, set_event_scope};
 pub use worlds::{Counterpart, set_world_counterpart};
 
-use crate::native::{arg, closure, function, get, hidden, js_text, object, text_of, type_error};
+use crate::native::{arg, arg_text, closure, get, hidden, js_text, object, text_of, type_error};
 
 // ─── The state kept on each object ──────────────────────────────────────────────────────────
 
@@ -274,7 +274,7 @@ pub fn web_class(
     Ok((constructor, prototype))
 }
 
-fn illegal(_: &JsObject, _: &[JsValue], _: &mut Context) -> JsResult<JsObject> {
+pub(crate) fn illegal(_: &JsObject, _: &[JsValue], _: &mut Context) -> JsResult<JsObject> {
     Err(type_error("Illegal constructor"))
 }
 
@@ -338,7 +338,7 @@ fn make_classes(context: &mut Context) -> JsResult<Dom> {
         |p, a, cx| make_event(p, a, &[("detail", JsValue::null())], cx),
         base,
         &[("initCustomEvent", 4, |this, args, cx| {
-            let kind = text_of(&arg(args, 0), cx)?;
+            let kind = arg_text(args, 0, cx)?;
             with_event(this, |state| {
                 if !state.dispatching {
                     state.kind = kind;
@@ -583,7 +583,7 @@ fn make_event(
             "Failed to construct 'Event': 1 argument required, but only 0 present.",
         ));
     }
-    let kind = text_of(&arg(args, 0), context)?;
+    let kind = arg_text(args, 0, context)?;
     let init = arg(args, 1);
     let mut own = Vec::with_capacity(fields.len());
     for (name, default) in fields {
@@ -684,7 +684,7 @@ const EVENT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(crate::native::array(cx, items))
     }),
     ("initEvent", 3, |this, args, cx| {
-        let kind = text_of(&arg(args, 0), cx)?;
+        let kind = arg_text(args, 0, cx)?;
         with_event(this, |s| {
             if !s.dispatching {
                 s.kind = kind;
@@ -856,7 +856,7 @@ fn listener_options(
 }
 
 fn add_listener(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let kind = text_of(&arg(args, 0), context)?;
+    let kind = arg_text(args, 0, context)?;
     let callback = arg(args, 1);
     let (capture, once, passive, signal) = listener_options(&arg(args, 2), context)?;
     if callback.is_null_or_undefined() {
@@ -952,7 +952,7 @@ fn follow_signal(
 }
 
 fn remove_listener(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let kind = text_of(&arg(args, 0), context)?;
+    let kind = arg_text(args, 0, context)?;
     let callback = arg(args, 1);
     let (capture, ..) = listener_options(&arg(args, 2), context)?;
     let world = crate::world::current_world(context);
@@ -1001,7 +1001,7 @@ pub fn dispatch_value(target: &JsValue, event: &JsObject, context: &mut Context)
         // state its own.
         let kind = text_of(&event.get(js_string!("type"), context)?, context)?;
         if let Some(holder) = holder(target, context) {
-            invoke(&holder, target, &kind, event, None, false, context)?;
+            invoke_listeners(&holder, target, &kind, event, None, false, context)?;
         }
         return Ok(!get(&event.clone().into(), "defaultPrevented", context)?.to_boolean());
     }
@@ -1052,7 +1052,7 @@ pub fn dispatch_value(target: &JsValue, event: &JsObject, context: &mut Context)
             state.current = this.clone();
             state.phase = phase;
         }
-        match invoke(&holder, this, &kind, event, capture, true, context) {
+        match invoke_listeners(&holder, this, &kind, event, capture, true, context) {
             Ok(false) => {}
             Ok(true) => break,
             Err(error) => {
@@ -1076,7 +1076,7 @@ pub fn dispatch_value(target: &JsValue, event: &JsObject, context: &mut Context)
 /// The listeners for `kind` on `holder` (the object `this` keeps its listeners on) called with
 /// `event`: only the capturing ones or only the others when `capture` says, both — capturing
 /// first — at the target. Answers whether `stopImmediatePropagation` was called.
-fn invoke(
+fn invoke_listeners(
     holder: &JsObject,
     this: &JsValue,
     kind: &str,
@@ -1170,7 +1170,7 @@ fn report_rejection(context: &mut Context, value: &JsValue) {
     let Ok(promise) = boa_engine::object::builtins::JsPromise::from_object(object.clone()) else {
         return;
     };
-    let report = function(context, "report", 1, |_, args, cx| {
+    let report = crate::native::function(context, "report", 1, |_, args, cx| {
         crate::report(cx, &JsError::from_opaque(arg(args, 0)));
         Ok(JsValue::undefined())
     });
@@ -1369,15 +1369,8 @@ pub fn define_event_class(
     fields: &'static [(&'static str, FieldDefault)],
     methods: &[(&str, usize, NativeFunctionPointer)],
 ) -> JsResult<(JsObject, JsObject)> {
-    let (constructor, prototype) = web_class(
-        context,
-        name,
-        1,
-        |_, _, _| Err(type_error("Illegal constructor")),
-        Some(parent),
-        methods,
-        &[],
-    )?;
+    let (constructor, prototype) =
+        web_class(context, name, 1, illegal, Some(parent), methods, &[])?;
     // The constructor `web_class` made calls a plain `Make`, which carries nothing; this class's
     // fields are on its constructor instead, read when it makes an event.
     let fields_list = FieldList(fields);
@@ -1803,7 +1796,7 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
     for (name, make) in globals {
         crate::native::lazy_global(context, name, *make)?;
     }
-    let report_error = function(context, "reportError", 1, |_, args, cx| {
+    let report_error = crate::native::function(context, "reportError", 1, |_, args, cx| {
         crate::report(cx, &JsError::from_opaque(arg(args, 0)));
         Ok(JsValue::undefined())
     });

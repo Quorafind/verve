@@ -8,8 +8,9 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use boa_engine::{Context, JsError, JsResult, JsValue};
 use tiny_skia::{FillRule, Mask, Path, PathBuilder, Point, Transform};
+use verve::native::{arg, list_of, type_error};
 
-use crate::bind::{Kind, Method, arg, dom_error, handle_of, list, type_error};
+use crate::bind::{Kind, Method, dom_error, handle_of};
 use crate::canvas::finite_numbers;
 use crate::canvas::matrix::transform_argument;
 use crate::canvas::store::{CanvasStore, illegal_invocation, this_handle};
@@ -198,7 +199,7 @@ fn round_rect_command(args: &[JsValue], context: &mut Context) -> JsResult<Optio
 /// The four corner radii of `roundRect`, in CSS order, from a number or a list of one to four.
 fn corner_radii(value: &JsValue, context: &mut Context) -> JsResult<[f32; 4]> {
     let items = match value.is_object() {
-        true => list(value, context)?,
+        true => list_of(value, context)?,
         false => vec![value.clone()],
     };
     let mut values = Vec::with_capacity(4);

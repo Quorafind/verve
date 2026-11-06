@@ -3,8 +3,8 @@
 
 use boa_engine::{Context, JsResult, JsValue};
 use tiny_skia::Transform;
+use verve::native::get;
 
-use crate::bind::get;
 use crate::bind::platform::{Matrix, from_2d, make_matrix, matrix_of};
 
 /// The 2D part of a `DOMMatrix`'s sixteen numbers, column by column as CSS writes them.

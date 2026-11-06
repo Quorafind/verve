@@ -11,12 +11,15 @@ use boa_engine::{
     object::builtins::JsProxyBuilder,
     property::{Attribute, PropertyDescriptor},
 };
+use verve::native::{
+    self, arg, arg_text, closure, function, get, illegal_constructor, js_text, list_of, text_of,
+    type_error,
+};
 
 use super::node::{read_dom, wrap};
 use super::{
-    Accessor, ClassSpec, Kind, Method, arg, arg_string, array, class, closure, dom_error,
-    extend_prototype, function, get, handle_of, illegal_constructor, native_instance, node_of,
-    opt_string, plain_object, set, string, text,
+    Accessor, Kind, Method, WebIdlClass, dom_error, extend_prototype, handle_of, native_instance,
+    node_of, opt_string, set, webidl_class,
 };
 use crate::css::MediaQuery;
 use crate::state::{FrameClock, shared};
@@ -126,8 +129,8 @@ pub fn navigate(context: &mut Context, href: &str, replace: bool) -> JsResult<()
             "HashChangeEvent",
             "hashchange",
             &[
-                ("oldURL", text(old.as_str())),
-                ("newURL", text(new.as_str())),
+                ("oldURL", js_text(old.as_str())),
+                ("newURL", js_text(new.as_str())),
                 ("bubbles", false.into()),
             ],
         )?;
@@ -148,9 +151,9 @@ macro_rules! location_accessor {
     ($name:literal, $set:expr) => {
         (
             $name,
-            Some(|_, _, cx| Ok(text(&location_part($name, cx)))),
+            Some(|_, _, cx| Ok(js_text(&location_part($name, cx)))),
             Some(|_, args, cx| {
-                let value = arg_string(args, 0, cx)?;
+                let value = arg_text(args, 0, cx)?;
                 let mut url = shared(cx).borrow().url.clone();
                 let change: fn(&mut url::Url, &str) = $set;
                 change(&mut url, &value);
@@ -164,9 +167,9 @@ macro_rules! location_accessor {
 const LOCATION_ACCESSORS: &[Accessor] = &[
     (
         "href",
-        Some(|_, _, cx| Ok(text(shared(cx).borrow().url.as_str()))),
+        Some(|_, _, cx| Ok(js_text(shared(cx).borrow().url.as_str()))),
         Some(|_, args, cx| {
-            let href = arg_string(args, 0, cx)?;
+            let href = arg_text(args, 0, cx)?;
             navigate(cx, &href, false)?;
             Ok(JsValue::undefined())
         }),
@@ -194,24 +197,24 @@ const LOCATION_ACCESSORS: &[Accessor] = &[
         .set_fragment(Some(v.trim_start_matches('#')))),
     (
         "origin",
-        Some(|_, _, cx| Ok(text(&location_part("origin", cx)))),
+        Some(|_, _, cx| Ok(js_text(&location_part("origin", cx)))),
         None,
     ),
     (
         "ancestorOrigins",
-        Some(|_, _, cx| Ok(array(Vec::new(), cx))),
+        Some(|_, _, cx| Ok(native::array(cx, Vec::new()))),
         None,
     ),
 ];
 
 const LOCATION_METHODS: &[Method] = &[
     ("assign", 1, |_, args, cx| {
-        let href = arg_string(args, 0, cx)?;
+        let href = arg_text(args, 0, cx)?;
         navigate(cx, &href, false)?;
         Ok(JsValue::undefined())
     }),
     ("replace", 1, |_, args, cx| {
-        let href = arg_string(args, 0, cx)?;
+        let href = arg_text(args, 0, cx)?;
         navigate(cx, &href, true)?;
         Ok(JsValue::undefined())
     }),
@@ -223,7 +226,7 @@ const LOCATION_METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     ("toString", 0, |_, _, cx| {
-        Ok(text(shared(cx).borrow().url.as_str()))
+        Ok(js_text(shared(cx).borrow().url.as_str()))
     }),
 ];
 
@@ -283,6 +286,7 @@ fn traverse(context: &mut Context, delta: i64) -> JsResult<JsValue> {
         let fire = closure(
             context,
             "popstate",
+            0,
             |_, _, value: &JsValue, cx| {
                 let global: JsValue = cx.global_object().into();
                 super::events::fire(
@@ -333,7 +337,7 @@ const HISTORY_ACCESSORS: &[Accessor] = &[
     ),
     (
         "scrollRestoration",
-        Some(|_, _, _| Ok(text("auto"))),
+        Some(|_, _, _| Ok(js_text("auto"))),
         Some(|_, _, _| Ok(JsValue::undefined())),
     ),
 ];
@@ -342,8 +346,7 @@ const HISTORY_ACCESSORS: &[Accessor] = &[
 
 /// Which storage a `Storage` object is: 0 local, 1 session.
 fn storage_of(this: &JsValue) -> JsResult<u32> {
-    handle_of(this, Kind::Plain)
-        .ok_or_else(|| super::type_error("Illegal invocation: not a Storage"))
+    handle_of(this, Kind::Plain).ok_or_else(|| type_error("Illegal invocation: not a Storage"))
 }
 
 fn with_storage<R>(
@@ -381,19 +384,20 @@ fn read_storage<R>(
 const STORAGE_METHODS: &[Method] = &[
     ("getItem", 1, |this, args, cx| {
         let which = storage_of(this)?;
-        let key = arg_string(args, 0, cx)?;
-        Ok(read_storage(cx, which, |s| s.get(&key).cloned()).map_or(JsValue::null(), |v| text(&v)))
+        let key = arg_text(args, 0, cx)?;
+        Ok(read_storage(cx, which, |s| s.get(&key).cloned())
+            .map_or(JsValue::null(), |v| js_text(&v)))
     }),
     ("setItem", 2, |this, args, cx| {
         let which = storage_of(this)?;
-        let key = arg_string(args, 0, cx)?;
-        let value = arg_string(args, 1, cx)?;
+        let key = arg_text(args, 0, cx)?;
+        let value = arg_text(args, 1, cx)?;
         with_storage(cx, which, |s| s.insert(key, value));
         Ok(JsValue::undefined())
     }),
     ("removeItem", 1, |this, args, cx| {
         let which = storage_of(this)?;
-        let key = arg_string(args, 0, cx)?;
+        let key = arg_text(args, 0, cx)?;
         with_storage(cx, which, |s| s.remove(&key));
         Ok(JsValue::undefined())
     }),
@@ -406,7 +410,7 @@ const STORAGE_METHODS: &[Method] = &[
         let which = storage_of(this)?;
         let at = arg(args, 0).to_number(cx)? as usize;
         Ok(read_storage(cx, which, |s| s.keys().nth(at).cloned())
-            .map_or(JsValue::null(), |k| text(&k)))
+            .map_or(JsValue::null(), |k| js_text(&k)))
     }),
 ];
 
@@ -437,22 +441,22 @@ fn storage(context: &mut Context, which: u32) -> JsResult<JsValue> {
                 return Ok(own);
             }
             let which = storage_of(&target)?;
-            let name = string(&key, cx)?;
+            let name = text_of(&key, cx)?;
             Ok(read_storage(cx, which, |s| s.get(&name).cloned())
-                .map_or(JsValue::undefined(), |v| text(&v)))
+                .map_or(JsValue::undefined(), |v| js_text(&v)))
         })
         .set(|_, args, cx| {
             let target = arg(args, 0);
             let which = storage_of(&target)?;
-            let name = string(&arg(args, 1), cx)?;
-            let value = string(&arg(args, 2), cx)?;
+            let name = text_of(&arg(args, 1), cx)?;
+            let value = text_of(&arg(args, 2), cx)?;
             with_storage(cx, which, |s| s.insert(name, value));
             Ok(true.into())
         })
         .has(|_, args, cx| {
             let target = arg(args, 0);
             let which = storage_of(&target)?;
-            let name = string(&arg(args, 1), cx)?;
+            let name = text_of(&arg(args, 1), cx)?;
             let known = target
                 .as_object()
                 .map(|o| o.has_property(JsString::from(name.as_str()), cx))
@@ -463,23 +467,23 @@ fn storage(context: &mut Context, which: u32) -> JsResult<JsValue> {
         .delete_property(|_, args, cx| {
             let target = arg(args, 0);
             let which = storage_of(&target)?;
-            let name = string(&arg(args, 1), cx)?;
+            let name = text_of(&arg(args, 1), cx)?;
             with_storage(cx, which, |s| s.remove(&name));
             Ok(true.into())
         })
         .own_keys(|_, args, cx| {
             let which = storage_of(&arg(args, 0))?;
             let keys: Vec<JsValue> =
-                read_storage(cx, which, |s| s.keys().map(|k| text(k)).collect());
-            Ok(array(keys, cx))
+                read_storage(cx, which, |s| s.keys().map(|k| js_text(k)).collect());
+            Ok(native::array(cx, keys))
         })
         .get_own_property_descriptor(|_, args, cx| {
             let which = storage_of(&arg(args, 0))?;
-            let name = string(&arg(args, 1), cx)?;
+            let name = text_of(&arg(args, 1), cx)?;
             match read_storage(cx, which, |s| s.get(&name).cloned()) {
                 Some(value) => {
-                    let descriptor = plain_object(cx);
-                    set(&descriptor, "value", text(&value), cx)?;
+                    let descriptor = native::object(cx);
+                    set(&descriptor, "value", js_text(&value), cx)?;
                     set(&descriptor, "writable", true, cx)?;
                     set(&descriptor, "enumerable", true, cx)?;
                     set(&descriptor, "configurable", true, cx)?;
@@ -546,7 +550,7 @@ const FRAME_FUNCTIONS: &[Method] = &[
     ("requestAnimationFrame", 1, |_, args, cx| {
         let callback = arg(args, 0);
         if !callback.is_callable() {
-            return Err(super::type_error(
+            return Err(type_error(
                 "Failed to execute 'requestAnimationFrame' on 'Window': The callback provided as parameter 1 is not a function.",
             ));
         }
@@ -579,13 +583,15 @@ const FRAME_FUNCTIONS: &[Method] = &[
         let run = closure(
             cx,
             "idle",
+            0,
             |_, _, callback: &JsValue, cx| {
-                let deadline = plain_object(cx);
+                let deadline = native::object(cx);
                 let start = verve::now(cx);
                 set(&deadline, "didTimeout", false, cx)?;
                 let remaining = closure(
                     cx,
                     "timeRemaining",
+                    0,
                     |_, _, start: &f64, cx| Ok((50. - (verve::now(cx) - start)).max(0.).into()),
                     start,
                 );
@@ -607,7 +613,7 @@ const FRAME_FUNCTIONS: &[Method] = &[
 // ─── matchMedia ─────────────────────────────────────────────────────────────────────────────
 
 fn media_of(this: &JsValue, context: &mut Context) -> JsResult<String> {
-    string(&get(this, "media", context)?, context)
+    text_of(&get(this, "media", context)?, context)
 }
 
 const MEDIA_QUERY_ACCESSORS: &[Accessor] = &[(
@@ -624,7 +630,7 @@ const MEDIA_QUERY_METHODS: &[Method] = &[
     ("addListener", 1, |this, args, cx| {
         let callback = arg(args, 0);
         if callback.is_callable() {
-            super::call_method(this, "addEventListener", &[text("change"), callback], cx)?;
+            super::call_method(this, "addEventListener", &[js_text("change"), callback], cx)?;
         }
         Ok(JsValue::undefined())
     }),
@@ -632,7 +638,7 @@ const MEDIA_QUERY_METHODS: &[Method] = &[
         super::call_method(
             this,
             "removeEventListener",
-            &[text("change"), arg(args, 0)],
+            &[js_text("change"), arg(args, 0)],
             cx,
         )
     }),
@@ -641,7 +647,7 @@ const MEDIA_QUERY_METHODS: &[Method] = &[
 /// `matchMedia(query)`: a list whose `matches` follows the viewport and colour scheme, and
 /// which hears `change` when they move it.
 fn match_media(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let query = arg_string(args, 0, context)?;
+    let query = arg_text(args, 0, context)?;
     let (target, list) = {
         let class = |name| crate::state::class_of(context, name).expect("made").0;
         (class("EventTarget"), class("MediaQueryList"))
@@ -650,7 +656,7 @@ fn match_media(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     object.define_property_or_throw(
         js_string!("media"),
         PropertyDescriptor::builder()
-            .value(text(&query))
+            .value(js_text(&query))
             .writable(false)
             .enumerable(true)
             .configurable(true),
@@ -693,7 +699,7 @@ pub fn media_changed(context: &mut Context) -> JsResult<()> {
             "MediaQueryListEvent",
             "change",
             &[
-                ("media", text(&media)),
+                ("media", js_text(&media)),
                 ("matches", matches.into()),
                 ("bubbles", false.into()),
                 ("cancelable", false.into()),
@@ -714,6 +720,7 @@ fn post_message(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     let deliver = closure(
         context,
         "message",
+        0,
         |_, _, (data, origin): &(JsValue, JsString), cx| {
             let global: JsValue = cx.global_object().into();
             let event = verve::dom_events::classes(cx)?;
@@ -730,7 +737,7 @@ fn post_message(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
                     ("source", global.clone()),
                 ],
             )?;
-            let message = class.construct(&[text("message"), init.into()], None, cx)?;
+            let message = class.construct(&[js_text("message"), init.into()], None, cx)?;
             verve::dom_events::dispatch_value(&global, &message, cx)?;
             Ok(JsValue::undefined())
         },
@@ -874,7 +881,7 @@ const WINDOW_ACCESSORS: &[Accessor] = &[
     ("screenTop", Some(|_, _, _| Ok(0.into())), None),
     (
         "origin",
-        Some(|_, _, cx| Ok(text(&location_part("origin", cx)))),
+        Some(|_, _, cx| Ok(js_text(&location_part("origin", cx)))),
         None,
     ),
 ];
@@ -887,7 +894,7 @@ fn window_scroll(context: &Context, axis: usize) -> f64 {
 }
 
 fn install_screen(context: &mut Context) -> JsResult<()> {
-    let screen = plain_object(context);
+    let screen = native::object(context);
     let (width, height) = {
         let state = shared(context);
         let state = state.borrow();
@@ -913,11 +920,13 @@ fn install_screen(context: &mut Context) -> JsResult<()> {
         .expect("made")
         .0;
     let orientation = target.construct(&[], None, context)?;
-    set(&orientation, "type", text("landscape-primary"), context)?;
+    set(&orientation, "type", js_text("landscape-primary"), context)?;
     set(&orientation, "angle", 0, context)?;
     let lock = function(context, "lock", 1, |_, _, cx| {
-        super::rejected(
-            super::type_error("screen.orientation.lock() is not available on this device."),
+        native::settled(
+            Err(type_error(
+                "screen.orientation.lock() is not available on this device.",
+            )),
             cx,
         )
     });
@@ -975,7 +984,7 @@ fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResul
             navigator.define_property_or_throw(
                 JsString::from(key),
                 PropertyDescriptor::builder()
-                    .value(text(value))
+                    .value(js_text(value))
                     .writable(true)
                     .enumerable(true)
                     .configurable(true),
@@ -984,27 +993,29 @@ fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResul
         }
     }
     if let Some(language) = &options.language {
-        navigator.set(js_string!("language"), text(language), false, context)?;
-        let languages = array(vec![text(language)], context);
+        navigator.set(js_string!("language"), js_text(language), false, context)?;
+        let languages = native::array(context, vec![js_text(language)]);
         navigator.set(js_string!("languages"), languages, false, context)?;
     }
-    let clipboard = plain_object(context);
+    let clipboard = native::object(context);
     let methods: &[Method] = &[
         ("writeText", 1, |_, args, cx| {
-            let content = arg_string(args, 0, cx)?;
+            let content = arg_text(args, 0, cx)?;
             shared(cx)
                 .borrow_mut()
                 .requests
                 .push(crate::Request::CopyText(content));
-            super::resolved(JsValue::undefined(), cx)
+            native::settled(Ok(JsValue::undefined()), cx)
         }),
-        ("readText", 0, |_, _, cx| super::resolved(text(""), cx)),
+        ("readText", 0, |_, _, cx| {
+            native::settled(Ok(js_text("")), cx)
+        }),
         ("write", 1, |_, _, cx| {
-            super::resolved(JsValue::undefined(), cx)
+            native::settled(Ok(JsValue::undefined()), cx)
         }),
         ("read", 0, |_, _, cx| {
-            let empty = array(Vec::new(), cx);
-            super::resolved(empty, cx)
+            let empty = native::array(cx, Vec::new());
+            native::settled(Ok(empty), cx)
         }),
     ];
     for (name, length, f) in methods {
@@ -1028,8 +1039,8 @@ fn install_form_data(context: &mut Context) -> JsResult<()> {
         .construct(|_, args, cx| {
             let target = arg(args, 0)
                 .as_object()
-                .ok_or_else(|| super::type_error("no FormData"))?;
-            let given = super::list(&arg(args, 1), cx)?;
+                .ok_or_else(|| type_error("no FormData"))?;
+            let given = list_of(&arg(args, 1), cx)?;
             let new_target = arg(args, 2);
             let form = given.first().and_then(super::node_id);
             let submitter = given.get(1).and_then(super::node_id);
@@ -1039,7 +1050,7 @@ fn install_form_data(context: &mut Context) -> JsResult<()> {
                     super::call_method(
                         &made.clone().into(),
                         "append",
-                        &[text(&name), text(&value)],
+                        &[js_text(&name), js_text(&value)],
                         cx,
                     )?;
                 }
@@ -1119,9 +1130,9 @@ pub fn form_entries(
 pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> {
     // `Window`, the window's class: `window instanceof Window`, and `EventTarget`'s methods
     // reached through it as a browser's window reaches them.
-    let (_, window) = class(
+    let (_, window) = webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Window",
             length: 0,
             construct: illegal_constructor,
@@ -1154,8 +1165,8 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
         ("closed", false.into()),
         ("isSecureContext", true.into()),
         ("crossOriginIsolated", false.into()),
-        ("name", text("")),
-        ("status", text("")),
+        ("name", js_text("")),
+        ("status", js_text("")),
         ("event", JsValue::undefined()),
     ] {
         global.define_property_or_throw(
@@ -1168,9 +1179,9 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
             context,
         )?;
     }
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Location",
             length: 0,
             construct: illegal_constructor,
@@ -1187,9 +1198,9 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
         location,
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "History",
             length: 0,
             construct: illegal_constructor,
@@ -1202,9 +1213,9 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
     )?;
     let history = native_instance(context, "History", Kind::Plain, 0);
     context.register_global_property(js_string!("history"), history, Attribute::all())?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Storage",
             length: 0,
             construct: illegal_constructor,
@@ -1219,9 +1230,9 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
     context.register_global_property(js_string!("localStorage"), local, Attribute::all())?;
     let session = storage(context, 1)?;
     context.register_global_property(js_string!("sessionStorage"), session, Attribute::all())?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "MediaQueryList",
             length: 0,
             construct: illegal_constructor,

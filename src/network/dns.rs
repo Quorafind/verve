@@ -3,7 +3,9 @@
 use super::{Id, reactor::Command};
 #[cfg(feature = "dns-records")]
 use crate::native::invoke;
-use crate::native::{arg, array, closure, coded_error_value, get, js_text, object, text_of};
+use crate::native::{
+    arg, arg_text, array, closure, coded_error_value, get, js_text, object, text_of,
+};
 use boa_engine::{Context, JsObject, JsResult, JsValue, js_string, object::builtins::JsPromise};
 use std::{
     collections::HashMap,
@@ -151,7 +153,7 @@ fn retry<T>(
 }
 
 fn start(args: &[JsValue], kind: &str, promise: bool, cx: &mut Context) -> JsResult<JsValue> {
-    let host = text_of(&arg(args, 0), cx)?;
+    let host = arg_text(args, 0, cx)?;
     let options = arg(args, 1);
     let granted = crate::shared(cx).network.borrow().permissions.dns;
     if !granted {
@@ -321,7 +323,7 @@ pub(crate) fn install(module: &JsObject, promises: bool, cx: &mut Context) -> Js
     });
     module.set(js_string!("getServers"), get_servers, false, cx)?;
     let set_order = crate::native::function(cx, "setDefaultResultOrder", 1, |_, args, cx| {
-        let order = text_of(&arg(args, 0), cx)?;
+        let order = arg_text(args, 0, cx)?;
         if !["verbatim", "ipv4first", "ipv6first"].contains(&order.as_str()) {
             return Err(crate::native::coded_error(
                 cx,

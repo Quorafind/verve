@@ -9,8 +9,9 @@ use boa_engine::{
     object::{WeakJsObject, builtins::JsPromise},
     property::PropertyDescriptor,
 };
+use verve::native::{self, arg, js_text, type_error};
 
-use crate::bind::{self, Accessor, Method, arg, dom_error, node_of, text, type_error};
+use crate::bind::{self, Accessor, Method, dom_error, node_of};
 use crate::state::shared;
 use crate::{Document, NodeId};
 
@@ -512,7 +513,7 @@ fn play(context: &mut Context, node: NodeId) -> JsResult<JsValue> {
         seek(context, node, 0.)?;
         if !active(context, node, generation) {
             let error = dom_error(context, "媒体源在 seeking 事件中已失效", "AbortError");
-            return bind::rejected(error, context);
+            return native::settled(Err(error), context);
         }
     }
     let (generation, terminal, error, ready, paused, existing) = {
@@ -536,10 +537,10 @@ fn play(context: &mut Context, node: NodeId) -> JsResult<JsValue> {
                 .map_or("没有可播放的媒体源", |e| e.message.as_str()),
             "NotSupportedError",
         );
-        return bind::rejected(error, context);
+        return native::settled(Err(error), context);
     }
     if !paused && ready >= 3 && existing.is_none() {
-        return bind::resolved(JsValue::undefined(), context);
+        return native::settled(Ok(JsValue::undefined()), context);
     }
     let request = if let Some((request, false)) = existing {
         request
@@ -899,7 +900,7 @@ pub(crate) const METHODS: &[Method] = &[
         let node = node_of(this)?;
         match play(cx, node) {
             Ok(promise) => Ok(promise),
-            Err(error) => bind::rejected(error, cx),
+            Err(error) => native::settled(Err(error), cx),
         }
     }),
     ("pause", 0, |this, _, cx| {
@@ -913,16 +914,14 @@ pub(crate) const METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     // 解码能力由宿主决定，不能凭 MIME 文本保证本机存在某个解码器。
-    ("canPlayType", 1, |_, _, _| Ok(text(""))),
+    ("canPlayType", 1, |_, _, _| Ok(js_text(""))),
     ("fastSeek", 1, |this, args, cx| {
         let node = node_of(this)?;
         let time = arg(args, 0).to_number(cx)?;
         seek(cx, node, time)?;
         Ok(JsValue::undefined())
     }),
-    ("addTextTrack", 3, |_, _, cx| {
-        Ok(bind::plain_object(cx).into())
-    }),
+    ("addTextTrack", 3, |_, _, cx| Ok(native::object(cx).into())),
 ];
 
 fn read(
@@ -1035,7 +1034,7 @@ pub(crate) const ACCESSORS: &[Accessor] = &[
     ),
     (
         "currentSrc",
-        Some(|this, _, cx| read(this, cx, |s| text(&s.src))),
+        Some(|this, _, cx| read(this, cx, |s| js_text(&s.src))),
         None,
     ),
     (
@@ -1072,9 +1071,9 @@ pub(crate) const ACCESSORS: &[Accessor] = &[
             match error {
                 None => Ok(JsValue::null()),
                 Some(error) => {
-                    let object = bind::plain_object(cx);
+                    let object = native::object(cx);
                     bind::set(&object, "code", u32::from(error.code), cx)?;
-                    bind::set(&object, "message", text(&error.message), cx)?;
+                    bind::set(&object, "message", js_text(&error.message), cx)?;
                     Ok(object.into())
                 }
             }
@@ -1098,7 +1097,7 @@ pub(crate) const ACCESSORS: &[Accessor] = &[
     ),
     (
         "textTracks",
-        Some(|_, _, cx| Ok(bind::array(Vec::new(), cx))),
+        Some(|_, _, cx| Ok(native::array(cx, Vec::new()))),
         None,
     ),
 ];

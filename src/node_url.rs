@@ -14,7 +14,7 @@ use boa_engine::{
 };
 
 use crate::native::{
-    ClassSpec, arg, class, coded_error, exports, get, invoke, js_text, object, text_of,
+    ClassSpec, arg, arg_text, class, coded_error, exports, get, invoke, js_text, object, text_of,
 };
 
 /// The protocols whose URLs have `//` and a host: `http://x/` is written so even when the
@@ -691,13 +691,13 @@ const URL_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("format", 2, format),
     ("resolve", 2, |_, args, cx| {
-        let from = text_of(&arg(args, 0), cx)?;
-        let to = text_of(&arg(args, 1), cx)?;
+        let from = arg_text(args, 0, cx)?;
+        let to = arg_text(args, 1, cx)?;
         Ok(js_text(&resolve(&from, &to)))
     }),
     ("resolveObject", 2, |_, args, cx| {
-        let from = text_of(&arg(args, 0), cx)?;
-        let to = text_of(&arg(args, 1), cx)?;
+        let from = arg_text(args, 0, cx)?;
+        let to = arg_text(args, 1, cx)?;
         legacy_object(&parse_legacy(&resolve(&from, &to), false), false, cx)
     }),
     ("domainToASCII", 1, |_, args, cx| {
@@ -720,7 +720,7 @@ const URL_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
             .map_err(|FileUrlError(code, message)| coded_error(cx, &message, code))
     }),
     ("pathToFileURL", 2, |_, args, cx| {
-        let path = text_of(&arg(args, 0), cx)?;
+        let path = arg_text(args, 0, cx)?;
         let windows = windows_option(&arg(args, 1), cx)?;
         path_to_file_url(&path, windows, cx)
     }),
@@ -787,7 +787,7 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
             init: |this, _, cx| fill_legacy(this, &Legacy::default(), false, cx),
             methods: &[
                 ("parse", 3, |this, args, cx| {
-                    let text = text_of(&arg(args, 0), cx)?;
+                    let text = arg_text(args, 0, cx)?;
                     let url = parse_legacy(&text, arg(args, 2).to_boolean());
                     if let Some(this) = this.as_object() {
                         fill_legacy(&this, &url, arg(args, 1).to_boolean(), cx)?;
@@ -799,12 +799,12 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
                 }),
                 ("resolve", 1, |this, args, cx| {
                     let from = field(this, "href", cx)?;
-                    let to = text_of(&arg(args, 0), cx)?;
+                    let to = arg_text(args, 0, cx)?;
                     Ok(js_text(&resolve(&from, &to)))
                 }),
                 ("resolveObject", 1, |this, args, cx| {
                     let from = field(this, "href", cx)?;
-                    let to = text_of(&arg(args, 0), cx)?;
+                    let to = arg_text(args, 0, cx)?;
                     legacy_object(&parse_legacy(&resolve(&from, &to), false), false, cx)
                 }),
             ],

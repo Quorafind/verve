@@ -9,9 +9,10 @@
 
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 use verve::dom_events::FieldDefault as F;
+use verve::native::{self, arg, arg_text, js_text, type_error};
 
 use super::node::{read_dom, with_dom, wrap};
-use super::{Method, arg, node_id, plain_object, text};
+use super::{Method, node_id};
 use crate::dom::{Dom, NodeId, NodeKind};
 use crate::state::shared;
 
@@ -327,7 +328,7 @@ const CLASSES: &[EventClass] = &[
 ];
 
 const MODIFIER_METHODS: &[Method] = &[("getModifierState", 1, |this, args, cx| {
-    let key = super::arg_string(args, 0, cx)?;
+    let key = arg_text(args, 0, cx)?;
     let field = match key.as_str() {
         "Control" => "ctrlKey",
         "Shift" => "shiftKey",
@@ -527,7 +528,7 @@ pub fn fire_event(
     trusted: bool,
 ) -> JsResult<(bool, JsObject)> {
     let (bubbles, cancelable) = defaults(kind);
-    let dict = plain_object(context);
+    let dict = native::object(context);
     dict.set(js_string!("bubbles"), bubbles, false, context)?;
     dict.set(js_string!("cancelable"), cancelable, false, context)?;
     // What the page itself does (a load, a change) stays where it happened; what a person did
@@ -546,8 +547,8 @@ pub fn fire_event(
     }
     let constructor = crate::state::class_of(context, class)
         .map(|(c, _)| c)
-        .ok_or_else(|| super::type_error(format!("no event class {class}")))?;
-    let event = constructor.construct(&[text(kind), dict.into()], None, context)?;
+        .ok_or_else(|| type_error(format!("no event class {class}")))?;
+    let event = constructor.construct(&[js_text(kind), dict.into()], None, context)?;
     verve::dom_events::set_trusted(&event.clone().into(), trusted)?;
     let global = context.global_object();
     let previous = global.get(js_string!("event"), context)?;

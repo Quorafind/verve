@@ -25,14 +25,18 @@ use boa_engine::{
     object::builtins::JsArray, property::PropertyDescriptor,
 };
 
-use crate::native::{arg, array, coded_error, exports, function, invoke, js_text, object, text_of};
+use crate::native::{
+    arg, arg_text, array, coded_error, exports, function, invoke, js_text, object, text_of,
+};
 use crate::{Level, console_line};
 
 /// The Node release `process.version` claims: the one Electron 39, and with it Obsidian's
 /// current desktop app (1.14), is built on. Plugins check these — Media Extended refuses an
 /// Electron older than 39 — so they match the user agent the embedder gives its `navigator`.
 pub const NODE_VERSION: &str = "22.20.0";
+/// `process.versions.electron`: the Electron release this runtime answers as.
 pub const ELECTRON_VERSION: &str = "39.2.0";
+/// `process.versions.chrome`: the Chromium that Electron release is built on.
 pub const CHROME_VERSION: &str = "142.0.7444.59";
 /// `process.versions.modules`, Node's `NODE_MODULE_VERSION`: the ABI a native addon is built
 /// for. Electron 39 reports 140 (observed on 39.8.10; Node 22 proper is 127).
@@ -183,7 +187,7 @@ const PROCESS_FUNCTIONS: &[(
         Ok(js_text(&crate::shared(cx).cwd.borrow()))
     }),
     ("chdir", 1, |_, args, cx| {
-        let to = text_of(&arg(args, 0), cx)?;
+        let to = arg_text(args, 0, cx)?;
         let current = std::path::PathBuf::from(crate::shared(cx).cwd.borrow().clone());
         let target = current.join(&to);
         if !target.is_dir() {
@@ -330,13 +334,13 @@ const PROCESS_FUNCTIONS: &[(
         ))
     }),
     ("binding", 1, |_, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Err(boa_engine::JsNativeError::error()
             .with_message(format!("No such module: {name}"))
             .into())
     }),
     ("_linkedBinding", 1, |_, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Err(boa_engine::JsNativeError::error()
             .with_message(format!("No such binding: {name}"))
             .into())
@@ -366,7 +370,7 @@ const PROCESS_FUNCTIONS: &[(
     ("constrainedMemory", 0, |_, _, _| Ok(0.into())),
     ("availableMemory", 0, |_, _, _| Ok((4u64 << 30).into())),
     ("getBuiltinModule", 1, |_, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Ok(crate::modules::builtin(cx, &name)?.unwrap_or_default())
     }),
 ];

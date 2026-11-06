@@ -92,6 +92,8 @@ impl Permissions {
         }
     }
 
+    /// Whether a connection to `host` on `port` is permitted: some outbound rule names both,
+    /// or leaves either open.
     pub fn allows_outbound(&self, host: &str, port: u16) -> bool {
         self.outbound.iter().any(|rule| {
             rule.port.is_none_or(|p| p == port)
@@ -102,6 +104,7 @@ impl Permissions {
         })
     }
 
+    /// Whether the realm may listen on `address`, by the listen policy (any, loopback only, none).
     pub fn allows_listen(&self, address: std::net::IpAddr) -> bool {
         self.listen == ListenPermission::Any
             || (self.listen == ListenPermission::Loopback && address.is_loopback())

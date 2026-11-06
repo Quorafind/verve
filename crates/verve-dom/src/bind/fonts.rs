@@ -15,11 +15,13 @@ use boa_engine::{
     object::builtins::{JsFunction, JsPromise},
 };
 use boa_gc::GcRefCell;
+use verve::native::{
+    self, arg, function, get, hidden, illegal_constructor, js_text, text_of, type_error,
+};
 
 use super::{
-    Accessor, ClassSpec, Method, arg, array, call_method, class, constructor_of, dom_error,
-    function, get, hidden, illegal_constructor, prototype_of_target, resolved, string, text,
-    type_error,
+    Accessor, Method, WebIdlClass, call_method, constructor_of, dom_error, prototype_of_target,
+    webidl_class,
 };
 use crate::state::shared;
 use crate::{FontFaceId, FontOutcome, Request};
@@ -89,7 +91,7 @@ struct Face {
 #[derive(Trace, Finalize, JsData)]
 struct FaceData(GcRefCell<Face>);
 
-/// What `ready` is: a promise already resolved, or one waiting for the fonts loading now.
+/// What `ready` is: a promise already  or one waiting for the fonts loading now.
 enum Ready {
     Settled(JsValue),
     Pending { promise: JsValue, resolve: JsValue },
@@ -135,13 +137,13 @@ fn construct_face(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let mut descriptors: Vec<String> = DESCRIPTORS.iter().map(|(_, d)| (*d).to_owned()).collect();
-    descriptors[0] = string(&arg(args, 0), context)?;
+    descriptors[0] = text_of(&arg(args, 0), context)?;
     let given = arg(args, 2);
     if given.is_object() {
         for (at, (name, _)) in DESCRIPTORS.iter().enumerate().skip(1) {
             let value = get(&given, name, context)?;
             if !value.is_undefined() {
-                descriptors[at] = string(&value, context)?;
+                descriptors[at] = text_of(&value, context)?;
             }
         }
     }
@@ -311,7 +313,7 @@ pub fn font_set(context: &mut Context) -> JsResult<JsValue> {
     let set = target.construct(&[], None, context)?;
     let prototype = crate::state::class_prototype(context, "FontFaceSet");
     set.set_prototype(Some(prototype));
-    let ready = resolved(set.clone().into(), context)?;
+    let ready = native::settled(Ok(set.clone().into()), context)?;
     let state = shared(context);
     let mut state = state.borrow_mut();
     state.fonts.set = Some(set.clone());
@@ -332,7 +334,7 @@ fn face_arg(args: &[JsValue], method: &str, context: &mut Context) -> JsResult<J
 
 fn faces_iterator(context: &mut Context) -> JsResult<JsValue> {
     let faces = shared(context).borrow().fonts.faces.clone();
-    let faces = array(faces.into_iter().map(JsValue::from).collect(), context);
+    let faces = native::array(context, faces.into_iter().map(JsValue::from).collect());
     call_method(&faces, "values", &[], context)
 }
 
@@ -382,20 +384,20 @@ const SET_METHODS: &[Method] = &[
     ("values", 0, |_, _, cx| faces_iterator(cx)),
     ("keys", 0, |_, _, cx| faces_iterator(cx)),
     ("check", 1, |_, args, cx| {
-        let font = string(&arg(args, 0), cx)?;
+        let font = text_of(&arg(args, 0), cx)?;
         let loaded = statuses(cx, &font)?
             .iter()
             .all(|(_, status)| *status == FaceStatus::Loaded);
         Ok(loaded.into())
     }),
     ("load", 1, |_, args, cx| {
-        let font = string(&arg(args, 0), cx)?;
+        let font = text_of(&arg(args, 0), cx)?;
         let mut loads = Vec::new();
         for (face, _) in statuses(cx, &font)? {
             loads.push(load_face(cx, &face)?);
         }
         let promise = cx.global_object().get(js_string!("Promise"), cx)?;
-        let loads = array(loads, cx);
+        let loads = native::array(cx, loads);
         call_method(&promise, "all", &[loads], cx)
     }),
 ];
@@ -410,7 +412,7 @@ const SET_ACCESSORS: &[Accessor] = &[
         "status",
         Some(|_, _, cx| {
             let loading = shared(cx).borrow().fonts.loading;
-            Ok(text(if loading { "loading" } else { "loaded" }))
+            Ok(js_text(if loading { "loading" } else { "loaded" }))
         }),
         None,
     ),
@@ -431,7 +433,7 @@ fn descriptor<const AT: usize>(
     _: &[JsValue],
     _: &mut Context,
 ) -> JsResult<JsValue> {
-    with_face(this, |f| text(&f.descriptors[AT]))
+    with_face(this, |f| js_text(&f.descriptors[AT]))
 }
 
 /// The descriptor `AT` of `DESCRIPTORS`, written.
@@ -440,7 +442,7 @@ fn set_descriptor<const AT: usize>(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let value = string(&arg(args, 0), context)?;
+    let value = text_of(&arg(args, 0), context)?;
     with_face(this, |f| f.descriptors[AT] = value)?;
     Ok(JsValue::undefined())
 }
@@ -461,7 +463,7 @@ const FACE_ACCESSORS: &[Accessor] = descriptor_accessors!(
 const FACE_STATE: &[Accessor] = &[
     (
         "status",
-        Some(|this, _, _| with_face(this, |f| text(f.status.as_str()))),
+        Some(|this, _, _| with_face(this, |f| js_text(f.status.as_str()))),
         None,
     ),
     (
@@ -480,9 +482,9 @@ const FACE_METHODS: &[Method] = &[("load", 0, |this, _, cx| {
 
 /// Makes `FontFace` and `FontFaceSet`, whose one instance is `document.fonts`.
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let (_, face) = class(
+    let (_, face) = webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "FontFace",
             length: 2,
             construct: construct_face,
@@ -494,9 +496,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         },
     )?;
     super::extend_prototype(context, &face, &[], FACE_STATE)?;
-    let (_, set) = class(
+    let (_, set) = webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "FontFaceSet",
             length: 0,
             construct: illegal_constructor,

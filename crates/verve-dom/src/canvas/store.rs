@@ -10,9 +10,10 @@ use std::sync::Arc;
 use boa_engine::object::WeakJsObject;
 use boa_engine::{Context, JsError, JsObject, JsResult, JsValue};
 use tiny_skia::{PathBuilder, Pixmap};
+use verve::native::type_error;
 
 use crate::bind::node::wrap;
-use crate::bind::{Kind, handle_of, native_instance, type_error};
+use crate::bind::{Kind, handle_of, native_instance};
 use crate::canvas::CanvasFrame;
 use crate::canvas::context2d::{Canvas2d, CanvasOwner, Scene};
 use crate::canvas::fonts::FontStack;

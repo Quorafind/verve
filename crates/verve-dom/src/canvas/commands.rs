@@ -3,11 +3,9 @@
 
 use boa_engine::{Context, JsResult, JsValue};
 use tiny_skia::{FillRule, PathBuilder, Point, Transform};
+use verve::native::{self, arg, arg_text, get, js_text, list_of, text_of, type_error};
 
-use crate::bind::{
-    self, Kind, Method, arg, arg_string, array, dom_error, get, handle_of, list, native_instance,
-    set, text, type_error,
-};
+use crate::bind::{self, Kind, Method, dom_error, handle_of, native_instance, set};
 use crate::canvas::context2d::{Canvas2d, Op, Place, Scene, hit_test};
 use crate::canvas::finite_numbers;
 use crate::canvas::matrix::{matrix_object, transform_argument};
@@ -229,7 +227,7 @@ fn fill_rule(value: &JsValue, context: &mut Context) -> JsResult<FillRule> {
     if !value.is_string() {
         return Ok(FillRule::Winding);
     }
-    Ok(match bind::string(value, context)?.as_str() {
+    Ok(match text_of(value, context)?.as_str() {
         "evenodd" => FillRule::EvenOdd,
         _ => FillRule::Winding,
     })
@@ -366,7 +364,7 @@ fn create_pattern(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     let repetition = match arg(args, 1) {
         value if value.is_null_or_undefined() => Repetition::Repeat,
         value => {
-            let name = bind::string(&value, context)?;
+            let name = text_of(&value, context)?;
             let known = value_of(Repetition::NAMES, &name);
             let known = known.or_else(|| name.is_empty().then_some(Repetition::Repeat));
             known.ok_or_else(|| {
@@ -392,7 +390,7 @@ fn create_pattern(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
 /// repeated so it alternates evenly.
 fn set_line_dash(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let mut dashes = Vec::new();
-    for value in list(&arg(args, 0), context)? {
+    for value in list_of(&arg(args, 0), context)? {
         let dash = value.to_number(context)?;
         if !dash.is_finite() || dash < 0. {
             return Ok(JsValue::undefined());
@@ -408,9 +406,9 @@ fn set_line_dash(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
 fn get_line_dash(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let dashes = read(this, context, |canvas| canvas.draw.line.dash.clone())?;
     let dashes = dashes.unwrap_or_default();
-    Ok(array(
-        dashes.into_iter().map(JsValue::from).collect(),
+    Ok(native::array(
         context,
+        dashes.into_iter().map(JsValue::from).collect(),
     ))
 }
 
@@ -418,7 +416,7 @@ fn get_line_dash(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
 
 /// `fillText` and `strokeText`: `content`, a point, and an optional width to condense to.
 fn draw_text(this: &JsValue, args: &[JsValue], context: &mut Context, op: Op) -> JsResult<JsValue> {
-    let content = arg_string(args, 0, context)?;
+    let content = arg_text(args, 0, context)?;
     let Some([x, y]) = finite_numbers(args.get(1..).unwrap_or_default(), context)? else {
         return Ok(JsValue::undefined());
     };
@@ -453,7 +451,7 @@ fn physical_align(align: Align, rtl: bool) -> Align {
 }
 
 fn measure_text(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let content = arg_string(args, 0, context)?;
+    let content = arg_text(args, 0, context)?;
     let id = canvas_id(this)?;
     let metrics = shared(context)
         .borrow_mut()
@@ -575,7 +573,7 @@ fn get_context_attributes(
     let members = [
         ("alpha", JsValue::from(alpha)),
         ("desynchronized", false.into()),
-        ("colorSpace", text("srgb")),
+        ("colorSpace", js_text("srgb")),
         ("willReadFrequently", frequently.into()),
     ];
     Ok(bind::dictionary(context, &members)?.into())

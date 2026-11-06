@@ -5,8 +5,9 @@
 use boa_engine::property::PropertyDescriptor;
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue};
 use tiny_skia::{BlendMode, Color, FilterQuality, LineCap, LineJoin};
+use verve::native::{arg, closure, js_text, text_of};
 
-use crate::bind::{Kind, arg, closure, handle_of, string, text};
+use crate::bind::{Kind, handle_of};
 use crate::canvas::context2d::DrawState;
 use crate::canvas::paint::{PaintSource, css_of, parse_color};
 use crate::canvas::store::{canvas_object, read_canvas, this_handle};
@@ -399,12 +400,14 @@ pub fn install_properties(context: &mut Context, prototype: &JsObject) -> JsResu
         let getter = closure(
             context,
             &format!("get {}", property.name),
+            0,
             |this, _, index: &usize, cx| read_property(this, cx, *index),
             index,
         );
         let setter = closure(
             context,
             &format!("set {}", property.name),
+            0,
             |this, args, index: &usize, cx| write_property(this, args, cx, *index),
             index,
         );
@@ -425,7 +428,7 @@ fn read_property(this: &JsValue, context: &mut Context, index: usize) -> JsResul
     })?;
     Ok(match reading {
         None => JsValue::undefined(),
-        Some(Reading::Text(value)) => text(&value),
+        Some(Reading::Text(value)) => js_text(&value),
         Some(Reading::Number(value)) => value.into(),
         Some(Reading::Flag(value)) => value.into(),
         Some(Reading::Paint(source)) => paint_object(&source, context),
@@ -463,7 +466,7 @@ fn written(input: Input, value: &JsValue, context: &mut Context) -> JsResult<Opt
             number.is_finite().then_some(Written::Number(number as f32))
         }
         Input::Flag => Some(Written::Flag(value.to_boolean())),
-        Input::Text => Some(Written::Text(string(value, context)?)),
+        Input::Text => Some(Written::Text(text_of(value, context)?)),
     })
 }
 
@@ -478,13 +481,13 @@ fn paint_from(value: &JsValue, context: &mut Context) -> JsResult<Option<PaintSo
     if !value.is_string() {
         return Ok(None);
     }
-    let written = string(value, context)?;
+    let written = text_of(value, context)?;
     Ok(parse_color(&written).map(|(color, css)| PaintSource::Color(color, css)))
 }
 
 fn paint_object(source: &PaintSource, context: &mut Context) -> JsValue {
     match source {
-        PaintSource::Color(_, css) => text(css),
+        PaintSource::Color(_, css) => js_text(css),
         PaintSource::Gradient(id) => {
             canvas_object(context, *id, (Kind::Gradient, "CanvasGradient")).into()
         }

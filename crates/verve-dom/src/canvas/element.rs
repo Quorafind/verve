@@ -5,11 +5,10 @@
 
 use boa_engine::{Context, JsResult, JsValue};
 use tiny_skia::Pixmap;
+use verve::native::{self, arg, arg_text, get, js_text, text_of};
 
 use crate::bind::node::read_dom;
-use crate::bind::{
-    Accessor, Kind, Method, arg, arg_string, dom_error, get, node_of, plain_object, string, text,
-};
+use crate::bind::{Accessor, Kind, Method, dom_error, node_of};
 use crate::canvas::context2d::{Canvas2d, CanvasOwner};
 use crate::canvas::pixels::{DEFAULT_JPEG_QUALITY, Encoded, ImageType, encode};
 use crate::canvas::store::{CanvasId, canvas_object};
@@ -33,7 +32,7 @@ pub const CANVAS_METHODS: &[Method] = &[
     ("getContext", 1, get_context),
     ("toDataURL", 0, to_data_url),
     ("toBlob", 1, to_blob),
-    ("captureStream", 0, |_, _, cx| Ok(plain_object(cx).into())),
+    ("captureStream", 0, |_, _, cx| Ok(native::object(cx).into())),
     ("transferControlToOffscreen", 0, |_, _, cx| {
         Err(dom_error(
             cx,
@@ -82,7 +81,7 @@ fn canvas_of(this: &JsValue, context: &mut Context, alpha: bool) -> JsResult<Can
 /// `getContext(kind, options)`: a 2D context, a bitmap renderer, or `null` for the kinds that
 /// need a GPU, as on a machine without one: libraries fall back.
 fn get_context(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let kind = arg_string(args, 0, context)?;
+    let kind = arg_text(args, 0, context)?;
     let options = arg(args, 1);
     let class = match kind.as_str() {
         "2d" => (Kind::Context2d, "CanvasRenderingContext2D"),
@@ -121,7 +120,7 @@ pub fn export_arguments(
     context: &mut Context,
 ) -> JsResult<(ImageType, f32)> {
     let kind = match kind.is_string() {
-        true => ImageType::from_mime(&string(kind, context)?),
+        true => ImageType::from_mime(&text_of(kind, context)?),
         false => ImageType::Png,
     };
     let quality = match quality.is_number() {
@@ -176,11 +175,11 @@ fn to_data_url(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     let encoded = exported_element(this, context, "toDataURL")?
         .and_then(|pixmap| encode(&pixmap, kind, quality));
     Ok(match encoded {
-        Some(Encoded { mime, bytes }) => text(&format!(
+        Some(Encoded { mime, bytes }) => js_text(&format!(
             "data:{mime};base64,{}",
             verve::encoding::base64(&bytes, false)
         )),
-        None => text("data:,"),
+        None => js_text("data:,"),
     })
 }
 

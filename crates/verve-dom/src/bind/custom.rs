@@ -11,9 +11,10 @@
 use std::collections::HashSet;
 
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, object::builtins::JsPromise};
+use verve::native::{self, arg, arg_text, js_text, list_of, text_of, type_error};
 
 use super::node::{existing_wrapper, read_dom, with_dom, wrap};
-use super::{Method, arg, arg_string, dom_error, list, string, text, type_error};
+use super::{Method, dom_error};
 use crate::dom::{AttrChange, Namespace, NodeId, is_custom_element_name};
 use crate::state::shared;
 
@@ -207,7 +208,7 @@ fn upgrade(context: &mut Context, id: NodeId) -> bool {
     }
     shared(context).borrow_mut().custom.nodes.insert(id);
     for (name, value) in attrs {
-        let args = [text(&name), JsValue::null(), text(&value)];
+        let args = [js_text(&name), JsValue::null(), js_text(&value)];
         call_back(context, id, "attributeChangedCallback", &args);
     }
     if connected {
@@ -232,8 +233,8 @@ fn observes(context: &Context, id: NodeId, name: &str) -> bool {
 pub fn react(context: &mut Context, attrs: Vec<AttrChange>, moved: Vec<(NodeId, bool)>) {
     for change in attrs {
         if observes(context, change.node, &change.name) {
-            let value = |v: Option<String>| v.map_or(JsValue::null(), |v| text(&v));
-            let args = [text(&change.name), value(change.old), value(change.new)];
+            let value = |v: Option<String>| v.map_or(JsValue::null(), |v| js_text(&v));
+            let args = [js_text(&change.name), value(change.old), value(change.new)];
             call_back(context, change.node, "attributeChangedCallback", &args);
         }
     }
@@ -274,14 +275,14 @@ fn observed_attributes(class: &JsObject, context: &mut Context) -> JsResult<Vec<
     if value.is_undefined() {
         return Ok(Vec::new());
     }
-    list(&value, context)?
+    list_of(&value, context)?
         .iter()
-        .map(|name| string(name, context))
+        .map(|name| text_of(name, context))
         .collect()
 }
 
 fn define(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let name = arg_string(args, 0, context)?;
+    let name = arg_text(args, 0, context)?;
     let Some(class) = arg(args, 1).as_object().filter(|c| c.is_constructor()) else {
         return Err(type_error(
             "Failed to execute 'define' on 'CustomElementRegistry': parameter 2 is not a constructor.",
@@ -346,19 +347,19 @@ fn define(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsVa
 pub const METHODS: &[Method] = &[
     ("define", 3, define),
     ("get", 1, |_, args, cx| {
-        let name = arg_string(args, 0, cx)?;
+        let name = arg_text(args, 0, cx)?;
         Ok(class_of(cx, &name).map_or(JsValue::undefined(), JsValue::from))
     }),
     ("getName", 1, |_, args, cx| {
         let name = arg(args, 0)
             .as_object()
             .and_then(|class| tag_of(cx, &class));
-        Ok(name.map_or(JsValue::null(), |n| text(&n)))
+        Ok(name.map_or(JsValue::null(), |n| js_text(&n)))
     }),
     ("whenDefined", 1, |_, args, cx| {
-        let name = arg_string(args, 0, cx)?;
+        let name = arg_text(args, 0, cx)?;
         if let Some(class) = class_of(cx, &name) {
-            return super::resolved(class.into(), cx);
+            return native::settled(Ok(class.into()), cx);
         }
         let (promise, resolvers) = JsPromise::new_pending(cx);
         shared(cx)

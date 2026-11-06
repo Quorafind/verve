@@ -271,7 +271,7 @@ pub(super) fn fetched(doc: &Document, node: NodeId, result: LoadResult) {
     };
     match result.body {
         Ok(bytes) if result.status < 400 => {
-            script.text = net::text(&bytes);
+            script.text = net::decoded_text(&bytes);
             script.status = Status::Ready;
         }
         _ => script.status = Status::Failed,

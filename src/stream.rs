@@ -25,8 +25,8 @@ use boa_engine::{
 
 use crate::events::{abort_error, coded_type_error};
 use crate::native::{
-    ClassSpec, arg, array, class, closure, coded_error_value, function, get, hidden, invoke,
-    js_text, list_of, object, text_of,
+    ClassSpec, arg, arg_text, array, class, closure, coded_error_value, function, get, hidden,
+    invoke, js_text, list_of, object, text_of,
 };
 
 // ─── Small things ────────────────────────────────────────────────────────────────────────────
@@ -3044,7 +3044,7 @@ const WRITABLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("cork", 0, cork),
     ("uncork", 0, uncork),
     ("setDefaultEncoding", 1, |this, args, cx| {
-        let encoding = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+        let encoding = arg_text(args, 0, cx)?.to_ascii_lowercase();
         if crate::string_decoder::normalize_encoding(&encoding).is_none() && encoding != "buffer" {
             return Err(coded_type_error(
                 cx,

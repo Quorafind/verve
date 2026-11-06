@@ -3,10 +3,11 @@
 
 use boa_engine::property::Attribute;
 use boa_engine::{Context, JsResult, JsValue, js_string, native_function::NativeFunctionPointer};
+use verve::native::{arg, arg_text, function, illegal_constructor};
 
 use crate::bind::{
-    self, Accessor, ClassSpec, Kind, Method, arg, arg_string, class, dom_error, extend_prototype,
-    illegal_constructor, instance,
+    self, Accessor, Kind, Method, WebIdlClass, dom_error, extend_prototype, handle_instance,
+    webidl_class,
 };
 use crate::canvas::bitmap::{
     BITMAP_ACCESSORS, BITMAP_METHODS, BITMAP_RENDERER_METHODS, OFFSCREEN_ACCESSORS,
@@ -90,7 +91,7 @@ const CLASSES: &[Entry] = &[
 /// The canvas classes, their methods and their properties.
 pub fn install(context: &mut Context) -> JsResult<()> {
     for entry in CLASSES {
-        let spec = ClassSpec {
+        let spec = WebIdlClass {
             name: entry.name,
             length: entry.length,
             construct: entry.construct,
@@ -100,13 +101,13 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             statics: &[],
             global: true,
         };
-        let (_, prototype) = class(context, spec)?;
+        let (_, prototype) = webidl_class(context, spec)?;
         extend_prototype(context, &prototype, entry.shared, &[])?;
         if entry.name == "CanvasRenderingContext2D" {
             install_properties(context, &prototype)?;
         }
     }
-    let create = bind::function(context, "createImageBitmap", 1, create_image_bitmap);
+    let create = function(context, "createImageBitmap", 1, create_image_bitmap);
     let writable = Attribute::WRITABLE | Attribute::CONFIGURABLE;
     context.register_global_property(js_string!("createImageBitmap"), create, writable)
 }
@@ -119,7 +120,7 @@ fn construct_path(
 ) -> JsResult<JsValue> {
     let first = arg(args, 0);
     let builder = if first.is_string() {
-        from_svg(&arg_string(args, 0, context)?).unwrap_or_default()
+        from_svg(&arg_text(args, 0, context)?).unwrap_or_default()
     } else {
         let source = bind::handle_of(&first, Kind::Path);
         let state = shared(context);
@@ -129,7 +130,7 @@ fn construct_path(
             .unwrap_or_default()
     };
     let id = shared(context).borrow_mut().canvas.add_path(builder);
-    Ok(instance(new_target, Kind::Path, id, context)?.into())
+    Ok(handle_instance(new_target, Kind::Path, id, context)?.into())
 }
 
 fn add_color_stop(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -139,7 +140,7 @@ fn add_color_stop(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         let message = "Failed to execute 'addColorStop' on 'CanvasGradient': The provided value is outside the range (0.0, 1.0).";
         return Err(dom_error(context, message, "IndexSizeError"));
     }
-    let written = arg_string(args, 1, context)?;
+    let written = arg_text(args, 1, context)?;
     let Some((color, _)) = parse_color(&written) else {
         let message = "Failed to execute 'addColorStop' on 'CanvasGradient': The value provided is not a valid color.";
         return Err(dom_error(context, message, "SyntaxError"));

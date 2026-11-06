@@ -8,18 +8,20 @@
 //! (`play`, `pause`, `reverse`, `finish`, `cancel`, `commitStyles`) is done to that one
 //! animation. `persist()` is not supported and says so.
 //!
-//! R1: `class` and `ClassSpec` are the legacy ones of `bind/mod.rs` (they register the class in
-//! the document's table, which `verve::native::class` does not); the rest comes from
+//! Its classes are made by `webidl_class` of `bind/mod.rs`, which registers them in the
+//! document's table as `verve::native::class` does not; everything else comes from
 //! `verve::native`.
 
 use std::sync::Arc;
 
 use boa_engine::object::builtins::JsPromise;
 use boa_engine::{Context, JsObject, JsResult, JsValue, NativeFunction};
-use verve::native::{arg, array, coded_error, get, js_text, list_of, text_of, type_error};
+use verve::native::{
+    self, arg, coded_error, get, illegal_constructor, js_text, list_of, text_of, type_error,
+};
 
 use super::node::with_dom;
-use super::{Accessor, ClassSpec, Method, class, illegal_constructor, node_of, queue_microtask};
+use super::{Accessor, Method, WebIdlClass, node_of, queue_microtask, webidl_class};
 use crate::css::{
     AnimationOutcome, Declaration, Direction, Easing, Fill, Keyframes, PlayState, Timing,
 };
@@ -31,7 +33,7 @@ const TAG: u64 = 1 << 41;
 
 /// Makes `Animation`, and the `CSSAnimation` and `CSSTransition` that extend it.
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let spec = |name, parent, methods, accessors| ClassSpec {
+    let spec = |name, parent, methods, accessors| WebIdlClass {
         name,
         length: 0,
         construct: illegal_constructor,
@@ -41,16 +43,16 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         statics: &[],
         global: true,
     };
-    let (_, prototype) = class(
+    let (_, prototype) = webidl_class(
         context,
         spec("Animation", Some("EventTarget"), METHODS, ACCESSORS),
     )?;
     verve::dom_events::handler_accessors(context, &prototype, &["finish", "cancel", "remove"])?;
-    class(
+    webidl_class(
         context,
         spec("CSSAnimation", Some("Animation"), &[], NAME_OF_ANIMATION),
     )?;
-    class(
+    webidl_class(
         context,
         spec("CSSTransition", Some("Animation"), &[], NAME_OF_TRANSITION),
     )?;
@@ -145,7 +147,7 @@ fn objects(ids: Vec<u32>, context: &mut Context) -> JsResult<JsValue> {
         .into_iter()
         .map(|id| object_of(context, id).into())
         .collect();
-    Ok(array(context, list))
+    Ok(native::array(context, list))
 }
 
 /// How animation `id` stands: its state, how far in it is (`None` when idle), and how fast it
@@ -311,7 +313,7 @@ const ACCESSORS: &[Accessor] = &[
     ("finished", Some(|this, _, cx| finished(this, cx)), None),
     (
         "ready",
-        Some(|this, _, cx| super::resolved(this.clone(), cx)),
+        Some(|this, _, cx| native::settled(Ok(this.clone()), cx)),
         None,
     ),
 ];
@@ -355,7 +357,7 @@ fn finished(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
     if outcome == Some(AnimationOutcome::Cancelled) {
         let error =
             verve::dom_events::exception(context, "The animation was aborted", "AbortError");
-        let rejected = super::rejected(error, context)?;
+        let rejected = native::settled(Err(error), context)?;
         if let Some(object) = rejected
             .as_object()
             .and_then(|o| JsPromise::from_object(o).ok())
@@ -364,7 +366,7 @@ fn finished(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
         }
         return Ok(rejected);
     }
-    super::resolved(this.clone(), context)
+    native::settled(Ok(this.clone()), context)
 }
 
 /// `element.animate(keyframes, options)`: an animation on the document's timeline, driven by

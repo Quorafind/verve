@@ -19,7 +19,7 @@ use boa_engine::{
 };
 
 use crate::encoding::{base64, bytes_of};
-use crate::native::{arg, function, get, hidden, js_text, object, text_of};
+use crate::native::{arg, arg_text, constructor, function, get, hidden, js_text, object, text_of};
 
 // ─── Errors as Node words them ───────────────────────────────────────────────────────────────
 
@@ -1513,23 +1513,6 @@ const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 // ─── Installing it ───────────────────────────────────────────────────────────────────────────
 
-fn constructor(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    boa_engine::object::FunctionObjectBuilder::new(
-        context.realm(),
-        boa_engine::NativeFunction::from_fn_ptr(f),
-    )
-    .name(JsString::from(name))
-    .length(length)
-    .constructor(true)
-    .build()
-    .into()
-}
-
 /// Makes `Buffer` a global: a constructor whose prototype inherits `Uint8Array`'s.
 pub(crate) fn install(context: &mut Context) -> JsResult<()> {
     let buffer = constructor(context, "Buffer", 2, construct_buffer);
@@ -1695,7 +1678,7 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
                 make(cx, out)
             }),
             ("resolveObjectURL", 1, |_, args, cx| {
-                let url = text_of(&arg(args, 0), cx)?;
+                let url = arg_text(args, 0, cx)?;
                 let bytes = crate::shared(cx).blobs.borrow().get(&url).cloned();
                 match bytes {
                     Some(bytes) => {

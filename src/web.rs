@@ -2,63 +2,33 @@
 //! `structuredClone`, `performance`, `Blob` and `File`.
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
-    js_string,
+    Context, JsError, JsObject, JsResult, JsString, JsValue, js_string,
     native_function::NativeFunctionPointer,
-    object::{
-        FunctionObjectBuilder,
-        builtins::{
-            JsArray, JsArrayBuffer, JsDate, JsMap, JsPromise, JsRegExp, JsSet, JsUint8Array,
-        },
+    object::builtins::{
+        JsArray, JsArrayBuffer, JsDate, JsMap, JsPromise, JsRegExp, JsSet, JsUint8Array,
     },
     property::{Attribute, PropertyDescriptor},
 };
 
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
+use crate::native::{
+    PlainClass, arg, arg_text, define_global, function, js_text, object, plain_class, text_of,
+    type_error,
+};
 
-fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
-    Ok(value.to_string(context)?.to_std_string_escaped())
-}
-
-fn js_text(text: &str) -> JsValue {
-    JsString::from(text).into()
-}
-
-fn type_error(message: impl Into<String>) -> JsError {
-    JsNativeError::typ().with_message(message.into()).into()
-}
-
-fn object(context: &mut Context) -> JsObject {
-    JsObject::with_object_proto(context.intrinsics())
-}
-
-fn function(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
-}
-
-fn constructor(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .constructor(true)
-        .build()
-        .into()
+/// A class of this module: no getters, a constructor of no parameters.
+fn class_spec<'a>(
+    name: &'a str,
+    construct: NativeFunctionPointer,
+    methods: &'a [(&'a str, usize, NativeFunctionPointer)],
+) -> PlainClass<'a> {
+    PlainClass {
+        name,
+        construct,
+        length: 0,
+        parent: None,
+        methods,
+        getters: &[],
+    }
 }
 
 /// The object `new` makes for a native constructor: `this` is the constructor `new` was
@@ -70,65 +40,6 @@ fn made_by(this: &JsValue, context: &mut Context) -> JsResult<JsObject> {
         made.set_prototype(prototype.as_object());
     }
     Ok(made)
-}
-
-/// A class: its constructor, its prototype with `methods` and `getters`, as a global.
-fn class(
-    context: &mut Context,
-    name: &str,
-    construct: NativeFunctionPointer,
-    methods: &[(&str, usize, NativeFunctionPointer)],
-    getters: &[(&str, NativeFunctionPointer)],
-) -> JsResult<(JsObject, JsObject)> {
-    let class = constructor(context, name, 0, construct);
-    let prototype = object(context);
-    for (method, length, f) in methods {
-        let method_fn = function(context, method, *length, *f);
-        prototype.define_property_or_throw(
-            JsString::from(*method),
-            PropertyDescriptor::builder()
-                .value(method_fn)
-                .writable(true)
-                .enumerable(false)
-                .configurable(true),
-            context,
-        )?;
-    }
-    for (getter, f) in getters {
-        let get = function(context, &format!("get {getter}"), 0, *f);
-        prototype.define_property_or_throw(
-            JsString::from(*getter),
-            PropertyDescriptor::builder()
-                .get(get)
-                .enumerable(true)
-                .configurable(true),
-            context,
-        )?;
-    }
-    prototype.define_property_or_throw(
-        js_string!("constructor"),
-        PropertyDescriptor::builder()
-            .value(class.clone())
-            .writable(true)
-            .enumerable(false)
-            .configurable(true),
-        context,
-    )?;
-    class.define_property_or_throw(
-        js_string!("prototype"),
-        PropertyDescriptor::builder()
-            .value(prototype.clone())
-            .writable(false)
-            .enumerable(false)
-            .configurable(false),
-        context,
-    )?;
-    context.register_global_property(
-        JsString::from(name),
-        class.clone(),
-        Attribute::WRITABLE | Attribute::CONFIGURABLE,
-    )?;
-    Ok((class, prototype))
 }
 
 // ─── structuredClone ────────────────────────────────────────────────────────────────────────
@@ -655,7 +566,7 @@ fn construct_file(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     dress_blob(&file, bytes, &kind, context)?;
     file.set(
         js_string!("name"),
-        js_text(&text_of(&arg(args, 1), context)?),
+        js_text(&arg_text(args, 1, context)?),
         false,
         context,
     )?;
@@ -772,8 +683,11 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
     )?;
 
-    let (_, blob_proto) = class(context, "Blob", construct_blob, BLOB_METHODS, &[])?;
-    let (_, file_proto) = class(context, "File", construct_file, &[], &[])?;
+    let (blob, blob_proto) =
+        plain_class(context, class_spec("Blob", construct_blob, BLOB_METHODS))?;
+    define_global(context, "Blob", blob)?;
+    let (file, file_proto) = plain_class(context, class_spec("File", construct_file, &[]))?;
+    define_global(context, "File", file)?;
     file_proto.set_prototype(Some(blob_proto));
     Ok(())
 }

@@ -5,8 +5,8 @@ use super::{
     tcp::{self, emit, put},
 };
 use crate::native::{
-    ClassSpec, arg, class, closure, coded_error_value, function, get, hidden, invoke, js_text,
-    list_of, text_of,
+    ClassSpec, arg, arg_text, class, closure, coded_error_value, function, get, hidden, invoke,
+    js_text, list_of, text_of,
 };
 use boa_engine::{
     Context, JsObject, JsResult, JsString, JsValue, js_string,
@@ -202,7 +202,7 @@ fn connect(this: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsVal
         ));
     }
     let host = if arg(args, 1).is_string() {
-        text_of(&arg(args, 1), cx)?
+        arg_text(args, 1, cx)?
     } else {
         if family(this, cx)? {
             "::1"

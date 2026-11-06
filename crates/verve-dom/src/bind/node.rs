@@ -11,10 +11,13 @@
 //! everything connected lives as long as the page.
 
 use boa_engine::{Context, JsObject, JsResult, JsValue};
+use verve::native::{
+    self, arg, arg_text, get, illegal_constructor, js_text, list_of, text_of, type_error,
+};
 
 use super::{
-    Accessor, ClassSpec, Method, arg, arg_string, array, class, dom_error, illegal_constructor,
-    node_arg, node_id, node_of, opt_string, prototype_of_target, text, type_error,
+    Accessor, Method, WebIdlClass, dom_error, node_arg, node_id, node_of, opt_string,
+    prototype_of_target, webidl_class,
 };
 use crate::dom::{Dom, Namespace, Node, NodeId, NodeKind};
 use crate::state::shared;
@@ -216,12 +219,12 @@ pub fn wrap_opt(context: &mut Context, id: Option<NodeId>) -> JsValue {
 
 /// The objects of `ids`, as a `NodeList`: an array, with `item`.
 pub fn node_list(ids: Vec<NodeId>, context: &mut Context) -> JsValue {
-    list_of(ids, "NodeList", context)
+    list_object(ids, "NodeList", context)
 }
 
-fn list_of(ids: Vec<NodeId>, class: &str, context: &mut Context) -> JsValue {
+fn list_object(ids: Vec<NodeId>, class: &str, context: &mut Context) -> JsValue {
     let values = ids.into_iter().map(|id| wrap(context, id)).collect();
-    let list = array(values, context);
+    let list = native::array(context, values);
     if let Some(object) = list.as_object() {
         let prototype = crate::state::class_prototype(context, class);
         object.set_prototype(Some(prototype));
@@ -325,7 +328,7 @@ pub fn node_or_text(value: &JsValue, context: &mut Context) -> JsResult<NodeId> 
     if let Some(id) = node_id(value) {
         return Ok(id);
     }
-    let content = super::string(value, context)?;
+    let content = text_of(value, context)?;
     Ok(with_dom(context, |dom| dom.create_text(&content)))
 }
 
@@ -491,7 +494,7 @@ const NODE_ACCESSORS: &[Accessor] = &[
         "nodeName",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 match dom.get(id).map(|n| &n.kind) {
                     Some(NodeKind::Element(_)) => crate::html::qualified_name(dom, id, true),
                     Some(NodeKind::Text(_)) => "#text".into(),
@@ -574,7 +577,7 @@ const NODE_ACCESSORS: &[Accessor] = &[
             let id = node_of(this)?;
             Ok(read_dom(cx, |dom| match dom.get(id).map(|n| &n.kind) {
                 Some(NodeKind::Document | NodeKind::Doctype(_)) => JsValue::null(),
-                _ => text(&dom.text_content(id)),
+                _ => js_text(&dom.text_content(id)),
             }))
         }),
         Some(|this, args, cx| {
@@ -596,7 +599,7 @@ const NODE_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let id = node_of(this)?;
             Ok(read_dom(cx, |dom| match dom.get(id).map(|n| &n.kind) {
-                Some(NodeKind::Text(t) | NodeKind::Comment(t)) => text(t),
+                Some(NodeKind::Text(t) | NodeKind::Comment(t)) => js_text(t),
                 _ => JsValue::null(),
             }))
         }),
@@ -636,7 +639,7 @@ const NODE_ACCESSORS: &[Accessor] = &[
     ),
     (
         "baseURI",
-        Some(|_, _, cx| Ok(text(shared(cx).borrow().base_url().as_str()))),
+        Some(|_, _, cx| Ok(js_text(shared(cx).borrow().base_url().as_str()))),
         None,
     ),
 ];
@@ -705,7 +708,7 @@ const NODE_METHODS: &[Method] = &[
     }),
     ("getRootNode", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let composed = super::get(&arg(args, 0), "composed", cx)?.to_boolean();
+        let composed = get(&arg(args, 0), "composed", cx)?.to_boolean();
         let root = read_dom(cx, |dom| {
             if composed {
                 dom.composed_root_of(id)
@@ -773,7 +776,7 @@ const NODE_METHODS: &[Method] = &[
         }
         Ok(
             read_dom(cx, |dom| dom.get(id).and_then(|n| n.namespace.uri()))
-                .map_or(JsValue::null(), text),
+                .map_or(JsValue::null(), js_text),
         )
     }),
     ("lookupPrefix", 1, |_, _, _| Ok(JsValue::null())),
@@ -899,7 +902,7 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
     }),
     ("getElementsByClassName", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let classes = arg_string(args, 0, cx)?;
+        let classes = arg_text(args, 0, cx)?;
         let wanted: Vec<String> = classes.split_whitespace().map(str::to_owned).collect();
         super::live::collection(cx, move |dom| {
             if wanted.is_empty() {
@@ -916,7 +919,7 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
     }),
     ("getElementsByTagName", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let tag = arg_string(args, 0, cx)?.to_ascii_lowercase();
+        let tag = arg_text(args, 0, cx)?.to_ascii_lowercase();
         super::live::collection(cx, move |dom| {
             dom.descendants(id)
                 .into_iter()
@@ -927,7 +930,7 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
     ("getElementsByTagNameNS", 2, |this, args, cx| {
         let id = node_of(this)?;
         let namespace = opt_string(args, 0, cx)?;
-        let tag = arg_string(args, 1, cx)?;
+        let tag = arg_text(args, 1, cx)?;
         super::live::collection(cx, move |dom| {
             let in_namespace = |n: &Node| {
                 namespace.as_deref() == Some("*") || n.namespace.uri() == namespace.as_deref()
@@ -950,7 +953,7 @@ pub fn query_selector(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<crate::css::SelectorList> {
-    let selector = arg_string(args, 0, context)?;
+    let selector = arg_text(args, 0, context)?;
     crate::css::SelectorList::parse(&selector).map_err(|error| {
         dom_error(
             context,
@@ -1103,7 +1106,7 @@ fn span(units: &[u16], offset: f64, count: f64) -> (usize, usize) {
 const CHARACTER_DATA_ACCESSORS: &[Accessor] = &[
     (
         "data",
-        Some(|this, _, cx| Ok(text(&data_of(this, cx)?.1))),
+        Some(|this, _, cx| Ok(js_text(&data_of(this, cx)?.1))),
         Some(|this, args, cx| {
             let id = node_of(this)?;
             let value = opt_string(args, 0, cx)?.unwrap_or_default();
@@ -1121,14 +1124,14 @@ const CHARACTER_DATA_ACCESSORS: &[Accessor] = &[
 const CHARACTER_DATA_METHODS: &[Method] = &[
     ("appendData", 1, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
-        let more = arg_string(args, 0, cx)?;
+        let more = arg_text(args, 0, cx)?;
         with_dom(cx, |dom| dom.set_text(id, &format!("{data}{more}")));
         Ok(JsValue::undefined())
     }),
     ("insertData", 2, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
         let offset = arg(args, 0).to_number(cx)?;
-        let more = arg_string(args, 1, cx)?;
+        let more = arg_text(args, 1, cx)?;
         let units = utf16(&data);
         let (at, _) = span(&units, offset, 0.);
         let joined = format!(
@@ -1158,7 +1161,7 @@ const CHARACTER_DATA_METHODS: &[Method] = &[
     ("replaceData", 3, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
         let (offset, count) = (arg(args, 0).to_number(cx)?, arg(args, 1).to_number(cx)?);
-        let more = arg_string(args, 2, cx)?;
+        let more = arg_text(args, 2, cx)?;
         let units = utf16(&data);
         let (start, end) = span(&units, offset, count);
         let joined = format!(
@@ -1174,7 +1177,7 @@ const CHARACTER_DATA_METHODS: &[Method] = &[
         let (offset, count) = (arg(args, 0).to_number(cx)?, arg(args, 1).to_number(cx)?);
         let units = utf16(&data);
         let (start, end) = span(&units, offset, count);
-        Ok(text(&String::from_utf16_lossy(&units[start..end])))
+        Ok(js_text(&String::from_utf16_lossy(&units[start..end])))
     }),
 ];
 
@@ -1209,7 +1212,7 @@ const TEXT_ACCESSORS: &[Accessor] = &[
         "wholeText",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 let mut start = id;
                 while let Some(previous) = dom
                     .sibling(start, -1, false)
@@ -1250,7 +1253,7 @@ const DOCTYPE_ACCESSORS: &[Accessor] = &[
         "name",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 match dom.get(id).map(|n| &n.kind) {
                     Some(NodeKind::Doctype(name)) => name.clone(),
                     _ => String::new(),
@@ -1259,14 +1262,14 @@ const DOCTYPE_ACCESSORS: &[Accessor] = &[
         }),
         None,
     ),
-    ("publicId", Some(|_, _, _| Ok(text(""))), None),
-    ("systemId", Some(|_, _, _| Ok(text(""))), None),
+    ("publicId", Some(|_, _, _| Ok(js_text(""))), None),
+    ("systemId", Some(|_, _, _| Ok(js_text(""))), None),
 ];
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Node",
             length: 0,
             construct: illegal_constructor,
@@ -1310,9 +1313,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             )?;
         }
     }
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "CharacterData",
             length: 0,
             construct: illegal_constructor,
@@ -1330,9 +1333,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         CHILD_NODE_METHODS,
         CHILD_NODE_ACCESSORS,
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Text",
             length: 1,
             construct: |new_target, args, cx| {
@@ -1346,9 +1349,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "CDATASection",
             length: 0,
             construct: illegal_constructor,
@@ -1359,9 +1362,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Comment",
             length: 1,
             construct: |new_target, args, cx| {
@@ -1375,9 +1378,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "DocumentFragment",
             length: 0,
             construct: |new_target, _, cx| construct_node(new_target, cx, Dom::create_fragment),
@@ -1394,7 +1397,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         &fragment,
         &[("getElementById", 1, |this, args, cx| {
             let root = node_of(this)?;
-            let wanted = arg_string(args, 0, cx)?;
+            let wanted = arg_text(args, 0, cx)?;
             let found = read_dom(cx, |dom| {
                 dom.descendants(root)
                     .into_iter()
@@ -1404,9 +1407,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         })],
         &[],
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "DocumentType",
             length: 0,
             construct: illegal_constructor,
@@ -1423,9 +1426,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ("NodeList", LIST_METHODS),
         ("HTMLCollection", COLLECTION_METHODS),
     ] {
-        let (_, prototype) = class(
+        let (_, prototype) = webidl_class(
             context,
-            ClassSpec {
+            WebIdlClass {
                 name,
                 length: 0,
                 construct: illegal_constructor,
@@ -1468,8 +1471,8 @@ const COLLECTION_METHODS: &[Method] = &[
         })
     }),
     ("namedItem", 1, |this, args, cx| {
-        let name = arg_string(args, 0, cx)?;
-        let nodes: Vec<NodeId> = super::list(this, cx)?.iter().filter_map(node_id).collect();
+        let name = arg_text(args, 0, cx)?;
+        let nodes: Vec<NodeId> = list_of(this, cx)?.iter().filter_map(node_id).collect();
         Ok(wrap_opt(cx, super::live::named_item(cx, &nodes, &name)))
     }),
 ];

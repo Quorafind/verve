@@ -46,6 +46,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use boa_engine::{Context, JsResult, JsValue};
+use verve::native::arg;
 
 use crate::bind::node::{read_dom, with_dom};
 use crate::bind::node_of;
@@ -77,7 +78,7 @@ pub(crate) fn finite_numbers<const N: usize>(
 ) -> JsResult<Option<[f32; N]>> {
     let mut out = [0.; N];
     for (at, slot) in out.iter_mut().enumerate() {
-        let value = crate::bind::arg(args, at).to_number(context)?;
+        let value = arg(args, at).to_number(context)?;
         if !value.is_finite() {
             return Ok(None);
         }
@@ -151,7 +152,7 @@ pub(crate) fn write_dimension(
     axis: Axis,
 ) -> JsResult<(NodeId, u32)> {
     let node = node_of(this)?;
-    let value = crate::bind::arg(args, 0).to_u32(context)?;
+    let value = arg(args, 0).to_u32(context)?;
     with_dom(context, |dom| {
         dom.set_attr(node, axis.attribute(), &value.to_string())
     });

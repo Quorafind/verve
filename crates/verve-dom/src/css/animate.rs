@@ -1162,8 +1162,12 @@ fn at(list: &[String], index: usize) -> Option<&str> {
 /// The timing the `index`th entry of the lists `prefix`-duration, -delay and -timing-function
 /// give; a timing function nothing says is `ease`.
 fn timing_at(style: &Style, prefix: &str, index: usize) -> Timing {
-    let list = |suffix: &str| listed(style, &format!("{prefix}-{suffix}"));
-    let (durations, delays, functions) = (list("duration"), list("delay"), list("timing-function"));
+    let entries = |suffix: &str| listed(style, &format!("{prefix}-{suffix}"));
+    let (durations, delays, functions) = (
+        entries("duration"),
+        entries("delay"),
+        entries("timing-function"),
+    );
     Timing {
         duration: at(&durations, index).and_then(milliseconds).unwrap_or(0.),
         delay: at(&delays, index).and_then(milliseconds).unwrap_or(0.),

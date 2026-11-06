@@ -6,7 +6,7 @@ use boa_engine::object::builtins::{JsArrayBuffer, JsFunction, JsPromise, JsUint8
 use boa_engine::{Context, JsError, JsObject, JsResult, JsValue};
 use boa_gc::{Finalize, Trace};
 use url::Url;
-use verve::native::{closure, get, invoke, js_text, object};
+use verve::native::{self, closure, get, invoke, js_text, object};
 
 use super::{Destination, Inbox, LoadError, LoadRequest, LoadResult, Wait};
 use crate::state::shared;
@@ -19,7 +19,7 @@ pub(crate) fn is_network(scheme: &str) -> bool {
 
 /// The text of a document or script body: UTF-8, a byte order mark dropped. (Other encodings
 /// are P41's.)
-pub(crate) fn text(bytes: &[u8]) -> String {
+pub(crate) fn decoded_text(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -314,7 +314,7 @@ pub(crate) fn answer(
             context,
         )?;
         if let Some(mime) = &result.mime {
-            let headers = crate::bind::plain_object(context);
+            let headers = native::object(context);
             headers.set(
                 boa_engine::js_string!("content-type"),
                 js_text(mime),

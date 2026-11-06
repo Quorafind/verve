@@ -1,8 +1,8 @@
 //! DOM 地址解析与传输分离；真正的请求仍经过安装前的 Verve fetch 和权限链。
 
 use boa_engine::{Context, JsResult, js_string};
+use verve::native::{self, arg, closure, get, js_text, text_of, type_error};
 
-use super::{arg, closure, get, rejected, string, text, type_error};
 use crate::state::shared;
 
 /// The getter of `Response.prototype.url`, as the runtime made it.
@@ -14,7 +14,7 @@ fn response_url_getter(context: &mut Context) -> Option<boa_engine::JsValue> {
     let describe = get(&object, "getOwnPropertyDescriptor", context).ok()?;
     let descriptor = describe
         .as_callable()?
-        .call(&object, &[proto, text("url")], context)
+        .call(&object, &[proto, js_text("url")], context)
         .ok()?;
     get(&descriptor, "get", context).ok()
 }
@@ -32,14 +32,15 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     let fetch = closure(
         context,
         "fetch",
+        0,
         |this, args, (original, request), cx| {
             let result = (|| {
                 let input = arg(args, 0);
                 let is_request = input.is_object() && input.instance_of(request, cx)?;
                 let address = if is_request {
-                    string(&get(&input, "url", cx)?, cx)?
+                    text_of(&get(&input, "url", cx)?, cx)?
                 } else {
-                    string(&input, cx)?
+                    text_of(&input, cx)?
                 };
                 let url = shared(cx)
                     .borrow()
@@ -57,16 +58,16 @@ pub fn install(context: &mut Context) -> JsResult<()> {
                 let mut forwarded = args.to_vec();
                 if !is_request {
                     if forwarded.is_empty() {
-                        forwarded.push(text(url.as_str()));
+                        forwarded.push(js_text(url.as_str()));
                     } else {
-                        forwarded[0] = text(url.as_str());
+                        forwarded[0] = js_text(url.as_str());
                     }
                 }
                 original.call(this, &forwarded, cx)
             })();
             match result {
                 Ok(value) => Ok(value),
-                Err(error) => rejected(error, cx),
+                Err(error) => native::settled(Err(error), cx),
             }
         },
         (original, request),
@@ -92,5 +93,5 @@ fn request_method(
     if method.is_undefined() {
         return Ok("GET".to_owned());
     }
-    Ok(string(&method, context)?.to_ascii_uppercase())
+    Ok(text_of(&method, context)?.to_ascii_uppercase())
 }

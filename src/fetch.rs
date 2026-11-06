@@ -14,15 +14,15 @@
 //! that or from a urlencoded body.
 
 use boa_engine::{
-    Context, JsData, JsObject, JsResult, JsSymbol, JsValue, builtins::promise::ResolvingFunctions,
-    js_string, native_function::NativeFunctionPointer,
+    Context, JsData, JsError, JsObject, JsResult, JsSymbol, JsValue,
+    builtins::promise::ResolvingFunctions, js_string, native_function::NativeFunctionPointer,
 };
 use boa_gc::{Finalize, Gc, Trace};
 
-use crate::native::{arg, array, get, invoke, js_text, list_of, object, text_of, type_error};
+use crate::native::{arg, arg_text, array, get, js_text, list_of, object, text_of, type_error};
 use crate::streams::{
-    error_value, pending, prototype_for, reject, rejected, resolve, rethrow, symbol_method,
-    type_error_value, u8array, web_class, when,
+    error_value, pending, prototype_for, reject, resolve, rethrow, symbol_method, type_error_value,
+    u8array, web_class, when,
 };
 
 // ─── The classes, made once ─────────────────────────────────────────────────────────────────
@@ -299,7 +299,7 @@ fn headers_iterator(this: &JsValue, context: &mut Context, which: u8) -> JsResul
         })
         .collect();
     let items = array(context, items);
-    invoke(&items, "values", &[], context)
+    crate::native::invoke(&items, "values", &[], context)
 }
 
 const HEADERS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
@@ -539,15 +539,15 @@ fn consume(context: &mut Context, target: &JsObject) -> JsResult<JsValue> {
     match &taken {
         Err(()) => {
             let reason = type_error_value("Body is unusable: Body has already been read", context);
-            rejected(reason, context)
+            crate::native::settled(Err(JsError::from_opaque(reason)), context)
         }
         Ok(Body::Empty) => {
             let bytes = u8array(Vec::new(), context)?;
-            crate::streams::resolved(bytes, context)
+            crate::native::settled(Ok(bytes), context)
         }
         Ok(Body::Bytes(bytes)) => {
             let bytes = u8array(bytes.clone(), context)?;
-            crate::streams::resolved(bytes, context)
+            crate::native::settled(Ok(bytes), context)
         }
         Ok(Body::Stream(stream)) => read_all(context, stream),
     }
@@ -652,7 +652,7 @@ fn consume_then(
         Ok(target) => target,
         Err(error) => {
             let reason = error_value(error, context);
-            return rejected(reason, context);
+            return crate::native::settled(Err(JsError::from_opaque(reason)), context);
         }
     };
     let kind = js_text(&content_type(&headers_object(&target)));
@@ -1204,7 +1204,7 @@ const RESPONSE_STATICS: &[(&str, usize, NativeFunctionPointer)] = &[
         .into())
     }),
     ("redirect", 2, |_, args, cx| {
-        let text = text_of(&arg(args, 0), cx)?;
+        let text = arg_text(args, 0, cx)?;
         let url = crate::native::construct_global(cx, "URL", &[js_text(&text)])
             .map_err(|_| type_error(format!("Failed to parse URL from {text}")))?;
         let href = text_of(&url.get(js_string!("href"), cx)?, cx)?;
@@ -1349,13 +1349,13 @@ fn form_iterator(this: &JsValue, context: &mut Context, which: u8) -> JsResult<J
         })
         .collect();
     let items = array(context, items);
-    invoke(&items, "values", &[], context)
+    crate::native::invoke(&items, "values", &[], context)
 }
 
 const FORM_DATA_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("append", 3, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let value = entry_value(&arg(args, 1), &arg(args, 2), cx)?;
         form.downcast_mut::<FormData>()
             .expect("a FormData")
@@ -1365,7 +1365,7 @@ const FORM_DATA_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("set", 3, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let value = entry_value(&arg(args, 1), &arg(args, 2), cx)?;
         let mut f = form.downcast_mut::<FormData>().expect("a FormData");
         match f.entries.iter().position(|e| e.name == name) {
@@ -1384,7 +1384,7 @@ const FORM_DATA_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("get", 1, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Ok(form_entries(&form)
             .into_iter()
             .find(|(n, _)| *n == name)
@@ -1392,7 +1392,7 @@ const FORM_DATA_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("getAll", 1, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let all: Vec<JsValue> = form_entries(&form)
             .into_iter()
             .filter(|(n, _)| *n == name)
@@ -1402,12 +1402,12 @@ const FORM_DATA_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("has", 1, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Ok(form_entries(&form).iter().any(|(n, _)| *n == name).into())
     }),
     ("delete", 1, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         form.downcast_mut::<FormData>()
             .expect("a FormData")
             .entries
@@ -1704,7 +1704,7 @@ const GLOBALS: &[(&str, crate::native::GlobalMaker)] = &[
     ("Request", |cx| Ok(classes(cx)?.request.clone().into())),
     ("Response", |cx| Ok(classes(cx)?.response.clone().into())),
     ("FormData", |cx| Ok(classes(cx)?.form_data.clone().into())),
-    ("fetch", |cx| Ok(crate::network::fetch::function(cx).into())),
+    ("fetch", |cx| Ok(crate::network::fetch::create(cx).into())),
 ];
 
 /// The five globals, each made (with the rest) the first time one is read. A host with

@@ -37,7 +37,7 @@ const IDLE_MS: u32 = 4_000;
 const MAX_REDIRECTS: u32 = 20;
 
 /// The global `fetch`.
-pub(crate) fn function(context: &mut Context) -> JsObject {
+pub(crate) fn create(context: &mut Context) -> JsObject {
     crate::native::function(context, "fetch", 1, |_, args, cx| {
         let (promise, resolvers) = pending(cx);
         // Nothing is thrown: every failure, even a bad argument, is the promise's.

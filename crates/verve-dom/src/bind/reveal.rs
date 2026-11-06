@@ -2,8 +2,8 @@
 //! `TypeError`, as WebIDL has it.
 
 use boa_engine::{Context, JsError, JsResult, JsValue};
+use verve::native::{get, text_of, type_error};
 
-use super::{get, string, type_error};
 use crate::Align;
 
 /// `scrollIntoView`'s argument: `true` (the default) lines the top up, `false` the bottom, an
@@ -41,7 +41,7 @@ fn reveal_align(value: JsValue, default: Align, context: &mut Context) -> JsResu
 fn behavior_name(value: &JsValue, context: &mut Context) -> JsResult<Option<String>> {
     match value.is_undefined() {
         true => Ok(None),
-        false => string(value, context).map(Some),
+        false => text_of(value, context).map(Some),
     }
 }
 

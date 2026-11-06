@@ -5,10 +5,9 @@ use std::sync::Arc;
 
 use boa_engine::{Context, JsResult, JsValue};
 use tiny_skia::{BlendMode, FilterQuality, IntRect, Pixmap, PixmapPaint, Transform};
+use verve::native::{self, arg, arg_text, get, text_of};
 
-use crate::bind::{
-    self, Accessor, Kind, Method, arg, arg_string, dom_error, get, handle_of, native_instance,
-};
+use crate::bind::{Accessor, Kind, Method, dom_error, handle_of, native_instance};
 use crate::canvas::context2d::{Canvas2d, CanvasOwner};
 use crate::canvas::element::{export_arguments, exported_pixmap};
 use crate::canvas::image::{decode, pixmap_of, premultiply};
@@ -117,7 +116,7 @@ fn set_offscreen_size(
 /// `getContext('2d')`; the other kinds need a GPU.
 fn offscreen_context(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = this_handle(this, Kind::Offscreen, "OffscreenCanvas")?;
-    Ok(match arg_string(args, 0, context)?.as_str() {
+    Ok(match arg_text(args, 0, context)?.as_str() {
         "2d" => canvas_object(context, id, (Kind::Context2d, "CanvasRenderingContext2D")).into(),
         _ => JsValue::null(),
     })
@@ -141,12 +140,12 @@ fn convert_to_blob(this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     let pixmap = exported_pixmap(Some(id), (0, 0), names, context);
     let encoded = match pixmap {
         Ok(pixmap) => pixmap.and_then(|pixmap| encode(&pixmap, kind, quality)),
-        Err(error) => return bind::rejected(error, context),
+        Err(error) => return native::settled(Err(error), context),
     };
     match encoded {
         Some(Encoded { mime, bytes }) => {
             let blob = verve::blob::new_blob(bytes, mime, context)?;
-            bind::resolved(blob, context)
+            native::settled(Ok(blob), context)
         }
         None => {
             let error = dom_error(
@@ -154,7 +153,7 @@ fn convert_to_blob(this: &JsValue, args: &[JsValue], context: &mut Context) -> J
                 "The canvas has no pixels to convert.",
                 "InvalidStateError",
             );
-            bind::rejected(error, context)
+            native::settled(Err(error), context)
         }
     }
 }
@@ -226,7 +225,10 @@ pub fn create_image_bitmap(
     };
     let Some(mut pixmap) = bitmap_source(&source, context)? else {
         let message = "Failed to execute 'createImageBitmap': the source has no pixels.";
-        return bind::rejected(dom_error(context, message, "InvalidStateError"), context);
+        return native::settled(
+            Err(dom_error(context, message, "InvalidStateError")),
+            context,
+        );
     };
     if let Some([x, y, width, height]) = crop {
         let rect = IntRect::from_xywh(x as i32, y as i32, width as u32, height as u32);
@@ -235,7 +237,7 @@ pub fn create_image_bitmap(
             .unwrap_or(pixmap);
     }
     let pixmap = resized(pixmap, &options, context)?;
-    bind::resolved(make_bitmap(context, Arc::new(pixmap)), context)
+    native::settled(Ok(make_bitmap(context, Arc::new(pixmap))), context)
 }
 
 /// The pixels of a `Blob` decoded, an `ImageData`, or an image element's or canvas's.
@@ -273,7 +275,7 @@ fn resized(source: Pixmap, options: &JsValue, context: &mut Context) -> JsResult
         return Ok(source);
     }
     let flip = get(options, "imageOrientation", context)?;
-    let flip = flip.is_string() && bind::string(&flip, context)? == "flipY";
+    let flip = flip.is_string() && text_of(&flip, context)? == "flipY";
     let (mut width, mut height) = (source.width(), source.height());
     let requested = |name: &str, context: &mut Context| -> JsResult<Option<u32>> {
         let value = get(options, name, context)?;
