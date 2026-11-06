@@ -21,12 +21,12 @@ use boa_engine::{
 
 use super::node::{ancestry, read_dom, with_dom, wrap, wrap_opt};
 use super::{
-    Accessor, ClassSpec, Kind, Method, arg, arg_string, array, class, constructor_of, function,
-    get, handle_of, illegal_constructor, instance, native_instance, node_id, node_of, opt_string,
-    plain_object, set, string, text, type_error,
+    Accessor, ClassSpec, Kind, Method, class, constructor_of, handle_of, illegal_constructor,
+    instance, native_instance, node_id, node_of, opt_string, plain_object, set, string,
 };
 use crate::dom::{Dom, NodeId, NodeKind, ShadowMode, SlotAssignment};
 use crate::state::shared;
+use verve::native::{self, arg, function, get, hidden, js_text, list_of, text_of, type_error};
 
 // ─── Attributes ─────────────────────────────────────────────────────────────────────────────
 
@@ -40,18 +40,18 @@ pub fn attr_object(
 ) -> JsResult<JsValue> {
     let attr = native_instance(context, "Attr", Kind::Plain, 0);
     let (prefix, local) = match name.split_once(':') {
-        Some((prefix, local)) => (text(prefix), local),
+        Some((prefix, local)) => (js_text(prefix), local),
         None => (JsValue::null(), name),
     };
     for (key, value) in [
-        ("name", text(name)),
-        ("nodeName", text(name)),
-        ("localName", text(local)),
+        ("name", js_text(name)),
+        ("nodeName", js_text(name)),
+        ("localName", js_text(local)),
         ("prefix", prefix),
         ("namespaceURI", JsValue::null()),
-        ("value", text(value)),
-        ("nodeValue", text(value)),
-        ("textContent", text(value)),
+        ("value", js_text(value)),
+        ("nodeValue", js_text(value)),
+        ("textContent", js_text(value)),
         ("specified", true.into()),
         ("nodeType", 2.into()),
         ("ownerElement", owner.clone()),
@@ -84,18 +84,18 @@ pub fn attributes(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
             &JsValue::undefined(),
         )?);
     }
-    let list = array(items.clone(), context);
+    let list = native::array(context, items.clone());
     if let Some(object) = list.as_object() {
         let prototype = crate::state::class_prototype(context, "NamedNodeMap");
         object.set_prototype(Some(prototype));
-        super::hidden(&object, js_string!("__owner"), this.clone(), context)?;
+        hidden(&object, js_string!("__owner"), this.clone(), context)?;
         for ((name, _), attr) in pairs.iter().zip(items) {
             if name.parse::<u32>().is_ok()
                 || object.has_own_property(JsString::from(name.as_str()), context)?
             {
                 continue;
             }
-            super::hidden(&object, JsString::from(name.as_str()), attr, context)?;
+            hidden(&object, JsString::from(name.as_str()), attr, context)?;
         }
     }
     Ok(list)
@@ -115,8 +115,8 @@ const NAMED_NODE_MAP_METHODS: &[Method] = &[
         })
     }),
     ("getNamedItem", 1, |this, args, cx| {
-        let name = arg_string(args, 0, cx)?;
-        for attr in super::list(this, cx)? {
+        let name = text_of(&arg(args, 0), cx)?;
+        for attr in list_of(this, cx)? {
             if string(&get(&attr, "name", cx)?, cx)?.eq_ignore_ascii_case(&name) {
                 return Ok(attr);
             }
@@ -145,9 +145,9 @@ const ATTRIBUTE_METHODS: &[Method] = &[
         let id = node_of(this)?;
         let names: Vec<JsValue> = read_dom(cx, |dom| dom.attributes(id))
             .into_iter()
-            .map(|(n, _)| text(&n))
+            .map(|(n, _)| js_text(&n))
             .collect();
-        Ok(array(names, cx))
+        Ok(native::array(cx, names))
     }),
     ("hasAttributes", 0, |this, _, cx| {
         let id = node_of(this)?;
@@ -155,7 +155,7 @@ const ATTRIBUTE_METHODS: &[Method] = &[
     }),
     ("getAttributeNode", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let name = arg_string(args, 0, cx)?;
+        let name = text_of(&arg(args, 0), cx)?;
         match read_dom(cx, |dom| dom.get_attr(id, &name)) {
             Some(value) => attr_object(cx, this, &name, &value, &JsValue::undefined()),
             None => Ok(JsValue::null()),
@@ -172,7 +172,7 @@ const ATTRIBUTE_METHODS: &[Method] = &[
     // attribute, as an HTML document keeps it.
     ("getAttributeNS", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let name = arg_string(args, 1, cx)?;
+        let name = text_of(&arg(args, 1), cx)?;
         let found = read_dom(cx, |dom| {
             dom.get_attr(id, &name).or_else(|| {
                 dom.attributes(id)
@@ -181,18 +181,18 @@ const ATTRIBUTE_METHODS: &[Method] = &[
                     .map(|(_, v)| v)
             })
         });
-        Ok(found.map_or(JsValue::null(), |v| text(&v)))
+        Ok(found.map_or(JsValue::null(), |v| js_text(&v)))
     }),
     ("setAttributeNS", 3, |this, args, cx| {
         let id = node_of(this)?;
-        let name = arg_string(args, 1, cx)?;
-        let value = arg_string(args, 2, cx)?;
+        let name = text_of(&arg(args, 1), cx)?;
+        let value = text_of(&arg(args, 2), cx)?;
         with_dom(cx, |dom| dom.set_attr(id, &name, &value));
         Ok(JsValue::undefined())
     }),
     ("removeAttributeNS", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let name = arg_string(args, 1, cx)?;
+        let name = text_of(&arg(args, 1), cx)?;
         let qualified = read_dom(cx, |dom| {
             dom.attributes(id)
                 .into_iter()
@@ -205,7 +205,7 @@ const ATTRIBUTE_METHODS: &[Method] = &[
     }),
     ("hasAttributeNS", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let name = arg_string(args, 1, cx)?;
+        let name = text_of(&arg(args, 1), cx)?;
         Ok(read_dom(cx, |dom| {
             dom.get_attr(id, &name).is_some()
                 || dom
@@ -300,7 +300,7 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let root = node_of(this)?;
             let mode = read_dom(cx, |dom| dom.shadow(root).map(|s| s.mode.as_str()));
-            Ok(mode.map_or(JsValue::null(), text))
+            Ok(mode.map_or(JsValue::null(), js_text))
         }),
         None,
     ),
@@ -320,7 +320,9 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let root = node_of(this)?;
             let assignment = read_dom(cx, |dom| dom.shadow(root).map(|s| s.assignment));
-            Ok(text(assignment.unwrap_or(SlotAssignment::Named).as_str()))
+            Ok(js_text(
+                assignment.unwrap_or(SlotAssignment::Named).as_str(),
+            ))
         }),
         None,
     ),
@@ -328,11 +330,11 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
         "innerHTML",
         Some(|this, _, cx| {
             let root = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| crate::html::inner(dom, root))))
+            Ok(js_text(&read_dom(cx, |dom| crate::html::inner(dom, root))))
         }),
         Some(|this, args, cx| {
             let root = node_of(this)?;
-            let markup = arg_string(args, 0, cx)?;
+            let markup = text_of(&arg(args, 0), cx)?;
             with_dom(cx, |dom| {
                 dom.empty(root);
                 crate::html::parse_into(dom, root, &markup);
@@ -364,23 +366,28 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
 
 fn rule_object(context: &mut Context, rule: &str, sheet: &JsValue) -> JsResult<JsValue> {
     let object = plain_object(context);
-    set(&object, "cssText", text(rule), context)?;
+    set(&object, "cssText", js_text(rule), context)?;
     if let Some(brace) = rule.find('{') {
         let selector = rule[..brace].trim();
-        set(&object, "selectorText", text(selector), context)?;
+        set(&object, "selectorText", js_text(selector), context)?;
         let body = rule[brace + 1..].trim_end().trim_end_matches('}').trim();
         let style = plain_object(context);
-        set(&style, "cssText", text(body), context)?;
+        set(&style, "cssText", js_text(body), context)?;
         for declaration in crate::css::declarations(body) {
-            set(&style, &declaration.name, text(&declaration.value), context)?;
+            set(
+                &style,
+                &declaration.name,
+                js_text(&declaration.value),
+                context,
+            )?;
             let camel = crate::dom::camel_name(&declaration.name);
-            set(&style, &camel, text(&declaration.value), context)?;
+            set(&style, &camel, js_text(&declaration.value), context)?;
         }
         let get_value = function(context, "getPropertyValue", 1, |this, args, cx| {
-            let name = arg_string(args, 0, cx)?;
+            let name = text_of(&arg(args, 0), cx)?;
             let value = get(this, &name, cx)?;
             Ok(if value.is_undefined() {
-                text("")
+                js_text("")
             } else {
                 value
             })
@@ -399,7 +406,7 @@ fn rule_object(context: &mut Context, rule: &str, sheet: &JsValue) -> JsResult<J
             set(
                 &object,
                 "conditionText",
-                text(selector.trim_start_matches("@media").trim()),
+                js_text(selector.trim_start_matches("@media").trim()),
                 context,
             )?;
         }
@@ -481,7 +488,7 @@ const SHEET_ACCESSORS: &[Accessor] = &[
             for rule in rules {
                 out.push(rule_object(cx, &rule, this)?);
             }
-            Ok(array(out, cx))
+            Ok(native::array(cx, out))
         }),
         None,
     ),
@@ -493,7 +500,7 @@ const SHEET_ACCESSORS: &[Accessor] = &[
             for rule in rules {
                 out.push(rule_object(cx, &rule, this)?);
             }
-            Ok(array(out, cx))
+            Ok(native::array(cx, out))
         }),
         None,
     ),
@@ -506,7 +513,7 @@ const SHEET_ACCESSORS: &[Accessor] = &[
         None,
     ),
     ("href", Some(|_, _, _| Ok(JsValue::null())), None),
-    ("type", Some(|_, _, _| Ok(text("text/css"))), None),
+    ("type", Some(|_, _, _| Ok(js_text("text/css"))), None),
     ("title", Some(|_, _, _| Ok(JsValue::null())), None),
     (
         "parentStyleSheet",
@@ -522,9 +529,9 @@ const SHEET_ACCESSORS: &[Accessor] = &[
     (
         "media",
         Some(|_, _, cx| {
-            let media = array(Vec::new(), cx);
+            let media = native::array(cx, Vec::new());
             if let Some(object) = media.as_object() {
-                set(&object, "mediaText", text(""), cx)?;
+                set(&object, "mediaText", js_text(""), cx)?;
             }
             Ok(media)
         }),
@@ -534,7 +541,7 @@ const SHEET_ACCESSORS: &[Accessor] = &[
 
 const SHEET_METHODS: &[Method] = &[
     ("insertRule", 2, |this, args, cx| {
-        let rule = arg_string(args, 0, cx)?;
+        let rule = text_of(&arg(args, 0), cx)?;
         let at = match arg(args, 1) {
             i if i.is_undefined() => 0,
             i => i.to_number(cx)? as usize,
@@ -556,8 +563,8 @@ const SHEET_METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     ("addRule", 2, |this, args, cx| {
-        let selector = arg_string(args, 0, cx)?;
-        let body = arg_string(args, 1, cx)?;
+        let selector = text_of(&arg(args, 0), cx)?;
+        let body = text_of(&arg(args, 1), cx)?;
         change_rules(this, cx, |rules| {
             rules.push(format!("{selector} {{ {body} }}"))
         })?;
@@ -567,12 +574,12 @@ const SHEET_METHODS: &[Method] = &[
         super::call_method(this, "deleteRule", args, cx)
     }),
     ("replaceSync", 1, |this, args, cx| {
-        let css = arg_string(args, 0, cx)?;
+        let css = text_of(&arg(args, 0), cx)?;
         change_rules(this, cx, |rules| *rules = crate::css::split_rules(&css))?;
         Ok(JsValue::undefined())
     }),
     ("replace", 1, |this, args, cx| {
-        let css = arg_string(args, 0, cx)?;
+        let css = text_of(&arg(args, 0), cx)?;
         change_rules(this, cx, |rules| *rules = crate::css::split_rules(&css))?;
         super::resolved(this.clone(), cx)
     }),
@@ -590,7 +597,7 @@ fn element_sheet(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
         return Ok(known);
     }
     let sheet = native_instance(context, "CSSStyleSheet", Kind::Sheet, id);
-    super::hidden(&element_object, key, sheet.clone(), context)?;
+    hidden(&element_object, key, sheet.clone(), context)?;
     Ok(sheet.into())
 }
 
@@ -616,7 +623,7 @@ pub fn style_sheets(context: &mut Context) -> JsResult<JsValue> {
     for id in ids {
         out.push(element_sheet(context, id)?);
     }
-    let list = array(out, context);
+    let list = native::array(context, out);
     if let Some(object) = list.as_object() {
         let item = function(context, "item", 1, |this, args, cx| {
             let at = arg(args, 0).to_number(cx)? as u32;
@@ -625,7 +632,7 @@ pub fn style_sheets(context: &mut Context) -> JsResult<JsValue> {
                 None => Ok(JsValue::null()),
             }
         });
-        super::hidden(&object, js_string!("item"), item, context)?;
+        hidden(&object, js_string!("item"), item, context)?;
     }
     Ok(list)
 }
@@ -638,7 +645,7 @@ pub fn adopted_sheets(tree: NodeId, context: &mut Context) -> JsResult<JsValue> 
         .get(&tree)
         .map(|list| list.iter().map(|(_, s)| s.clone().into()).collect())
         .unwrap_or_default();
-    Ok(array(sheets, context))
+    Ok(native::array(context, sheets))
 }
 
 /// Sets the `adoptedStyleSheets` of the tree rooted at `tree`; `owner` names its class in the
@@ -650,7 +657,7 @@ pub fn set_adopted_sheets(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let mut adopted = Vec::new();
-    for sheet in super::list(given, context)? {
+    for sheet in list_of(given, context)? {
         match (handle_of(&sheet, Kind::Constructed), sheet.as_object()) {
             (Some(id), Some(object)) => adopted.push((id, object)),
             _ => {
@@ -685,7 +692,7 @@ fn construct_sheet(
 const CSS_FUNCTIONS: &[Method] = &[
     // CSS.escape, as the CSSOM writes it.
     ("escape", 1, |_, args, cx| {
-        let value = arg_string(args, 0, cx)?;
+        let value = text_of(&arg(args, 0), cx)?;
         let mut out = String::new();
         let chars: Vec<char> = value.chars().collect();
         for (i, &c) in chars.iter().enumerate() {
@@ -707,11 +714,11 @@ const CSS_FUNCTIONS: &[Method] = &[
                 out.push(c);
             }
         }
-        Ok(text(&out))
+        Ok(js_text(&out))
     }),
     ("supports", 2, |_, args, cx| {
         // A selector is supported when it parses; a declaration, always.
-        let first = arg_string(args, 0, cx)?;
+        let first = text_of(&arg(args, 0), cx)?;
         if let Some(selector) = first
             .trim()
             .strip_prefix("selector(")
@@ -904,7 +911,7 @@ const RANGE_METHODS: &[Method] = &[
     }),
     // A fragment of what `html` says, parsed as the inside of the range's start would parse it.
     ("createContextualFragment", 1, |_, args, cx| {
-        let markup = arg_string(args, 0, cx)?;
+        let markup = text_of(&arg(args, 0), cx)?;
         let fragment = with_dom(cx, |dom| {
             let fragment = dom.create_fragment();
             crate::html::parse_runnable(dom, fragment, &markup);
@@ -1025,9 +1032,9 @@ const RANGE_METHODS: &[Method] = &[
         let (container, start) = boundary(this, cx, "start")?;
         let (end_container, end) = boundary(this, cx, "end")?;
         let (Some(a), Some(b)) = (node_id(&container), node_id(&end_container)) else {
-            return Ok(text(""));
+            return Ok(js_text(""));
         };
-        Ok(text(&read_dom(cx, |dom| {
+        Ok(js_text(&read_dom(cx, |dom| {
             if a == b {
                 if let Some(NodeKind::Text(content)) = dom.get(a).map(|n| &n.kind) {
                     return split_text_units(content, start, end).1;
@@ -1064,7 +1071,7 @@ const RANGE_METHODS: &[Method] = &[
     }),
     ("getClientRects", 0, |this, _, cx| {
         let rect = super::call_method(this, "getBoundingClientRect", &[], cx)?;
-        Ok(array(vec![rect], cx))
+        Ok(native::array(cx, vec![rect]))
     }),
     ("compareBoundaryPoints", 2, |_, _, _| Ok(0.into())),
     ("comparePoint", 2, |_, _, _| Ok(0.into())),
@@ -1082,15 +1089,15 @@ pub fn selection(context: &mut Context) -> JsResult<JsValue> {
         return Ok(known);
     }
     let made = native_instance(context, "Selection", Kind::Plain, 0);
-    let ranges = array(Vec::new(), context);
+    let ranges = native::array(context, Vec::new());
     set(&made, "__ranges", ranges, context)?;
-    super::hidden(&global, key, made.clone(), context)?;
+    hidden(&global, key, made.clone(), context)?;
     Ok(made.into())
 }
 
 fn selection_ranges(this: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
     let ranges = get(this, "__ranges", context)?;
-    super::list(&ranges, context)
+    list_of(&ranges, context)
 }
 
 fn set_selection_ranges(
@@ -1098,7 +1105,7 @@ fn set_selection_ranges(
     context: &mut Context,
     ranges: Vec<JsValue>,
 ) -> JsResult<()> {
-    let list = array(ranges, context);
+    let list = native::array(context, ranges);
     if let Some(object) = this.as_object() {
         set(&object, "__ranges", list, context)?;
     }
@@ -1133,7 +1140,7 @@ const SELECTION_ACCESSORS: &[Accessor] = &[
         "type",
         Some(|this, _, cx| {
             let ranges = selection_ranges(this, cx)?;
-            Ok(text(match ranges.first() {
+            Ok(js_text(match ranges.first() {
                 None => "None",
                 Some(range) if get(range, "collapsed", cx)?.to_boolean() => "Caret",
                 Some(_) => "Range",
@@ -1242,7 +1249,7 @@ const SELECTION_METHODS: &[Method] = &[
     ("toString", 0, |this, _, cx| {
         match selection_ranges(this, cx)?.first() {
             Some(range) => super::call_method(range, "toString", &[], cx),
-            None => Ok(text("")),
+            None => Ok(js_text("")),
         }
     }),
 ];
@@ -1366,7 +1373,7 @@ fn matrix_from_init(init: &JsValue, context: &mut Context) -> JsResult<Matrix> {
     if length.is_undefined() {
         return matrix_of(init, context).or(Ok(IDENTITY));
     }
-    let numbers: Vec<f64> = super::list(init, context)?
+    let numbers: Vec<f64> = list_of(init, context)?
         .into_iter()
         .map(|v| v.to_number(context))
         .collect::<JsResult<_>>()?;
@@ -1682,7 +1689,7 @@ fn install_geometry(context: &mut Context) -> JsResult<()> {
         ("toString", 0, |this, _, cx| {
             let m = matrix_of(this, cx)?;
             let is_2d = get(this, "is2D", cx)?.to_boolean();
-            Ok(text(&if is_2d {
+            Ok(js_text(&if is_2d {
                 format!(
                     "matrix({}, {}, {}, {}, {}, {})",
                     m[0], m[1], m[4], m[5], m[12], m[13]
@@ -1897,12 +1904,12 @@ fn construct_data_transfer(
 ) -> JsResult<JsValue> {
     let transfer = instance(new_target, Kind::Plain, 0, context)?;
     let data = plain_object(context);
-    super::hidden(&transfer, js_string!("__data"), data, context)?;
-    set(&transfer, "dropEffect", text("none"), context)?;
-    set(&transfer, "effectAllowed", text("all"), context)?;
-    let files = array(Vec::new(), context);
+    hidden(&transfer, js_string!("__data"), data, context)?;
+    set(&transfer, "dropEffect", js_text("none"), context)?;
+    set(&transfer, "effectAllowed", js_text("all"), context)?;
+    let files = native::array(context, Vec::new());
     set(&transfer, "files", files, context)?;
-    let items = array(Vec::new(), context);
+    let items = native::array(context, Vec::new());
     set(&transfer, "items", items, context)?;
     Ok(transfer.into())
 }
@@ -1910,21 +1917,21 @@ fn construct_data_transfer(
 const DATA_TRANSFER_METHODS: &[Method] = &[
     ("setData", 2, |this, args, cx| {
         let data = get(this, "__data", cx)?;
-        let format = arg_string(args, 0, cx)?.to_ascii_lowercase();
+        let format = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
         let format = if format == "text" {
             "text/plain".to_owned()
         } else {
             format
         };
-        let value = arg_string(args, 1, cx)?;
+        let value = text_of(&arg(args, 1), cx)?;
         if let Some(data) = data.as_object() {
-            set(&data, &format, text(&value), cx)?;
+            set(&data, &format, js_text(&value), cx)?;
         }
         Ok(JsValue::undefined())
     }),
     ("getData", 1, |this, args, cx| {
         let data = get(this, "__data", cx)?;
-        let format = arg_string(args, 0, cx)?.to_ascii_lowercase();
+        let format = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
         let format = if format == "text" {
             "text/plain".to_owned()
         } else {
@@ -1932,7 +1939,7 @@ const DATA_TRANSFER_METHODS: &[Method] = &[
         };
         let value = get(&data, &format, cx)?;
         Ok(if value.is_undefined() {
-            text("")
+            js_text("")
         } else {
             value
         })
@@ -1942,7 +1949,7 @@ const DATA_TRANSFER_METHODS: &[Method] = &[
         if format.is_undefined() {
             let data = plain_object(cx);
             if let Some(this) = this.as_object() {
-                super::hidden(&this, js_string!("__data"), data, cx)?;
+                hidden(&this, js_string!("__data"), data, cx)?;
             }
         } else {
             let data = get(this, "__data", cx)?;
@@ -1964,11 +1971,11 @@ const DATA_TRANSFER_ACCESSORS: &[Accessor] = &[(
             Some(data) => data
                 .own_property_keys(cx)?
                 .into_iter()
-                .map(|k| text(&k.to_string()))
+                .map(|k| js_text(&k.to_string()))
                 .collect(),
             None => Vec::new(),
         };
-        Ok(array(keys, cx))
+        Ok(native::array(cx, keys))
     }),
     None,
 )];
