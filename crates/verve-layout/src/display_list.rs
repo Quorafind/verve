@@ -24,7 +24,7 @@ pub type Rgba = [f32; 4];
 /// The items to draw, back to front.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DisplayList {
-    /// Moves whenever the list is not the one before it.
+    /// Different for every list a process makes, so two lists with one number are one list.
     pub revision: u64,
     pub items: Vec<PaintItem>,
     /// The gradients that [`Fill::Raster`] refers to, for the renderer to rasterise.

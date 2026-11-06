@@ -7,6 +7,7 @@
 //! through [`TextMeasurer`].
 
 mod display_list;
+mod engine;
 mod gradient;
 mod grid;
 mod layout;
@@ -24,6 +25,7 @@ pub use display_list::{
     AppRegionKind, Border, BorderLine, ControlKind, Cursor, DecorationKind, DisplayList, Fill,
     ImageKey, ObjectFit, PaintItem, RasterSpec, ResolvedHitbox, Rgba, Shadow,
 };
+pub use engine::LayoutEngine;
 pub use gradient::{
     ColorStop, EllipseSize, Extent, Gradient, GradientPosition, LinearDirection, RadialShape,
     gradient_line, is_gradient,
