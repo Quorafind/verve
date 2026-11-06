@@ -37,6 +37,9 @@ pub(crate) struct Window {
     pub contents: ContentsId,
     /// The window this one is a child of: it goes when its parent does.
     pub parent: Option<WindowId>,
+    /// Whether the system draws a frame: Electron shows no menu bar in a window without one.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub framed: bool,
     native: Rc<Native>,
     reporter: Rc<Reporter>,
     asked: Rc<Cell<Option<Instant>>>,
@@ -161,6 +164,8 @@ pub(crate) fn open(opening: Opening, display: &Display, cx: &mut AsyncApp) -> Op
         handle,
         contents,
         parent: options.parent,
+        #[cfg(any(windows, target_os = "macos"))]
+        framed: framed(options),
         native,
         reporter,
         asked,
@@ -301,6 +306,12 @@ impl Window {
             WindowOp::Unmaximize => {}
         }
         self.reporter.sync(native.observe());
+    }
+
+    /// The system's handle of the window: the `HWND`, or the `NSView` on macOS.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn raw_handle(&self) -> isize {
+        self.native.handle() as isize
     }
 
     /// Shows the window and asks for a frame, so that `FirstPaint` comes though no page changed.

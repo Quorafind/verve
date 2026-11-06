@@ -14,9 +14,13 @@
 mod app_region;
 mod dialog;
 mod dom_view;
+mod menu;
+mod native;
 mod platform;
 mod report;
 mod shell;
+mod shortcut;
+mod tray;
 mod window;
 
 use std::sync::Arc;
@@ -40,6 +44,22 @@ impl Control {
     pub fn set_app_regions(&self, window: WindowId, regions: Vec<AppRegion>) {
         self.0.push_item(Item::Regions(window, regions));
     }
+
+    /// The menu item that `key`, pressed in `window`, chooses by its accelerator, if any: the window's
+    /// menu then the application menu, as `MenuBook::item_for` reads them.
+    ///
+    /// The shell does not forward keys to pages (P32's input bridge does), so the bridge calls this
+    /// on every key down *before* it sends the key to the page, and, for an item found, says
+    /// `FromShell::MenuClicked { menu_item, window: Some(window), triggered_by_accelerator: true,
+    /// modifiers }` to the Hub and does not send the key on. A page whose `webContents` has a
+    /// `'before-input-event'` listener (`Hub::intercepts_keys`) gets the key sent to the main
+    /// process as `FromShell::KeyForContents` instead, which looks the menu up itself after the
+    /// listeners.
+    pub fn menu_item_for_key(&self, window: WindowId, key: &verve_dom::Key) -> Option<u32> {
+        let book = self.0.book();
+        let book = book.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        book.item_for(window, key)
+    }
 }
 
 /// Runs an app: the OS thread's GPUI application, the windows the main process asks it for, and
@@ -56,7 +76,7 @@ pub fn run_with(hub: Arc<Hub>, start: impl FnOnce(&Arc<Hub>, Control) + 'static)
     let inbox = Inbox::new(wake);
     // The system's own error box when no window exists, unless the environment says no (the
     // tests of this crate do, so none puts a box on the desktop).
-    if std::env::var_os("VERVE_NO_SYSTEM_DIALOGS").is_none() {
+    if native::touches_desktop() {
         hub.allow_system_boxes();
     }
     hub.set_shell(Arc::new(Port {
