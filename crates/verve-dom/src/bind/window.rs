@@ -14,12 +14,15 @@ use boa_engine::{
 
 use super::node::{read_dom, wrap};
 use super::{
-    Accessor, ClassSpec, Kind, Method, define_class, dom_error, extend_prototype, handle_of,
-    illegal_constructor, native_instance, node_of, opt_string, plain_object, set, string,
+    Accessor, Kind, Method, WebIdlClass, dom_error, extend_prototype, handle_of, native_instance,
+    node_of, opt_string, set, webidl_class,
 };
 use crate::css::MediaQuery;
 use crate::state::{FrameClock, shared};
-use verve::native::{self, arg, arg_text, closure, function, get, js_text, list_of, type_error};
+use verve::native::{
+    self, arg, arg_text, closure, function, get, illegal_constructor, js_text, list_of, text_of,
+    type_error,
+};
 
 // ─── Location and history ───────────────────────────────────────────────────────────────────
 
@@ -438,22 +441,22 @@ fn storage(context: &mut Context, which: u32) -> JsResult<JsValue> {
                 return Ok(own);
             }
             let which = storage_of(&target)?;
-            let name = string(&key, cx)?;
+            let name = text_of(&key, cx)?;
             Ok(read_storage(cx, which, |s| s.get(&name).cloned())
                 .map_or(JsValue::undefined(), |v| js_text(&v)))
         })
         .set(|_, args, cx| {
             let target = arg(args, 0);
             let which = storage_of(&target)?;
-            let name = string(&arg(args, 1), cx)?;
-            let value = string(&arg(args, 2), cx)?;
+            let name = text_of(&arg(args, 1), cx)?;
+            let value = text_of(&arg(args, 2), cx)?;
             with_storage(cx, which, |s| s.insert(name, value));
             Ok(true.into())
         })
         .has(|_, args, cx| {
             let target = arg(args, 0);
             let which = storage_of(&target)?;
-            let name = string(&arg(args, 1), cx)?;
+            let name = text_of(&arg(args, 1), cx)?;
             let known = target
                 .as_object()
                 .map(|o| o.has_property(JsString::from(name.as_str()), cx))
@@ -464,7 +467,7 @@ fn storage(context: &mut Context, which: u32) -> JsResult<JsValue> {
         .delete_property(|_, args, cx| {
             let target = arg(args, 0);
             let which = storage_of(&target)?;
-            let name = string(&arg(args, 1), cx)?;
+            let name = text_of(&arg(args, 1), cx)?;
             with_storage(cx, which, |s| s.remove(&name));
             Ok(true.into())
         })
@@ -476,10 +479,10 @@ fn storage(context: &mut Context, which: u32) -> JsResult<JsValue> {
         })
         .get_own_property_descriptor(|_, args, cx| {
             let which = storage_of(&arg(args, 0))?;
-            let name = string(&arg(args, 1), cx)?;
+            let name = text_of(&arg(args, 1), cx)?;
             match read_storage(cx, which, |s| s.get(&name).cloned()) {
                 Some(value) => {
-                    let descriptor = plain_object(cx);
+                    let descriptor = native::object(cx);
                     set(&descriptor, "value", js_text(&value), cx)?;
                     set(&descriptor, "writable", true, cx)?;
                     set(&descriptor, "enumerable", true, cx)?;
@@ -582,7 +585,7 @@ const FRAME_FUNCTIONS: &[Method] = &[
             "idle",
             0,
             |_, _, callback: &JsValue, cx| {
-                let deadline = plain_object(cx);
+                let deadline = native::object(cx);
                 let start = verve::now(cx);
                 set(&deadline, "didTimeout", false, cx)?;
                 let remaining = closure(
@@ -610,7 +613,7 @@ const FRAME_FUNCTIONS: &[Method] = &[
 // ─── matchMedia ─────────────────────────────────────────────────────────────────────────────
 
 fn media_of(this: &JsValue, context: &mut Context) -> JsResult<String> {
-    string(&get(this, "media", context)?, context)
+    text_of(&get(this, "media", context)?, context)
 }
 
 const MEDIA_QUERY_ACCESSORS: &[Accessor] = &[(
@@ -891,7 +894,7 @@ fn window_scroll(context: &Context, axis: usize) -> f64 {
 }
 
 fn install_screen(context: &mut Context) -> JsResult<()> {
-    let screen = plain_object(context);
+    let screen = native::object(context);
     let (width, height) = {
         let state = shared(context);
         let state = state.borrow();
@@ -920,8 +923,10 @@ fn install_screen(context: &mut Context) -> JsResult<()> {
     set(&orientation, "type", js_text("landscape-primary"), context)?;
     set(&orientation, "angle", 0, context)?;
     let lock = function(context, "lock", 1, |_, _, cx| {
-        super::rejected(
-            type_error("screen.orientation.lock() is not available on this device."),
+        native::settled(
+            Err(type_error(
+                "screen.orientation.lock() is not available on this device.",
+            )),
             cx,
         )
     });
@@ -992,7 +997,7 @@ fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResul
         let languages = native::array(context, vec![js_text(language)]);
         navigator.set(js_string!("languages"), languages, false, context)?;
     }
-    let clipboard = plain_object(context);
+    let clipboard = native::object(context);
     let methods: &[Method] = &[
         ("writeText", 1, |_, args, cx| {
             let content = arg_text(args, 0, cx)?;
@@ -1000,15 +1005,17 @@ fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResul
                 .borrow_mut()
                 .requests
                 .push(crate::Request::CopyText(content));
-            super::resolved(JsValue::undefined(), cx)
+            native::settled(Ok(JsValue::undefined()), cx)
         }),
-        ("readText", 0, |_, _, cx| super::resolved(js_text(""), cx)),
+        ("readText", 0, |_, _, cx| {
+            native::settled(Ok(js_text("")), cx)
+        }),
         ("write", 1, |_, _, cx| {
-            super::resolved(JsValue::undefined(), cx)
+            native::settled(Ok(JsValue::undefined()), cx)
         }),
         ("read", 0, |_, _, cx| {
             let empty = native::array(cx, Vec::new());
-            super::resolved(empty, cx)
+            native::settled(Ok(empty), cx)
         }),
     ];
     for (name, length, f) in methods {
@@ -1123,9 +1130,9 @@ pub fn form_entries(
 pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> {
     // `Window`, the window's class: `window instanceof Window`, and `EventTarget`'s methods
     // reached through it as a browser's window reaches them.
-    let (_, window) = define_class(
+    let (_, window) = webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Window",
             length: 0,
             construct: illegal_constructor,
@@ -1172,9 +1179,9 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
             context,
         )?;
     }
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Location",
             length: 0,
             construct: illegal_constructor,
@@ -1191,9 +1198,9 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
         location,
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
     )?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "History",
             length: 0,
             construct: illegal_constructor,
@@ -1206,9 +1213,9 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
     )?;
     let history = native_instance(context, "History", Kind::Plain, 0);
     context.register_global_property(js_string!("history"), history, Attribute::all())?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Storage",
             length: 0,
             construct: illegal_constructor,
@@ -1223,9 +1230,9 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
     context.register_global_property(js_string!("localStorage"), local, Attribute::all())?;
     let session = storage(context, 1)?;
     context.register_global_property(js_string!("sessionStorage"), session, Attribute::all())?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "MediaQueryList",
             length: 0,
             construct: illegal_constructor,

@@ -8,9 +8,11 @@
 
 use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
 
-use super::{Accessor, ClassSpec, Method, call_method, define_class, plain_object, set, string};
+use super::{Accessor, Method, WebIdlClass, call_method, set, webidl_class};
 use crate::state::shared;
-use verve::native::{self, arg, arg_text, closure, get, js_text, list_of, type_error};
+use verve::native::{
+    self, arg, arg_text, closure, get, illegal_constructor, js_text, list_of, text_of, type_error,
+};
 
 const EVENTS: &[&str] = &[
     "abort",
@@ -35,7 +37,7 @@ fn construct(new_target: &JsValue, _: &[JsValue], context: &mut Context) -> JsRe
         .expect("made")
         .0;
     let object = target.construct(&[], new_target.as_object().as_ref(), context)?;
-    let hidden = plain_object(context);
+    let hidden = native::object(context);
     let headers = native::array(context, Vec::new());
     set(&hidden, "headers", headers, context)?;
     set(&hidden, "readyState", 0, context)?;
@@ -121,7 +123,7 @@ const XHR_ACCESSORS: &[Accessor] = &[
         "responseXML",
         Some(|this, _, cx| {
             let body = read(this, "responseText", cx)?;
-            if string(&body, cx)?.is_empty() {
+            if text_of(&body, cx)?.is_empty() {
                 return Ok(JsValue::null());
             }
             let parser = cx.global_object().get(js_string!("DOMParser"), cx)?;
@@ -179,12 +181,12 @@ const XHR_METHODS: &[Method] = &[
                 "InvalidStateError",
             ));
         }
-        let init = plain_object(cx);
+        let init = native::object(cx);
         set(&init, "method", method.clone(), cx)?;
         let headers = hidden.get(js_string!("headers"), cx)?;
         set(&init, "headers", headers, cx)?;
         let body = arg(args, 0);
-        let method_text = string(&method, cx)?;
+        let method_text = text_of(&method, cx)?;
         if !body.is_null_or_undefined() && method_text != "GET" && method_text != "HEAD" {
             set(&init, "body", body, cx)?;
         }
@@ -220,7 +222,7 @@ const XHR_METHODS: &[Method] = &[
     }),
     ("getResponseHeader", 1, |this, args, cx| {
         let name = arg_text(args, 0, cx)?.to_ascii_lowercase();
-        let headers = string(&read(this, "responseHeaders", cx)?, cx)?;
+        let headers = text_of(&read(this, "responseHeaders", cx)?, cx)?;
         let values: Vec<&str> = headers
             .lines()
             .filter_map(|line| line.split_once(": "))
@@ -267,14 +269,14 @@ fn answered(xhr: &JsValue, response: &JsValue, context: &mut Context) -> JsResul
         if let [name, value] = pair.as_slice() {
             lines.push_str(&format!(
                 "{}: {}\r\n",
-                string(name, context)?,
-                string(value, context)?
+                text_of(name, context)?,
+                text_of(value, context)?
             ));
         }
     }
     set(&hidden, "responseHeaders", js_text(&lines), context)?;
     ready(xhr, 2, context)?;
-    let kind = string(&get(xhr, "responseType", context)?, context)?;
+    let kind = text_of(&get(xhr, "responseType", context)?, context)?;
     let reader = match kind.as_str() {
         "arraybuffer" => "arrayBuffer",
         "blob" => "blob",
@@ -305,7 +307,7 @@ fn loaded(xhr: &JsValue, body: &JsValue, context: &mut Context) -> JsResult<JsVa
         return Ok(JsValue::undefined());
     }
     ready(xhr, 3, context)?;
-    let kind = string(&get(xhr, "responseType", context)?, context)?;
+    let kind = text_of(&get(xhr, "responseType", context)?, context)?;
     let response = match kind.as_str() {
         "json" => {
             let json = context.intrinsics().objects().json();
@@ -357,9 +359,9 @@ fn failed(xhr: &JsValue, kind: &str, context: &mut Context) -> JsResult<JsValue>
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let (constructor, prototype) = define_class(
+    let (constructor, prototype) = webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "XMLHttpRequest",
             length: 0,
             construct,
@@ -381,12 +383,12 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         constructor.set(boa_engine::JsString::from(name), value, false, context)?;
         prototype.set(boa_engine::JsString::from(name), value, false, context)?;
     }
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "XMLHttpRequestEventTarget",
             length: 0,
-            construct: super::illegal_constructor,
+            construct: illegal_constructor,
             parent: Some("EventTarget"),
             methods: &[],
             accessors: &[],

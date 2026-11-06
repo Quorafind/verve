@@ -6,7 +6,7 @@ use boa_engine::object::builtins::{JsArrayBuffer, JsFunction, JsPromise, JsUint8
 use boa_engine::{Context, JsError, JsObject, JsResult, JsValue};
 use boa_gc::{Finalize, Trace};
 use url::Url;
-use verve::native::{closure, get, invoke, js_text, object};
+use verve::native::{self, closure, get, invoke, js_text, object};
 
 use super::{Destination, Inbox, LoadError, LoadRequest, LoadResult, Wait};
 use crate::state::shared;
@@ -314,7 +314,7 @@ pub(crate) fn answer(
             context,
         )?;
         if let Some(mime) = &result.mime {
-            let headers = crate::bind::plain_object(context);
+            let headers = native::object(context);
             headers.set(
                 boa_engine::js_string!("content-type"),
                 js_text(mime),

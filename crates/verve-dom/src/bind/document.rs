@@ -5,12 +5,14 @@ use boa_engine::{Context, JsResult, JsValue, js_string};
 
 use super::node::{PARENT_NODE_ACCESSORS, PARENT_NODE_METHODS, read_dom, with_dom, wrap, wrap_opt};
 use super::{
-    Accessor, ClassSpec, Kind, Method, constructor_of, define_class, dom_error, extend_prototype,
-    handle_instance, illegal_constructor, native_instance, node_id, node_of, opt_string, string,
+    Accessor, Kind, Method, WebIdlClass, constructor_of, dom_error, extend_prototype,
+    handle_instance, native_instance, node_id, node_of, opt_string, webidl_class,
 };
 use crate::dom::{Dom, Namespace, NodeId, NodeKind};
 use crate::state::shared;
-use verve::native::{arg, arg_text, function, hidden, js_text, type_error};
+use verve::native::{
+    self, arg, arg_text, function, hidden, illegal_constructor, js_text, text_of, type_error,
+};
 
 /// The document a document's member is asked of: a parsed one, or the window's.
 fn document_of(this: &JsValue, context: &Context) -> NodeId {
@@ -231,14 +233,14 @@ const DOCUMENT_METHODS: &[Method] = &[
                 false,
             )?;
         }
-        super::resolved(JsValue::undefined(), cx)
+        native::settled(Ok(JsValue::undefined()), cx)
     }),
     // `document.write` while the page is open: what it is given read into the body.
     ("write", 1, |this, args, cx| {
         let doc = document_of(this, cx);
         let mut markup = String::new();
         for value in args {
-            markup.push_str(&string(value, cx)?);
+            markup.push_str(&text_of(value, cx)?);
         }
         // While the page is read, what a script writes to the page goes in where the parser is;
         // a document of the script's own making is not the parser's.
@@ -273,7 +275,7 @@ const DOCUMENT_METHODS: &[Method] = &[
         if command == "copy" {
             let selected =
                 super::call_method(&super::platform::selection(cx)?, "toString", &[], cx)?;
-            let selected = string(&selected, cx)?;
+            let selected = text_of(&selected, cx)?;
             if !selected.is_empty() {
                 shared(cx)
                     .borrow_mut()
@@ -300,8 +302,8 @@ const DOCUMENT_METHODS: &[Method] = &[
         if update.is_callable() {
             verve::call(cx, &update, &JsValue::undefined(), &[])?;
         }
-        let transition = super::plain_object(cx);
-        let done = super::resolved(JsValue::undefined(), cx)?;
+        let transition = native::object(cx);
+        let done = native::settled(Ok(JsValue::undefined()), cx)?;
         for key in ["finished", "ready", "updateCallbackDone"] {
             super::set(&transition, key, done.clone(), cx)?;
         }
@@ -482,7 +484,7 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
             let jar = if jar.is_undefined() {
                 String::new()
             } else {
-                string(&jar, cx)?
+                text_of(&jar, cx)?
             };
             let expired = given.to_ascii_lowercase().contains("max-age=0")
                 || given
@@ -646,7 +648,7 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
     (
         "timeline",
         Some(|_, _, cx| {
-            let timeline = super::plain_object(cx);
+            let timeline = native::object(cx);
             let now = verve::now(cx);
             super::set(&timeline, "currentTime", now, cx)?;
             Ok(timeline.into())
@@ -761,9 +763,9 @@ const IMPLEMENTATION_METHODS: &[Method] = &[
 ];
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let (_, document) = define_class(
+    let (_, document) = webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Document",
             length: 0,
             // `new Document()`: an empty document of its own.
@@ -788,9 +790,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         PARENT_NODE_ACCESSORS,
     )?;
     for name in ["HTMLDocument", "XMLDocument"] {
-        define_class(
+        webidl_class(
             context,
-            ClassSpec {
+            WebIdlClass {
                 name,
                 length: 0,
                 construct: illegal_constructor,
@@ -802,9 +804,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             },
         )?;
     }
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "DOMParser",
             length: 0,
             construct: |new_target, _, cx| {
@@ -817,9 +819,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "XMLSerializer",
             length: 0,
             construct: |new_target, _, cx| {
@@ -832,9 +834,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "DOMImplementation",
             length: 0,
             construct: illegal_constructor,

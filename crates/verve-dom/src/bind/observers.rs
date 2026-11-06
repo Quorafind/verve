@@ -14,14 +14,13 @@
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 
 use super::node::{node_list, read_dom, wrap, wrap_opt};
-use super::{
-    ClassSpec, Kind, Method, define_class, handle_instance, handle_of, node_of, plain_object, set,
-    string,
-};
+use super::{Kind, Method, WebIdlClass, handle_instance, handle_of, node_of, set, webidl_class};
 use crate::Rect;
 use crate::dom::{Mutation, NodeId};
 use crate::state::{MutationOptions, ObservedTarget, ObserverRecord, Watch, shared};
-use verve::native::{self, arg, function, get, hidden, js_text, list_of, type_error};
+use verve::native::{
+    self, arg, function, get, hidden, illegal_constructor, js_text, list_of, text_of, type_error,
+};
 
 fn construct(
     new_target: &JsValue,
@@ -159,7 +158,7 @@ fn mutation_options(options: &JsValue, context: &mut Context) -> JsResult<Mutati
         Some(
             list_of(&filter, context)?
                 .iter()
-                .map(|v| string(v, context))
+                .map(|v| text_of(v, context))
                 .collect::<JsResult<Vec<_>>>()?,
         )
     };
@@ -400,7 +399,7 @@ pub(crate) fn distribute(context: &mut Context) {
 }
 
 fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsValue> {
-    let record = plain_object(context);
+    let record = native::object(context);
     let prototype = crate::state::class_prototype(context, "MutationRecord");
     record.set_prototype(Some(prototype));
     let target = wrap(context, mutation.target());
@@ -550,7 +549,7 @@ fn rect_object(context: &mut Context, rect: Rect) -> JsResult<JsValue> {
 }
 
 fn size_object(context: &mut Context, width: f32, height: f32) -> JsResult<JsValue> {
-    let size = plain_object(context);
+    let size = native::object(context);
     set(&size, "inlineSize", f64::from(width), context)?;
     set(&size, "blockSize", f64::from(height), context)?;
     Ok(size.into())
@@ -622,7 +621,7 @@ fn resize_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>> {
                 t.last = Some([now.x, now.y, now.width, now.height]);
             }
         });
-        let entry = plain_object(context);
+        let entry = native::object(context);
         let prototype = crate::state::class_prototype(context, "ResizeObserverEntry");
         entry.set_prototype(Some(prototype));
         let target = wrap(context, node);
@@ -702,7 +701,7 @@ fn intersection_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>
         } else {
             1.
         };
-        let entry = plain_object(context);
+        let entry = native::object(context);
         let prototype = crate::state::class_prototype(context, "IntersectionObserverEntry");
         entry.set_prototype(Some(prototype));
         let target = wrap(context, node);
@@ -745,9 +744,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             construct(t, a, c, Watch::Intersection)
         }),
     ] {
-        define_class(
+        webidl_class(
             context,
-            ClassSpec {
+            WebIdlClass {
                 name,
                 length: 1,
                 construct: construct_fn,
@@ -772,12 +771,12 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         "IntersectionObserverEntry",
         "ResizeObserverSize",
     ] {
-        define_class(
+        webidl_class(
             context,
-            ClassSpec {
+            WebIdlClass {
                 name,
                 length: 0,
-                construct: super::illegal_constructor,
+                construct: illegal_constructor,
                 parent: None,
                 methods: &[],
                 accessors: &[],

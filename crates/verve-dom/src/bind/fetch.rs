@@ -2,9 +2,8 @@
 
 use boa_engine::{Context, JsResult, js_string};
 
-use super::{rejected, string};
 use crate::state::shared;
-use verve::native::{arg, closure, get, js_text, type_error};
+use verve::native::{self, arg, closure, get, js_text, text_of, type_error};
 
 /// The getter of `Response.prototype.url`, as the runtime made it.
 fn response_url_getter(context: &mut Context) -> Option<boa_engine::JsValue> {
@@ -39,9 +38,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
                 let input = arg(args, 0);
                 let is_request = input.is_object() && input.instance_of(request, cx)?;
                 let address = if is_request {
-                    string(&get(&input, "url", cx)?, cx)?
+                    text_of(&get(&input, "url", cx)?, cx)?
                 } else {
-                    string(&input, cx)?
+                    text_of(&input, cx)?
                 };
                 let url = shared(cx)
                     .borrow()
@@ -68,7 +67,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             })();
             match result {
                 Ok(value) => Ok(value),
-                Err(error) => rejected(error, cx),
+                Err(error) => native::settled(Err(error), cx),
             }
         },
         (original, request),
@@ -94,5 +93,5 @@ fn request_method(
     if method.is_undefined() {
         return Ok("GET".to_owned());
     }
-    Ok(string(&method, context)?.to_ascii_uppercase())
+    Ok(text_of(&method, context)?.to_ascii_uppercase())
 }

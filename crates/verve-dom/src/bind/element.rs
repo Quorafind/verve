@@ -16,14 +16,15 @@ use super::node::{
     with_dom, wrap, wrap_opt,
 };
 use super::{
-    Accessor, ClassSpec, Kind, Method, call_method, define_class, dom_error, extend_prototype,
-    handle_of, illegal_constructor, native_instance, node_id, node_of, opt_string, plain_object,
-    set, string,
+    Accessor, Kind, Method, WebIdlClass, call_method, dom_error, extend_prototype, handle_of,
+    native_instance, node_id, node_of, opt_string, set, webidl_class,
 };
 use crate::dom::{Dom, NodeId, ShadowMode, camel_name, css_name};
 use crate::state::shared;
 use crate::{Align, Rect};
-use verve::native::{self, arg, arg_text, closure, get, hidden, js_text, type_error};
+use verve::native::{
+    self, arg, arg_text, closure, get, hidden, illegal_constructor, js_text, text_of, type_error,
+};
 
 /// The class of an HTML element, by its tag.
 pub fn html_class(tag: &str) -> &'static str {
@@ -463,7 +464,7 @@ pub fn reflect(
                     let value = if r.1 == 2 {
                         (value.to_number(cx)? as i64).to_string()
                     } else {
-                        string(&value, cx)?
+                        text_of(&value, cx)?
                     };
                     with_dom(cx, |dom| dom.set_attr(id, &name, &value));
                 }
@@ -495,7 +496,7 @@ fn tag_of(context: &Context, id: NodeId) -> Option<String> {
 fn class_args(args: &[JsValue], context: &mut Context) -> JsResult<Vec<String>> {
     let mut out = Vec::new();
     for value in args {
-        let class = string(value, context)?;
+        let class = text_of(value, context)?;
         if class.is_empty() {
             return Err(dom_error(
                 context,
@@ -1178,7 +1179,7 @@ const ELEMENT_METHODS: &[Method] = &[
             "fullscreenchange",
             &[("bubbles", true.into())],
         )?;
-        super::resolved(JsValue::undefined(), cx)
+        native::settled(Ok(JsValue::undefined()), cx)
     }),
     ("attachShadow", 1, |this, args, cx| {
         super::platform::attach_shadow(this, args, cx)
@@ -1194,11 +1195,9 @@ const ELEMENT_METHODS: &[Method] = &[
         let id = node_of(this)?;
         Ok(read_dom(cx, |dom| dom.is_shown(id)).into())
     }),
-    (
-        "computedStyleMap",
-        0,
-        |_, _, cx| Ok(plain_object(cx).into()),
-    ),
+    ("computedStyleMap", 0, |_, _, cx| {
+        Ok(native::object(cx).into())
+    }),
 ];
 
 // ─── HTMLElement ────────────────────────────────────────────────────────────────────────────
@@ -1334,7 +1333,7 @@ pub fn style_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
             let value = if value.is_null_or_undefined() {
                 String::new()
             } else {
-                string(&value, cx)?
+                text_of(&value, cx)?
             };
             if name == "cssText" {
                 with_dom(cx, |dom| dom.set_attr(id, "style", &value));
@@ -1430,7 +1429,7 @@ fn dataset_proxy(context: &mut Context, id: NodeId) -> JsResult<JsValue> {
             let attr = format!("data-{}", css_name(&name.to_std_string_escaped()));
             match read_dom(cx, |dom| dom.get_attr(id, &attr)) {
                 Some(value) => {
-                    let descriptor = plain_object(cx);
+                    let descriptor = native::object(cx);
                     set(&descriptor, "value", js_text(&value), cx)?;
                     set(&descriptor, "writable", true, cx)?;
                     set(&descriptor, "enumerable", true, cx)?;
@@ -1644,7 +1643,9 @@ const HTML_ELEMENT_METHODS: &[Method] = &[
         super::events::click(cx, id, &[], false)?;
         Ok(JsValue::undefined())
     }),
-    ("attachInternals", 0, |_, _, cx| Ok(plain_object(cx).into())),
+    ("attachInternals", 0, |_, _, cx| {
+        Ok(native::object(cx).into())
+    }),
     ("showPopover", 0, |_, _, _| Ok(JsValue::undefined())),
     ("hidePopover", 0, |_, _, _| Ok(JsValue::undefined())),
     ("togglePopover", 0, |_, _, _| Ok(false.into())),
@@ -1857,7 +1858,7 @@ const FIELD_METHODS: &[Method] = &[
 ];
 
 fn validity(context: &mut Context) -> JsResult<JsValue> {
-    let object = plain_object(context);
+    let object = native::object(context);
     for key in [
         "badInput",
         "customError",
@@ -3160,9 +3161,9 @@ const CELL_REFLECTED: &[(&str, &str, Reflect)] = &[
 // ─── Installing ─────────────────────────────────────────────────────────────────────────────
 
 fn plain_class(context: &mut Context, name: &'static str, parent: &str) -> JsResult<JsObject> {
-    Ok(define_class(
+    Ok(webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name,
             length: 0,
             construct: illegal_constructor,
@@ -3184,9 +3185,9 @@ fn full_class(
     accessors: &[Accessor],
     reflected: &[(&str, &str, Reflect)],
 ) -> JsResult<JsObject> {
-    let (_, prototype) = define_class(
+    let (_, prototype) = webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name,
             length: 0,
             construct: illegal_constructor,
@@ -3218,9 +3219,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     )?;
     extend_prototype(context, &element, CHILD_NODE_METHODS, CHILD_NODE_ACCESSORS)?;
     // `HTMLElement` is constructed only as the `super()` of a custom element's class.
-    let (_, html) = define_class(
+    let (_, html) = webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "HTMLElement",
             length: 0,
             construct: super::custom::construct_html_element,
@@ -3689,9 +3690,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     extend_prototype(context, &svg_svg, super::svg::SVG_SVG_METHODS, &[])?;
     plain_class(context, "MathMLElement", "Element")?;
     // What an element hands out.
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "DOMTokenList",
             length: 0,
             construct: illegal_constructor,
@@ -3735,9 +3736,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             )?;
         }
     }
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "CSSStyleDeclaration",
             length: 0,
             construct: illegal_constructor,
@@ -3748,9 +3749,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "DOMStringMap",
             length: 0,
             construct: illegal_constructor,

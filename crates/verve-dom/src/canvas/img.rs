@@ -14,12 +14,12 @@ use boa_engine::{Context, JsObject, JsResult, JsValue, builtins::promise::Resolv
 use crate::Request;
 use crate::bind::element::{Reflect, absolute_url};
 use crate::bind::node::{read_dom, with_dom};
-use crate::bind::{self, Accessor, Method, node_of, string};
+use crate::bind::{self, Accessor, Method, node_of};
 use crate::canvas::image::{ElementImage, Keep, Status, image_size};
 use crate::canvas::{Axis, set_dimension};
 use crate::dom::NodeId;
 use crate::state::{State, shared};
-use verve::native::{arg, closure, js_text};
+use verve::native::{self, arg, closure, js_text, text_of};
 
 pub const IMAGE_ACCESSORS: &[Accessor] = &[
     (
@@ -84,7 +84,7 @@ fn source(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
 /// Setting the source starts the load at once, as in a browser, so its events are due.
 fn set_source(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = node_of(this)?;
-    let value = string(&arg(args, 0), context)?;
+    let value = text_of(&arg(args, 0), context)?;
     with_dom(context, |dom| dom.set_attr(id, "src", &value));
     report(context, id);
     Ok(JsValue::undefined())
@@ -233,7 +233,7 @@ pub(crate) fn flush_events(context: &mut Context) {
 
 fn fire_event(_: &JsValue, args: &[JsValue], _: &(), context: &mut Context) -> JsResult<JsValue> {
     let node = arg(args, 0).as_number().unwrap_or_default() as NodeId;
-    let name = string(&arg(args, 1), context)?;
+    let name = text_of(&arg(args, 1), context)?;
     if shared(context).borrow().dom.exists(node) {
         bind::events::fire_at(context, node, "Event", &name, &[], true)?;
     }
@@ -307,10 +307,10 @@ fn decode_promise(context: &mut Context, node: NodeId) -> JsResult<JsValue> {
             .decodes(report.url.as_deref());
     match (report.status, decodable) {
         (Status::Loading, _) => wait_for(context, node),
-        (_, true) => bind::resolved(JsValue::undefined(), context),
+        (_, true) => native::settled(Ok(JsValue::undefined()), context),
         (_, false) => {
             let error = decode_error(context, UNDECODABLE);
-            bind::rejected(error, context)
+            native::settled(Err(error), context)
         }
     }
 }

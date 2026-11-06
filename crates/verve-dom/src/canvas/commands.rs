@@ -16,7 +16,7 @@ use crate::canvas::source::source_pixmap;
 use crate::canvas::store::{CanvasId, canvas_object, read_canvas, this_handle};
 use crate::canvas::text::{Align, HANGING_BASELINE, Placement};
 use crate::state::shared;
-use verve::native::{self, arg, arg_text, get, js_text, list_of, type_error};
+use verve::native::{self, arg, arg_text, get, js_text, list_of, text_of, type_error};
 
 pub const CONTEXT_METHODS: &[Method] = &[
     ("save", 0, |this, _, cx| update(this, cx, Canvas2d::save)),
@@ -227,7 +227,7 @@ fn fill_rule(value: &JsValue, context: &mut Context) -> JsResult<FillRule> {
     if !value.is_string() {
         return Ok(FillRule::Winding);
     }
-    Ok(match bind::string(value, context)?.as_str() {
+    Ok(match text_of(value, context)?.as_str() {
         "evenodd" => FillRule::EvenOdd,
         _ => FillRule::Winding,
     })
@@ -364,7 +364,7 @@ fn create_pattern(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     let repetition = match arg(args, 1) {
         value if value.is_null_or_undefined() => Repetition::Repeat,
         value => {
-            let name = bind::string(&value, context)?;
+            let name = text_of(&value, context)?;
             let known = value_of(Repetition::NAMES, &name);
             let known = known.or_else(|| name.is_empty().then_some(Repetition::Repeat));
             known.ok_or_else(|| {

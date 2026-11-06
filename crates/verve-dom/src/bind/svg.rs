@@ -5,9 +5,10 @@ use boa_engine::JsValue;
 
 use super::element::{painted, rect_object};
 use super::node::{read_dom, wrap_opt};
-use super::{Accessor, Method, node_of, plain_object, set};
+use super::{Accessor, Method, node_of, set};
 use crate::Rect;
 use crate::dom::Namespace;
+use verve::native::{self};
 
 pub const SVG_ACCESSORS: &[Accessor] = &[
     (
@@ -53,7 +54,7 @@ pub const SVG_GRAPHICS_METHODS: &[Method] = &[
     }),
     ("getTotalLength", 0, |_, _, _| Ok(0.into())),
     ("getPointAtLength", 1, |_, _, cx| {
-        let point = plain_object(cx);
+        let point = native::object(cx);
         set(&point, "x", 0, cx)?;
         set(&point, "y", 0, cx)?;
         Ok(point.into())

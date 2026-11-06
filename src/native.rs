@@ -53,6 +53,12 @@ pub fn type_error(message: impl Into<String>) -> JsError {
     JsNativeError::typ().with_message(message.into()).into()
 }
 
+/// A native constructor that refuses to construct: `new X` is a `TypeError`, as for an interface
+/// with no constructor.
+pub fn illegal_constructor(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Err(type_error("Illegal constructor"))
+}
+
 /// An `Error` with `message`.
 pub fn error(message: impl Into<String>) -> JsError {
     JsNativeError::error().with_message(message.into()).into()

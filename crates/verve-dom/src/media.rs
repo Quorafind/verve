@@ -513,7 +513,7 @@ fn play(context: &mut Context, node: NodeId) -> JsResult<JsValue> {
         seek(context, node, 0.)?;
         if !active(context, node, generation) {
             let error = dom_error(context, "媒体源在 seeking 事件中已失效", "AbortError");
-            return bind::rejected(error, context);
+            return native::settled(Err(error), context);
         }
     }
     let (generation, terminal, error, ready, paused, existing) = {
@@ -537,10 +537,10 @@ fn play(context: &mut Context, node: NodeId) -> JsResult<JsValue> {
                 .map_or("没有可播放的媒体源", |e| e.message.as_str()),
             "NotSupportedError",
         );
-        return bind::rejected(error, context);
+        return native::settled(Err(error), context);
     }
     if !paused && ready >= 3 && existing.is_none() {
-        return bind::resolved(JsValue::undefined(), context);
+        return native::settled(Ok(JsValue::undefined()), context);
     }
     let request = if let Some((request, false)) = existing {
         request
@@ -900,7 +900,7 @@ pub(crate) const METHODS: &[Method] = &[
         let node = node_of(this)?;
         match play(cx, node) {
             Ok(promise) => Ok(promise),
-            Err(error) => bind::rejected(error, cx),
+            Err(error) => native::settled(Err(error), cx),
         }
     }),
     ("pause", 0, |this, _, cx| {
@@ -921,9 +921,7 @@ pub(crate) const METHODS: &[Method] = &[
         seek(cx, node, time)?;
         Ok(JsValue::undefined())
     }),
-    ("addTextTrack", 3, |_, _, cx| {
-        Ok(bind::plain_object(cx).into())
-    }),
+    ("addTextTrack", 3, |_, _, cx| Ok(native::object(cx).into())),
 ];
 
 fn read(
@@ -1073,7 +1071,7 @@ pub(crate) const ACCESSORS: &[Accessor] = &[
             match error {
                 None => Ok(JsValue::null()),
                 Some(error) => {
-                    let object = bind::plain_object(cx);
+                    let object = native::object(cx);
                     bind::set(&object, "code", u32::from(error.code), cx)?;
                     bind::set(&object, "message", js_text(&error.message), cx)?;
                     Ok(object.into())

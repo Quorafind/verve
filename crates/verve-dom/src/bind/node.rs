@@ -13,12 +13,14 @@
 use boa_engine::{Context, JsObject, JsResult, JsValue};
 
 use super::{
-    Accessor, ClassSpec, Method, define_class, dom_error, illegal_constructor, node_arg, node_id,
-    node_of, opt_string, prototype_of_target,
+    Accessor, Method, WebIdlClass, dom_error, node_arg, node_id, node_of, opt_string,
+    prototype_of_target, webidl_class,
 };
 use crate::dom::{Dom, Namespace, Node, NodeId, NodeKind};
 use crate::state::shared;
-use verve::native::{self, arg, arg_text, get, js_text, list_of, type_error};
+use verve::native::{
+    self, arg, arg_text, get, illegal_constructor, js_text, list_of, text_of, type_error,
+};
 
 /// What distinguishes a node's number among host targets: bit 40. An animation's is bit 41, in
 /// `bind/animation.rs`.
@@ -326,7 +328,7 @@ pub fn node_or_text(value: &JsValue, context: &mut Context) -> JsResult<NodeId> 
     if let Some(id) = node_id(value) {
         return Ok(id);
     }
-    let content = super::string(value, context)?;
+    let content = text_of(value, context)?;
     Ok(with_dom(context, |dom| dom.create_text(&content)))
 }
 
@@ -1265,9 +1267,9 @@ const DOCTYPE_ACCESSORS: &[Accessor] = &[
 ];
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Node",
             length: 0,
             construct: illegal_constructor,
@@ -1311,9 +1313,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             )?;
         }
     }
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "CharacterData",
             length: 0,
             construct: illegal_constructor,
@@ -1331,9 +1333,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         CHILD_NODE_METHODS,
         CHILD_NODE_ACCESSORS,
     )?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Text",
             length: 1,
             construct: |new_target, args, cx| {
@@ -1347,9 +1349,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "CDATASection",
             length: 0,
             construct: illegal_constructor,
@@ -1360,9 +1362,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Comment",
             length: 1,
             construct: |new_target, args, cx| {
@@ -1376,9 +1378,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "DocumentFragment",
             length: 0,
             construct: |new_target, _, cx| construct_node(new_target, cx, Dom::create_fragment),
@@ -1405,9 +1407,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         })],
         &[],
     )?;
-    define_class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "DocumentType",
             length: 0,
             construct: illegal_constructor,
@@ -1424,9 +1426,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ("NodeList", LIST_METHODS),
         ("HTMLCollection", COLLECTION_METHODS),
     ] {
-        let (_, prototype) = define_class(
+        let (_, prototype) = webidl_class(
             context,
-            ClassSpec {
+            WebIdlClass {
                 name,
                 length: 0,
                 construct: illegal_constructor,

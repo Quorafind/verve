@@ -13,10 +13,10 @@ use std::collections::HashSet;
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, object::builtins::JsPromise};
 
 use super::node::{existing_wrapper, read_dom, with_dom, wrap};
-use super::{Method, dom_error, string};
+use super::{Method, dom_error};
 use crate::dom::{AttrChange, Namespace, NodeId, is_custom_element_name};
 use crate::state::shared;
-use verve::native::{arg, arg_text, js_text, list_of, type_error};
+use verve::native::{self, arg, arg_text, js_text, list_of, text_of, type_error};
 
 /// A tag `customElements.define` was given a class for.
 pub struct Definition {
@@ -277,7 +277,7 @@ fn observed_attributes(class: &JsObject, context: &mut Context) -> JsResult<Vec<
     }
     list_of(&value, context)?
         .iter()
-        .map(|name| string(name, context))
+        .map(|name| text_of(name, context))
         .collect()
 }
 
@@ -359,7 +359,7 @@ pub const METHODS: &[Method] = &[
     ("whenDefined", 1, |_, args, cx| {
         let name = arg_text(args, 0, cx)?;
         if let Some(class) = class_of(cx, &name) {
-            return super::resolved(class.into(), cx);
+            return native::settled(Ok(class.into()), cx);
         }
         let (promise, resolvers) = JsPromise::new_pending(cx);
         shared(cx)

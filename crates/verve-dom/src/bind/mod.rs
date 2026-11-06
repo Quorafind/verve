@@ -35,7 +35,7 @@ use boa_engine::{
     native_function::NativeFunctionPointer,
     property::{Attribute, PropertyDescriptor},
 };
-use verve::native::{arg, function, get, js_text, type_error};
+use verve::native::{self, arg, function, get, js_text, text_of, type_error};
 
 use crate::dom::NodeId;
 use crate::state::shared;
@@ -145,10 +145,6 @@ pub fn node_arg(args: &[JsValue], index: usize, method: &str, class: &str) -> Js
     })
 }
 
-pub fn string(value: &JsValue, context: &mut Context) -> JsResult<String> {
-    Ok(value.to_string(context)?.to_std_string_escaped())
-}
-
 /// The argument as a string, or `None` when it is `undefined` or `null`.
 pub fn opt_string(
     args: &[JsValue],
@@ -159,7 +155,7 @@ pub fn opt_string(
     if value.is_null_or_undefined() {
         return Ok(None);
     }
-    Ok(Some(string(&value, context)?))
+    Ok(Some(text_of(&value, context)?))
 }
 
 pub fn set(
@@ -187,25 +183,10 @@ pub fn call_method(
     }
 }
 
-pub fn plain_object(context: &mut Context) -> JsObject {
-    JsObject::with_object_proto(context.intrinsics())
-}
-
-/// A promise already settled with `value`.
-pub fn resolved(value: JsValue, context: &mut Context) -> JsResult<JsValue> {
-    Ok(boa_engine::object::builtins::JsPromise::resolve(value, context)?.into())
-}
-
-pub fn rejected(error: JsError, context: &mut Context) -> JsResult<JsValue> {
-    Ok(boa_engine::object::builtins::JsPromise::reject(error, context)?.into())
-}
-
-pub fn illegal_constructor(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    Err(type_error("Illegal constructor"))
-}
-
-/// One native class: its constructor, what it extends, and what its prototype holds.
-pub struct ClassSpec<'a> {
+/// One WebIDL interface as the DOM has it: unlike `verve::native::PlainClass` its methods and
+/// accessors are listed (enumerable), it carries a `Symbol.toStringTag`, it extends a class made
+/// here by name, and it is remembered in the document's registry.
+pub struct WebIdlClass<'a> {
     pub name: &'static str,
     pub length: usize,
     pub construct: NativeFunctionPointer,
@@ -218,8 +199,11 @@ pub struct ClassSpec<'a> {
     pub global: bool,
 }
 
-/// Makes a class and remembers it by name.
-pub fn define_class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, JsObject)> {
+/// Makes an interface and remembers it by name.
+pub fn webidl_class(
+    context: &mut Context,
+    spec: WebIdlClass<'_>,
+) -> JsResult<(JsObject, JsObject)> {
     let parent = spec.parent.map(|name| {
         crate::state::class_of(context, name)
             .unwrap_or_else(|| panic!("the parent class {name} is made first"))
@@ -356,7 +340,7 @@ pub fn constructor_of(context: &Context, name: &str) -> Option<JsObject> {
 
 /// Sets `(key, value)` pairs on a fresh object: an event's `init`, a rect.
 pub fn dictionary(context: &mut Context, pairs: &[(&str, JsValue)]) -> JsResult<JsObject> {
-    let object = plain_object(context);
+    let object = native::object(context);
     for (key, value) in pairs {
         object.set(JsString::from(*key), value.clone(), false, context)?;
     }

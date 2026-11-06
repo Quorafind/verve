@@ -337,10 +337,6 @@ pub(crate) fn symbol_method(
     Ok(())
 }
 
-fn illegal(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    Err(type_error("Illegal constructor"))
-}
-
 /// The prototype the object a constructor makes is made on: `new.target`'s, which `new` (or a
 /// subclass's `super()`) hands a native constructor as `this`.
 pub(crate) fn prototype_for(
@@ -418,7 +414,7 @@ fn make_classes(context: &mut Context) -> JsResult<Classes> {
         context,
         "ReadableStreamDefaultController",
         0,
-        illegal,
+        crate::native::illegal_constructor,
         CONTROLLER_METHODS,
         &[("desiredSize", controller_desired_size, None)],
         &[],
@@ -427,7 +423,7 @@ fn make_classes(context: &mut Context) -> JsResult<Classes> {
         context,
         "ReadableByteStreamController",
         0,
-        illegal,
+        crate::native::illegal_constructor,
         CONTROLLER_METHODS,
         &[
             ("desiredSize", controller_desired_size, None),
@@ -493,7 +489,7 @@ fn make_classes(context: &mut Context) -> JsResult<Classes> {
         context,
         "WritableStreamDefaultController",
         0,
-        illegal,
+        crate::native::illegal_constructor,
         &[("error", 1, |this, args, cx| {
             let stream = controlled_writable(this)?;
             if with_writable(&stream, |w| w.phase) == WPhase::Writable {
@@ -548,7 +544,7 @@ fn make_classes(context: &mut Context) -> JsResult<Classes> {
         context,
         "TransformStreamDefaultController",
         0,
-        illegal,
+        crate::native::illegal_constructor,
         TRANSFORM_CONTROLLER_METHODS,
         &[(
             "desiredSize",

@@ -5,8 +5,8 @@ use boa_engine::property::Attribute;
 use boa_engine::{Context, JsResult, JsValue, js_string, native_function::NativeFunctionPointer};
 
 use crate::bind::{
-    self, Accessor, ClassSpec, Kind, Method, define_class, dom_error, extend_prototype,
-    handle_instance, illegal_constructor,
+    self, Accessor, Kind, Method, WebIdlClass, dom_error, extend_prototype, handle_instance,
+    webidl_class,
 };
 use crate::canvas::bitmap::{
     BITMAP_ACCESSORS, BITMAP_METHODS, BITMAP_RENDERER_METHODS, OFFSCREEN_ACCESSORS,
@@ -20,7 +20,7 @@ use crate::canvas::pixels::construct_image_data;
 use crate::canvas::properties::install_properties;
 use crate::canvas::store::{owner_of_context, this_handle};
 use crate::state::shared;
-use verve::native::{arg, arg_text, function};
+use verve::native::{arg, arg_text, function, illegal_constructor};
 
 /// A class: its constructor, its own methods and accessors, and methods it shares with another.
 struct Entry {
@@ -91,7 +91,7 @@ const CLASSES: &[Entry] = &[
 /// The canvas classes, their methods and their properties.
 pub fn install(context: &mut Context) -> JsResult<()> {
     for entry in CLASSES {
-        let spec = ClassSpec {
+        let spec = WebIdlClass {
             name: entry.name,
             length: entry.length,
             construct: entry.construct,
@@ -101,7 +101,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             statics: &[],
             global: true,
         };
-        let (_, prototype) = define_class(context, spec)?;
+        let (_, prototype) = webidl_class(context, spec)?;
         extend_prototype(context, &prototype, entry.shared, &[])?;
         if entry.name == "CanvasRenderingContext2D" {
             install_properties(context, &prototype)?;

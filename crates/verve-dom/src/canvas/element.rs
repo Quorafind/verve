@@ -7,13 +7,13 @@ use boa_engine::{Context, JsResult, JsValue};
 use tiny_skia::Pixmap;
 
 use crate::bind::node::read_dom;
-use crate::bind::{Accessor, Kind, Method, dom_error, node_of, plain_object, string};
+use crate::bind::{Accessor, Kind, Method, dom_error, node_of};
 use crate::canvas::context2d::{Canvas2d, CanvasOwner};
 use crate::canvas::pixels::{DEFAULT_JPEG_QUALITY, Encoded, ImageType, encode};
 use crate::canvas::store::{CanvasId, canvas_object};
 use crate::canvas::{Axis, element_dimension, element_size, write_dimension};
 use crate::state::shared;
-use verve::native::{arg, arg_text, get, js_text};
+use verve::native::{self, arg, arg_text, get, js_text, text_of};
 
 pub const CANVAS_ACCESSORS: &[Accessor] = &[
     (
@@ -32,7 +32,7 @@ pub const CANVAS_METHODS: &[Method] = &[
     ("getContext", 1, get_context),
     ("toDataURL", 0, to_data_url),
     ("toBlob", 1, to_blob),
-    ("captureStream", 0, |_, _, cx| Ok(plain_object(cx).into())),
+    ("captureStream", 0, |_, _, cx| Ok(native::object(cx).into())),
     ("transferControlToOffscreen", 0, |_, _, cx| {
         Err(dom_error(
             cx,
@@ -120,7 +120,7 @@ pub fn export_arguments(
     context: &mut Context,
 ) -> JsResult<(ImageType, f32)> {
     let kind = match kind.is_string() {
-        true => ImageType::from_mime(&string(kind, context)?),
+        true => ImageType::from_mime(&text_of(kind, context)?),
         false => ImageType::Png,
     };
     let quality = match quality.is_number() {

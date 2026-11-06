@@ -9,9 +9,9 @@
 use boa_engine::{Context, JsResult, JsValue, js_string};
 
 use super::node::{read_dom, wrap};
-use super::{call_method, node_of, plain_object, set};
+use super::{call_method, node_of, set};
 use crate::dom::{Dom, NodeId, NodeKind};
-use verve::native::{arg, function, get};
+use verve::native::{self, arg, function, get};
 
 const SHOW_ALL: u32 = u32::MAX;
 const FILTER_ACCEPT: u32 = 1;
@@ -19,7 +19,7 @@ const FILTER_REJECT: u32 = 2;
 
 /// The global `NodeFilter`, with its constants.
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let filter = plain_object(context);
+    let filter = native::object(context);
     for (key, value) in [
         ("FILTER_ACCEPT", 1.),
         ("FILTER_REJECT", 2.),
@@ -102,7 +102,7 @@ fn order(context: &mut Context, walk: &JsValue) -> JsResult<Vec<NodeId>> {
 pub fn create(args: &[JsValue], context: &mut Context, walker: bool) -> JsResult<JsValue> {
     let root = arg(args, 0);
     node_of(&root)?;
-    let walk = plain_object(context);
+    let walk = native::object(context);
     set(&walk, "root", root.clone(), context)?;
     let what = arg(args, 1);
     let what = if what.is_undefined() {

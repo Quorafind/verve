@@ -21,12 +21,15 @@ use boa_engine::{
 
 use super::node::{ancestry, read_dom, with_dom, wrap, wrap_opt};
 use super::{
-    Accessor, ClassSpec, Kind, Method, constructor_of, define_class, handle_instance, handle_of,
-    illegal_constructor, native_instance, node_id, node_of, opt_string, plain_object, set, string,
+    Accessor, Kind, Method, WebIdlClass, constructor_of, handle_instance, handle_of,
+    native_instance, node_id, node_of, opt_string, set, webidl_class,
 };
 use crate::dom::{Dom, NodeId, NodeKind, ShadowMode, SlotAssignment};
 use crate::state::shared;
-use verve::native::{self, arg, arg_text, function, get, hidden, js_text, list_of, type_error};
+use verve::native::{
+    self, arg, arg_text, function, get, hidden, illegal_constructor, js_text, list_of, text_of,
+    type_error,
+};
 
 // ─── Attributes ─────────────────────────────────────────────────────────────────────────────
 
@@ -117,7 +120,7 @@ const NAMED_NODE_MAP_METHODS: &[Method] = &[
     ("getNamedItem", 1, |this, args, cx| {
         let name = arg_text(args, 0, cx)?;
         for attr in list_of(this, cx)? {
-            if string(&get(&attr, "name", cx)?, cx)?.eq_ignore_ascii_case(&name) {
+            if text_of(&get(&attr, "name", cx)?, cx)?.eq_ignore_ascii_case(&name) {
                 return Ok(attr);
             }
         }
@@ -236,7 +239,7 @@ fn shadow_option<T>(
             ))
         });
     }
-    let name = string(&given, context)?;
+    let name = text_of(&given, context)?;
     parse(&name).ok_or_else(|| {
         type_error(format!(
             "Failed to execute 'attachShadow' on 'Element': Failed to read the '{key}' property from 'ShadowRootInit': The provided value '{name}' is not a valid enum value."
@@ -363,13 +366,13 @@ const SHADOW_ROOT_ACCESSORS: &[Accessor] = &[
 // ─── The CSSOM ──────────────────────────────────────────────────────────────────────────────
 
 fn rule_object(context: &mut Context, rule: &str, sheet: &JsValue) -> JsResult<JsValue> {
-    let object = plain_object(context);
+    let object = native::object(context);
     set(&object, "cssText", js_text(rule), context)?;
     if let Some(brace) = rule.find('{') {
         let selector = rule[..brace].trim();
         set(&object, "selectorText", js_text(selector), context)?;
         let body = rule[brace + 1..].trim_end().trim_end_matches('}').trim();
-        let style = plain_object(context);
+        let style = native::object(context);
         set(&style, "cssText", js_text(body), context)?;
         for declaration in crate::css::declarations(body) {
             let value = js_text(&declaration.value);
@@ -575,7 +578,7 @@ const SHEET_METHODS: &[Method] = &[
     ("replace", 1, |this, args, cx| {
         let css = arg_text(args, 0, cx)?;
         change_rules(this, cx, |rules| *rules = crate::css::split_rules(&css))?;
-        super::resolved(this.clone(), cx)
+        native::settled(Ok(this.clone()), cx)
     }),
 ];
 
@@ -1581,9 +1584,9 @@ fn simple_class(
     accessors: &[Accessor],
     global: bool,
 ) -> JsResult<JsObject> {
-    Ok(define_class(
+    Ok(webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name,
             length: 0,
             construct,
@@ -1697,7 +1700,7 @@ fn install_geometry(context: &mut Context) -> JsResult<()> {
         }),
         ("toJSON", 0, |this, _, cx| {
             let m = matrix_of(this, cx)?;
-            let out = plain_object(cx);
+            let out = native::object(cx);
             set_matrix(&out, &m, cx)?;
             Ok(out.into())
         }),
@@ -1738,7 +1741,7 @@ fn install_geometry(context: &mut Context) -> JsResult<()> {
                 )
             }),
             ("toJSON", 0, |this, _, cx| {
-                let out = plain_object(cx);
+                let out = native::object(cx);
                 for key in ["x", "y", "z", "w"] {
                     let value = get(this, key, cx)?;
                     set(&out, key, value, cx)?;
@@ -1764,7 +1767,7 @@ fn install_geometry(context: &mut Context) -> JsResult<()> {
         construct_rect,
         None,
         &[("toJSON", 0, |this, _, cx| {
-            let out = plain_object(cx);
+            let out = native::object(cx);
             for key in [
                 "x", "y", "width", "height", "top", "right", "bottom", "left",
             ] {
@@ -1876,7 +1879,7 @@ fn construct_rect(
 
 /// An empty `TimeRanges`.
 pub fn empty_ranges(context: &mut Context) -> JsResult<JsValue> {
-    let ranges = plain_object(context);
+    let ranges = native::object(context);
     set(&ranges, "length", 0, context)?;
     for name in ["start", "end"] {
         let f = function(context, name, 1, |_, _, cx| {
@@ -1897,7 +1900,7 @@ fn construct_data_transfer(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let transfer = handle_instance(new_target, Kind::Plain, 0, context)?;
-    let data = plain_object(context);
+    let data = native::object(context);
     hidden(&transfer, js_string!("__data"), data, context)?;
     set(&transfer, "dropEffect", js_text("none"), context)?;
     set(&transfer, "effectAllowed", js_text("all"), context)?;
@@ -1941,13 +1944,13 @@ const DATA_TRANSFER_METHODS: &[Method] = &[
     ("clearData", 1, |this, args, cx| {
         let format = arg(args, 0);
         if format.is_undefined() {
-            let data = plain_object(cx);
+            let data = native::object(cx);
             if let Some(this) = this.as_object() {
                 hidden(&this, js_string!("__data"), data, cx)?;
             }
         } else {
             let data = get(this, "__data", cx)?;
-            let format = string(&format, cx)?.to_ascii_lowercase();
+            let format = text_of(&format, cx)?.to_ascii_lowercase();
             if let Some(data) = data.as_object() {
                 data.delete_property_or_throw(JsString::from(format.as_str()), cx)?;
             }
@@ -2125,7 +2128,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     ] {
         simple_class(context, name, illegal_constructor, None, &[], &[], true)?;
     }
-    let css = plain_object(context);
+    let css = native::object(context);
     for (name, length, f) in CSS_FUNCTIONS {
         let made = function(context, name, *length, *f);
         set(&css, name, made, context)?;

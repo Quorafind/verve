@@ -1,5 +1,5 @@
-crates/verve-dom/src/bind/element.rs 3765
-crates/verve-dom/src/bind/platform.rs 2176
+crates/verve-dom/src/bind/element.rs 3766
+crates/verve-dom/src/bind/platform.rs 2179
 crates/verve-dom/src/dom.rs 1754
 crates/verve-dom/src/lib.rs 1662
 src/buffer.rs 1725
@@ -13,6 +13,6 @@ src/intl.rs 1997
 src/network/http.rs 1766
 src/path.rs 1507
 src/stream.rs 4600
-src/streams.rs 4034
+src/streams.rs 4030
 src/util.rs 3498
 tests/npm.rs 1572
