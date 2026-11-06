@@ -182,6 +182,22 @@ pub enum WindowOp {
     CloseAnswer {
         prevented: bool,
     },
+    /// `setClosable`: whether the window's close button works.
+    SetClosable(bool),
+    /// `setMovable`.
+    SetMovable(bool),
+    /// `setMinimizable`.
+    SetMinimizable(bool),
+    /// `setMaximizable`.
+    SetMaximizable(bool),
+    /// `setFocusable`: whether the window may take the keyboard focus.
+    SetFocusable(bool),
+    /// `setEnabled`: `false` makes the window take no input, as the parent of a shown modal one.
+    SetEnabled(bool),
+    /// `setParentWindow`: the window the system keeps this one above.
+    SetParent(Option<WindowId>),
+    /// `moveTop`: above every other window, without the focus.
+    MoveTop,
 }
 
 /// Menus, trays and global shortcuts. Empty until P15 gives them their first variant.
@@ -284,6 +300,25 @@ pub struct Display {
     pub primary: bool,
 }
 
+impl Default for Display {
+    /// The screen a machine with none reports: 1920 x 1080 at 1x, and the primary one.
+    fn default() -> Self {
+        let screen = Rect {
+            x: 0.,
+            y: 0.,
+            width: 1920.,
+            height: 1080.,
+        };
+        Self {
+            id: 1,
+            bounds: screen,
+            work_area: screen,
+            scale_factor: 1.,
+            primary: true,
+        }
+    }
+}
+
 /// A box in screen coordinates, as `screen` and `getBounds` read it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -338,6 +373,16 @@ pub enum ToRenderer {
     ProtocolResponse {
         call: u64,
         response: ProtocolResponse,
+    },
+    /// The window is closing: dispatch `beforeunload` and answer with
+    /// [`FromRenderer::BeforeUnloadReply`].
+    BeforeUnload {
+        call: u64,
+    },
+    /// The close goes ahead: dispatch `pagehide` and `unload`, then answer with
+    /// [`FromRenderer::UnloadReply`].
+    Unload {
+        call: u64,
     },
 }
 
@@ -435,10 +480,21 @@ pub enum FromRenderer {
     Reload {
         url: String,
     },
+    /// The answer to [`ToRenderer::BeforeUnload`]: `false` when a handler prevented the unload
+    /// (`preventDefault()`, or a `returnValue` that is not empty).
+    BeforeUnloadReply {
+        call: u64,
+        proceed: bool,
+    },
+    /// `pagehide` and `unload` have been dispatched: the page is ready to go.
+    UnloadReply {
+        call: u64,
+    },
 }
 
-/// What `webPreferences` says of a page, the part P02 reads; P13 adds the rest. A page is made
-/// with these and, when P20 makes its isolate anew on a navigation, made with the same ones.
+/// What `webPreferences` says of a page. A page is made with these and, when P20 makes its
+/// isolate anew on a navigation, made with the same ones. The fields from `image_animation_policy`
+/// on are the ones only P13 reads: they are kept, and handed to whoever draws or loads.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WebPreferences {
     /// `devTools`.
@@ -468,6 +524,89 @@ pub struct WebPreferences {
     /// `contextIsolation`: whether the page's scripts run in a world of their own, apart from
     /// the preload's. With it (the default) the page has no `require`, `nodeIntegration` or not.
     pub context_isolation: bool,
+    /// `imageAnimationPolicy`: `animate`, `animateOnce` or `noAnimation`.
+    pub image_animation_policy: String,
+    /// `textAreasAreResizable`.
+    pub text_areas_are_resizable: bool,
+    /// `webgl`: kept; Verve has none.
+    pub webgl: bool,
+    /// `plugins`.
+    pub plugins: bool,
+    /// `experimentalFeatures`.
+    pub experimental_features: bool,
+    /// `scrollBounce`.
+    pub scroll_bounce: bool,
+    /// `offscreen`.
+    pub offscreen: bool,
+    /// `webviewTag`.
+    pub webview_tag: bool,
+    /// `safeDialogs`.
+    pub safe_dialogs: bool,
+    /// `safeDialogsMessage`.
+    pub safe_dialogs_message: Option<String>,
+    /// `disableDialogs`.
+    pub disable_dialogs: bool,
+    /// `navigateOnDragDrop`.
+    pub navigate_on_drag_drop: bool,
+    /// `disableHtmlFullscreenWindowResize`.
+    pub disable_html_fullscreen_window_resize: bool,
+    /// `enablePreferredSizeMode`.
+    pub enable_preferred_size_mode: bool,
+    /// `enableBlinkFeatures`.
+    pub enable_blink_features: String,
+    /// `disableBlinkFeatures`.
+    pub disable_blink_features: String,
+    /// `defaultFontFamily`, for the font fallback of P31.
+    pub default_font_family: FontFamilies,
+    /// `defaultFontSize`.
+    pub default_font_size: i32,
+    /// `defaultMonospaceFontSize`.
+    pub default_monospace_font_size: i32,
+    /// `minimumFontSize`.
+    pub minimum_font_size: i32,
+    /// `defaultEncoding`.
+    pub default_encoding: String,
+    /// `backgroundThrottling`: timers at 1 Hz and no animation frames while hidden.
+    pub background_throttling: bool,
+    /// `autoplayPolicy`.
+    pub autoplay_policy: String,
+    /// `accessibleTitle`.
+    pub accessible_title: Option<String>,
+    /// `spellcheck`: kept; Verve has none.
+    pub spellcheck: bool,
+    /// `enableWebSQL`: kept; Verve has none.
+    pub enable_web_sql: bool,
+    /// `v8CacheOptions`: `none`, `code`, `bypassHeatCheck`, `bypassHeatCheckAndEagerCompile`.
+    pub v8_cache_options: String,
+    /// `transparent`.
+    pub transparent: bool,
+}
+
+/// `defaultFontFamily`: the family each generic name of CSS stands for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontFamilies {
+    pub standard: String,
+    pub serif: String,
+    pub sans_serif: String,
+    pub monospace: String,
+    pub cursive: String,
+    pub fantasy: String,
+    pub math: String,
+}
+
+impl Default for FontFamilies {
+    fn default() -> Self {
+        let family = |name: &str| name.to_owned();
+        Self {
+            standard: family("Times New Roman"),
+            serif: family("Times New Roman"),
+            sans_serif: family("Arial"),
+            monospace: family("Courier New"),
+            cursive: family("Script"),
+            fantasy: family("Impact"),
+            math: family("Latin Modern Math"),
+        }
+    }
 }
 
 impl Default for WebPreferences {
@@ -486,6 +625,34 @@ impl Default for WebPreferences {
             allow_running_insecure_content: false,
             images: true,
             context_isolation: true,
+            image_animation_policy: "animate".into(),
+            text_areas_are_resizable: true,
+            webgl: true,
+            plugins: false,
+            experimental_features: false,
+            scroll_bounce: false,
+            offscreen: false,
+            webview_tag: false,
+            safe_dialogs: false,
+            safe_dialogs_message: None,
+            disable_dialogs: false,
+            navigate_on_drag_drop: false,
+            disable_html_fullscreen_window_resize: false,
+            enable_preferred_size_mode: false,
+            enable_blink_features: String::new(),
+            disable_blink_features: String::new(),
+            default_font_family: FontFamilies::default(),
+            default_font_size: 16,
+            default_monospace_font_size: 13,
+            minimum_font_size: 0,
+            default_encoding: "ISO-8859-1".into(),
+            background_throttling: true,
+            autoplay_policy: "no-user-gesture-required".into(),
+            accessible_title: None,
+            spellcheck: true,
+            enable_web_sql: true,
+            v8_cache_options: "code".into(),
+            transparent: true,
         }
     }
 }

@@ -198,6 +198,10 @@ impl Native {
 
     pub fn set_resizable(&self, _: bool) {}
 
+    pub fn set_closable(&self, _: bool) {}
+
+    pub fn set_enabled(&self, _: bool) {}
+
     pub fn set_always_on_top(&self, on: bool) {
         self.on_top.set(on);
         #[cfg(target_os = "macos")]

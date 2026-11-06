@@ -120,8 +120,27 @@ impl RendererGuest {
                 self.loader.answer(call, response);
                 self.pump();
             }
+            ToRenderer::BeforeUnload { call } => self.before_unload(call),
+            ToRenderer::Unload { call } => self.unload(call),
             _ => {}
         }
+    }
+
+    /// The window is closing: `beforeunload` is dispatched, and the answer is told to the main
+    /// process.
+    fn before_unload(&mut self, call: u64) {
+        let proceed = self.document.before_unload(&mut self.runtime);
+        let reply = FromRenderer::BeforeUnloadReply { call, proceed };
+        self.outbox.borrow_mut().push(reply);
+    }
+
+    /// The close goes ahead: `pagehide` and `unload` are dispatched, and the main process is told
+    /// they were.
+    fn unload(&mut self, call: u64) {
+        self.document.unload(&mut self.runtime);
+        self.outbox
+            .borrow_mut()
+            .push(FromRenderer::UnloadReply { call });
     }
 
     /// Evaluates `code` in the page's realm, answering the result as JSON.
@@ -188,11 +207,8 @@ impl RendererGuest {
             .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
         if let Some(folder) = folder {
             let require = self.runtime.global_require_in(&folder);
-            if let Err(error) =
-                verve::native::define_global(self.runtime.context(), "require", require)
-            {
-                verve::report(self.runtime.context(), &error);
-            }
+            let defined = verve::native::define_global(self.runtime.context(), "require", require);
+            api::define::report(self.runtime.context(), defined);
         }
     }
 

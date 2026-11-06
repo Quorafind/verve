@@ -12,13 +12,18 @@ pub(crate) mod ipc_renderer;
 pub(crate) mod message_port_main;
 pub(crate) mod process;
 pub(crate) mod web_frame_main;
+pub(crate) mod web_preferences;
+pub(crate) mod window_events;
+pub(crate) mod window_geometry;
+pub(crate) mod window_lifecycle;
+pub(crate) mod window_methods;
+pub(crate) mod window_options;
+pub(crate) mod windows;
 
-use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
+use boa_engine::{Context, JsResult, JsValue, js_string};
 use verve::native;
 
 use crate::hub::{Hub, RendererHandle};
@@ -26,13 +31,14 @@ use crate::ids::{ContentsId, WindowId};
 use crate::msg::WebPreferences;
 
 /// What the browser process's API keeps between calls: the [`Hub`] every method goes through, and
-/// for each window it made, the object standing for it and the page it shows.
+/// for each window it made, the object standing for it, the page it shows and its cached state.
 pub(crate) struct MainState {
     /// The router every method of the API sends through.
     pub(crate) hub: Arc<Hub>,
     /// The app object's state: its name, paths, switches and where it is in ending.
     pub(crate) app: app::AppState,
-    windows: RefCell<BTreeMap<WindowId, (JsObject, RendererHandle)>>,
+    /// The windows the app made, until their `'closed'` has been heard.
+    pub(crate) windows: windows::Windows,
 }
 
 impl MainState {
@@ -40,65 +46,16 @@ impl MainState {
         Rc::new(Self {
             hub,
             app,
-            windows: RefCell::new(BTreeMap::new()),
+            windows: windows::Windows::default(),
         })
     }
 
-    /// Emits `'close'` on `window`'s object: answers whether a listener prevented the default,
-    /// which keeps the window open.
-    pub(crate) fn emit_close(&self, context: &mut Context, window: WindowId) -> bool {
-        let Some(object) = self.object(window) else {
-            return false;
-        };
-        define::emit_cancelable(context, &object, "close", &[]).unwrap_or_else(|error| {
-            verve::report(context, &error);
-            false
-        })
-    }
-
-    /// A window is gone: the Hub forgets it, its object hears `'closed'` — after the native window
-    /// is destroyed, as in Electron — and is let go. The app is then told whether it was the last.
-    pub(crate) fn window_closed(&self, context: &mut Context, window: WindowId) {
-        let contents = self.hub.contents_of(window);
-        self.hub.remove_window(window);
-        if let Some(object) = self.object(window)
-            && let Err(error) = define::emit(context, &object, "closed", &[])
-        {
-            verve::report(context, &error);
-        }
-        if let Some(contents) = contents {
-            contents_ipc::forget(context, contents);
-        }
-        self.forget(window);
-    }
-
-    /// Keeps `object` as the one standing for `window`, and `page` as the handle on what it shows.
-    /// The object is held until [`MainState::forget`], as Electron keeps a window until it is
-    /// closed: a script that lets go of its last reference still gets `'closed'` on it, and the
-    /// same object back from `getAllWindows` and `fromId`.
-    pub(crate) fn keep(&self, window: WindowId, object: &JsObject, page: RendererHandle) {
-        self.windows
-            .borrow_mut()
-            .insert(window, (object.clone(), page));
-    }
-
-    /// The object standing for `window`, until it is forgotten.
-    pub(crate) fn object(&self, window: WindowId) -> Option<JsObject> {
-        Some(self.windows.borrow().get(&window)?.0.clone())
-    }
-
-    /// The page `window` shows, while the Hub still has the window: once it is gone, a method of
-    /// it throws `Object has been destroyed`, as Electron's does. The Hub's registry is what
-    /// says so, not this one — a window is gone from the moment it closed, its `'closed'`
-    /// listeners included, and this map only lets go of the object after they have all run.
+    /// The page `window` shows, while a script can still use the window: once it is destroyed, a
+    /// method of it throws `Object has been destroyed`, as Electron's does. The record is kept
+    /// until the window's `'closed'` listeners have all run.
     pub(crate) fn page(&self, window: WindowId) -> Option<RendererHandle> {
         self.hub.contents_of(window)?;
-        Some(self.windows.borrow().get(&window)?.1.clone())
-    }
-
-    /// Lets go of what was kept for `window`.
-    pub(crate) fn forget(&self, window: WindowId) {
-        self.windows.borrow_mut().remove(&window);
+        Some(self.windows.live(window)?.page.clone())
     }
 }
 

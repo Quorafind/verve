@@ -245,9 +245,7 @@ pub(crate) fn receive(context: &mut Context, message: ToRenderer) {
         ToRenderer::InvokeReply { call, result } => settle(context, call, result),
         _ => Ok(()),
     };
-    if let Err(error) = heard {
-        verve::report(context, &error);
-    }
+    define::report(context, heard);
 }
 
 fn post_heard(

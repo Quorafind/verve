@@ -14,8 +14,7 @@ use boa_engine::{Context, JsValue};
 use verve::native::{self, js_text};
 
 use super::{emit_quietly, is_heard};
-use crate::api::shared;
-use crate::msg::{ToShell, WindowOp};
+use crate::api::{define, shared, window_lifecycle};
 
 /// Where the app is in ending. A listener may call `app.quit()` or `app.exit()` while an event
 /// is being emitted, so the state is entered before the emit and read again after it.
@@ -55,24 +54,15 @@ pub(crate) fn quit(context: &mut Context) {
     }
     state.app.quit.set(Ending::ClosingWindows);
     // Every window is asked, in this call, as Electron's `CloseAllWindows` does; one that refuses
-    // cancels the quit, and the others close all the same.
-    let mut refused = false;
+    // (a `'close'` listener, or a page that keeps its `beforeunload`) cancels the quit through
+    // `close_prevented`, and the others close all the same.
     for window in windows {
-        if state.emit_close(context, window) {
-            refused = true;
-        } else {
-            state.hub.to_shell(ToShell::Window {
-                window,
-                op: WindowOp::CloseAnswer { prevented: false },
-            });
-        }
-    }
-    if refused && state.app.quit.get() == Ending::ClosingWindows {
-        state.app.quit.set(Ending::Running);
+        window_lifecycle::begin_close(context, window);
     }
 }
 
-/// A window's `'close'` listener called `preventDefault()`: a quit that was waiting on it is off.
+/// A window refused to close (its `'close'` listener called `preventDefault()`, or its page kept
+/// the `beforeunload`): a quit that was waiting on it is off.
 pub(crate) fn close_prevented(context: &mut Context) {
     let quit = &shared(context).app.quit;
     if quit.get() == Ending::ClosingWindows {
@@ -139,9 +129,7 @@ pub(crate) fn finish(context: &mut Context, code: i32, emit_exit: bool) {
     if emit_exit {
         let process = native::global(context, "process").unwrap_or_default();
         let heard = native::invoke(&process, "emit", &[js_text("exit"), code.into()], context);
-        if let Err(error) = heard {
-            verve::report(context, &error);
-        }
+        define::report(context, heard);
     }
     emit_quietly(context, "quit", &[JsValue::from(code)]);
     // The lock goes first: the program started again may be this app, asking for it.

@@ -19,7 +19,7 @@ use verve::vfs::Overlay;
 use crate::ids::{ContentsId, Ids, WindowId};
 use crate::launcher::Start;
 use crate::msg::{
-    AppEvent, FromRenderer, FromShell, GoneReason, PageEvent, RendererView, ToRenderer,
+    AppEvent, Display, FromRenderer, FromShell, GoneReason, PageEvent, RendererView, ToRenderer,
     ToRendererInput, ToShell, WebPreferences,
 };
 use crate::{ElectronOptions, MainGuest, RendererGuest};
@@ -170,6 +170,8 @@ pub struct Hub {
     overlay: Mutex<Option<Arc<dyn Overlay>>>,
     /// Told of every [`FromShell`] before the main process is: how a test watches what a shell says.
     observer: Mutex<Option<ShellObserver>>,
+    /// The displays as the shell last reported them: where a new window opens.
+    displays: Mutex<Vec<Display>>,
 }
 
 /// What [`Hub::observe_shell`] calls.
@@ -194,6 +196,7 @@ impl Hub {
             beats: AtomicU64::new(0),
             overlay: Mutex::new(None),
             observer: Mutex::new(None),
+            displays: Mutex::new(Vec::new()),
         })
     }
 
@@ -421,11 +424,28 @@ impl Hub {
 
     /// What the shell saw: a window shown, closed or resized, the displays changed.
     pub fn from_shell(&self, msg: FromShell) {
+        if let FromShell::Displays(displays) = &msg {
+            self.set_displays(displays.clone());
+        }
         let observer = lock(&self.observer).clone();
         if let Some(observer) = observer {
             observer(&msg);
         }
         self.to_main(move |guest| guest.from_shell(msg));
+    }
+
+    /// Records the displays the shell has: a window the main process makes opens on the primary
+    /// one, and `getBounds()` answers where, before the shell has said.
+    pub fn set_displays(&self, displays: Vec<Display>) {
+        *lock(&self.displays) = displays;
+    }
+
+    /// The display new windows open on: the primary one the shell reported, or a 1920 x 1080
+    /// screen when it has reported none.
+    pub fn primary_display(&self) -> Display {
+        let displays = lock(&self.displays);
+        let primary = displays.iter().find(|d| d.primary).or(displays.first());
+        primary.cloned().unwrap_or_default()
     }
 
     /// Calls `observer` with every message the shell sends the main process, on the thread that
@@ -513,6 +533,13 @@ impl Hub {
         {
             isolate.send(move |guest, _| job(guest));
         }
+    }
+
+    /// Whether page `contents` has an isolate to answer: one that was never made, has been
+    /// retired or has crashed answers nothing.
+    pub fn has_renderer(&self, contents: ContentsId) -> bool {
+        let slot = lock(&self.renderers).get(&contents).cloned();
+        slot.is_some_and(|slot| !slot.gone.load(Ordering::SeqCst) && lock(&slot.isolate).is_some())
     }
 
     /// The view the shell has not read yet. Taken: a view is delivered once.
@@ -750,6 +777,24 @@ mod tests {
         std::thread::sleep(Duration::from_millis(600));
         let lines = lines();
         assert!(!lines.iter().any(|l| l.contains("OLD")), "{lines:?}");
+        hub.shutdown(0);
+    }
+
+    #[test]
+    fn a_page_that_crashed_is_not_asked_anything() {
+        let (hub, shell, _) = app();
+        assert!(wait(|| !shell.windows().is_empty()));
+        let page = shell.windows()[0].contents;
+        hub.to_renderer(
+            page,
+            ToRenderer::Load {
+                url: "data:text/html,x".into(),
+                options: LoadOptions::default(),
+            },
+        );
+        assert!(hub.has_renderer(page));
+        hub.on_renderer(page, |_| panic!("the page broke"));
+        assert!(wait(|| !hub.has_renderer(page)));
         hub.shutdown(0);
     }
 

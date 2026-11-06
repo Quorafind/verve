@@ -79,3 +79,59 @@ fn an_inline_box_has_a_rectangle_per_line() {
         );
     });
 }
+
+#[test]
+fn a_page_keeps_its_window_in_each_way_beforeunload_allows() {
+    // Each script, and whether the page lets the window close after it.
+    let cases = [
+        ("", true),
+        ("addEventListener('beforeunload', () => {})", true),
+        (
+            "addEventListener('beforeunload', (e) => e.preventDefault())",
+            false,
+        ),
+        (
+            "addEventListener('beforeunload', (e) => { e.returnValue = false; })",
+            false,
+        ),
+        (
+            "addEventListener('beforeunload', (e) => { e.returnValue = 'stay'; })",
+            false,
+        ),
+        (
+            "addEventListener('beforeunload', (e) => { e.returnValue = ''; })",
+            true,
+        ),
+        ("onbeforeunload = () => 'stay'", false),
+        ("onbeforeunload = () => false", false),
+        // Any answer but `null` and `undefined` sets the canceled flag, the empty string too.
+        ("onbeforeunload = () => ''", false),
+        ("onbeforeunload = () => undefined", true),
+        ("onbeforeunload = () => null", true),
+    ];
+    for (script, proceeds) in cases {
+        on_page(move || {
+            let mut page = Page::new(Options::default());
+            page.eval(script);
+            let proceed = page.document.before_unload(&mut page.runtime);
+            assert_eq!(proceed, proceeds, "{script}");
+        });
+    }
+}
+
+#[test]
+fn the_return_value_of_a_beforeunload_event_is_text() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        page.eval(
+            r#"window.seen = [];
+               addEventListener('beforeunload', (e) => {
+                 seen.push(JSON.stringify(e.returnValue));
+                 e.returnValue = false;
+                 seen.push(JSON.stringify(e.returnValue));
+               });"#,
+        );
+        page.document.before_unload(&mut page.runtime);
+        assert_eq!(page.eval("seen.join(' ')"), r#""" "false""#);
+    });
+}

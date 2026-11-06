@@ -1,31 +1,43 @@
-//! `BrowserWindow`, as far as P02 needs it: a window with a page, `loadURL`, `webContents.id`
-//! and `'closed'`. P13 makes it the whole of Electron's.
+//! `BrowserWindow`, Electron 39's: a window with a page, its options, its methods, its events and
+//! the statics that find one.
 //!
 //! The window itself lives in the shell, on the OS thread; this object is the handle the main
-//! process's script holds, and every method of it is a message. What it accepts is Electron's
-//! `BrowserWindowConstructorOptions`, read as Electron reads them: leniently, with Electron's
-//! defaults. Like Electron's, the class is native — calling it without `new` throws.
+//! process's script holds, and every method of it is a message or a read of the cached
+//! [state](crate::window_state). What it accepts is Electron's `BrowserWindowConstructorOptions`
+//! ([`window_options`], [`web_preferences`]). Like Electron's, the class is native — calling it
+//! without `new` throws — and `class extends BrowserWindow` works.
+//!
+//! The members are in tables: [`window_methods`] and [`window_geometry`] for the prototype,
+//! [`window_events`] and [`window_lifecycle`] for what the window says and how it ends.
 
-use std::path::PathBuf;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use boa_engine::{Context, JsObject, JsResult, JsValue};
 use verve::events::emitter_init;
-use verve::native::{self, ClassSpec, NewOnly};
+use verve::native::{self, ClassSpec, NewOnly, arg};
 
-use crate::api::define::{self, Args, Fields, Kind};
-use crate::api::{app, contents_ipc, shared};
+use super::contents_ipc::{self, WEB_CONTENTS};
+use super::define::{self, Args, Fields, Kind};
+use super::windows::{Closing, WindowRecord};
+use super::{app, shared, web_preferences, window_methods, window_options};
 use crate::hub::RendererHandle;
 use crate::ids::WindowId;
-use crate::msg::{LoadOptions, ToRenderer, ToShell, WebPreferences, WindowOp, WindowOptions};
+use crate::msg::{LoadOptions, ToRenderer, ToShell, WindowOp};
+use crate::window_state::WindowState;
 
 /// The kind of object a `BrowserWindow` is, in [`define`]'s table.
 pub(crate) const WINDOW: Kind = Kind("BrowserWindow");
 
+/// The window a `BrowserWindow` object stands for, if `value` is one.
+pub(crate) fn window_id_of(value: &JsValue, context: &mut Context) -> Option<WindowId> {
+    define::id_of(value, WINDOW, context)
+}
+
 /// Makes `BrowserWindow`, extending `EventEmitter`, and answers the constructor.
 pub(crate) fn make(context: &mut Context) -> JsResult<JsObject> {
     let emitter = define::emitter(context)?;
-    let (window, _) = native::class(
+    let (window, prototype) = native::class(
         context,
         ClassSpec {
             name: "BrowserWindow",
@@ -35,13 +47,24 @@ pub(crate) fn make(context: &mut Context) -> JsResult<JsObject> {
             methods: &[
                 ("loadURL", 1, load_url),
                 ("loadFile", 1, load_file),
-                ("close", 0, close),
+                ("reload", 0, reload),
+                ("capturePage", 0, |this, _, cx| {
+                    page_of(this, cx)?;
+                    define::rejected(cx, "capturePage")
+                }),
             ],
             accessors: &[("id", id, None), ("webContents", web_contents, None)],
+            statics: &[
+                ("getAllWindows", 0, all_windows),
+                ("getFocusedWindow", 0, focused_window),
+                ("fromId", 1, from_id),
+                ("fromWebContents", 1, from_web_contents),
+                ("fromBrowserView", 1, |_, _, _| Ok(JsValue::null())),
+            ],
             new_only: Some(NewOnly::Native),
-            ..ClassSpec::default()
         },
     )?;
+    window_methods::install(context, &prototype)?;
     Ok(window)
 }
 
@@ -51,23 +74,42 @@ fn init(this: &JsObject, args: &[JsValue], context: &mut Context) -> JsResult<()
     emitter_init(this, &[], context)?;
     let given = args.first().and_then(JsValue::as_object);
     let fields = Fields::new(given.as_ref());
-    let options = window_options(&fields, context)?;
-    let prefs = match fields.object("webPreferences", context)? {
-        Some(object) => web_preferences(&Fields::new(Some(&object)), context)?,
-        None => WebPreferences::default(),
-    };
     let state = shared(context);
+    let mut read = window_options::read(&fields, &state.app.name(), context)?;
+    let preferences = fields.object("webPreferences", context)?;
+    let forced = state.app.sandbox_forced();
+    let prefs = web_preferences::read(&Fields::new(preferences.as_ref()), forced, context)?;
+    // A parent that is destroyed is no parent: `setParentWindow` throws for it, the constructor
+    // leaves it out.
+    let parent = match &read.parent {
+        Some(parent) => window_id_of(&parent.clone().into(), context),
+        None => None,
+    };
+    let parent = parent.filter(|parent| state.windows.live(*parent).is_some());
+    read.options.parent = parent;
+    read.options.modal &= parent.is_some();
     let hub = Arc::clone(&state.hub);
     let (window, contents) = hub.new_window_ids();
     hub.add_window(window, contents);
+    let accessible_title = prefs.accessible_title.clone();
     let page = hub.create_renderer(contents, prefs);
+    let record = record_for(window, this, page, &read, parent, &hub.primary_display());
+    *record.accessible_title.borrow_mut() = accessible_title;
+    state.windows.insert(record);
     define::bind(this, WINDOW, window, context);
-    state.keep(window, this, page);
+    let options = read.options.clone();
     hub.to_shell(ToShell::CreateWindow {
         window,
         contents,
         options,
     });
+    if read.opacity != 1. {
+        let op = WindowOp::SetOpacity(read.opacity);
+        hub.to_shell(ToShell::Window { window, op });
+    }
+    if let Some(record) = state.windows.get(window) {
+        state.follow_modal(&record);
+    }
     // The page's `webContents` is heard of first, then the window that shows it.
     let page = web_contents(&this.clone().into(), &[], context)?;
     app::emit(context, "web-contents-created", &[page])?;
@@ -75,52 +117,46 @@ fn init(this: &JsObject, args: &[JsValue], context: &mut Context) -> JsResult<()
     Ok(())
 }
 
-/// The options P02 reads, over Electron's defaults. A size is an integer, as Electron's
-/// `Integer`; anything else is left at the default.
-fn window_options(fields: &Fields, context: &mut Context) -> JsResult<WindowOptions> {
-    let mut options = WindowOptions::default();
-    options.width = fields.int("width", options.width, context)?;
-    options.height = fields.int("height", options.height, context)?;
-    options.show = fields.bool("show", options.show, context)?;
-    if let Some(title) = fields.string("title", context)? {
-        options.title = title;
+/// The record of a window just made: the state its options give.
+fn record_for(
+    window: WindowId,
+    object: &JsObject,
+    page: RendererHandle,
+    read: &window_options::Read,
+    parent: Option<WindowId>,
+    display: &crate::msg::Display,
+) -> WindowRecord {
+    let mut state = WindowState::new(&read.options, display);
+    for (flag, on) in &read.flags {
+        state.set_flag(*flag, *on);
     }
-    Ok(options)
-}
-
-/// The `webPreferences` P02 reads, over Electron's defaults. `sandbox` is on unless
-/// `nodeIntegration` is, or the app says otherwise.
-fn web_preferences(fields: &Fields, context: &mut Context) -> JsResult<WebPreferences> {
-    let mut prefs = WebPreferences::default();
-    prefs.dev_tools = fields.bool("devTools", prefs.dev_tools, context)?;
-    prefs.node_integration = fields.bool("nodeIntegration", prefs.node_integration, context)?;
-    prefs.node_integration_in_worker = fields.bool(
-        "nodeIntegrationInWorker",
-        prefs.node_integration_in_worker,
-        context,
-    )?;
-    prefs.node_integration_in_sub_frames = fields.bool(
-        "nodeIntegrationInSubFrames",
-        prefs.node_integration_in_sub_frames,
-        context,
-    )?;
-    prefs.preload = fields.string("preload", context)?.map(PathBuf::from);
-    prefs.sandbox = fields.bool("sandbox", !prefs.node_integration, context)?;
-    prefs.partition = fields.string("partition", context)?;
-    prefs.zoom_factor = fields.f64("zoomFactor", prefs.zoom_factor, context)?;
-    prefs.javascript = fields.bool("javascript", prefs.javascript, context)?;
-    prefs.web_security = fields.bool("webSecurity", prefs.web_security, context)?;
-    prefs.allow_running_insecure_content =
-        fields.bool("allowRunningInsecureContent", !prefs.web_security, context)?;
-    prefs.images = fields.bool("images", prefs.images, context)?;
-    prefs.context_isolation = fields.bool("contextIsolation", prefs.context_isolation, context)?;
-    Ok(prefs)
+    state.opacity = read.opacity;
+    if let Some([r, g, b, _]) = read.options.background_color {
+        state.background = [r, g, b];
+    }
+    WindowRecord {
+        id: window,
+        object: object.clone(),
+        page,
+        state: RefCell::new(state),
+        paint_when_hidden: read.paint_when_initially_hidden,
+        modal: read.options.modal,
+        parent: Cell::new(parent),
+        dead: Cell::new(false),
+        closing: Cell::new(Closing::Idle),
+        asked_at: Cell::new(None),
+        contents_destroyed: Cell::new(false),
+        ready: Cell::default(),
+        url: RefCell::default(),
+        accessible_title: RefCell::default(),
+    }
 }
 
 /// `loadURL(url[, options])`, answering a promise. Electron's settles when the page has loaded;
 /// P02's page is parsed on its own thread and nothing tells the main process, so it settles at
-/// once — P13 and P20 make it wait. A `url` that is not a string throws, as Electron's gin
-/// conversion does: a method written in JavaScript there, it reads a missing one as `undefined`.
+/// once — P13's second half makes it wait. A `url` that is not a string throws, as Electron's
+/// gin conversion does: a method written in JavaScript there, it reads a missing one as
+/// `undefined`.
 fn load_url(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let url = Args::new(&[native::arg(args, 0)]).string(0, "url", context)?;
     let (_, page) = page_of(this, context)?;
@@ -165,12 +201,14 @@ fn load_file(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     native::settled(Ok(JsValue::undefined()), context)
 }
 
-fn close(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let (window, _) = page_of(this, context)?;
-    shared(context).hub.to_shell(ToShell::Window {
-        window,
-        op: WindowOp::Close,
-    });
+/// `reload()`: the page's address again.
+fn reload(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let record = window_methods::record_of(this, context)?;
+    let url = record.url.borrow().clone();
+    if !url.is_empty() {
+        let options = LoadOptions::default();
+        record.page.to_renderer(ToRenderer::Load { url, options });
+    }
     Ok(JsValue::undefined())
 }
 
@@ -183,7 +221,8 @@ fn id(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue>
 }
 
 fn web_contents(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    // P13 makes this the `WebContents` class; until then it is the object `contents_ipc` keeps.
+    // P13's second half makes this the `WebContents` class; until then it is the object
+    // `contents_ipc` keeps.
     let (_, page) = page_of(this, context)?;
     Ok(contents_ipc::contents_object(context, page.contents)?.into())
 }
@@ -193,4 +232,42 @@ fn web_contents(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResul
 fn page_of(this: &JsValue, context: &mut Context) -> JsResult<(WindowId, RendererHandle)> {
     let state = shared(context);
     define::live(this, WINDOW, context, |window| state.page(window))
+}
+
+/// `BrowserWindow.getAllWindows()`: the windows a script can use, the newest first.
+fn all_windows(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let windows = shared(context).windows.newest_first();
+    let objects = windows.iter().map(|w| w.object.clone().into()).collect();
+    Ok(native::array(context, objects))
+}
+
+/// `BrowserWindow.getFocusedWindow()`: the window that has the focus, or `null`.
+fn focused_window(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let windows = shared(context).windows.newest_first();
+    let focused = windows.into_iter().find(|w| w.state.borrow().focused);
+    Ok(focused.map_or(JsValue::null(), |w| w.object.clone().into()))
+}
+
+/// `BrowserWindow.fromId(id)`: the window with that id, or `null`.
+fn from_id(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = Args::new(args).f64(0, "id", context)?;
+    let found = shared(context).windows.live(id as WindowId);
+    Ok(found.map_or(JsValue::null(), |w| w.object.clone().into()))
+}
+
+/// `BrowserWindow.fromWebContents(contents)`: the window that shows it; `Object has been
+/// destroyed` for one whose window is gone.
+fn from_web_contents(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(contents) = define::id_of(&arg(args, 0), WEB_CONTENTS, context) else {
+        return Ok(JsValue::null());
+    };
+    let state = shared(context);
+    let window = state
+        .hub
+        .window_of(contents)
+        .ok_or_else(define::destroyed)?;
+    Ok(state
+        .windows
+        .live(window)
+        .map_or(JsValue::null(), |w| w.object.clone().into()))
 }
