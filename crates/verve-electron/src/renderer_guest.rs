@@ -21,7 +21,7 @@ use crate::loader::ElectronLoader;
 use crate::msg::{
     FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
-use crate::{preload, probe};
+use crate::{page_script, preload, probe};
 
 /// One page: the runtime its scripts run in, its document, and what it has yet to tell the main
 /// process.
@@ -37,6 +37,9 @@ pub struct RendererGuest {
     prefs: WebPreferences,
     /// What the page's document is loaded through; the other half is the document's.
     loader: ElectronLoader,
+    /// The address the page last told the main process of, to see when the page moved within
+    /// itself (`location.hash`, `pushState`).
+    url: String,
 }
 
 impl RendererGuest {
@@ -83,6 +86,7 @@ impl RendererGuest {
             contents,
             prefs,
             loader,
+            url: String::new(),
         }
     }
 
@@ -108,8 +112,8 @@ impl RendererGuest {
         self.runtime.set_waker(Some(waker));
     }
 
-    /// What the main process asks of the page. A page's messages, evaluation and the zoom factor
-    /// are P12/P13's.
+    /// What the main process asks of the page: a load, a message, a script to run, a sheet, an
+    /// edit, or to close.
     pub fn apply(&mut self, msg: ToRenderer) {
         match msg {
             ToRenderer::Load { url, .. } => self.load(&url),
@@ -120,6 +124,31 @@ impl RendererGuest {
             ToRenderer::ProtocolResponse { call, response } => {
                 self.loader.answer(call, response);
                 self.pump();
+            }
+            ToRenderer::ExecuteJavaScript {
+                call, code, world, ..
+            } => {
+                let ran = page_script::run(&mut self.runtime, &code, world);
+                // A `window.open` is heard before the script's result, as it is in Electron, where it
+                // has been done by then; a navigation after it, as a page that has gone away says nothing.
+                let (opens, rest): (Vec<_>, Vec<_>) = self
+                    .document
+                    .take_requests()
+                    .into_iter()
+                    .partition(|request| matches!(request, verve_dom::Request::Open { .. }));
+                self.queue(opens);
+                page_script::settle(&mut self.runtime, call, ran);
+                self.queue(rest);
+            }
+            ToRenderer::InsertCss { key, css, user } => {
+                page_script::insert_css(&mut self.runtime, &key, &css, user);
+            }
+            ToRenderer::RemoveCss { key } => page_script::remove_css(&mut self.runtime, &key),
+            ToRenderer::EditCommand(command) => {
+                page_script::edit(&mut self.runtime, &self.document, command);
+            }
+            ToRenderer::ConsoleError { message } => {
+                verve::console_line(self.runtime.context(), Level::Error, message);
             }
             ToRenderer::BeforeUnload { call } => self.before_unload(call),
             ToRenderer::Unload { call } => self.unload(call),
@@ -165,10 +194,9 @@ impl RendererGuest {
         self.document.type_text(&mut self.runtime, text);
     }
 
-    /// What a person did to the window, to the page under it. Pointer, keys, text, scroll and
-    /// focus are P24/P32's: the shell sends none of them while P02's `DomView` draws text and
-    /// nothing else. The boxes a shell measured are the exception, until P30 lays pages out on
-    /// the page's own thread: a headless shell still sends them.
+    /// What a person did to the window, to the page under it: the pointer, the wheel, keys and text
+    /// act on the document ([`page_script::person`]). The boxes a shell measured, the viewport, the
+    /// colour scheme and the frames are the page's own to take; composition and focus are P24/P32's.
     pub fn input(&mut self, msg: ToRendererInput) {
         match msg {
             ToRendererInput::Layout(boxes) => self.document.set_layout(&mut self.runtime, boxes),
@@ -181,7 +209,12 @@ impl RendererGuest {
             ToRendererInput::Frame { now } => {
                 self.document.frame(&mut self.runtime, now);
             }
-            _ => {}
+            other => {
+                let heard = page_script::person(&mut self.runtime, &self.document, other);
+                if let Some(message) = heard {
+                    self.outbox.borrow_mut().push(message);
+                }
+            }
         }
     }
 
@@ -216,13 +249,49 @@ impl RendererGuest {
         self.collect();
     }
 
+    /// What the page asked of the window (a navigation, `window.open`, a dialog) goes to the
+    /// outbox, in the order it happened with the rest.
+    fn queue_requests(&mut self) {
+        let requests = self.document.take_requests();
+        self.queue(requests);
+    }
+
+    fn queue(&mut self, requests: Vec<verve_dom::Request>) {
+        let mut outbox = self.outbox.borrow_mut();
+        for request in requests {
+            outbox.push(match request {
+                verve_dom::Request::Reload => FromRenderer::Reload {
+                    url: self.document.url(),
+                },
+                other => FromRenderer::Dom(other),
+            });
+        }
+    }
+
+    /// A page that is now at another address without a load (`location.hash = …`, `pushState`) has
+    /// navigated within itself: the main process is told as `DidNavigateInPage`.
+    fn report_move_within_page(&mut self) {
+        let now = self.document.url();
+        if self.url.is_empty() || now == self.url {
+            return;
+        }
+        self.url.clone_from(&now);
+        let moved = PageEvent::DidNavigateInPage { url: now };
+        self.outbox
+            .borrow_mut()
+            .push(FromRenderer::Lifecycle(moved));
+    }
+
     /// The stages the document went through, as events of the page's lifecycle, in the page's
     /// ordered outbox.
     fn collect(&mut self) {
         for event in self.document.take_load_events() {
             let event = match event {
                 LoadEvent::Started => PageEvent::DidStartLoading,
-                LoadEvent::Committed(url) => PageEvent::DidNavigate { url },
+                LoadEvent::Committed(url) => {
+                    self.url.clone_from(&url);
+                    PageEvent::DidNavigate { url }
+                }
                 LoadEvent::DomContentLoaded => PageEvent::DomReady,
                 LoadEvent::Loaded => PageEvent::DidFinishLoad,
                 LoadEvent::Failed {
@@ -243,6 +312,7 @@ impl RendererGuest {
                 .borrow_mut()
                 .push(FromRenderer::Lifecycle(event));
         }
+        self.report_move_within_page();
     }
 }
 
@@ -287,17 +357,8 @@ impl Guest for RendererGuest {
 
     fn drain(&mut self, _out: &mut IsolateOutbox<FromRenderer>) {
         self.collect();
-        let mut outbox = self.outbox.borrow_mut();
-        outbox.extend(self.loader.take_outbox());
-        for request in self.document.take_requests() {
-            outbox.push(match request {
-                verve_dom::Request::Reload => FromRenderer::Reload {
-                    url: self.document.url(),
-                },
-                other => FromRenderer::Dom(other),
-            });
-        }
-        drop(outbox);
+        self.outbox.borrow_mut().extend(self.loader.take_outbox());
+        self.queue_requests();
         api::ipc_renderer::flush(self.runtime.context());
     }
 

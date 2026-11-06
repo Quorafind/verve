@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 
 use boa_engine::JsObject;
 
+use super::page_state::PageState;
 use crate::hub::RendererHandle;
-use crate::ids::WindowId;
+use crate::ids::{ContentsId, WindowId};
 use crate::window_state::WindowState;
 
 /// Where a window is in the round trip that closes it.
@@ -67,8 +68,8 @@ pub(crate) struct WindowRecord {
     /// Whether the page's `webContents` has said `'destroyed'`.
     pub contents_destroyed: Cell<bool>,
     pub ready: Cell<Ready>,
-    /// The address the page last committed: what `reload()` loads again.
-    pub url: RefCell<String>,
+    /// The page: where it is, its history and the load it is in.
+    pub page_state: PageState,
     /// `accessibleTitle`, when the window's own is not the title.
     pub accessible_title: RefCell<Option<String>>,
 }
@@ -147,6 +148,21 @@ impl Windows {
             r.closing.get() != Closing::Idle && asked.is_some_and(|at| now >= at + CLOSE_PATIENCE)
         };
         records.values().filter(due).cloned().collect()
+    }
+
+    /// Whether any window can still be used by a script.
+    pub(crate) fn any_live(&self) -> bool {
+        self.records
+            .borrow()
+            .values()
+            .any(|record| !record.dead.get())
+    }
+
+    /// The windows `window.open` made from page `contents`, which go with it unless they outlive it.
+    pub(crate) fn opened_by(&self, contents: ContentsId) -> Vec<Rc<WindowRecord>> {
+        let records = self.records.borrow();
+        let opened = |r: &&Rc<WindowRecord>| r.page_state.opener.get() == Some(contents);
+        records.values().filter(opened).cloned().collect()
     }
 
     /// When the first page still asked about closing runs out of patience.

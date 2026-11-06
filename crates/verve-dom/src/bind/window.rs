@@ -31,10 +31,35 @@ pub(crate) fn http_url(context: &mut Context, href: &str) -> JsResult<url::Url> 
         Some(url) if matches!(url.scheme(), "http" | "https") => Ok(url),
         _ => Err(dom_error(
             context,
-            "只允许有效的 HTTP(S) 目标地址",
+            "Only HTTP(S) addresses are allowed here",
             "SecurityError",
         )),
     }
+}
+
+/// Whether a link with this `target` opens a window of its own: any name but the page's own.
+pub(crate) fn opens_elsewhere(target: &str) -> bool {
+    !matches!(
+        target.trim().to_ascii_lowercase().as_str(),
+        "" | "_self" | "_parent" | "_top"
+    )
+}
+
+/// Asks the embedder to open `url` in the window `target` names (`_blank` is none): a link with a
+/// `target` is a `window.open` and must reach the embedder's say, not load into this window.
+pub(crate) fn open_window(context: &mut Context, url: &str, target: &str) -> JsResult<()> {
+    let name = if target.eq_ignore_ascii_case("_blank") {
+        String::new()
+    } else {
+        target.to_owned()
+    };
+    let open = crate::Request::Open {
+        url: url.to_owned(),
+        name,
+        features: String::new(),
+    };
+    shared(context).borrow_mut().requests.push(open);
+    Ok(())
 }
 
 /// What a page's own navigation to an address it may not go to comes to: Chromium throws
@@ -763,14 +788,24 @@ const WINDOW_FUNCTIONS: &[Method] = &[
     }),
     ("open", 3, |_, args, cx| {
         let url = opt_string(args, 0, cx)?.unwrap_or_default();
-        let resolved = http_url(cx, &url)?.to_string();
         let name = opt_string(args, 1, cx)?.unwrap_or_default();
         let features = opt_string(args, 2, cx)?.unwrap_or_default();
-        shared(cx).borrow_mut().requests.push(crate::Request::Open {
-            url: resolved,
-            name,
-            features,
-        });
+        let base = shared(cx).borrow().base_url();
+        let Ok(resolved) = base.join(&url) else {
+            let message = format!(
+                "Failed to execute 'open' on 'Window': Unable to open a window with invalid URL '{url}'."
+            );
+            return Err(dom_error(cx, &message, "SyntaxError"));
+        };
+        if resolved.scheme() != "javascript" {
+            let url = resolved.to_string();
+            let open = crate::Request::Open {
+                url,
+                name,
+                features,
+            };
+            shared(cx).borrow_mut().requests.push(open);
+        }
         Ok(JsValue::null())
     }),
     ("close", 0, |_, _, _| Ok(JsValue::undefined())),

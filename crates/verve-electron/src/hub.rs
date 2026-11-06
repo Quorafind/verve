@@ -77,8 +77,8 @@ pub struct RendererHandle {
 
 impl RendererHandle {
     /// Sends `msg` to the page.
-    pub fn to_renderer(&self, msg: ToRenderer) {
-        self.hub.to_renderer(self.contents, msg);
+    pub fn to_renderer(&self, msg: ToRenderer) -> bool {
+        self.hub.to_renderer(self.contents, msg)
     }
 }
 
@@ -97,6 +97,11 @@ struct RendererSlot {
     view: Mutex<Option<RendererView>>,
     /// Whether the main process was told the page's process is gone.
     gone: AtomicBool,
+    /// Whether the shell hands the page's keys to the main process first (`before-input-event`).
+    intercept_keys: AtomicBool,
+    /// When each input sent to the page and not yet taken by it was sent, oldest first. Emptied when
+    /// the isolate goes: the jobs it had queued go with it.
+    input: Mutex<std::collections::VecDeque<std::time::Instant>>,
 }
 
 impl RendererSlot {
@@ -354,6 +359,8 @@ impl Hub {
             view: Mutex::new(None),
             gone: AtomicBool::new(false),
             loaded: AtomicBool::new(false),
+            intercept_keys: AtomicBool::new(false),
+            input: Mutex::new(std::collections::VecDeque::new()),
             generation: Arc::new(AtomicU64::new(0)),
         });
         // Registered first: what the page says while its isolate is made is heard.
@@ -405,20 +412,22 @@ impl Hub {
     /// as Chromium gives a new document a new world: the old one is retired (the one place a
     /// page's isolate is torn down) and the new one is made with the same preferences. The first
     /// load of a page uses the isolate it was made with.
-    fn renew_for_navigation(self: &Arc<Self>, contents: ContentsId) {
+    fn renew_for_navigation(self: &Arc<Self>, contents: ContentsId) -> bool {
         let Some(slot) = lock(&self.renderers).get(&contents).cloned() else {
-            return;
+            return false;
         };
         if !slot.loaded.swap(true, Ordering::SeqCst) {
-            return;
+            return false;
         }
         stop(&slot);
+        lock(&slot.input).clear();
         // Nothing the old document said from here on is heard, nor what is said for it.
         slot.generation.fetch_add(1, Ordering::SeqCst);
         *lock(&slot.view) = None;
         // The new page's process may be gone in its turn, and the main process hears of that.
         slot.gone.store(false, Ordering::SeqCst);
         self.spawn_renderer(&slot);
+        true
     }
 
     /// The preferences page `contents` was made with, while it exists.
@@ -552,11 +561,13 @@ impl Hub {
     }
 
     /// Sends `msg` to page `contents`, to run as a job of its isolate.
-    pub fn to_renderer(self: &Arc<Self>, contents: ContentsId, msg: ToRenderer) {
-        if matches!(msg, ToRenderer::Load { .. }) {
-            self.renew_for_navigation(contents);
-        }
+    /// Answers whether the page's isolate was replaced by this (a `Load` of a page that has loaded):
+    /// what the old one was asked will never be answered.
+    pub fn to_renderer(self: &Arc<Self>, contents: ContentsId, msg: ToRenderer) -> bool {
+        let replaced =
+            matches!(msg, ToRenderer::Load { .. }) && self.renew_for_navigation(contents);
         self.on_renderer(contents, move |guest| guest.apply(msg));
+        replaced
     }
 
     /// What a person did to the window, to the page under it: the hot path, and the only
@@ -572,7 +583,26 @@ impl Hub {
             }
             other => other,
         };
-        self.on_renderer(contents, move |guest| guest.input(msg));
+        // Only what a person does is waited for: frames and layouts queued behind a hang are no sign
+        // the page is being asked anything.
+        let by_person = matches!(
+            msg,
+            ToRendererInput::Pointer { .. }
+                | ToRendererInput::Wheel { .. }
+                | ToRendererInput::Key { .. }
+                | ToRendererInput::Text(_)
+        );
+        let slot = lock(&self.renderers).get(&contents).cloned();
+        let slot = slot.filter(|_| by_person && self.has_renderer(contents));
+        if let Some(slot) = &slot {
+            lock(&slot.input).push_back(std::time::Instant::now());
+        }
+        self.on_renderer(contents, move |guest| {
+            guest.input(msg);
+            if let Some(slot) = slot {
+                lock(&slot.input).pop_front();
+            }
+        });
     }
 
     /// The displays the shell last reported.
@@ -634,6 +664,51 @@ impl Hub {
     pub fn has_renderer(&self, contents: ContentsId) -> bool {
         let slot = lock(&self.renderers).get(&contents).cloned();
         slot.is_some_and(|slot| !slot.gone.load(Ordering::SeqCst) && lock(&slot.isolate).is_some())
+    }
+
+    /// How long the oldest input sent to page `contents` has waited for the page to take it, if
+    /// any has: with a script that has run as long, the page is not answering (Chromium's hang rule).
+    pub fn input_waiting_for(&self, contents: ContentsId) -> Option<Duration> {
+        let slot = lock(&self.renderers).get(&contents).cloned()?;
+        let since = lock(&slot.input).front().copied();
+        since.map(|since| since.elapsed())
+    }
+
+    /// How long the script page `contents` runs has been running, when it runs one: what the main
+    /// process's heartbeat reads for `'unresponsive'`.
+    pub fn renderer_busy_for(&self, contents: ContentsId) -> Option<Duration> {
+        let slot = lock(&self.renderers).get(&contents).cloned()?;
+        lock(&slot.isolate).as_ref()?.busy_for()
+    }
+
+    /// Ends page `contents`' process as `forcefullyCrashRenderer()` does: the isolate is dropped, the
+    /// main process hears it crashed (Electron 39.8.10 says `crashed`, not `killed`), and the next
+    /// load makes a new one.
+    pub fn kill_renderer(self: &Arc<Self>, contents: ContentsId) {
+        let Some(slot) = lock(&self.renderers).get(&contents).cloned() else {
+            return;
+        };
+        slot.loaded.store(true, Ordering::SeqCst);
+        if !slot.gone.swap(true, Ordering::SeqCst) {
+            stop(&slot);
+            lock(&slot.input).clear();
+            let generation = slot.generation.load(Ordering::SeqCst);
+            let reason = GoneReason::Crashed;
+            self.from_renderer(contents, generation, FromRenderer::Gone { reason });
+        }
+    }
+
+    /// Whether the shell is to hand page `contents`' keys to the main process before the page.
+    pub fn set_intercept_keys(&self, contents: ContentsId, on: bool) {
+        if let Some(slot) = lock(&self.renderers).get(&contents) {
+            slot.intercept_keys.store(on, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether keys for page `contents` go to the main process first, as [`FromShell::KeyForContents`].
+    pub fn intercepts_keys(&self, contents: ContentsId) -> bool {
+        let slot = lock(&self.renderers).get(&contents).cloned();
+        slot.is_some_and(|slot| slot.intercept_keys.load(Ordering::SeqCst))
     }
 
     /// The view the shell has not read yet. Taken: a view is delivered once.

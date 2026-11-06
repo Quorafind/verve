@@ -22,6 +22,7 @@ pub mod main_guest;
 pub mod msg;
 mod os;
 mod oscrypt;
+mod page_script;
 mod pixels;
 mod preload;
 mod probe;

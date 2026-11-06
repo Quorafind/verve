@@ -1,0 +1,6 @@
+{
+  "name": "web-contents-observe",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.js"
+}

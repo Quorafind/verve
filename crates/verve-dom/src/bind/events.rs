@@ -875,7 +875,13 @@ pub fn click(
                 .join(&href)
                 .map(|u| u.to_string())
                 .unwrap_or(href);
-            super::window::navigate(context, &resolved, false)?;
+            let target =
+                read_dom(context, |dom| dom.get_attr(activator, "target")).unwrap_or_default();
+            if super::window::opens_elsewhere(&target) {
+                super::window::open_window(context, &resolved, &target)?;
+            } else {
+                super::window::navigate(context, &resolved, false)?;
+            }
         }
         _ => {}
     }

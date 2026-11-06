@@ -99,6 +99,22 @@ pub fn emit_cancelable(
     args: &[JsValue],
 ) -> JsResult<bool> {
     let cancel = event(context)?;
+    emit_with_event(context, object, event_name, &cancel, args)
+}
+
+/// [`emit_cancelable`] with an `event` the caller made, to give properties of its own: emits
+/// `event_name` with `event` before `args` and answers whether a listener prevented it.
+///
+/// # Errors
+///
+/// What a listener threw, or an unheard `error`.
+pub fn emit_with_event(
+    context: &mut Context,
+    object: &JsObject,
+    event_name: &str,
+    cancel: &JsObject,
+    args: &[JsValue],
+) -> JsResult<bool> {
     let mut all = vec![JsValue::from(cancel.clone())];
     all.extend_from_slice(args);
     emit(context, object, event_name, &all)?;

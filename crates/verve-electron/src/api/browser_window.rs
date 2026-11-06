@@ -19,11 +19,14 @@ use verve::native::{self, ClassSpec, NewOnly, arg};
 
 use super::contents_ipc::{self, WEB_CONTENTS};
 use super::define::{self, Args, Fields, Kind};
+use super::page_state::PageState;
 use super::windows::{Closing, WindowRecord};
-use super::{app, shared, web_preferences, window_methods, window_options};
+use super::{
+    app, navigation, shared, web_contents, web_preferences, window_methods, window_options,
+};
 use crate::hub::RendererHandle;
 use crate::ids::WindowId;
-use crate::msg::{LoadOptions, ToRenderer, ToShell, WindowOp};
+use crate::msg::{ToShell, WindowOp};
 use crate::window_state::WindowState;
 
 /// The kind of object a `BrowserWindow` is, in [`define`]'s table.
@@ -65,6 +68,7 @@ pub(crate) fn make(context: &mut Context) -> JsResult<JsObject> {
         },
     )?;
     window_methods::install(context, &prototype)?;
+    *shared(context).window_class.borrow_mut() = Some(window.clone());
     Ok(window)
 }
 
@@ -147,68 +151,27 @@ fn record_for(
         asked_at: Cell::new(None),
         contents_destroyed: Cell::new(false),
         ready: Cell::default(),
-        url: RefCell::default(),
+        page_state: PageState::default(),
         accessible_title: RefCell::default(),
     }
 }
 
-/// `loadURL(url[, options])`, answering a promise. Electron's settles when the page has loaded;
-/// P02's page is parsed on its own thread and nothing tells the main process, so it settles at
-/// once — P13's second half makes it wait. A `url` that is not a string throws, as Electron's
-/// gin conversion does: a method written in JavaScript there, it reads a missing one as
-/// `undefined`.
+/// `loadURL(url[, options])`: the promise settles when the page has loaded or failed.
 fn load_url(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let url = Args::new(&[native::arg(args, 0)]).string(0, "url", context)?;
-    let (_, page) = page_of(this, context)?;
-    page.to_renderer(ToRenderer::Load {
-        url,
-        options: LoadOptions::default(),
-    });
-    native::settled(Ok(JsValue::undefined()), context)
+    let record = window_methods::record_of(this, context)?;
+    web_contents::load_url(&record, args, context)
 }
 
 /// `loadFile(path[, { query, search, hash }])`: `loadURL` of the file's `file:` address.
 fn load_file(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let path = Args::new(&[native::arg(args, 0)]).string(0, "filePath", context)?;
-    let given = args.get(1).and_then(JsValue::as_object);
-    let fields = Fields::new(given.as_ref());
-    let search = fields.string("search", context)?;
-    let hash = fields.string("hash", context)?;
-    let query = fields.object("query", context)?;
-    let query = match query {
-        Some(object) => Some(verve::query_string(&object.into(), context)?),
-        None => None,
-    };
-    let base = shared(context).hub.options().app_path.clone();
-    let path = base.join(path);
-    let mut url = url::Url::from_file_path(&path).map_err(|()| {
-        native::type_error(format!(
-            "loadFile: {} is not an absolute path",
-            path.display()
-        ))
-    })?;
-    match (search, query) {
-        (Some(search), _) => url.set_query(Some(search.trim_start_matches('?'))),
-        (None, Some(query)) => url.set_query(Some(&query)),
-        _ => {}
-    }
-    url.set_fragment(hash.as_deref().map(|hash| hash.trim_start_matches('#')));
-    let (_, page) = page_of(this, context)?;
-    page.to_renderer(ToRenderer::Load {
-        url: url.to_string(),
-        options: LoadOptions::default(),
-    });
-    native::settled(Ok(JsValue::undefined()), context)
+    let record = window_methods::record_of(this, context)?;
+    web_contents::load_file(&record, args, context)
 }
 
 /// `reload()`: the page's address again.
 fn reload(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let record = window_methods::record_of(this, context)?;
-    let url = record.url.borrow().clone();
-    if !url.is_empty() {
-        let options = LoadOptions::default();
-        record.page.to_renderer(ToRenderer::Load { url, options });
-    }
+    navigation::reload(context, &record)?;
     Ok(JsValue::undefined())
 }
 
@@ -221,8 +184,6 @@ fn id(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue>
 }
 
 fn web_contents(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    // P13's second half makes this the `WebContents` class; until then it is the object
-    // `contents_ipc` keeps.
     let (_, page) = page_of(this, context)?;
     Ok(contents_ipc::contents_object(context, page.contents)?.into())
 }

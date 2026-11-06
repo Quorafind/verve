@@ -10,6 +10,7 @@ mod paths;
 pub(crate) mod platform;
 pub(crate) mod quit;
 mod system;
+pub(crate) use system::user_agent;
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};

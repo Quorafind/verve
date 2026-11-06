@@ -16,14 +16,15 @@ use verve::isolate::{Guest, InterruptHandle, Outbox};
 use verve::native;
 use verve::{Level, ProcessInfo, Runtime, UncaughtBehavior};
 
-use crate::api::{self, MainState, app, define, window_events, window_lifecycle};
+use crate::api::{
+    self, MainState, app, define, input_events, navigation, page_events, web_contents,
+    window_events, window_lifecycle, window_open,
+};
 use crate::beat;
 use crate::hub::{Hub, Program};
 use crate::ids::{ContentsId, WindowId};
 use crate::launcher::Target;
-use crate::msg::{
-    AppEvent, FromRenderer, FromShell, LoadOptions, PageEvent, ToRenderer, WindowEvent,
-};
+use crate::msg::{AppEvent, FromRenderer, FromShell, PageEvent, WindowEvent};
 use crate::probe;
 
 /// The browser process: its runtime, the API the app's script calls, and what ends the app.
@@ -35,6 +36,8 @@ pub struct MainGuest {
     failed: Option<i32>,
     /// When the collector next looks for `sendSync` events let go without an answer.
     sweep_at: Option<Instant>,
+    /// When the pages are next asked whether they are still answering.
+    beat_at: Instant,
 }
 
 impl MainGuest {
@@ -57,6 +60,7 @@ impl MainGuest {
             api,
             failed: None,
             sweep_at: None,
+            beat_at: Instant::now() + HEARTBEAT,
         }
     }
 
@@ -149,6 +153,13 @@ impl MainGuest {
         define::report(context, heard);
     }
 
+    /// `findInPage`'s `found-in-page`, heard after the call that asked for it returned.
+    pub(crate) fn found_in_page(&mut self, contents: ContentsId, request: u64) {
+        let found = api::contents_stubs::found(self.runtime.context(), contents, request);
+        api::define::report(self.runtime.context(), found);
+        self.runtime.run_microtasks();
+    }
+
     pub(crate) fn all_closed(&mut self) {
         app::quit::all_closed(self.runtime.context());
     }
@@ -180,95 +191,87 @@ impl MainGuest {
                 api::dialog::answered(self.runtime.context(), call, &result);
                 self.runtime.run_microtasks();
             }
+            FromShell::KeyForContents {
+                contents,
+                down,
+                key,
+            } => {
+                input_events::key_for(self.runtime.context(), contents, down, key);
+                self.runtime.run_microtasks();
+            }
             _ => {}
         }
     }
 
-    /// What a page said, told to the window that shows it. What `webContents` reports of a page's
-    /// lifecycle is P13's second half (the window's title and `ready-to-show` are heard now); its
-    /// messages are heard as events at once, each with the microtask checkpoint a task of
-    /// Electron's main process ends with.
+    /// What a page said, told to the window that shows it and heard as the events of its
+    /// `webContents`, each with the microtask checkpoint a task of Electron's main process ends
+    /// with.
     pub fn from_renderer(&mut self, contents: ContentsId, event: FromRenderer) {
+        let context = self.runtime.context();
         match event {
             FromRenderer::Ipc { .. }
             | FromRenderer::Invoke { .. }
             | FromRenderer::SendSync { .. }
             | FromRenderer::Post { .. } => {
-                api::ipc_main::receive(self.runtime.context(), contents, event);
+                api::ipc_main::receive(context, contents, event);
                 self.runtime.run_microtasks();
                 self.sweep_at = api::ipc_main::watch_unanswered(self.runtime.context());
+                return;
             }
             // The window is titled by its page, as in Electron, unless a listener of the window's
             // 'page-title-updated' says otherwise.
             FromRenderer::Dom(verve_dom::Request::Title(title)) => {
-                self.page_event(contents, PageEvent::TitleUpdated(title));
+                page_events::page_event(context, contents, PageEvent::TitleUpdated(title));
             }
-            FromRenderer::Lifecycle(event) => self.page_event(contents, event),
+            FromRenderer::Lifecycle(event) => page_events::page_event(context, contents, event),
             FromRenderer::BeforeUnloadReply { call, proceed } => {
-                let context = self.runtime.context();
                 window_lifecycle::before_unload_reply(context, contents, call, proceed);
-                self.runtime.run_microtasks();
             }
             FromRenderer::UnloadReply { call } => {
-                window_lifecycle::unload_reply(self.runtime.context(), contents, call);
-                self.runtime.run_microtasks();
+                window_lifecycle::unload_reply(context, contents, call);
             }
             // A page that goes to another address (`location.href`, a link, a form) asks the
-            // main process, which lets it.
-            FromRenderer::Reload { url } => self.page_reloads(contents, url),
+            // main process, whose `will-navigate` listeners may refuse.
+            FromRenderer::Dom(verve_dom::Request::Navigate { url, replace }) => {
+                navigation::page_navigates(context, contents, url, replace);
+            }
+            FromRenderer::Dom(verve_dom::Request::Open {
+                url,
+                name,
+                features,
+            }) => window_open::requested(context, contents, (url, name, features)),
+            FromRenderer::Reload { url } => navigation::page_reloads(context, contents, url),
             FromRenderer::PreloadError {
                 path,
                 name,
                 message,
-            } => api::contents_ipc::preload_error(
-                self.runtime.context(),
-                contents,
-                path,
-                name,
-                message,
-            ),
-            // The shell's scaling and `webContents.getZoomFactor` are P13's and P30's; whoever
-            // does them keeps the factor, which nothing here reads.
-            FromRenderer::ZoomChanged(_) => {}
-            FromRenderer::Dom(verve_dom::Request::Navigate { url, .. }) => {
-                self.page_navigates(contents, url);
+            } => api::contents_ipc::preload_error(context, contents, path, name, message),
+            FromRenderer::ZoomChanged(factor) => {
+                web_contents::zoom_changed(context, contents, factor)
             }
-            // `'render-process-gone'` is `webContents`' event, P13's second half; a window that was
-            // closing and has nobody left to ask closes.
+            FromRenderer::ExecuteJavaScriptReply { call, result } => {
+                api::shared(context).calls.answer(context, call, result);
+            }
+            FromRenderer::ContextMenu(params) => {
+                input_events::context_menu(context, contents, params)
+            }
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
-                window_lifecycle::page_gone(self.runtime.context(), contents);
+                page_events::render_process_gone(context, contents, &reason);
             }
-            _ => {}
+            _ => return,
         }
-    }
-
-    /// Page `contents` asks to go to `url`: the main process's say in it. P13 wraps this in
-    /// `will-frame-navigate` and `will-navigate`, which a listener may cancel; until then every
-    /// navigation goes through, and the page is given a document of its own.
-    fn page_navigates(&mut self, contents: ContentsId, url: String) {
-        self.load_for_page(contents, url);
-    }
-
-    /// Page `contents` asks to be loaded again (`location.reload()`): no `will-navigate`, which
-    /// P13 leaves out for a reload as Electron does, and a document of its own all the same.
-    fn page_reloads(&mut self, contents: ContentsId, url: String) {
-        self.load_for_page(contents, url);
-    }
-
-    /// Has page `contents` load `url` in a document of its own.
-    fn load_for_page(&mut self, contents: ContentsId, url: String) {
-        let load = ToRenderer::Load {
-            url,
-            options: LoadOptions::default(),
-        };
-        self.hub.to_renderer(contents, load);
-    }
-
-    /// What a page's lifecycle says, heard as the events of its window and `webContents`.
-    fn page_event(&mut self, contents: ContentsId, event: PageEvent) {
-        window_events::page_event(self.runtime.context(), contents, event);
         self.runtime.run_microtasks();
+    }
+
+    /// Asks the pages whether they still answer, once a [`HEARTBEAT`]; whether it did.
+    fn take_beat(&mut self) -> bool {
+        if Instant::now() < self.beat_at {
+            return false;
+        }
+        self.beat_at = Instant::now() + HEARTBEAT;
+        page_events::heartbeat(self.runtime.context());
+        true
     }
 
     /// A window `destroy()` was called on is gone: its `'closed'` is heard, after the turn of the
@@ -284,6 +287,10 @@ impl MainGuest {
         self.runtime.run_microtasks();
     }
 }
+
+/// How often the pages are asked whether they still answer; one that has been busy for
+/// [`page_events::UNRESPONSIVE_AFTER`] is `'unresponsive'`.
+const HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// The `code` of a thrown error, as `err.code` reads it.
 fn error_code(context: &mut boa_engine::Context, error: &boa_engine::JsError) -> Option<String> {
@@ -348,9 +355,10 @@ impl Guest for MainGuest {
         if self.sweep_at.is_some() {
             self.sweep_at = api::ipc_main::sweep(self.runtime.context());
         }
+        let beat = self.take_beat();
         let closed = window_lifecycle::close_overdue(self.runtime.context());
         let pumped = api::message_port_main::pump(self.runtime.context());
-        if closed || pumped {
+        if beat || closed || pumped {
             self.runtime.run_microtasks();
         }
         if let Some(code) = self.failed {
@@ -367,7 +375,12 @@ impl Guest for MainGuest {
             .windows
             .next_overdue()
             .map(|at| at.saturating_duration_since(Instant::now()));
-        [beat::next_due(&self.runtime), sweep, closing]
+        let pages = self
+            .api
+            .windows
+            .any_live()
+            .then(|| self.beat_at.saturating_duration_since(Instant::now()));
+        [beat::next_due(&self.runtime), sweep, closing, pages]
             .into_iter()
             .flatten()
             .min()

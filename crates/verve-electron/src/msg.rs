@@ -353,6 +353,14 @@ pub enum FromShell {
         call: u64,
         result: DialogResult,
     },
+    /// A key meant for page `contents`, which the shell sends here and not to the page while the main
+    /// process has a `'before-input-event'` listener ([`Hub::intercepts_keys`]); the main process
+    /// passes it on with [`Hub::input`] unless a listener prevents it.
+    KeyForContents {
+        contents: ContentsId,
+        down: bool,
+        key: verve_dom::Key,
+    },
 }
 
 /// What happened to a window.
@@ -490,10 +498,13 @@ pub enum ToRenderer {
         call: u64,
         value: Cloned,
     },
+    /// Runs `code` in the page and answers with [`FromRenderer::ExecuteJavaScriptReply`]; `world` is `0`
+    /// for the page itself, else the isolated world `executeJavaScriptInIsolatedWorld` named.
     ExecuteJavaScript {
         call: u64,
         code: String,
         user_gesture: bool,
+        world: i32,
     },
     SetZoomFactor(f64),
     /// `webContents.postMessage`: a message with the ports the page is given, as `MessagePort`s.
@@ -512,11 +523,65 @@ pub enum ToRenderer {
     BeforeUnload {
         call: u64,
     },
+    /// A line for the page's own console, as an error (what Chromium writes when it refuses a
+    /// `window.open`).
+    ConsoleError {
+        message: String,
+    },
     /// The close goes ahead: dispatch `pagehide` and `unload`, then answer with
     /// [`FromRenderer::UnloadReply`].
     Unload {
         call: u64,
     },
+    /// `webContents.insertCSS`: the sheet goes in under `key`, which the main process chose; `user`
+    /// is `cssOrigin: 'user'`.
+    InsertCss {
+        key: String,
+        css: String,
+        user: bool,
+    },
+    /// `webContents.removeInsertedCSS(key)`.
+    RemoveCss {
+        key: String,
+    },
+    /// One of `webContents`' editing methods, done to what the page has selected or focused.
+    EditCommand(EditCommand),
+}
+
+/// What `webContents` does to the text a page has selected or focused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditCommand {
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    PasteAndMatchStyle,
+    Delete,
+    SelectAll,
+    Unselect,
+    ScrollToTop,
+    ScrollToBottom,
+    InsertText(String),
+}
+
+/// What a page knows of where a context menu was asked for, as `'context-menu'` reports it: the
+/// rest of its `params` the main process fills from the page's address.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ContextMenuParams {
+    pub x: f32,
+    pub y: f32,
+    /// The `href` of the link the pointer is over, resolved.
+    pub link_url: String,
+    pub link_text: String,
+    /// The `src` of an image or media element under the pointer, resolved.
+    pub src_url: String,
+    /// `none`, `image`, `audio`, `video` or `canvas`.
+    pub media_type: String,
+    pub is_editable: bool,
+    pub selection_text: String,
+    pub title_text: String,
+    pub alt_text: String,
 }
 
 /// The answer to a `sendSync`, sent once.
@@ -632,6 +697,8 @@ pub enum FromRenderer {
     },
     /// `webFrame.setZoomFactor` (P21): the page's zoom factor is now this.
     ZoomChanged(f64),
+    /// The page's `contextmenu` event was not prevented: the main process says `'context-menu'`.
+    ContextMenu(ContextMenuParams),
 }
 
 /// What `webPreferences` says of a page. A page is made with these and, when P20 makes its

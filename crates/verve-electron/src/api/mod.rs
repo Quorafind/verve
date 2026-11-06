@@ -6,22 +6,31 @@ pub(crate) mod app;
 pub(crate) mod browser_window;
 pub(crate) mod clipboard;
 pub(crate) mod command_line;
+pub(crate) mod contents_history;
 pub(crate) mod contents_ipc;
+pub(crate) mod contents_page;
+pub(crate) mod contents_stubs;
 pub(crate) mod context_bridge;
 pub mod define;
 pub(crate) mod dialog;
+pub(crate) mod input_events;
 pub(crate) mod ipc_main;
 pub(crate) mod ipc_renderer;
 pub(crate) mod message_port_main;
 pub(crate) mod native_image;
 pub(crate) mod native_theme;
+pub(crate) mod navigation;
 pub(crate) mod notification;
+pub(crate) mod page_calls;
+pub(crate) mod page_events;
+pub(crate) mod page_state;
 pub(crate) mod power;
 pub(crate) mod process;
 pub(crate) mod safe_storage;
 pub(crate) mod screen;
 pub(crate) mod shell;
 pub(crate) mod system_preferences;
+pub(crate) mod web_contents;
 pub(crate) mod web_frame;
 pub(crate) mod web_frame_main;
 pub(crate) mod web_preferences;
@@ -30,6 +39,7 @@ pub(crate) mod window_events;
 pub(crate) mod window_geometry;
 pub(crate) mod window_lifecycle;
 pub(crate) mod window_methods;
+pub(crate) mod window_open;
 pub(crate) mod window_options;
 pub(crate) mod windows;
 
@@ -54,6 +64,12 @@ pub(crate) struct MainState {
     pub(crate) windows: windows::Windows,
     /// The dialogs asked for and not yet answered.
     pub(crate) dialogs: dialog::Pending,
+    /// The scripts asked of pages and not yet answered.
+    pub(crate) calls: page_calls::Calls,
+    /// The legacy `webContents` methods already warned about.
+    pub(crate) deprecated: std::cell::RefCell<Vec<String>>,
+    /// The `BrowserWindow` class, for the windows `window.open` makes.
+    pub(crate) window_class: std::cell::RefCell<Option<boa_engine::JsObject>>,
 }
 
 impl MainState {
@@ -63,6 +79,9 @@ impl MainState {
             app,
             windows: windows::Windows::default(),
             dialogs: dialog::Pending::default(),
+            calls: page_calls::Calls::default(),
+            deprecated: std::cell::RefCell::new(Vec::new()),
+            window_class: std::cell::RefCell::new(None),
         })
     }
 
@@ -72,6 +91,11 @@ impl MainState {
     pub(crate) fn page(&self, window: WindowId) -> Option<RendererHandle> {
         self.hub.contents_of(window)?;
         Some(self.windows.live(window)?.page.clone())
+    }
+
+    /// The record of the window that shows page `contents`, while a script can use it.
+    pub(crate) fn showing(&self, contents: ContentsId) -> Option<Rc<windows::WindowRecord>> {
+        self.windows.live(self.hub.window_of(contents)?)
     }
 }
 
@@ -135,7 +159,9 @@ fn main_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     exports.set(js_string!("BrowserWindow"), window, false, context)?;
     exports.set(js_string!("app"), app::make(context)?, false, context)?;
     ipc_main::add_exports(context, &exports)?;
-    let modules: [(&str, ModuleMaker); 11] = [
+    let modules: [(&str, ModuleMaker); 13] = [
+        ("webContents", web_contents::make_module),
+        ("webFrameMain", web_frame_main::make_module),
         ("dialog", dialog::make),
         ("Notification", notification::make),
         ("shell", shell::make),

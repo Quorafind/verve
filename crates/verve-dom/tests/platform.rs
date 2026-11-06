@@ -16,7 +16,6 @@ fn review_navigation_and_forms_only_queue_http_urls() {
         page.eval(r#"
             for (const url of ['javascript:alert(1)', 'file:///C:/Windows/win.ini', 'data:text/html,x', 'custom:x', 'http://[']) {
                 try { location.href = url; } catch (_) {}
-                try { window.open(url); } catch (_) {}
                 const a = document.createElement('a'); a.href = url;
                 try { a.click(); } catch (_) {}
                 const f = document.createElement('form'); f.action = url;
@@ -37,6 +36,54 @@ fn review_navigation_and_forms_only_queue_http_urls() {
         assert!(matches!(&requests[2], verve_dom::Request::Submit(_)));
         page.eval("f.submit(); f.action = 'file:///C:/Windows/win.ini'");
         assert!(page.document.take_requests().is_empty());
+    });
+}
+
+#[test]
+fn window_open_and_links_with_a_target_ask_the_embedder_for_any_address_but_javascript() {
+    on_page(|| {
+        let mut page = Page::new(Options {
+            url: "file:///app/index.html".into(),
+            ..Options::default()
+        });
+        page.eval(
+            r#"
+            window.open('javascript:alert(1)');
+            window.open('about:blank');
+            window.open('data:text/html,x', 'side', 'width=1');
+            const a = document.createElement('a');
+            a.href = 'https://example.test/x';
+            a.target = '_blank';
+            a.click();
+            a.target = '_self';
+            a.click();
+        "#,
+        );
+        let requests = page.document.take_requests();
+        let opens: Vec<_> = requests
+            .iter()
+            .filter_map(|r| match r {
+                verve_dom::Request::Open {
+                    url,
+                    name,
+                    features,
+                } => Some((url.as_str(), name.as_str(), features.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            opens,
+            [
+                ("about:blank", "", ""),
+                ("data:text/html,x", "side", "width=1"),
+                ("https://example.test/x", "", "")
+            ]
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, verve_dom::Request::Navigate { .. }))
+        );
     });
 }
 

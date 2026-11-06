@@ -287,3 +287,65 @@ pub fn written_by(lines: &[(String, String)], from: &str) -> Vec<String> {
         .map(|(_, text)| text.clone())
         .collect()
 }
+
+/// Runs `body` — the body of an async function in the main process, with `app`, `BrowserWindow`,
+/// `sleep`, `log`, `load(win, html)` and `watch(tag, emitter, names)` at hand — and answers what
+/// the app logged, up to the `DONE` it logs when `body` has finished. A throw is logged as
+/// `THREW <message>`. `files` are written beside the app's script (`win.loadFile('a.html')`); the
+/// body has `timeout` to finish.
+pub fn run_sourced(body: &str, files: &[(&str, &str)], timeout: Duration) -> Vec<(String, String)> {
+    let script = format!(
+        r#"const {{ app, BrowserWindow }} = require('electron');
+app.on('window-all-closed', () => {{}});
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const log = (...parts) => console.log(parts.map((p) => (typeof p === 'string' ? p : p === undefined ? 'undefined' : JSON.stringify(p))).join(' '));
+const load = (win, html) => new Promise((resolve) => {{
+  win.webContents.once('did-finish-load', resolve);
+  win.loadURL('data:text/html,' + encodeURIComponent(html));
+}});
+const watch = (tag, emitter, names) => names.forEach((n) => emitter.on(n, () => log(tag, n)));
+app.whenReady().then(async () => {{
+  try {{
+{body}
+  }} catch (error) {{ log('THREW', error.message); }}
+  log('DONE');
+}});"#
+    );
+    let app = App::launch_script(&script, files);
+    assert!(
+        app.run_until(
+            |app| app.console().iter().any(|line| line == "DONE"),
+            timeout
+        ),
+        "the script did not finish: {:?}",
+        app.console()
+    );
+    let mut lines = console_of(&app);
+    let done = lines
+        .iter()
+        .position(|(who, line)| who == "main" && line == "DONE");
+    lines.truncate(done.unwrap_or(lines.len()));
+    lines
+}
+
+pub fn run_within(body: &str, files: &[(&str, &str)], timeout: Duration) -> Vec<String> {
+    let lines = run_sourced(body, files, timeout);
+    lines.into_iter().map(|(_, text)| text).collect()
+}
+
+/// [`run_within`] for the usual wait.
+pub fn run_with(body: &str, files: &[(&str, &str)]) -> Vec<String> {
+    run_within(body, files, TIMEOUT)
+}
+
+/// [`run_with`] for a test that needs no files.
+pub fn run(body: &str) -> Vec<String> {
+    run_with(body, &[])
+}
+
+/// What the main process logged and nothing else, for a test that must not hear a page's lines
+/// (an uncaught error of the page) as the main process's.
+pub fn run_main(body: &str) -> Vec<String> {
+    let lines = run_sourced(body, &[], TIMEOUT);
+    written_by(&lines, "main")
+}
