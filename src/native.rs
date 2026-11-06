@@ -276,6 +276,31 @@ pub fn list_of(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>>
     (0..length).map(|at| object.get(at, context)).collect()
 }
 
+/// The items of anything `Array.from` takes (an iterable such as a `Set` or a `Map`'s entries
+/// as well as an array-like), as a list. Where [`list_of`] reads only indices, this runs the
+/// iterator.
+pub fn list_from(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
+    let from = context
+        .intrinsics()
+        .constructors()
+        .array()
+        .constructor()
+        .get(js_string!("from"), context)?;
+    let list = crate::call(
+        context,
+        &from,
+        &JsValue::undefined(),
+        std::slice::from_ref(value),
+    )?;
+    let Some(list) = list.as_object() else {
+        return Ok(Vec::new());
+    };
+    let list = JsArray::from_object(list)?;
+    (0..list.length(context)?)
+        .map(|at| list.get(at, context))
+        .collect()
+}
+
 /// A JavaScript array of `items`.
 pub fn array(context: &mut Context, items: Vec<JsValue>) -> JsValue {
     JsArray::from_iter(items, context).into()

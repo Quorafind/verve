@@ -30,6 +30,7 @@ use wasmi::{
     core::{F32, F64, ValType},
 };
 
+use crate::native::{arg, function, hidden, js_text, list_from, object};
 use crate::shared;
 
 /// What a store keeps beside the module's own state: how to reach the realm, and the
@@ -76,47 +77,13 @@ impl std::fmt::Display for Thrown {
 
 impl wasmi::core::HostError for Thrown {}
 
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
-
-fn js_text(text: &str) -> JsValue {
-    JsString::from(text).into()
-}
-
-fn object(context: &mut Context) -> JsObject {
-    JsObject::with_object_proto(context.intrinsics())
-}
-
-fn list_of(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
-    let from = context
-        .intrinsics()
-        .constructors()
-        .array()
-        .constructor()
-        .get(js_string!("from"), context)?;
-    let list = crate::call(
-        context,
-        &from,
-        &JsValue::undefined(),
-        std::slice::from_ref(value),
-    )?;
-    let Some(list) = list.as_object() else {
-        return Ok(Vec::new());
-    };
-    let list = JsArray::from_object(list)?;
-    (0..list.length(context)?)
-        .map(|at| list.get(at, context))
-        .collect()
-}
-
 fn engine(context: &Context) -> Engine {
     let state = shared(context);
     let mut wasm = state.wasm.borrow_mut();
     wasm.engine.get_or_insert_with(Engine::default).clone()
 }
 
-fn instance(context: &Context, id: u32) -> JsResult<Rc<Wasm>> {
+fn wasm_instance(context: &Context, id: u32) -> JsResult<Rc<Wasm>> {
     shared(context)
         .wasm
         .borrow()
@@ -156,24 +123,6 @@ fn wasm_error(context: &mut Context, class: &str, message: &str) -> JsError {
 
 fn link_error(context: &mut Context, message: &str) -> JsError {
     wasm_error(context, "LinkError", message)
-}
-
-fn hidden(
-    target: &JsObject,
-    name: &str,
-    value: impl Into<JsValue>,
-    context: &mut Context,
-) -> JsResult<()> {
-    target.define_property_or_throw(
-        JsString::from(name),
-        PropertyDescriptor::builder()
-            .value(value.into())
-            .writable(true)
-            .enumerable(false)
-            .configurable(true),
-        context,
-    )?;
-    Ok(())
 }
 
 fn hidden_number(target: &JsValue, name: &str, context: &mut Context) -> Option<u32> {
@@ -343,7 +292,7 @@ fn export_function(
     func: Func,
     store: &StoreContextMut<'_, HostData>,
 ) -> JsResult<JsObject> {
-    let wasm = instance(context, wasm_id)?;
+    let wasm = wasm_instance(context, wasm_id)?;
     let index = {
         let mut funcs = wasm.funcs.borrow_mut();
         funcs.push(func);
@@ -358,8 +307,8 @@ fn export_function(
     .length(length)
     .build()
     .into();
-    hidden(&function, "__wasm", wasm_id, context)?;
-    hidden(&function, "__func", index, context)?;
+    hidden(&function, js_string!("__wasm"), wasm_id, context)?;
+    hidden(&function, js_string!("__func"), index, context)?;
     Ok(function)
 }
 
@@ -369,7 +318,7 @@ fn call_export(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let wasm = instance(context, wasm_id)?;
+    let wasm = wasm_instance(context, wasm_id)?;
     let func = wasm.funcs.borrow()[index as usize];
     let ty = with_store(&wasm, |store| func.ty(&store))?;
     let mut prepared = Vec::new();
@@ -438,7 +387,7 @@ fn host_function(store: &mut Store<HostData>, ty: FuncType, import: usize) -> Fu
             // SAFETY: the realm the call into the module was made from, waiting on it.
             let context = unsafe { &mut *context_ptr };
             let wasm_id = caller.data().id;
-            let Ok(wasm) = instance(context, wasm_id) else {
+            let Ok(wasm) = wasm_instance(context, wasm_id) else {
                 return Err(wasmi::Error::new("the instance is gone"));
             };
             let function = caller.data().imports[import].clone();
@@ -469,7 +418,7 @@ fn host_function(store: &mut Store<HostData>, ty: FuncType, import: usize) -> Fu
             let values = match results.len() {
                 0 => Vec::new(),
                 1 => vec![returned],
-                _ => match list_of(&returned, context) {
+                _ => match list_from(&returned, context) {
                     Ok(list) => list,
                     Err(error) => return Err(throw(context, error)),
                 },
@@ -526,7 +475,7 @@ fn compile(bytes: &[u8], context: &mut Context) -> JsResult<JsObject> {
         wasm.modules.len() - 1
     };
     let object = with_proto(context, "Module")?;
-    hidden(&object, "__module", id as u32, context)?;
+    hidden(&object, js_string!("__module"), id as u32, context)?;
     Ok(object)
 }
 
@@ -567,7 +516,7 @@ fn new_wasm(context: &Context) -> (u32, Rc<Wasm>) {
 fn owned(value: &JsValue, kind: &str, context: &mut Context) -> Option<(Rc<Wasm>, usize)> {
     let id = hidden_number(value, "__wasm", context)?;
     let index = hidden_number(value, kind, context)? as usize;
-    Some((instance(context, id).ok()?, index))
+    Some((wasm_instance(context, id).ok()?, index))
 }
 
 fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsResult<JsObject> {
@@ -683,8 +632,8 @@ fn instantiate(module: &Module, imports: &JsValue, context: &mut Context) -> JsR
             .map_err(|e| link_error(context, &e.to_string()))?;
     }
     for (object, kind, index) in rebind {
-        hidden(&object, "__wasm", id, context)?;
-        hidden(&object, kind, index, context)?;
+        hidden(&object, js_string!("__wasm"), id, context)?;
+        hidden(&object, JsString::from(kind), index, context)?;
     }
     // Made, and its start function run.
     let context_ptr: *mut Context = context;
@@ -784,8 +733,8 @@ fn handle(
     index: u32,
 ) -> JsResult<JsObject> {
     let object = with_proto(context, class)?;
-    hidden(&object, "__wasm", id, context)?;
-    hidden(&object, kind, index, context)?;
+    hidden(&object, js_string!("__wasm"), id, context)?;
+    hidden(&object, JsString::from(kind), index, context)?;
     Ok(object)
 }
 
@@ -1186,19 +1135,6 @@ fn describe(module: &Module, exports: bool, context: &mut Context) -> JsResult<J
 
 // ─── Installing it ──────────────────────────────────────────────────────────────────────────
 
-fn function(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
-}
-
 struct ClassSpec<'a> {
     name: &'a str,
     construct: NativeFunctionPointer,
@@ -1207,7 +1143,11 @@ struct ClassSpec<'a> {
     proto_parent: Option<JsObject>,
 }
 
-fn class(context: &mut Context, namespace: &JsObject, spec: ClassSpec<'_>) -> JsResult<JsObject> {
+fn define_class(
+    context: &mut Context,
+    namespace: &JsObject,
+    spec: ClassSpec<'_>,
+) -> JsResult<JsObject> {
     let constructor: JsObject =
         FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(spec.construct))
             .name(JsString::from(spec.name))
@@ -1277,7 +1217,7 @@ fn error_class(context: &mut Context, namespace: &JsObject, name: &'static str) 
         "LinkError" => |this, args, cx| make_error(this, args, cx, "LinkError"),
         _ => |this, args, cx| make_error(this, args, cx, "RuntimeError"),
     };
-    let constructor = class(
+    let constructor = define_class(
         context,
         namespace,
         ClassSpec {
@@ -1334,7 +1274,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         let f = function(context, name, *length, *f);
         namespace.set(JsString::from(*name), f, false, context)?;
     }
-    let module = class(
+    let module = define_class(
         context,
         &namespace,
         ClassSpec {
@@ -1362,7 +1302,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         let f = function(context, name, 1, f);
         module.set(JsString::from(name), f, false, context)?;
     }
-    class(
+    define_class(
         context,
         &namespace,
         ClassSpec {
@@ -1373,7 +1313,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             proto_parent: None,
         },
     )?;
-    class(
+    define_class(
         context,
         &namespace,
         ClassSpec {
@@ -1384,7 +1324,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             proto_parent: None,
         },
     )?;
-    class(
+    define_class(
         context,
         &namespace,
         ClassSpec {
@@ -1395,7 +1335,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             proto_parent: None,
         },
     )?;
-    let global = class(
+    let global = define_class(
         context,
         &namespace,
         ClassSpec {

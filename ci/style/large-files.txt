@@ -8,7 +8,7 @@ src/crypto.rs 2529
 src/dom_events.rs 1829
 src/fetch.rs 1718
 src/fs.rs 1884
-src/indexeddb.rs 2612
+src/indexeddb.rs 2544
 src/intl.rs 1997
 src/network/http.rs 1766
 src/path.rs 1507
