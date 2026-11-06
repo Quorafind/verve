@@ -32,7 +32,9 @@ use crate::{Level, console_line};
 /// current desktop app (1.14), is built on. Plugins check these — Media Extended refuses an
 /// Electron older than 39 — so they match the user agent the embedder gives its `navigator`.
 pub const NODE_VERSION: &str = "22.20.0";
+/// `process.versions.electron`: the Electron release this runtime answers as.
 pub const ELECTRON_VERSION: &str = "39.2.0";
+/// `process.versions.chrome`: the Chromium that Electron release is built on.
 pub const CHROME_VERSION: &str = "142.0.7444.59";
 /// `process.versions.modules`, Node's `NODE_MODULE_VERSION`: the ABI a native addon is built
 /// for. Electron 39 reports 140 (observed on 39.8.10; Node 22 proper is 127).

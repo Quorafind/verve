@@ -161,6 +161,7 @@ pub struct ConsoleLine {
     pub text: String,
 }
 
+/// The severity a console method gives a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
     Log,
@@ -402,6 +403,7 @@ impl Runtime {
         net.permissions = permissions;
     }
 
+    /// The permissions in force now.
     pub fn permissions(&self) -> Permissions {
         shared(&self.context).network.borrow().permissions.clone()
     }
