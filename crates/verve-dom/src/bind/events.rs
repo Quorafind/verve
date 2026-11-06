@@ -290,7 +290,11 @@ const CLASSES: &[EventClass] = &[
         "Event",
         &[("persisted", F::Bool(false))],
     ),
-    ("BeforeUnloadEvent", "Event", &[]),
+    (
+        "BeforeUnloadEvent",
+        "Event",
+        &[("returnValue", F::Text(""))],
+    ),
     (
         "StorageEvent",
         "Event",
@@ -451,6 +455,24 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             Ok(JsValue::undefined())
         })],
         &[],
+    )?;
+    // `returnValue` of a `BeforeUnloadEvent` is a `DOMString` a handler may set: any text but the
+    // empty one keeps the page (`false` is `"false"`), as the idiom in Electron's documentation
+    // has it.
+    let unload = shared(context).borrow().prototype("BeforeUnloadEvent");
+    super::extend_prototype(
+        context,
+        &unload,
+        &[],
+        &[(
+            "returnValue",
+            Some(|this, _, _| verve::dom_events::field_value(this, "returnValue")),
+            Some(|this, args, cx| {
+                let value = arg(args, 0).to_string(cx)?;
+                verve::dom_events::set_field_value(this, "returnValue", value.into())?;
+                Ok(JsValue::undefined())
+            }),
+        )],
     )?;
     install_hooks(context);
     Ok(())

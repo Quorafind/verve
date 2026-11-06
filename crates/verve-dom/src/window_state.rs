@@ -2,7 +2,7 @@
 //! drawing: whether it is in sight or has the keyboard, where the lines of inline boxes were
 //! painted, how a font the page asked for fared, and the flat tree a drawer walks.
 
-use boa_engine::JsValue;
+use boa_engine::{JsValue, js_string};
 
 use crate::bind;
 use crate::dom::NodeId;
@@ -95,6 +95,59 @@ impl Document {
             verve::report(context, &error);
         }
         runtime.run_microtasks();
+    }
+
+    /// The window is about to close: `beforeunload` is dispatched at it. Answers whether the page
+    /// let it go ahead — a handler that called `preventDefault()` or set `returnValue` to text
+    /// kept it.
+    pub fn before_unload(&self, runtime: &mut verve::Runtime) -> bool {
+        let context = runtime.context();
+        let window: JsValue = context.global_object().into();
+        let fired = bind::events::fire_event(
+            context,
+            &window,
+            "BeforeUnloadEvent",
+            "beforeunload",
+            &[],
+            false,
+        );
+        let proceed = match fired {
+            Ok((allowed, event)) => {
+                let value = event
+                    .get(js_string!("returnValue"), context)
+                    .unwrap_or_default();
+                allowed && value.as_string().is_none_or(|text| text.is_empty())
+            }
+            Err(error) => {
+                verve::report(context, &error);
+                true
+            }
+        };
+        runtime.run_microtasks();
+        proceed
+    }
+
+    /// The window closes: `pagehide`, the document going hidden, then `unload`.
+    pub fn unload(&self, runtime: &mut verve::Runtime) {
+        let persisted = [("persisted", JsValue::from(false))];
+        self.fire_at_window(runtime, "PageTransitionEvent", "pagehide", &persisted);
+        self.set_visibility(runtime, true);
+        self.fire_at_window(runtime, "Event", "unload", &[]);
+        runtime.run_microtasks();
+    }
+
+    fn fire_at_window(
+        &self,
+        runtime: &mut verve::Runtime,
+        class: &str,
+        kind: &str,
+        init: &[(&str, JsValue)],
+    ) {
+        let context = runtime.context();
+        let window: JsValue = context.global_object().into();
+        if let Err(error) = bind::events::fire(context, &window, class, kind, init) {
+            verve::report(context, &error);
+        }
     }
 
     /// Whether the window has the keyboard: `document.hasFocus()`, and `focus` or `blur` at the
