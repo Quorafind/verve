@@ -16,14 +16,13 @@ use verve::isolate::{Guest, InterruptHandle, Outbox};
 use verve::native;
 use verve::{Level, ProcessInfo, Runtime, UncaughtBehavior};
 
-use crate::api::{self, MainState, app, define};
+use crate::api::{self, MainState, app, define, window_events, window_lifecycle};
 use crate::beat;
 use crate::hub::{Hub, Program};
 use crate::ids::{ContentsId, WindowId};
 use crate::launcher::Target;
 use crate::msg::{
     AppEvent, FromRenderer, FromShell, LoadOptions, PageEvent, ToRenderer, ToShell, WindowEvent,
-    WindowOp,
 };
 use crate::probe;
 
@@ -146,9 +145,8 @@ impl MainGuest {
     fn emit_process(&mut self, event: &str) {
         let context = self.runtime.context();
         let process = native::global(context, "process").unwrap_or_default();
-        if let Err(error) = native::invoke(&process, "emit", &[native::js_text(event)], context) {
-            verve::report(context, &error);
-        }
+        let heard = native::invoke(&process, "emit", &[native::js_text(event)], context);
+        define::report(context, heard);
     }
 
     pub(crate) fn all_closed(&mut self) {
@@ -175,8 +173,9 @@ impl MainGuest {
     }
 
     /// What a page said, told to the window that shows it. What `webContents` reports of a page's
-    /// lifecycle is P13's; its messages are heard as events at once, each with the microtask
-    /// checkpoint a task of Electron's main process ends with.
+    /// lifecycle is P13's second half (the window's title and `ready-to-show` are heard now); its
+    /// messages are heard as events at once, each with the microtask checkpoint a task of
+    /// Electron's main process ends with.
     pub fn from_renderer(&mut self, contents: ContentsId, event: FromRenderer) {
         match event {
             FromRenderer::Ipc { .. }
@@ -187,16 +186,20 @@ impl MainGuest {
                 self.runtime.run_microtasks();
                 self.sweep_at = api::ipc_main::watch_unanswered(self.runtime.context());
             }
-            // The window is titled by its page, as in Electron; P13 adds 'page-title-updated',
-            // which a listener may cancel.
-            FromRenderer::Dom(verve_dom::Request::Title(title))
-            | FromRenderer::Lifecycle(PageEvent::TitleUpdated(title)) => {
-                if let Some(window) = self.hub.window_of(contents) {
-                    self.hub.to_shell(ToShell::Window {
-                        window,
-                        op: WindowOp::SetTitle(title),
-                    });
-                }
+            // The window is titled by its page, as in Electron, unless a listener of the window's
+            // 'page-title-updated' says otherwise.
+            FromRenderer::Dom(verve_dom::Request::Title(title)) => {
+                self.page_event(contents, PageEvent::TitleUpdated(title));
+            }
+            FromRenderer::Lifecycle(event) => self.page_event(contents, event),
+            FromRenderer::BeforeUnloadReply { call, proceed } => {
+                let context = self.runtime.context();
+                window_lifecycle::before_unload_reply(context, contents, call, proceed);
+                self.runtime.run_microtasks();
+            }
+            FromRenderer::UnloadReply { call } => {
+                window_lifecycle::unload_reply(self.runtime.context(), contents, call);
+                self.runtime.run_microtasks();
             }
             // A page that goes to another address (`location.href`, a link, a form) asks the
             // main process, which lets it.
@@ -204,9 +207,11 @@ impl MainGuest {
             FromRenderer::Dom(verve_dom::Request::Navigate { url, .. }) => {
                 self.page_navigates(contents, url);
             }
-            // `'render-process-gone'` is `webContents`' event, P13's; until then it is said.
+            // `'render-process-gone'` is `webContents`' event, P13's second half; a window that was
+            // closing and has nobody left to ask closes.
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
+                window_lifecycle::page_gone(self.runtime.context(), contents);
             }
             _ => {}
         }
@@ -234,32 +239,23 @@ impl MainGuest {
         self.hub.to_renderer(contents, load);
     }
 
+    /// What a page's lifecycle says, heard as the events of its window and `webContents`.
+    fn page_event(&mut self, contents: ContentsId, event: PageEvent) {
+        window_events::page_event(self.runtime.context(), contents, event);
+        self.runtime.run_microtasks();
+    }
+
+    /// A window `destroy()` was called on is gone: its `'closed'` is heard, after the turn of the
+    /// script that destroyed it.
+    pub(crate) fn window_gone(&mut self, window: WindowId) {
+        self.api.window_closed(self.runtime.context(), window);
+        self.runtime.run_microtasks();
+    }
+
+    /// What the shell saw of a window, heard as its events.
     fn window_event(&mut self, window: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => {
-                // A `'close'` listener may keep the window open with `preventDefault()`; a quit
-                // waiting on the window is off, and the shell is told the answer.
-                let prevented = self.api.emit_close(self.runtime.context(), window);
-                if prevented {
-                    app::quit::close_prevented(self.runtime.context());
-                }
-                self.hub.to_shell(ToShell::Window {
-                    window,
-                    op: WindowOp::CloseAnswer { prevented },
-                });
-            }
-            WindowEvent::Closed => {
-                // The window is gone before its `'closed'` listeners hear of it, as in Electron:
-                // there the native window is already destroyed, so a listener that still holds
-                // the object gets `Object has been destroyed` from any method of it. The object
-                // itself stays until the listeners are done — they are what is being emitted on.
-                let context = self.runtime.context();
-                self.api.window_closed(context, window);
-                app::quit::window_closed(context);
-            }
-            // Shown, focused, resized and the rest are `BrowserWindow`'s events in P13.
-            _ => {}
-        }
+        window_events::shell_event(self.runtime.context(), window, event);
+        self.runtime.run_microtasks();
     }
 }
 
@@ -326,7 +322,9 @@ impl Guest for MainGuest {
         if self.sweep_at.is_some() {
             self.sweep_at = api::ipc_main::sweep(self.runtime.context());
         }
-        if api::message_port_main::pump(self.runtime.context()) {
+        let closed = window_lifecycle::close_overdue(self.runtime.context());
+        let pumped = api::message_port_main::pump(self.runtime.context());
+        if closed || pumped {
             self.runtime.run_microtasks();
         }
         if let Some(code) = self.failed {
@@ -338,10 +336,15 @@ impl Guest for MainGuest {
         let sweep = self
             .sweep_at
             .map(|at| at.saturating_duration_since(Instant::now()));
-        match (beat::next_due(&self.runtime), sweep) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let closing = self
+            .api
+            .windows
+            .next_overdue()
+            .map(|at| at.saturating_duration_since(Instant::now()));
+        [beat::next_due(&self.runtime), sweep, closing]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     fn drain(&mut self, _out: &mut Outbox<()>) {}

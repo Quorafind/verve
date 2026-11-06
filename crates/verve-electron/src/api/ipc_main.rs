@@ -315,9 +315,7 @@ pub(crate) fn receive(context: &mut Context, id: ContentsId, message: FromRender
         } => answer(context, &page, id, call, &channel, &args),
         _ => Ok(()),
     };
-    if let Err(error) = heard {
-        verve::report(context, &error);
-    }
+    define::report(context, heard);
 }
 
 /// A message that is only heard: its event, and the channel on the frame's, the contents' and

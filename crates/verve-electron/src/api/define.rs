@@ -107,6 +107,30 @@ pub fn emit_cancelable(
         .to_boolean())
 }
 
+/// What `result` holds; a throw is reported like any uncaught error of the process that runs this
+/// (the main process, or a page), and is `None`.
+pub fn report<T>(context: &mut Context, result: JsResult<T>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            verve::report(context, &error);
+            None
+        }
+    }
+}
+
+/// [`emit_cancelable`] for an event nobody can answer for, with a listener's throw [`report`]ed
+/// and the event taken as not prevented.
+pub fn emit_reporting(
+    context: &mut Context,
+    object: &JsObject,
+    event_name: &str,
+    args: &[JsValue],
+) -> bool {
+    let result = emit_cancelable(context, object, event_name, args);
+    report(context, result).unwrap_or(false)
+}
+
 /// Marks `object` — the one a constructor's `init` was handed — as an instance of `kind`
 /// standing for `id`.
 pub fn bind(object: &JsObject, kind: Kind, id: u32, context: &mut Context) {
@@ -294,6 +318,23 @@ impl<'a> Args<'a> {
         self.f64(at, name, context)
     }
 
+    /// The `N` numbers the arguments start with, as gin reads them: a missing one is
+    /// `Insufficient number of arguments.`, and a bad one is named by the last of them.
+    pub fn numbers<const N: usize>(&self, context: &mut Context) -> JsResult<[f64; N]> {
+        let mut read = [0.; N];
+        let mut failed = None;
+        for (at, slot) in read.iter_mut().enumerate() {
+            match arg(self.values, at).as_number() {
+                Some(number) => *slot = number,
+                None => failed = Some(at),
+            }
+        }
+        match failed {
+            Some(at) => Err(self.mismatch(at, "", "number", context)),
+            None => Ok(read),
+        }
+    }
+
     /// A boolean, or `default` when the argument is left out. Gin reads any value by its
     /// truthiness; Node's dialect wants a boolean.
     pub fn bool_or(
@@ -420,12 +461,15 @@ impl<'a> Fields<'a> {
     /// The field's integer, or `default`: Electron's options take `Integer`, and a fractional
     /// number is not one — `{ width: 300.7 }` is an 800 pixel window.
     pub fn int(&self, field: &str, default: f32, context: &mut Context) -> JsResult<f32> {
+        Ok(self.int_opt(field, context)?.unwrap_or(default))
+    }
+
+    /// The field's integer, `None` when it is absent, the wrong type or not whole.
+    pub fn int_opt(&self, field: &str, context: &mut Context) -> JsResult<Option<f32>> {
         match self.f64_opt(field, context)? {
-            Some(number) if number.fract() == 0. => Ok(number as f32),
-            Some(number) => Ok(self
-                .wrong::<f32>(field, "integer", &JsValue::new(number), context)?
-                .unwrap_or(default)),
-            None => Ok(default),
+            Some(number) if number.fract() == 0. => Ok(Some(number as f32)),
+            Some(number) => self.wrong::<f32>(field, "integer", &JsValue::new(number), context),
+            None => Ok(None),
         }
     }
 

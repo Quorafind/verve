@@ -23,6 +23,7 @@ pub mod msg;
 mod probe;
 pub mod renderer_guest;
 mod single_instance;
+mod window_state;
 
 use std::path::PathBuf;
 

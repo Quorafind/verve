@@ -306,9 +306,7 @@ fn pump_port(port: &JsObject, context: &mut Context) -> bool {
             Heard::Message(data, ends) => emit_message(port, &data, ends, context),
             Heard::Closed => define::emit(context, port, "close", &[]),
         };
-        if let Err(error) = emitted {
-            verve::report(context, &error);
-        }
+        define::report(context, emitted);
     }
     wake(context);
     heard

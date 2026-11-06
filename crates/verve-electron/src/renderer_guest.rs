@@ -207,11 +207,8 @@ impl RendererGuest {
             .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
         if let Some(folder) = folder {
             let require = self.runtime.global_require_in(&folder);
-            if let Err(error) =
-                verve::native::define_global(self.runtime.context(), "require", require)
-            {
-                verve::report(self.runtime.context(), &error);
-            }
+            let defined = verve::native::define_global(self.runtime.context(), "require", require);
+            api::define::report(self.runtime.context(), defined);
         }
     }
 

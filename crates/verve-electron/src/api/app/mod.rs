@@ -116,6 +116,11 @@ impl AppState {
         self.name.borrow().clone()
     }
 
+    /// Whether `app.enableSandbox()` was called: every window's page is sandboxed then.
+    pub(crate) fn sandbox_forced(&self) -> bool {
+        self.settings.borrow().sandbox
+    }
+
     /// Whether `ready` has been emitted.
     pub(crate) fn is_ready(&self) -> bool {
         self.ready.get()
@@ -168,10 +173,8 @@ pub(crate) fn emit(context: &mut Context, name: &str, args: &[JsValue]) -> JsRes
 /// [`emit`] for an event nobody can answer, with a listener's throw reported like any uncaught
 /// error of the main process.
 pub(crate) fn emit_quietly(context: &mut Context, name: &str, args: &[JsValue]) -> bool {
-    emit(context, name, args).unwrap_or_else(|error| {
-        verve::report(context, &error);
-        false
-    })
+    let app = shared(context).app.object.borrow().clone();
+    app.is_some_and(|app| define::emit_reporting(context, &app, name, args))
 }
 
 /// Whether the app has a listener for `name`.
@@ -234,9 +237,8 @@ pub(crate) fn ready(context: &mut Context) {
     emit_quietly(context, "ready", &[launch_info.into()]);
     let waiters = std::mem::take(&mut *state.app.waiters.borrow_mut());
     for resolve in waiters {
-        if let Err(error) = resolve.call(&JsValue::undefined(), &[], context) {
-            verve::report(context, &error);
-        }
+        let settled = resolve.call(&JsValue::undefined(), &[], context);
+        define::report(context, settled);
     }
     // A quit in the entry was waiting for this.
     if let Some(code) = state.app.pending_exit.take() {

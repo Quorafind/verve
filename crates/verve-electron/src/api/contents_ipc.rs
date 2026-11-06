@@ -36,6 +36,11 @@ pub(crate) const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(JsValue::undefined())
     }),
     ("sendToFrame", 2, send_to_frame),
+    ("isDestroyed", 0, |this, _, cx| {
+        let state = shared(cx);
+        let window = define::id_of(this, WEB_CONTENTS, cx).and_then(|id| state.hub.window_of(id));
+        Ok(state.windows.is_gone(window).into())
+    }),
     ("postMessage", 2, |this, args, cx| {
         let id = open_page(this, cx)?;
         post(cx, id, args)?;
