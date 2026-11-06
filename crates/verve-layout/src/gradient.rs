@@ -323,6 +323,16 @@ fn conic_head(head: &str, units: &Units) -> Option<(f32, [GradientPosition; 2])>
     Some((from, position_pair(&words(at), units)?))
 }
 
+/// The line of a linear gradient at `angle` (CSS's: `0` points up, `90` right) across a box of
+/// `size`: the unit vector it points along (y down), and how long it is, which is as far as the
+/// box reaches along it. The line runs through the box's centre, so a drawer places it there.
+pub fn gradient_line(angle: f32, size: [f32; 2]) -> ([f32; 2], f32) {
+    let radians = angle.to_radians();
+    let direction = [radians.sin(), -radians.cos()];
+    let length = (size[0] * direction[0]).abs() + (size[1] * direction[1]).abs();
+    (direction, length)
+}
+
 impl Gradient {
     pub fn stops(&self) -> &[ColorStop] {
         match self {

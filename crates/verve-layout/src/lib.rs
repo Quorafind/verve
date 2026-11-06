@@ -8,7 +8,10 @@
 
 mod display_list;
 mod gradient;
+mod grid;
 mod measure;
+mod paint_style;
+mod props;
 mod shadow;
 mod transform;
 mod value;
@@ -19,6 +22,6 @@ pub use display_list::{
 };
 pub use gradient::{
     ColorStop, EllipseSize, Extent, Gradient, GradientPosition, LinearDirection, RadialShape,
-    is_gradient,
+    gradient_line, is_gradient,
 };
 pub use measure::{FontKey, FontMetrics, HeadlessMeasurer, PlacedGlyph, ShapedRun, TextMeasurer};
