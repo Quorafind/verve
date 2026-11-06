@@ -164,10 +164,22 @@ impl MainGuest {
         match msg {
             FromShell::Window { window, event } => self.window_event(window, event),
             FromShell::App(AppEvent::Ready) => app::ready(self.runtime.context()),
+            FromShell::Displays(displays) => {
+                api::screen::displays_changed(self.runtime.context(), &displays);
+            }
+            FromShell::App(AppEvent::ThemeChanged { dark }) => {
+                let context = self.runtime.context();
+                api::native_theme::updated(context);
+                app::platform_event(context, AppEvent::ThemeChanged { dark });
+            }
             FromShell::App(AppEvent::SecondInstance { argv, cwd, data }) => {
                 app::second_instance(self.runtime.context(), &argv, &cwd, &data);
             }
             FromShell::App(event) => app::platform_event(self.runtime.context(), event),
+            FromShell::DialogResult { call, result } => {
+                api::dialog::answered(self.runtime.context(), call, &result);
+                self.runtime.run_microtasks();
+            }
             _ => {}
         }
     }

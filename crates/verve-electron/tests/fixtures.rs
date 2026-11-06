@@ -133,11 +133,21 @@ fn menus_and_a_tray_are_built() {
     assert_eq!(app.wait_exit(ENDS_WITHIN), 0);
 }
 
+// Not recorded: real Electron waits for a person at every dialog. The headless shell answers
+// from its presets, and the lines it logs are held to `tests/system_a.rs`.
 #[test]
-#[ignore = "P14: dialogs answered from presets; not recorded, a dialog waiting for a person"]
 fn dialogs_answer_from_the_shells_presets() {
     let app = App::launch(&fixture("dialogs"));
-    assert_eq!(app.wait_exit(ENDS_WITHIN), 0);
+    let code = app.exit_code(ENDS_WITHIN);
+    let lines = written_by(&console_of(&app), "main");
+    let want = [
+        "message box 0 false",
+        "open true []",
+        "save true ",
+        "error box shown",
+    ];
+    assert_eq!(lines, want);
+    assert_eq!(code, Some(0));
 }
 
 #[test]
