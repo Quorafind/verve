@@ -298,4 +298,80 @@ pub struct RendererView { /* P02 原有字段 */ pub display_list: Option<Arc<ve
 
 ## 状态
 
-（实现者完成后填写）
+### 第一阶段：`verve-layout`（无 GPUI、无渲染器接线）
+
+**做了**（步骤 2、3、4、7）：
+
+- `crates/verve-layout`：`TextMeasurer`/`FontKey`/`FontMetrics`/`ShapedRun`/`PlacedGlyph`（形状取 P31 的契约）和无头测量器（每字 0.5em，ascent 0.8em）；
+  CSS 文本读取（切分与函数读取用 verve-dom 导出的 `css::split_slices`/`function_parts`，长度含 `em/rem/vw` 与 `calc()`、线性/径向/锥形渐变及 `repeating-`、`box-shadow`、`transform`/`translate` 的平移部分、
+  网格轨道/命名区域/`grid-area`/`grid-row`/`grid-column`），都有单元测试。
+- 建树：按扁平树（影子 DOM 的宿主与槽位；`<slot>` 无显式 `display` 时按 `contents`）；`none`、`contents`、不在 flex/grid 里的行内元素、表格的行与行组不建盒（flex/grid 容器的行内孩子按规范“块化”，建盒）；绝对定位盒挂到包含块
+  （最近的非 static 或有 transform 的祖先），fixed 挂到视口（或有 transform 的祖先），原位留一个同样式的“幽灵”节点（连尺寸一起，所以 flex/grid 父盒的对齐也算进静态位置），用来给两侧 inset 都是 `auto` 的轴找回静态位置
+  （布局两遍）；竖向百分比 `padding` 在第一遍后换成像素（taffy 0.13 的块条目列表拿高度当基准，是它的缺陷）；`order` 稳定排序；表格按 `colspan`/`rowspan` 摆成网格（列数取最宽的一行，`border-spacing` 作 gap 和外圈 padding，`caption` 占首行）；根元素是 `flow-root`。
+- 整树布局（taffy 0.13，`block_layout float_layout flexbox grid content_size`，关闭取整）；`LayoutEngine::update/rects/rect/client_rects/scroll_extent/scroll_offset(s)/apply_scroll/hit_test/display_list/unsupported`。
+  `apply_scroll` 支持 `To`/`By`/`Reveal`（`scrollIntoView` 自内向外滚各层容器，`smooth` 当作立即）。
+- 摆放：滚动偏移夹取、sticky（相对最近滚动容器的可视区，且不出父盒）、`transform` 平移、页面滚动范围（不含 fixed 与被裁剪的子孙）；每个盒两套矩形：`rect`（视口坐标，脚本读）和
+  `paint_rect`（所在滚动帧的空间，显示列表用）。
+- 层叠上下文与 `DisplayList`：CSS 2.1 附录 E 的简化（见 `paint.rs` 的模块文档）；裁剪、滚动帧与不透明度用“当前打开的效果栈”输出 `PushClip/PopClip/PushScroll/PopScroll/PushOpacity/PopOpacity`，
+  绝对定位盒按包含块链裁剪；画布背景取根元素、没有则取 body；轮廓放在**所属**上下文末尾（不是最近结束的内层上下文）；`Hitbox`（帧内空间的边框盒∩同帧裁剪、`cursor`、`app_region`，
+  `pointer-events:none` 不出）和 `Scroller`；`DisplayList::resolved_hitboxes`/`hit_test` 按 Shell 的预测偏移还原窗口坐标。
+  层叠上下文的触发另含 `isolation: isolate`、`filter`、`mix-blend-mode`、`contain: paint/layout`、`will-change` 对应值（它们也是 fixed/absolute 的包含块，与 `transform` 同）。
+- 测试：`tests/chromium.rs`（21 页无文字的页面，期望值取自 Electron 39.8.10 / Chromium 142 / Windows / DPR 1，视口 800×600；探针脚本在 `tests/chromium/`，README 说明如何重采）和 `tests/behavior.rs`（显示列表、裁剪、
+  不透明度、命中、滚动帧、sticky、fixed、文档变化）。第一轮协调者的中央运行：62 通过 5 失败，已在第二轮修复（渐变角度、页面滚动重复扣减、影子 DOM 探针脚本、竖向百分比 padding）。
+
+**没做 / 已知偏差**：
+
+- **文字与行内（P31）**：文字节点不进布局；`display: inline` 的元素（不在 flex/grid 里时）透明（子元素提升）；`inline-block`/`inline-flex`/`inline-grid` 与替换元素按块级盒参与块流，宽度 `auto` 时不收缩
+  （`inline-block` 映射成 `flow-root`）。`<canvas>`/`<iframe>`/`<video>`/`<embed>`/`<object>`/`<svg>` 默认 300×150，`<img>` 取 `width`/`height` 属性；表单控件的固有尺寸是 P32 的。
+  P31 要在 `tree.rs` 的 `Builder::visit_children` 处接入：现在它逐个访问孩子，P31 在那里把一个块的行内孩子收成游程；行内内容的绘制接在 `paint.rs` 的 `Painter::context`（“P31”注释处，浮动之后、定位盒之前）。
+  `position: relative` 的行内元素是它后代绝对定位盒的包含块，现在因为行内元素不建盒而被跳过——这也交给 P31（行内盒的包含块要用它的第一个行框）。
+- **`::before`/`::after`** 没有 `NodeId`，不建盒（`Snapshot.pseudo` 的生成盒归 P31/P22 的接线）。
+- **表格** 是网格近似：`border-spacing` 以 gap 和外圈 padding 近似；表格宽度 `auto` 时撑满（Chromium 收缩到内容），列宽按 `auto` 轨道分配，没有 `border-collapse: collapse` 的边框合并。
+- **`calc()`** 里长度与百分比混用、`max-content`/`min-content`/`fit-content` 作尺寸：退回 `auto`，计入 `LayoutEngine::unsupported()`。`scale/rotate/skew` 同样计入（盒子不旋转缩放）。
+- **滚动条覆盖式、不占布局**。Chromium 的经典滚动条会占 15px（`overflow: auto` 的容器里子盒宽 185 而不是 200，已观察），探针页因此都写了 `scrollbar-width: none`；
+  带滚动条的真实页面与 Chromium 会差这 15px。`overflow: clip` 当 `hidden`；`html`/`body` 的 `overflow` 不上传给视口（`html { overflow: hidden }` 只是不出页面的 `Scroller`）。
+- **滚动帧**取代契约里的 `PushTranslate`/`PopTranslate`（见上文“契约调整”）：一次滚动只改 `Scroller` 的 offset。不可手动滚动的容器（`overflow: hidden`）的偏移、sticky 位移和 `transform` 平移直接在位置里，
+  所以 Shell 本地预测滚动时，帧内的 sticky 盒随帧一起走，渲染器重新发布才纠正（已知偏差）。滚轮的目标（命中元素向上最近的能滚的帧，链式）是 P32 的事，契约已写在 P30 的“滚动”一节。
+- **整树重建**：`update` 在文档变化时重做整棵 taffy 树（P33 做增量）；滚动只重新摆放。幽灵节点用与真盒相同的样式，但百分比 margin 的基准是它所在的父盒而不是包含块，略有不同。`LayoutEngine::update` 之外的滚动不触发布局。
+- 页面滚动范围不算 `transform` 位移后的盒子。`Fill::Raster` 的栅格化（tiny-skia）在第二阶段；这里只产出 `DisplayList.rasters`（渐变解析结果、尺寸、`ImageKey`）。
+- **不透明度**：没有改 fork（按协调者决定）。核对过 e679b51：`Window::with_element_opacity` 只是把 alpha 乘进此后每个图元的颜色（`paint_quad`、`paint_glyph`… 各自读 `element_opacity`），
+  `Styled::opacity` 走的也是它，所以**没有公开的“分组不透明度”路径，改成 `pub` 的补丁也不会消除偏差**。v1 的行为就是逐图元乘 alpha：重叠的后代各自混合（已知偏差，第二阶段由 `DomElement` 在
+  回放 `PushOpacity` 时实现）。`finish_frame` 的补丁（`crates/gpui/src/text_system.rs:884` `pub(crate) fn finish_frame(&self) {` 改成 `pub fn finish_frame(&self) {`）是 P31 的：工作线程上的 `WindowTextSystem` 缓存释放。
+- **第二轮顺带的范围外改动**：`crates/verve-dom/src/css/syntax.rs` 导出 `split_slices`（借用的切分，反斜杠转义）和 `function_parts`，`css::split_outside` 改为它的包装；verve-layout 用它们，不再自带一份切分/函数读取。
+- 竖向百分比 `padding` 靠“布局两遍”修正；`outline-style: auto`（焦点环）画成实线；`matrix()` 保留平移分量，同时缩放/旋转的算作不支持；gradient 的 `ImageKey` 最高位置 1，与 P35 的图片键分开。
+
+**观察到的 Chromium 行为**（Electron 39.8.10 / Chromium 142.0.7444.265，Windows，DPR 1，隐藏窗口 800×600；探针脚本在 `crates/verve-layout/tests/chromium/`）：
+
+- `display: contents`/`none` 元素的 `getBoundingClientRect()` 是全零；`visibility: hidden` 的元素保留位置。
+- `elementFromPoint` 在没有元素盖住的窗口内一点答复 `html`。
+- 经典滚动条占 15px（见上）；`overflow: scroll` 的 `scrollWidth/Height` 不含滚动条。
+- `aspect-ratio` 加定高、`width: auto` 的块级盒宽度由比例得出（90×60，不是撑满）。
+- `float` 的 `width: auto` 收缩到内容（40px）；`overflow: hidden` 的块包含浮动；`clear: both` 的块落在浮动之下。
+- 边距折叠：兄弟之间取大者，首个子盒的上边距穿过父盒（也穿过影子宿主）；负边距相加。
+- 绝对定位盒在两侧 inset 都是 `auto` 时取静态位置（含 `margin-left` 与 `padding-top`）；包含块是祖先的 padding box，百分比 inset 与尺寸以它为准；`position: relative` 的 `left/top/right/bottom` 只移动自身；
+  static 元素的 inset 无效。
+- sticky 在 `overflow: auto` 的容器里滚动 100px 后 `top: 10px` 的盒子停在 y=10；`bottom: 5px` 的在可视区内时不动。
+- `transform: translate(...)` 改变 `getBoundingClientRect` 和命中，不改变后面盒子的位置；百分比以自身为准。
+- 命名区域的网格里 `1fr` 行吃掉剩余高度（300 − 50 − 40 = 210）。
+- 页面滚动 300px 后：流内盒上移 300，绝对定位盒（包含块是初始包含块）上移 300，fixed 不动，`position: sticky; top: 20px` 停在 y=20；`documentElement` 的 rect 也上移。
+- flex/grid 容器里的 `<span>` 是块级的 flex/grid 项（`<span style="width:16px;height:16px">` 得 16×16 的盒）；`display: inline-block` 的项也块化。
+- `border-spacing: 4px` 的表格：单元格离表格边 4px，间距 4px，表格高 28。
+
+**给其他包**：
+
+- **P31**：`TextMeasurer` 在 `measure.rs`；`BoxProps` 不带文字属性，你在 `props.rs` 里加；`LayoutEngine::measurer()` 取测量器；`DisplayList` 里 `Glyphs`/`Decoration` 已定义未产出。
+- **P32/P34**：`Hitbox` 的形状见“契约调整”；`app_region.rs` 要的矩形来自 `DisplayList::resolved_hitboxes(offset_of)` 里 `app_region` 非空的项（`AppRegionKind::Drag` ↔ P34 的 `AppRegion { rect: bounds, drag: true }`），
+  顺序即绘制顺序（后者覆盖前者）；`no-drag` 后代在 `drag` 祖先之后。键盘与指针的转发桥是 P32 的，这里没有做。滚轮目标见“契约调整”。
+- **P33**：`LayoutEngine::update` 是整树重建，`DisplayList.revision` 在整个进程内唯一，只在列表变了时换新号，内容相同时 `Arc` 不变；一次滚动只让 `Scroller` 的 offset 不同；`chunks` 由你追加。
+- **P35**：`ImageKey` 和 `PaintItem::Image` 已定义；`Fill::Raster` 的 `ImageKey` 来自 `DisplayList.rasters`。
+
+**要跑的测试**（一次一条）：
+
+```
+cargo test --locked -p verve-layout
+cargo clippy --locked -p verve-layout --all-targets -- -D warnings
+```
+
+第二轮还动了 verve-dom，所以也要 `cargo test --locked -p verve-dom --test css`（切分器的行为不变）和 `cargo check --locked -p verve-dom -p verve-electron --all-targets`。
+
+（第二阶段待续：步骤 5、6、8。）
