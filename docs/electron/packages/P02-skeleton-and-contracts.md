@@ -69,9 +69,9 @@ crates/verve-gpui       (lib + bin "electron")
 
 | API | 包 | 说明 |
 |---|---|---|
-| `dialog.show*Sync` | P14 | 对话框在 OS 主线程弹出，主进程线程等结果 |
+| `dialog.show*Sync` | P14 | 对话框在 OS 主线程弹出，主进程线程在 `ToShell::Dialog` 带去的一次性通道（`DialogReply::Sync`）上等结果；Shell 在 GPUI 的 `cx.spawn` 里等对话框的 future，不阻塞消息循环；父窗口已销毁或 Shell 在退出时发 `DialogResult::Closed`，主进程当作取消；阻塞期间到达的 `FromShell`/`FromRenderer` 照常排队，对话框返回后处理 |
 | `globalShortcut.register` / `isRegistered` | P15 | 等 Shell 注册结果，500 ms 超时后按失败处理 |
-| `clipboard.*`（若走 Shell） | P14 | 推荐直接用 arboard 在主进程线程完成，不走 Shell |
+| `clipboard.*`（若走 Shell） | P14 | 不走 Shell：主进程线程直接调用系统剪贴板（Windows 用 `windows-sys`），所以不在此例外内 |
 
 新增例外必须先改这张表。
 
@@ -96,7 +96,18 @@ pub enum ToShell {
     Quit { exit_code: i32 },
     /// `dialog.showErrorBox`：主进程未捕获的错误弹的框（P10 加；P14 画，之前 Shell 只记录）。
     ErrorBox { title: String, content: String },
+    /// P14：对话框。`call` 对应 `FromShell::DialogResult`；`reply` 为 `Sync` 时答复写进它的通道。
+    Dialog { call: u64, parent: Option<WindowId>, spec: DialogSpec, reply: DialogReply },
+    /// P14：`nativeTheme.themeSource`，让 Shell 切换窗口的亮暗标题栏。
+    SetThemeSource(ThemeSource),
 }
+
+/// P14：`DialogSpec::{Open, Save, MessageBox}`、`DialogReply::{Async, Sync(SyncSender<DialogResult>)}`、
+/// `DialogResult::{Open{canceled, file_paths}, Save{canceled, file_path}, MessageBox{response, checkbox_checked}, Closed}`、
+/// `ThemeSource::{System, Light, Dark}`。字段以 `crates/verve-electron/src/msg.rs` 为准，与 P14 文档第 2 节的草稿不同处：
+/// 路径一律 `String`（`default_path`；`DialogResult` 里的 `file_paths: Vec<String>`、`file_path: Option<String>`），不是 `Option<PathBuf>`；
+/// `MessageBox.default_id: i32`（`-1` 为没指定）；没有 `bookmarks` 和 `normalize_access_keys`（按钮文字在 `api/dialog.rs` 里已按平台处理）；
+/// 没有 `DialogSpec::ErrorBox`（用 `ToShell::ErrorBox`）；没有 `ToShell::Notification` 和 `FromShell::Theme`/`ThemeState`。
 
 pub struct WindowOptions {
     pub width: f32, pub height: f32,            // 默认 800 x 600
@@ -140,6 +151,7 @@ pub enum FromShell {
     App(AppEvent),
     MenuClicked { menu_item: u32, window: Option<WindowId> },     // P15
     Displays(Vec<Display>),                                       // screen 模块缓存（P14）
+    DialogResult { call: u64, result: DialogResult },             // P14：异步对话框的答复
 }
 
 pub enum WindowEvent {
@@ -277,6 +289,7 @@ pub struct RendererView {
 | `ToRendererInput::{Drag, Paste, ClipboardContents}` | P24 |
 | `CompositionEvent` 具体化为 `Update { text, selection } \| Commit \| Cancel` | P24 |
 | `ToRenderer::Post { channel, message, ports }`、`FromRenderer::Post { channel, message, ports }`（`ipcRenderer.postMessage` / `webContents.postMessage`：带端口的消息；端口是 `verve::messaging::PortEnd`） | P12 |
+| `ToShell::Dialog { call, parent, spec, reply }`、`ToShell::SetThemeSource(ThemeSource)`、`FromShell::DialogResult { call, result }`，及 `DialogSpec`/`DialogReply`/`DialogResult`/`ThemeSource`（`msg.rs` 末尾，字段以它为准；`DialogReply::Sync` 带 `SyncSender<DialogResult>`）。`FromShell::Displays` 由 Hub 存下（`Hub::displays()`），主进程按需读取，所以启动时先于主进程发出的不会丢 | P14 |
 | 内核：`verve::isolate::Isolate::poker`（唤醒 isolate 线程）、`ClassSpec::new_only`、`verve::events::{emitter_class, emitter_init}` 公开 | P02 |
 
 verve-dom 侧的配套改动（由 P20/P23/P24 在 verve-dom 内完成）：`Request::Open(String)` → `Open { url, name, features }`；
