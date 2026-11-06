@@ -13,6 +13,7 @@ pub(crate) mod contents_stubs;
 pub(crate) mod context_bridge;
 pub mod define;
 pub(crate) mod dialog;
+pub(crate) mod global_shortcut;
 pub(crate) mod input_events;
 pub(crate) mod ipc_main;
 pub(crate) mod ipc_renderer;

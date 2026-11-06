@@ -17,8 +17,8 @@ use verve::native;
 use verve::{Level, ProcessInfo, Runtime, UncaughtBehavior};
 
 use crate::api::{
-    self, MainState, app, define, input_events, menu_state, navigation, page_events, web_contents,
-    window_events, window_lifecycle, window_open,
+    self, MainState, app, define, global_shortcut, input_events, menu_state, navigation,
+    page_events, web_contents, window_events, window_lifecycle, window_open,
 };
 use crate::beat;
 use crate::hub::{Hub, Program};
@@ -212,8 +212,12 @@ impl MainGuest {
                 menu_state::will_close(self.runtime.context(), menu, call);
                 self.runtime.run_microtasks();
             }
-            // Trays and global shortcuts follow.
-            FromShell::Tray { .. } | FromShell::TrayBounds { .. } | FromShell::Shortcut { .. } => {}
+            // Trays follow.
+            FromShell::Tray { .. } | FromShell::TrayBounds { .. } => {}
+            FromShell::Shortcut { id } => {
+                global_shortcut::pressed(self.runtime.context(), id);
+                self.runtime.run_microtasks();
+            }
             FromShell::KeyForContents {
                 contents,
                 down,

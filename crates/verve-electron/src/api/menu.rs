@@ -478,6 +478,8 @@ pub(crate) fn add_exports(context: &mut Context, exports: &JsObject) -> JsResult
     exports.set(js_string!("Menu"), menu, false, context)?;
     let item = menu_item::make(context)?;
     exports.set(js_string!("MenuItem"), item, false, context)?;
+    let shortcut = super::global_shortcut::make(context)?;
+    exports.set(js_string!("globalShortcut"), shortcut, false, context)?;
     Ok(())
 }
 
