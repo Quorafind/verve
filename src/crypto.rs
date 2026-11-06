@@ -12,8 +12,7 @@
 //! Public-key cryptography — RSA, elliptic curves, Ed25519 — is not here: asking for it answers
 //! a `NotSupportedError` (web) or throws `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM` (Node).
 
-use std::cell::RefCell;
-
+pub mod primitives;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
 use boa_engine::{
     Context, Finalize, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue,
@@ -23,6 +22,7 @@ use boa_engine::{
 };
 use ghash::universal_hash::UniversalHash;
 use sha2::digest::DynDigest;
+use std::cell::RefCell;
 
 use crate::native::{
     arg, array, closure, coded_error, function, get, hidden, js_text, methods, object, text_of,
