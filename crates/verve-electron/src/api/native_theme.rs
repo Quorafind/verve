@@ -97,7 +97,6 @@ pub(crate) fn updated(context: &mut Context) {
         return;
     }
     let object = theme.object.clone();
-    if let Err(error) = define::emit(context, &object, "updated", &[]) {
-        verve::report(context, &error);
-    }
+    let emitted = define::emit(context, &object, "updated", &[]);
+    define::report(context, emitted);
 }

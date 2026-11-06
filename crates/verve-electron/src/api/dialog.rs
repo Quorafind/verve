@@ -517,12 +517,7 @@ pub(crate) fn answered(context: &mut Context, call: u64, result: &DialogResult) 
     let Some((asked, resolvers)) = waiting else {
         return;
     };
-    let outcome = async_value(context, asked, result).and_then(|value| {
-        resolvers
-            .resolve
-            .call(&JsValue::undefined(), &[value], context)
-    });
-    if let Err(error) = outcome {
-        verve::report(context, &error);
-    }
+    let outcome = async_value(context, asked, result)
+        .and_then(|value| define::settle(context, &resolvers, Ok(value)));
+    define::report(context, outcome);
 }

@@ -57,13 +57,12 @@ impl Calls {
         let Some((_, settle)) = self.waiting.borrow_mut().remove(&call) else {
             return;
         };
-        let (function, value) = match result {
-            Ok(value) => (&settle.resolve, value.to_value(context)),
-            Err(error) => (&settle.reject, error.to_value(context)),
+        let outcome = match result {
+            Ok(value) => Ok(value.to_value(context).unwrap_or_default()),
+            Err(error) => Err(error.to_value(context).unwrap_or_default()),
         };
-        let value = value.unwrap_or_default();
-        let called = function.call(&JsValue::undefined(), &[value], context);
-        super::define::report(context, called);
+        let settled = super::define::settle(context, &settle, outcome);
+        super::define::report(context, settled);
     }
 
     /// Page `contents` is gone: what it was asked fails.

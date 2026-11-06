@@ -107,9 +107,7 @@ pub(crate) fn preload_error(
         let args = [event.into(), js_text(&path), error.into()];
         define::emit(context, &object, "preload-error", &args)
     })();
-    if let Err(error) = emitted {
-        verve::report(context, &error);
-    }
+    define::report(context, emitted);
 }
 
 /// The objects of page `id`, if they were made and the page has not been forgotten.

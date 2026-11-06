@@ -11,7 +11,6 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use boa_engine::{Context, JsValue};
-use verve::native::{self, js_text};
 
 use super::{emit_quietly, is_heard};
 use crate::api::{define, shared, window_lifecycle};
@@ -127,9 +126,7 @@ pub(crate) fn finish(context: &mut Context, code: i32, emit_exit: bool) {
         state.window_closed(context, window);
     }
     if emit_exit {
-        let process = native::global(context, "process").unwrap_or_default();
-        let heard = native::invoke(&process, "emit", &[js_text("exit"), code.into()], context);
-        define::report(context, heard);
+        define::emit_process(context, "exit", &[code.into()]);
     }
     emit_quietly(context, "quit", &[JsValue::from(code)]);
     // The lock goes first: the program started again may be this app, asking for it.

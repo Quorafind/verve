@@ -62,9 +62,8 @@ pub(crate) fn displays_changed(context: &mut Context, displays: &[Display]) {
     if before.is_empty() {
         return;
     }
-    if let Err(error) = emit_differences(context, &screen, &before, displays) {
-        verve::report(context, &error);
-    }
+    let emitted = emit_differences(context, &screen, &before, displays);
+    define::report(context, emitted);
 }
 
 fn emit_differences(
