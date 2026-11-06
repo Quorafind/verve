@@ -11,14 +11,11 @@
 use boa_engine::{
     Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string,
     native_function::NativeFunctionPointer,
-    object::{
-        FunctionObjectBuilder,
-        builtins::{JsArrayBuffer, JsUint8Array},
-    },
+    object::builtins::{JsArrayBuffer, JsUint8Array},
     property::Attribute,
 };
 
-use crate::native::{arg, function, text_of, type_error};
+use crate::native::{arg, constructor, function, text_of, type_error};
 
 // ─── Base64 and the rest ────────────────────────────────────────────────────────────────────
 
@@ -391,20 +388,6 @@ fn with_prototype(
 /// A `Uint8Array` of `bytes`, made a `Buffer` (see `crate::buffer`).
 pub(crate) fn make_buffer(context: &mut Context, bytes: Vec<u8>) -> JsResult<JsValue> {
     crate::buffer::make(context, bytes)
-}
-
-fn constructor(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .constructor(true)
-        .build()
-        .into()
 }
 
 pub(crate) fn install(context: &mut Context) -> JsResult<()> {

@@ -21,11 +21,14 @@ use boa_engine::{
         FunctionObjectBuilder,
         builtins::{JsArray, JsArrayBuffer, JsDate, JsMap, JsSet, JsUint8Array},
     },
-    property::{Attribute, PropertyDescriptor},
+    property::Attribute,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::native::{arg, function, hidden, js_text, list_from, object, text_of};
+use crate::native::{
+    PlainClass, arg, define_global, function, hidden, js_text, list_from, object, plain_class,
+    text_of, type_error,
+};
 use crate::shared;
 
 // ─── Keys and values, in Rust ───────────────────────────────────────────────────────────────
@@ -2347,98 +2350,58 @@ const RANGE_METHODS: &[(&str, usize, NativeFunctionPointer)] =
 
 // ─── Installing it ──────────────────────────────────────────────────────────────────────────
 
-fn define_class(
+/// An `IDB*` interface: a global that cannot be constructed, on `parent`'s prototype.
+fn define_interface(
     context: &mut Context,
     name: &str,
     parent: Option<&JsObject>,
     methods: &[(&str, usize, NativeFunctionPointer)],
     getters: &[(&str, NativeFunctionPointer)],
 ) -> JsResult<JsObject> {
-    let constructor: JsObject = FunctionObjectBuilder::new(
-        context.realm(),
-        NativeFunction::from_fn_ptr(|_, _, _| {
-            Err(JsNativeError::typ()
-                .with_message("Illegal constructor")
-                .into())
-        }),
-    )
-    .name(JsString::from(name))
-    .constructor(true)
-    .build()
-    .into();
-    let prototype = object(context);
-    if let Some(parent) = parent {
-        prototype.set_prototype(Some(parent.clone()));
-    }
-    for (method, length, f) in methods {
-        let f = function(context, method, *length, *f);
-        prototype.define_property_or_throw(
-            JsString::from(*method),
-            PropertyDescriptor::builder()
-                .value(f)
-                .writable(true)
-                .enumerable(false)
-                .configurable(true),
-            context,
-        )?;
-    }
-    for (getter, f) in getters {
-        let f = function(context, &format!("get {getter}"), 0, *f);
-        prototype.define_property_or_throw(
-            JsString::from(*getter),
-            PropertyDescriptor::builder()
-                .get(f)
-                .enumerable(true)
-                .configurable(true),
-            context,
-        )?;
-    }
-    constructor.define_property_or_throw(
-        js_string!("prototype"),
-        PropertyDescriptor::builder()
-            .value(prototype.clone())
-            .writable(false)
-            .enumerable(false)
-            .configurable(false),
+    let (class, prototype) = plain_class(
         context,
+        PlainClass {
+            name,
+            construct: |_, _, _| Err(type_error("Illegal constructor")),
+            length: 0,
+            parent: parent.cloned(),
+            methods,
+            getters,
+        },
     )?;
-    context.register_global_property(
-        JsString::from(name),
-        constructor.clone(),
-        Attribute::WRITABLE | Attribute::CONFIGURABLE,
-    )?;
+    define_global(context, name, class)?;
     Ok(prototype)
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let target = define_class(context, "IDBEventTarget", None, TARGET_METHODS, &[])?;
-    let request = define_class(context, "IDBRequest", Some(&target), &[], &[])?;
-    define_class(context, "IDBOpenDBRequest", Some(&request), &[], &[])?;
-    define_class(
+    let target = define_interface(context, "IDBEventTarget", None, TARGET_METHODS, &[])?;
+    let request = define_interface(context, "IDBRequest", Some(&target), &[], &[])?;
+    define_interface(context, "IDBOpenDBRequest", Some(&request), &[], &[])?;
+    define_interface(
         context,
         "IDBDatabase",
         Some(&target),
         DATABASE_METHODS,
         DATABASE_GETTERS,
     )?;
-    define_class(
+    define_interface(
         context,
         "IDBTransaction",
         Some(&target),
         TRANSACTION_METHODS,
         TRANSACTION_GETTERS,
     )?;
-    let store = define_class(
+    let store = define_interface(
         context,
         "IDBObjectStore",
         None,
         STORE_METHODS,
         STORE_GETTERS,
     )?;
-    define_class(context, "IDBIndex", Some(&store), &[], &[])?;
-    let cursor = define_class(context, "IDBCursor", None, CURSOR_METHODS, &[])?;
-    define_class(context, "IDBCursorWithValue", Some(&cursor), &[], &[])?;
-    define_class(context, "IDBKeyRange", None, RANGE_METHODS, &[])?;
+    define_interface(context, "IDBIndex", Some(&store), &[], &[])?;
+    let cursor = define_interface(context, "IDBCursor", None, CURSOR_METHODS, &[])?;
+    define_interface(context, "IDBCursorWithValue", Some(&cursor), &[], &[])?;
+    define_interface(context, "IDBKeyRange", None, RANGE_METHODS, &[])?;
     let range_class = context
         .global_object()
         .get(js_string!("IDBKeyRange"), context)?;

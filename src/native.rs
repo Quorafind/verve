@@ -555,6 +555,74 @@ pub fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, 
     Ok((class, prototype))
 }
 
+/// A native function `name` of `length` parameters that `new` can call.
+pub fn constructor(
+    context: &mut Context,
+    name: &str,
+    length: usize,
+    f: NativeFunctionPointer,
+) -> JsObject {
+    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
+        .name(JsString::from(name))
+        .length(length)
+        .constructor(true)
+        .build()
+        .into()
+}
+
+/// A plain class, as WebIDL interfaces are: what [`plain_class`] makes.
+///
+/// Unlike [`class`] it is not wrapped in a `Proxy`, so it cannot be called without `new` or
+/// extended through `Foo.call(this)`; its methods are not listed and its getters are.
+pub struct PlainClass<'a> {
+    pub name: &'a str,
+    pub construct: NativeFunctionPointer,
+    /// The constructor's `length`.
+    pub length: usize,
+    /// The prototype the class's own inherits, `Object.prototype` when none.
+    pub parent: Option<JsObject>,
+    pub methods: &'a [(&'a str, usize, NativeFunctionPointer)],
+    pub getters: &'a [(&'a str, NativeFunctionPointer)],
+}
+
+/// The constructor and prototype of a [`PlainClass`], linked both ways. Putting the constructor
+/// somewhere (a global, a namespace) is the caller's.
+pub fn plain_class(context: &mut Context, spec: PlainClass<'_>) -> JsResult<(JsObject, JsObject)> {
+    let class = constructor(context, spec.name, spec.length, spec.construct);
+    let prototype = object(context);
+    if let Some(parent) = spec.parent {
+        prototype.set_prototype(Some(parent));
+    }
+    methods(context, &prototype, spec.methods)?;
+    for (name, f) in spec.getters {
+        let getter = function(context, &format!("get {name}"), 0, *f);
+        prototype.define_property_or_throw(
+            JsString::from(*name),
+            PropertyDescriptor::builder()
+                .get(getter)
+                .enumerable(true)
+                .configurable(true),
+            context,
+        )?;
+    }
+    hidden(
+        &prototype,
+        js_string!("constructor"),
+        class.clone(),
+        context,
+    )?;
+    class.define_property_or_throw(
+        js_string!("prototype"),
+        PropertyDescriptor::builder()
+            .value(prototype.clone())
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
+        context,
+    )?;
+    Ok((class, prototype))
+}
+
 /// `value` as the global `name`, writable and configurable so an embedder can put its own in
 /// its place.
 pub fn define_global(context: &mut Context, name: &str, value: impl Into<JsValue>) -> JsResult<()> {

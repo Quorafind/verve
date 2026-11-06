@@ -30,7 +30,7 @@ use wasmi::{
     core::{F32, F64, ValType},
 };
 
-use crate::native::{arg, function, hidden, js_text, list_from, object};
+use crate::native::{PlainClass, arg, function, hidden, js_text, list_from, object, plain_class};
 use crate::shared;
 
 /// What a store keeps beside the module's own state: how to reach the realm, and the
@@ -1135,78 +1135,30 @@ fn describe(module: &Module, exports: bool, context: &mut Context) -> JsResult<J
 
 // ─── Installing it ──────────────────────────────────────────────────────────────────────────
 
-struct ClassSpec<'a> {
-    name: &'a str,
-    construct: NativeFunctionPointer,
-    methods: &'a [(&'a str, usize, NativeFunctionPointer)],
-    getters: &'a [(&'a str, NativeFunctionPointer)],
-    proto_parent: Option<JsObject>,
-}
-
-fn define_class(
+/// A class of the `WebAssembly` namespace: no global of its own, the constructor of one
+/// parameter, on `parent`'s prototype when it has one.
+fn in_namespace(
     context: &mut Context,
     namespace: &JsObject,
-    spec: ClassSpec<'_>,
+    name: &str,
+    construct: NativeFunctionPointer,
+    methods: &[(&str, usize, NativeFunctionPointer)],
+    getters: &[(&str, NativeFunctionPointer)],
+    parent: Option<JsObject>,
 ) -> JsResult<JsObject> {
-    let constructor: JsObject =
-        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(spec.construct))
-            .name(JsString::from(spec.name))
-            .length(1)
-            .constructor(true)
-            .build()
-            .into();
-    let prototype = object(context);
-    if let Some(parent) = spec.proto_parent {
-        prototype.set_prototype(Some(parent));
-    }
-    for (name, length, f) in spec.methods {
-        let f = function(context, name, *length, *f);
-        prototype.define_property_or_throw(
-            JsString::from(*name),
-            PropertyDescriptor::builder()
-                .value(f)
-                .writable(true)
-                .enumerable(false)
-                .configurable(true),
-            context,
-        )?;
-    }
-    for (name, f) in spec.getters {
-        let f = function(context, &format!("get {name}"), 0, *f);
-        prototype.define_property_or_throw(
-            JsString::from(*name),
-            PropertyDescriptor::builder()
-                .get(f)
-                .enumerable(true)
-                .configurable(true),
-            context,
-        )?;
-    }
-    prototype.define_property_or_throw(
-        js_string!("constructor"),
-        PropertyDescriptor::builder()
-            .value(constructor.clone())
-            .writable(true)
-            .enumerable(false)
-            .configurable(true),
+    let (class, _) = plain_class(
         context,
+        PlainClass {
+            name,
+            construct,
+            length: 1,
+            parent,
+            methods,
+            getters,
+        },
     )?;
-    constructor.define_property_or_throw(
-        js_string!("prototype"),
-        PropertyDescriptor::builder()
-            .value(prototype)
-            .writable(false)
-            .enumerable(false)
-            .configurable(false),
-        context,
-    )?;
-    namespace.set(
-        JsString::from(spec.name),
-        constructor.clone(),
-        false,
-        context,
-    )?;
-    Ok(constructor)
+    namespace.set(JsString::from(name), class.clone(), false, context)?;
+    Ok(class)
 }
 
 /// The three errors: each an `Error` with its own name and prototype.
@@ -1217,16 +1169,14 @@ fn error_class(context: &mut Context, namespace: &JsObject, name: &'static str) 
         "LinkError" => |this, args, cx| make_error(this, args, cx, "LinkError"),
         _ => |this, args, cx| make_error(this, args, cx, "RuntimeError"),
     };
-    let constructor = define_class(
+    let constructor = in_namespace(
         context,
         namespace,
-        ClassSpec {
-            name,
-            construct,
-            methods: &[],
-            getters: &[],
-            proto_parent: Some(error_proto),
-        },
+        name,
+        construct,
+        &[],
+        &[],
+        Some(error_proto),
     )?;
     let prototype = constructor.get(js_string!("prototype"), context)?;
     if let Some(prototype) = prototype.as_object() {
@@ -1274,16 +1224,14 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         let f = function(context, name, *length, *f);
         namespace.set(JsString::from(*name), f, false, context)?;
     }
-    let module = define_class(
+    let module = in_namespace(
         context,
         &namespace,
-        ClassSpec {
-            name: "Module",
-            construct: construct_module,
-            methods: &[],
-            getters: &[],
-            proto_parent: None,
-        },
+        "Module",
+        construct_module,
+        &[],
+        &[],
+        None,
     )?;
     for (name, f) in [
         (
@@ -1302,49 +1250,41 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         let f = function(context, name, 1, f);
         module.set(JsString::from(name), f, false, context)?;
     }
-    define_class(
+    in_namespace(
         context,
         &namespace,
-        ClassSpec {
-            name: "Instance",
-            construct: construct_instance,
-            methods: &[],
-            getters: &[],
-            proto_parent: None,
-        },
+        "Instance",
+        construct_instance,
+        &[],
+        &[],
+        None,
     )?;
-    define_class(
+    in_namespace(
         context,
         &namespace,
-        ClassSpec {
-            name: "Memory",
-            construct: construct_memory,
-            methods: MEMORY_METHODS,
-            getters: MEMORY_GETTERS,
-            proto_parent: None,
-        },
+        "Memory",
+        construct_memory,
+        MEMORY_METHODS,
+        MEMORY_GETTERS,
+        None,
     )?;
-    define_class(
+    in_namespace(
         context,
         &namespace,
-        ClassSpec {
-            name: "Table",
-            construct: construct_table,
-            methods: TABLE_METHODS,
-            getters: TABLE_GETTERS,
-            proto_parent: None,
-        },
+        "Table",
+        construct_table,
+        TABLE_METHODS,
+        TABLE_GETTERS,
+        None,
     )?;
-    let global = define_class(
+    let global = in_namespace(
         context,
         &namespace,
-        ClassSpec {
-            name: "Global",
-            construct: construct_global,
-            methods: GLOBAL_METHODS,
-            getters: &[],
-            proto_parent: None,
-        },
+        "Global",
+        construct_global,
+        GLOBAL_METHODS,
+        &[],
+        None,
     )?;
     if let Some(prototype) = global.get(js_string!("prototype"), context)?.as_object() {
         let get = function(context, "get value", 0, global_get);

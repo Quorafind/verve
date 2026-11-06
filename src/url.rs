@@ -7,14 +7,15 @@
 use std::cell::RefCell;
 
 use boa_engine::{
-    Context, Finalize, JsData, JsObject, JsResult, JsString, JsValue, NativeFunction, Trace,
-    js_string,
+    Context, Finalize, JsData, JsObject, JsResult, JsString, JsValue, Trace, js_string,
     native_function::NativeFunctionPointer,
-    object::{FunctionObjectBuilder, builtins::JsArray},
-    property::{Attribute, PropertyDescriptor, PropertyKey},
+    object::builtins::JsArray,
+    property::{PropertyDescriptor, PropertyKey},
 };
 
-use crate::native::{arg, function, js_text, text_of, type_error};
+use crate::native::{
+    PlainClass, arg, define_global, function, js_text, plain_class, text_of, type_error,
+};
 
 #[derive(Trace, Finalize, JsData)]
 struct UrlData {
@@ -30,20 +31,6 @@ struct ParamsData {
     pairs: RefCell<Vec<(String, String)>>,
     /// The URL these are the query of, if they are one's.
     owner: boa_gc::GcRefCell<Option<JsObject>>,
-}
-
-fn constructor(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .constructor(true)
-        .build()
-        .into()
 }
 
 /// The prototype `new_target` names, or `fallback`'s.
@@ -521,56 +508,30 @@ const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 // ─── Installing them ────────────────────────────────────────────────────────────────────────
 
-fn define_method(
-    object: &JsObject,
-    name: &str,
-    method: JsObject,
-    context: &mut Context,
-) -> JsResult<()> {
-    object.define_property_or_throw(
-        JsString::from(name),
-        PropertyDescriptor::builder()
-            .value(method)
-            .writable(true)
-            .enumerable(false)
-            .configurable(true),
-        context,
-    )?;
-    Ok(())
-}
-
-fn define_class(
+/// A global class of one parameter's constructor, with `methods` and no getters yet.
+fn global_class(
     context: &mut Context,
     name: &str,
     construct: NativeFunctionPointer,
     methods: &[(&str, usize, NativeFunctionPointer)],
 ) -> JsResult<(JsObject, JsObject)> {
-    let class = constructor(context, name, 1, construct);
-    let prototype = JsObject::with_object_proto(context.intrinsics());
-    for (method_name, length, f) in methods {
-        let method = function(context, method_name, *length, *f);
-        define_method(&prototype, method_name, method, context)?;
-    }
-    define_method(&prototype, "constructor", class.clone(), context)?;
-    class.define_property_or_throw(
-        js_string!("prototype"),
-        PropertyDescriptor::builder()
-            .value(prototype.clone())
-            .writable(false)
-            .enumerable(false)
-            .configurable(false),
+    let (class, prototype) = plain_class(
         context,
+        PlainClass {
+            name,
+            construct,
+            length: 1,
+            parent: None,
+            methods,
+            getters: &[],
+        },
     )?;
-    context.register_global_property(
-        JsString::from(name),
-        class.clone(),
-        Attribute::WRITABLE | Attribute::CONFIGURABLE,
-    )?;
+    define_global(context, name, class.clone())?;
     Ok((class, prototype))
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let (url_class, url_proto) = define_class(context, "URL", construct_url, URL_METHODS)?;
+    let (url_class, url_proto) = global_class(context, "URL", construct_url, URL_METHODS)?;
     for (name, get, set) in URL_ACCESSORS {
         let getter = function(context, &format!("get {name}"), 0, *get);
         let setter = (!matches!(*name, "origin"))
@@ -598,7 +559,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         url_class.set(JsString::from(*name), method, false, context)?;
     }
     let (_, params_proto) =
-        define_class(context, "URLSearchParams", construct_params, PARAMS_METHODS)?;
+        global_class(context, "URLSearchParams", construct_params, PARAMS_METHODS)?;
     // `for (const [k, v] of params)`, and `params.size`.
     let entries = params_proto.get(js_string!("entries"), context)?;
     params_proto.define_property_or_throw(

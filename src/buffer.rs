@@ -19,7 +19,7 @@ use boa_engine::{
 };
 
 use crate::encoding::{base64, bytes_of};
-use crate::native::{arg, function, get, hidden, js_text, object, text_of};
+use crate::native::{arg, constructor, function, get, hidden, js_text, object, text_of};
 
 // ─── Errors as Node words them ───────────────────────────────────────────────────────────────
 
@@ -1512,23 +1512,6 @@ const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 ];
 
 // ─── Installing it ───────────────────────────────────────────────────────────────────────────
-
-fn constructor(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    boa_engine::object::FunctionObjectBuilder::new(
-        context.realm(),
-        boa_engine::NativeFunction::from_fn_ptr(f),
-    )
-    .name(JsString::from(name))
-    .length(length)
-    .constructor(true)
-    .build()
-    .into()
-}
 
 /// Makes `Buffer` a global: a constructor whose prototype inherits `Uint8Array`'s.
 pub(crate) fn install(context: &mut Context) -> JsResult<()> {
