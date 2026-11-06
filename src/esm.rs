@@ -1041,8 +1041,9 @@ fn cjs_names(
 }
 
 fn data_source(url: &Url, context: &mut Context) -> JsResult<(String, bool)> {
-    // Node reads the URL's pathname: the query is no part of the data, and the format is
-    // checked before anything is decoded.
+    // The format is read from the type before the body is decoded, the query is dropped and a
+    // stray `%` is an error. Node 22 reads the body as fetch does instead: the query kept, a
+    // stray `%` kept, and bad base64 an ERR_INVALID_URL that comes before the format's error.
     let Some((header, _)) = url.path().split_once(',') else {
         return Err(module_error(
             context,

@@ -429,14 +429,9 @@ fn script_of(url: &str, context: &Context) -> Option<String> {
     {
         return crate::fs::sys::read_to_string(&crate::vfs::View::of(context), &path).ok();
     }
-    let rest = url.strip_prefix("data:")?;
-    let (header, body) = rest.split_once(',')?;
-    if header.ends_with(";base64") {
-        let bytes = crate::encoding::unbase64(body)?;
-        Some(String::from_utf8_lossy(&bytes).into_owned())
-    } else {
-        crate::esm_resolve::decode_url_escapes(body).ok()
-    }
+    let parsed = url::Url::parse(url).ok()?;
+    let (_, bytes) = crate::encoding::data_url(&parsed).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn construct_worker(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

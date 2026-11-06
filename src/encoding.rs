@@ -112,8 +112,8 @@ pub fn data_url(url: &url::Url) -> Result<(String, Vec<u8>), String> {
     data_url_with(url, |body| Ok(percent_decode(body)))
 }
 
-/// [`data_url`] where a malformed `%` escape is an error, as a module loader takes it, not
-/// kept as it is.
+/// [`data_url`] where a malformed `%` escape is an error, as Verve's module loader takes it,
+/// not kept as it is.
 pub fn data_url_strict(url: &url::Url) -> Result<(String, Vec<u8>), String> {
     data_url_with(url, |body| {
         percent_decode_strict(body).map_err(str::to_owned)
@@ -460,6 +460,8 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn data_urls_decode_as_the_standard_says() {
         let parse = |s: &str| data_url(&url::Url::parse(s).unwrap()).unwrap();
@@ -482,6 +484,20 @@ mod tests {
     }
 
     #[test]
+    fn the_strict_reading_refuses_only_a_stray_percent() {
+        let parse = |s: &str| data_url_strict(&url::Url::parse(s).unwrap()).unwrap().1;
+        // The fragment is no part of it, the query is, and `base64` is any case.
+        assert_eq!(parse("data:text/javascript;BASE64,SGk=#frag"), b"Hi");
+        assert_eq!(parse("data:,a?b=1#c"), b"a?b=1");
+        // `%+1` is not an escape: the strict reading refuses it, the standard's keeps it.
+        assert!(data_url_strict(&url::Url::parse("data:,%+1").unwrap()).is_err());
+        assert_eq!(
+            data_url(&url::Url::parse("data:,%+1").unwrap()).unwrap().1,
+            b"%+1"
+        );
+    }
+
+    #[test]
     fn only_a_data_url_is_one() {
         for other in ["https://h/a,b.js", "a:", "file:///x,y"] {
             assert!(
@@ -494,8 +510,6 @@ mod tests {
             );
         }
     }
-
-    use super::*;
 
     #[test]
     fn base64_reads_both_alphabets_and_round_trips() {

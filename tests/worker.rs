@@ -234,3 +234,37 @@ fn only_a_blob_file_or_data_address_is_a_script() {
         );
     }
 }
+
+#[test]
+fn a_data_address_is_read_as_a_browser_reads_it() {
+    // `;BASE64` in any case and a fragment make a worker; so do a byte that is not UTF-8 and a
+    // `%` that starts no escape, which fetch's data: URL processor keeps as they are. Each script
+    // says it ran by posting to its page.
+    for (address, said) in [
+        (
+            "data:text/javascript;BASE64,cG9zdE1lc3NhZ2UoJ2Zyb20gYmFzZTY0Jyk=#fragment",
+            "from base64",
+        ),
+        (
+            "data:text/javascript,postMessage('from text')//%FF%zz",
+            "from text",
+        ),
+    ] {
+        let mut rt = Runtime::new();
+        js(
+            &mut rt,
+            &format!(
+                "globalThis.heard = []; globalThis.worker = new Worker(`{address}`); \
+                 worker.onmessage = (e) => heard.push(e.data); 'made'"
+            ),
+        );
+        for _ in 0..50 {
+            rt.wait_for_workers(std::time::Duration::from_millis(100));
+            rt.run_workers();
+            if js(&mut rt, "heard.length") != "0" {
+                break;
+            }
+        }
+        assert_eq!(js(&mut rt, "heard[0]"), said, "{address}");
+    }
+}
