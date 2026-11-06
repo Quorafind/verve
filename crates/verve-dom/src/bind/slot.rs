@@ -4,9 +4,10 @@
 use boa_engine::{Context, JsResult, JsValue};
 
 use super::node::{read_dom, with_dom, wrap};
-use super::{Method, arg, array, extend_prototype, get, node_of, queue_microtask};
+use super::{Method, extend_prototype, node_of, queue_microtask};
 use crate::dom::NodeId;
 use crate::state::shared;
+use verve::native::{self, arg, get};
 
 /// The slots of a shadow tree and what is assigned to each, told to `slotchange`.
 #[derive(Default)]
@@ -36,7 +37,7 @@ fn assigned(
             .collect::<Vec<_>>()
     });
     let objects = nodes.into_iter().map(|id| wrap(context, id)).collect();
-    Ok(array(objects, context))
+    Ok(native::array(context, objects))
 }
 
 const SLOT_METHODS: &[Method] = &[

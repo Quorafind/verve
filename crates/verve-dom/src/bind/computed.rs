@@ -7,12 +7,11 @@
 
 use boa_engine::{Context, JsObject, JsResult, JsValue};
 
-use super::{
-    Handle, Kind, Method, arg, arg_string, function, get, native_instance, text, type_error,
-};
+use super::{Handle, Kind, Method, native_instance};
 use crate::css::{PseudoElement, Style, style_of, style_of_part};
 use crate::dom::NodeId;
 use crate::state::shared;
+use verve::native::{arg, function, get, js_text, text_of, type_error};
 
 /// What a computed style declaration is about.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -94,17 +93,19 @@ pub fn rendered_text(context: &Context, id: NodeId) -> String {
 const COMPUTED_METHODS: &[Method] = &[
     ("getPropertyValue", 1, |this, args, cx| {
         let (id, target) = computed_target(this).ok_or_else(|| type_error("Illegal invocation"))?;
-        let property = arg_string(args, 0, cx)?;
-        Ok(text(computed_value(cx, id, target, property.trim()).trim()))
+        let property = text_of(&arg(args, 0), cx)?;
+        Ok(js_text(
+            computed_value(cx, id, target, property.trim()).trim(),
+        ))
     }),
-    ("getPropertyPriority", 1, |_, _, _| Ok(text(""))),
+    ("getPropertyPriority", 1, |_, _, _| Ok(js_text(""))),
     ("item", 1, |this, args, cx| {
         let (id, target) = computed_target(this).ok_or_else(|| type_error("Illegal invocation"))?;
         let at = arg(args, 0).to_number(cx)? as usize;
         let style = style_of_target(cx, id, target);
         let mut names: Vec<&String> = style.keys().collect();
         names.sort();
-        Ok(names.get(at).map_or(text(""), |n| text(n)))
+        Ok(names.get(at).map_or(js_text(""), |n| js_text(n)))
     }),
     ("setProperty", 2, |_, _, cx| {
         Err(super::dom_error(
@@ -144,7 +145,7 @@ pub fn computed_style(context: &mut Context, id: NodeId, target: Target) -> JsRe
             match name.as_str() {
                 "constructor" => return get(&declaration, "constructor", cx),
                 "length" => return Ok(style_of_target(cx, id, target).len().into()),
-                "cssText" => return Ok(text("")),
+                "cssText" => return Ok(js_text("")),
                 "parentRule" => return Ok(JsValue::null()),
                 _ => {}
             }
@@ -153,7 +154,7 @@ pub fn computed_style(context: &mut Context, id: NodeId, target: Target) -> JsRe
             } else {
                 crate::dom::css_name(&name)
             };
-            Ok(text(computed_value(cx, id, target, &property).trim()))
+            Ok(js_text(computed_value(cx, id, target, &property).trim()))
         })
         .set(|_, _, _| Ok(true.into()))
         .build(context)?;

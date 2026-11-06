@@ -3,8 +3,9 @@
 
 use boa_engine::{Context, JsError, JsResult, JsValue};
 
-use super::{get, string, type_error};
+use super::string;
 use crate::Align;
+use verve::native::{get, type_error};
 
 /// `scrollIntoView`'s argument: `true` (the default) lines the top up, `false` the bottom, an
 /// options object says `block`, `inline` and `behavior`.

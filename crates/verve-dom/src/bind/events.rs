@@ -11,9 +11,10 @@ use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 use verve::dom_events::FieldDefault as F;
 
 use super::node::{read_dom, with_dom, wrap};
-use super::{Method, arg, node_id, plain_object, text};
+use super::{Method, node_id, plain_object};
 use crate::dom::{Dom, NodeId, NodeKind};
 use crate::state::shared;
+use verve::native::{arg, js_text, text_of, type_error};
 
 /// The next target on an event's path from `target`: a node's parent, the window from its
 /// document, a shadow root's host — for an event that crosses shadow boundaries (`composed`).
@@ -327,7 +328,7 @@ const CLASSES: &[EventClass] = &[
 ];
 
 const MODIFIER_METHODS: &[Method] = &[("getModifierState", 1, |this, args, cx| {
-    let key = super::arg_string(args, 0, cx)?;
+    let key = text_of(&arg(args, 0), cx)?;
     let field = match key.as_str() {
         "Control" => "ctrlKey",
         "Shift" => "shiftKey",
@@ -546,8 +547,8 @@ pub fn fire_event(
     }
     let constructor = crate::state::class_of(context, class)
         .map(|(c, _)| c)
-        .ok_or_else(|| super::type_error(format!("no event class {class}")))?;
-    let event = constructor.construct(&[text(kind), dict.into()], None, context)?;
+        .ok_or_else(|| type_error(format!("no event class {class}")))?;
+    let event = constructor.construct(&[js_text(kind), dict.into()], None, context)?;
     verve::dom_events::set_trusted(&event.clone().into(), trusted)?;
     let global = context.global_object();
     let previous = global.get(js_string!("event"), context)?;

@@ -15,12 +15,12 @@ use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 
 use super::node::{node_list, read_dom, wrap, wrap_opt};
 use super::{
-    ClassSpec, Kind, Method, arg, array, class, get, handle_of, instance, list, node_of,
-    plain_object, set, string, text, type_error,
+    ClassSpec, Kind, Method, class, handle_of, instance, node_of, plain_object, set, string,
 };
 use crate::Rect;
 use crate::dom::{Mutation, NodeId};
 use crate::state::{MutationOptions, ObservedTarget, ObserverRecord, Watch, shared};
+use verve::native::{self, arg, function, get, hidden, js_text, list_of, type_error};
 
 fn construct(
     new_target: &JsValue,
@@ -54,7 +54,7 @@ fn construct(
             &object,
             "rootMargin",
             if margin.is_undefined() {
-                text("0px 0px 0px 0px")
+                js_text("0px 0px 0px 0px")
             } else {
                 margin
             },
@@ -62,18 +62,18 @@ fn construct(
         )?;
         let threshold = get(&options, "threshold", context)?;
         let thresholds = if threshold.is_undefined() {
-            array(vec![0.into()], context)
+            native::array(context, vec![0.into()])
         } else if threshold.is_object() {
             threshold
         } else {
-            array(vec![threshold], context)
+            native::array(context, vec![threshold])
         };
         set(&object, "thresholds", thresholds, context)?;
     }
     // Kept on the observer too: the host lets go of an observer watching nothing, and takes it
     // back from here when it watches again.
-    super::hidden(&object, js_string!("__callback"), callback.clone(), context)?;
-    super::hidden(&object, js_string!("__watch"), watch as u32, context)?;
+    hidden(&object, js_string!("__callback"), callback.clone(), context)?;
+    hidden(&object, js_string!("__watch"), watch as u32, context)?;
     Ok(object.into())
 }
 
@@ -156,7 +156,7 @@ fn mutation_options(options: &JsValue, context: &mut Context) -> JsResult<Mutati
         None
     } else {
         Some(
-            list(&filter, context)?
+            list_of(&filter, context)?
                 .iter()
                 .map(|v| string(v, context))
                 .collect::<JsResult<Vec<_>>>()?,
@@ -264,7 +264,7 @@ const OBSERVER_METHODS: &[Method] = &[
         for mutation in records {
             out.push(mutation_record(cx, &mutation)?);
         }
-        Ok(array(out, cx))
+        Ok(native::array(cx, out))
     }),
 ];
 
@@ -413,7 +413,7 @@ fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsVal
             next,
             ..
         } => {
-            set(&record, "type", text("childList"), context)?;
+            set(&record, "type", js_text("childList"), context)?;
             let added = node_list(added.clone(), context);
             set(&record, "addedNodes", added, context)?;
             let removed = node_list(removed.clone(), context);
@@ -426,21 +426,21 @@ fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsVal
             set(&record, "oldValue", JsValue::null(), context)?;
         }
         Mutation::Attributes { name, old, .. } => {
-            set(&record, "type", text("attributes"), context)?;
+            set(&record, "type", js_text("attributes"), context)?;
             set(&record, "addedNodes", empty.clone(), context)?;
             set(&record, "removedNodes", empty, context)?;
             set(&record, "previousSibling", JsValue::null(), context)?;
             set(&record, "nextSibling", JsValue::null(), context)?;
-            set(&record, "attributeName", text(name), context)?;
+            set(&record, "attributeName", js_text(name), context)?;
             set(
                 &record,
                 "oldValue",
-                old.as_deref().map_or(JsValue::null(), text),
+                old.as_deref().map_or(JsValue::null(), js_text),
                 context,
             )?;
         }
         Mutation::CharacterData { old, .. } => {
-            set(&record, "type", text("characterData"), context)?;
+            set(&record, "type", js_text("characterData"), context)?;
             set(&record, "addedNodes", empty.clone(), context)?;
             set(&record, "removedNodes", empty, context)?;
             set(&record, "previousSibling", JsValue::null(), context)?;
@@ -452,7 +452,7 @@ fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsVal
                 if old.is_empty() {
                     JsValue::null()
                 } else {
-                    text(old)
+                    js_text(old)
                 },
                 context,
             )?;
@@ -509,7 +509,7 @@ fn deliver_mutations_to(id: u32, context: &mut Context) -> JsResult<()> {
         if records.is_empty() {
             return Ok(());
         }
-        let list = array(records, context);
+        let list = native::array(context, records);
         if let Err(error) = verve::call(
             context,
             &callback,
@@ -529,7 +529,7 @@ fn schedule_layout_delivery(context: &mut Context) {
     if shared(context).borrow().frame_clock != crate::state::FrameClock::Timer {
         return;
     }
-    let deliver = super::function(context, "observe", 0, |_, _, cx| {
+    let deliver = function(context, "observe", 0, |_, _, cx| {
         deliver_layout(cx)?;
         Ok(JsValue::undefined())
     });
@@ -588,7 +588,7 @@ fn deliver_layout_to(id: u32, watch: Watch, context: &mut Context) -> JsResult<b
         if let Some(object) = found {
             let callback = object.get(js_string!("__callback"), context)?;
             told = true;
-            let list = array(entries, context);
+            let list = native::array(context, entries);
             if let Err(error) = verve::call(
                 context,
                 &callback,
@@ -642,7 +642,7 @@ fn resize_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>> {
             "devicePixelContentBoxSize",
         ] {
             let size = size_object(context, now.width, now.height)?;
-            let sizes = array(vec![size], context);
+            let sizes = native::array(context, vec![size]);
             set(&entry, key, sizes, context)?;
         }
         out.push(entry.into());

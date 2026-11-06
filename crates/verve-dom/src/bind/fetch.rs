@@ -2,8 +2,9 @@
 
 use boa_engine::{Context, JsResult, js_string};
 
-use super::{arg, closure, get, rejected, string, text, type_error};
+use super::{rejected, string};
 use crate::state::shared;
+use verve::native::{arg, closure, get, js_text, type_error};
 
 /// The getter of `Response.prototype.url`, as the runtime made it.
 fn response_url_getter(context: &mut Context) -> Option<boa_engine::JsValue> {
@@ -14,7 +15,7 @@ fn response_url_getter(context: &mut Context) -> Option<boa_engine::JsValue> {
     let describe = get(&object, "getOwnPropertyDescriptor", context).ok()?;
     let descriptor = describe
         .as_callable()?
-        .call(&object, &[proto, text("url")], context)
+        .call(&object, &[proto, js_text("url")], context)
         .ok()?;
     get(&descriptor, "get", context).ok()
 }
@@ -32,6 +33,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     let fetch = closure(
         context,
         "fetch",
+        0,
         |this, args, (original, request), cx| {
             let result = (|| {
                 let input = arg(args, 0);
@@ -57,9 +59,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
                 let mut forwarded = args.to_vec();
                 if !is_request {
                     if forwarded.is_empty() {
-                        forwarded.push(text(url.as_str()));
+                        forwarded.push(js_text(url.as_str()));
                     } else {
-                        forwarded[0] = text(url.as_str());
+                        forwarded[0] = js_text(url.as_str());
                     }
                 }
                 original.call(this, &forwarded, cx)

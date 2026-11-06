@@ -9,8 +9,9 @@
 use boa_engine::{Context, JsResult, JsValue, js_string};
 
 use super::node::{read_dom, wrap};
-use super::{arg, call_method, function, get, node_of, plain_object, set};
+use super::{call_method, node_of, plain_object, set};
 use crate::dom::{Dom, NodeId, NodeKind};
+use verve::native::{arg, function, get};
 
 const SHOW_ALL: u32 = u32::MAX;
 const FILTER_ACCEPT: u32 = 1;

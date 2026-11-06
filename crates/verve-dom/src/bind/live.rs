@@ -15,8 +15,8 @@ use boa_engine::{
 };
 
 use super::node::{read_dom, wrap};
-use super::{arg, hidden};
 use crate::dom::{Dom, NodeId};
+use verve::native::{arg, hidden};
 
 type Query = Rc<dyn Fn(&Dom) -> Vec<NodeId>>;
 

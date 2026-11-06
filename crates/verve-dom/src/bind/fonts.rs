@@ -17,12 +17,12 @@ use boa_engine::{
 use boa_gc::GcRefCell;
 
 use super::{
-    Accessor, ClassSpec, Method, arg, array, call_method, class, constructor_of, dom_error,
-    function, get, hidden, illegal_constructor, prototype_of_target, resolved, string, text,
-    type_error,
+    Accessor, ClassSpec, Method, call_method, class, constructor_of, dom_error,
+    illegal_constructor, prototype_of_target, resolved, string,
 };
 use crate::state::shared;
 use crate::{FontFaceId, FontOutcome, Request};
+use verve::native::{self, arg, function, get, hidden, js_text, type_error};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FaceStatus {
@@ -332,7 +332,7 @@ fn face_arg(args: &[JsValue], method: &str, context: &mut Context) -> JsResult<J
 
 fn faces_iterator(context: &mut Context) -> JsResult<JsValue> {
     let faces = shared(context).borrow().fonts.faces.clone();
-    let faces = array(faces.into_iter().map(JsValue::from).collect(), context);
+    let faces = native::array(context, faces.into_iter().map(JsValue::from).collect());
     call_method(&faces, "values", &[], context)
 }
 
@@ -395,7 +395,7 @@ const SET_METHODS: &[Method] = &[
             loads.push(load_face(cx, &face)?);
         }
         let promise = cx.global_object().get(js_string!("Promise"), cx)?;
-        let loads = array(loads, cx);
+        let loads = native::array(cx, loads);
         call_method(&promise, "all", &[loads], cx)
     }),
 ];
@@ -410,7 +410,7 @@ const SET_ACCESSORS: &[Accessor] = &[
         "status",
         Some(|_, _, cx| {
             let loading = shared(cx).borrow().fonts.loading;
-            Ok(text(if loading { "loading" } else { "loaded" }))
+            Ok(js_text(if loading { "loading" } else { "loaded" }))
         }),
         None,
     ),
@@ -431,7 +431,7 @@ fn descriptor<const AT: usize>(
     _: &[JsValue],
     _: &mut Context,
 ) -> JsResult<JsValue> {
-    with_face(this, |f| text(&f.descriptors[AT]))
+    with_face(this, |f| js_text(&f.descriptors[AT]))
 }
 
 /// The descriptor `AT` of `DESCRIPTORS`, written.
@@ -461,7 +461,7 @@ const FACE_ACCESSORS: &[Accessor] = descriptor_accessors!(
 const FACE_STATE: &[Accessor] = &[
     (
         "status",
-        Some(|this, _, _| with_face(this, |f| text(f.status.as_str()))),
+        Some(|this, _, _| with_face(this, |f| js_text(f.status.as_str()))),
         None,
     ),
     (
