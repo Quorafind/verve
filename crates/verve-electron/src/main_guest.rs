@@ -226,6 +226,9 @@ impl MainGuest {
             FromRenderer::ZoomChanged(factor) => {
                 web_contents::zoom_changed(context, contents, factor)
             }
+            FromRenderer::ExecuteJavaScriptReply { call, result } => {
+                api::shared(context).calls.answer(context, call, result);
+            }
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
                 window_lifecycle::page_gone(context, contents);

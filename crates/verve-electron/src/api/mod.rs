@@ -8,6 +8,7 @@ pub(crate) mod clipboard;
 pub(crate) mod command_line;
 pub(crate) mod contents_history;
 pub(crate) mod contents_ipc;
+pub(crate) mod contents_page;
 pub(crate) mod context_bridge;
 pub mod define;
 pub(crate) mod dialog;
@@ -18,6 +19,7 @@ pub(crate) mod native_image;
 pub(crate) mod native_theme;
 pub(crate) mod navigation;
 pub(crate) mod notification;
+pub(crate) mod page_calls;
 pub(crate) mod page_events;
 pub(crate) mod page_state;
 pub(crate) mod power;
@@ -59,6 +61,8 @@ pub(crate) struct MainState {
     pub(crate) windows: windows::Windows,
     /// The dialogs asked for and not yet answered.
     pub(crate) dialogs: dialog::Pending,
+    /// The scripts asked of pages and not yet answered.
+    pub(crate) calls: page_calls::Calls,
     /// The legacy `webContents` methods already warned about.
     pub(crate) deprecated: std::cell::RefCell<Vec<String>>,
 }
@@ -70,6 +74,7 @@ impl MainState {
             app,
             windows: windows::Windows::default(),
             dialogs: dialog::Pending::default(),
+            calls: page_calls::Calls::default(),
             deprecated: std::cell::RefCell::new(Vec::new()),
         })
     }
@@ -148,8 +153,9 @@ fn main_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     exports.set(js_string!("BrowserWindow"), window, false, context)?;
     exports.set(js_string!("app"), app::make(context)?, false, context)?;
     ipc_main::add_exports(context, &exports)?;
-    let modules: [(&str, ModuleMaker); 12] = [
+    let modules: [(&str, ModuleMaker); 13] = [
         ("webContents", web_contents::make_module),
+        ("webFrameMain", web_frame_main::make_module),
         ("dialog", dialog::make),
         ("Notification", notification::make),
         ("shell", shell::make),

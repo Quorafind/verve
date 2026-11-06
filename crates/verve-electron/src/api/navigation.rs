@@ -47,7 +47,10 @@ pub(crate) fn start(
         *page.load.borrow_mut() = Some(settle);
         JsValue::from(promise)
     });
-    record.page.to_renderer(ToRenderer::Load { url, options });
+    // When the page's isolate is replaced, what it was asked will never be answered.
+    if record.page.to_renderer(ToRenderer::Load { url, options }) {
+        shared(context).calls.fail(context, record.page.contents);
+    }
     Ok(promise)
 }
 

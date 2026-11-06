@@ -206,10 +206,11 @@ impl MainState {
     }
 
     /// The window is gone: a `loadURL` still waiting fails as `ERR_FAILED (-2)` (Electron's answer
-    /// for a destroyed page).
+    /// for a destroyed page), and so does every script asked of the page.
     fn give_up_on_page(&self, context: &mut Context, record: &WindowRecord) {
         let url = record.page_state.target.borrow().clone();
         navigation::settle_load(context, record, Err((-2, "ERR_FAILED".into(), url)));
+        self.calls.fail(context, record.page.contents);
     }
 
     /// A modal window blocks its parent while it can be seen: the parent takes input again once

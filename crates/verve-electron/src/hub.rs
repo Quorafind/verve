@@ -77,8 +77,8 @@ pub struct RendererHandle {
 
 impl RendererHandle {
     /// Sends `msg` to the page.
-    pub fn to_renderer(&self, msg: ToRenderer) {
-        self.hub.to_renderer(self.contents, msg);
+    pub fn to_renderer(&self, msg: ToRenderer) -> bool {
+        self.hub.to_renderer(self.contents, msg)
     }
 }
 
@@ -408,12 +408,12 @@ impl Hub {
     /// as Chromium gives a new document a new world: the old one is retired (the one place a
     /// page's isolate is torn down) and the new one is made with the same preferences. The first
     /// load of a page uses the isolate it was made with.
-    fn renew_for_navigation(self: &Arc<Self>, contents: ContentsId) {
+    fn renew_for_navigation(self: &Arc<Self>, contents: ContentsId) -> bool {
         let Some(slot) = lock(&self.renderers).get(&contents).cloned() else {
-            return;
+            return false;
         };
         if !slot.loaded.swap(true, Ordering::SeqCst) {
-            return;
+            return false;
         }
         stop(&slot);
         // Nothing the old document said from here on is heard, nor what is said for it.
@@ -422,6 +422,7 @@ impl Hub {
         // The new page's process may be gone in its turn, and the main process hears of that.
         slot.gone.store(false, Ordering::SeqCst);
         self.spawn_renderer(&slot);
+        true
     }
 
     /// The preferences page `contents` was made with, while it exists.
@@ -555,11 +556,13 @@ impl Hub {
     }
 
     /// Sends `msg` to page `contents`, to run as a job of its isolate.
-    pub fn to_renderer(self: &Arc<Self>, contents: ContentsId, msg: ToRenderer) {
-        if matches!(msg, ToRenderer::Load { .. }) {
-            self.renew_for_navigation(contents);
-        }
+    /// Answers whether the page's isolate was replaced by this (a `Load` of a page that has loaded):
+    /// what the old one was asked will never be answered.
+    pub fn to_renderer(self: &Arc<Self>, contents: ContentsId, msg: ToRenderer) -> bool {
+        let replaced =
+            matches!(msg, ToRenderer::Load { .. }) && self.renew_for_navigation(contents);
         self.on_renderer(contents, move |guest| guest.apply(msg));
+        replaced
     }
 
     /// What a person did to the window, to the page under it: the hot path, and the only

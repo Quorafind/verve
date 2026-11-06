@@ -20,7 +20,7 @@ use super::define::{self, Args, Fields};
 use super::page_state::Intent;
 use super::web_frame::LEVEL_STEP;
 use super::windows::WindowRecord;
-use super::{app, contents_history, navigation, shared, web_frame_main};
+use super::{app, contents_history, contents_page, navigation, shared, web_frame_main};
 use crate::ids::ContentsId;
 use crate::ipc;
 use crate::msg::{LoadOptions, ToRenderer, ToRendererInput};
@@ -57,6 +57,7 @@ fn make_class(context: &mut Context) -> JsResult<JsObject> {
     native::methods(context, &prototype, METHODS)?;
     native::methods(context, &prototype, contents_ipc::METHODS)?;
     native::accessors(context, &prototype, contents_ipc::ACCESSORS)?;
+    contents_page::install(context, &prototype)?;
     contents_history::install_legacy(context, &prototype)?;
     Ok(class)
 }

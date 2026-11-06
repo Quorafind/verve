@@ -139,6 +139,8 @@ pub(crate) struct PageState {
     pub zoom_factor: Cell<Option<f64>>,
     /// The page's process ended and no load has made a new one.
     pub crashed: Cell<bool>,
+    /// How many sheets `insertCSS` has added: keys are numbered.
+    pub sheets: Cell<u32>,
 }
 
 #[cfg(test)]

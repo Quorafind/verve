@@ -168,14 +168,14 @@ pub(crate) fn send(context: &mut Context, id: ContentsId, args: &[JsValue]) -> J
         return Err(native::type_error("Missing required channel argument"));
     };
     match ipc::pack(args.get(1..).unwrap_or_default(), context) {
-        Ok(args) => shared(context).hub.to_renderer(
-            id,
-            ToRenderer::Ipc {
+        Ok(args) => {
+            let ipc = ToRenderer::Ipc {
                 channel,
                 args,
                 sender_id: 0,
-            },
-        ),
+            };
+            shared(context).hub.to_renderer(id, ipc);
+        }
         Err(_) => {
             let failed = ipc::error_value("Failed to serialize arguments", context)?;
             let said = js_text("Error sending from webFrameMain: ");

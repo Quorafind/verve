@@ -10,7 +10,7 @@
 
 mod support;
 
-use support::run;
+use support::{run, run_main, run_with};
 
 /// The events a first load says, in the order Electron 39.8.10 says them.
 const LOAD_EVENTS: &str = "['frame-created', 'did-start-loading', 'did-start-navigation', 'will-navigate', 'will-frame-navigate', 'did-frame-navigate', 'did-navigate', 'page-title-updated', 'dom-ready', 'did-frame-finish-load', 'did-finish-load', 'did-fail-provisional-load', 'did-fail-load', 'did-stop-loading']";
@@ -184,6 +184,156 @@ fn the_history_moves_with_loads_and_goes_back_and_forward() {
 }
 
 #[test]
+fn a_hash_change_is_a_navigation_within_the_page() {
+    // Electron 39.8.10: did-start-loading, did-start-navigation (isSameDocument), then
+    // did-navigate-in-page (url, true), did-stop-loading; the history gains an entry.
+    let lines = run_with(
+        r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await win.loadFile('a.html');
+    const names = ['did-start-loading', 'did-start-navigation', 'did-navigate', 'did-navigate-in-page', 'did-stop-loading'];
+    wc.on('did-navigate-in-page', (e, url, main) => log('in-page', url.split('/').pop(), main));
+    wc.on('did-start-navigation', (e, url, inPlace) => log('start', url.split('/').pop(), inPlace, e.isSameDocument));
+    watch('wc', wc, names.filter((n) => n !== 'did-navigate-in-page' && n !== 'did-start-navigation'));
+    await wc.executeJavaScript("location.hash = '#frag'");
+    await sleep(200);
+    log(wc.navigationHistory.length(), wc.getURL().split('/').pop());
+    "#,
+        &[("a.html", "<title>A</title><p>a</p>")],
+    );
+    assert_eq!(lines[0], "wc did-start-loading");
+    assert_eq!(lines[1], "start a.html#frag true true");
+    assert_eq!(lines[2], "in-page a.html#frag true");
+    assert_eq!(lines[3], "wc did-stop-loading");
+    assert_eq!(lines[4], "2 a.html#frag");
+}
+
+#[test]
+fn will_navigate_hears_a_link_and_can_stop_it_but_load_url_does_not() {
+    // Electron 39.8.10: a click says did-start-navigation, will-frame-navigate, will-navigate (the
+    // event holds url, isSameDocument, isMainFrame, frame, initiator, processId, routingId; the
+    // arguments are url, isInPlace, isMainFrame, processId, routingId); a listener that prevents
+    // it keeps the page where it was; loadFile says neither will-event.
+    let lines = run_with(
+        r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await win.loadFile('a.html');
+    const names = ['did-start-navigation', 'will-frame-navigate', 'will-navigate', 'did-navigate'];
+    watch('wc', wc, names);
+    wc.on('will-navigate', (event, url, inPlace, main) => {
+      log('details', Object.keys(event).sort(), url.split('/').pop(), inPlace, main, event.isSameDocument);
+      event.preventDefault();
+    });
+    await wc.executeJavaScript("document.getElementById('l').click()");
+    await sleep(300);
+    log('stayed', wc.getURL().split('/').pop());
+    wc.removeAllListeners('will-navigate');
+    await wc.executeJavaScript("document.getElementById('l').click()");
+    await sleep(300);
+    log('went', wc.getURL().split('/').pop());
+    await win.loadFile('a.html');
+    "#,
+        &[
+            ("a.html", "<a id=\"l\" href=\"b.html\">go</a>"),
+            ("b.html", "<title>B</title>b"),
+        ],
+    );
+    let expected = [
+        "wc did-start-navigation",
+        "wc will-frame-navigate",
+        "wc will-navigate",
+        "details [\"frame\",\"initiator\",\"isMainFrame\",\"isSameDocument\",\"processId\",\"routingId\",\"url\"] b.html false true false",
+        "stayed a.html",
+        "wc did-start-navigation",
+        "wc will-frame-navigate",
+        "wc did-navigate",
+        "went b.html",
+        "wc did-start-navigation",
+        "wc did-navigate",
+    ];
+    assert_eq!(lines, expected, "the order of will-navigate: {lines:?}");
+}
+
+#[test]
+fn execute_javascript_answers_values_promises_and_failures() {
+    // Electron 39.8.10: a value, an object and a settled promise come back; a throw (an Error, a
+    // string, a syntax error) rejects with `Script failed to execute…`; a rejected promise rejects
+    // with its reason; a function is `An object could not be cloned.`; a world of its own sees the
+    // document and not the page's globals.
+    let lines = run_main(
+        r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await load(win, '<p id="p">hi</p>');
+    const result = (promise) => promise.then((v) => JSON.stringify(v) ?? 'undefined', (e) => 'rejected: ' + e.message);
+    log(await result(wc.executeJavaScript('1 + 2')));
+    log(await result(wc.executeJavaScript('({ a: [1, 2], b: "x" })')));
+    log(await result(wc.executeJavaScript('new Promise((r) => setTimeout(() => r("later"), 20))')));
+    log(await result(wc.executeJavaScript('undefined')));
+    log(await result(wc.executeJavaScript('Promise.reject(new Error("no"))')));
+    log(await result(wc.executeJavaScript('throw new Error("boom")')));
+    log(await result(wc.executeJavaScript('throw "str"')));
+    log(await result(wc.executeJavaScript('var =')));
+    log(await result(wc.executeJavaScript('(function(){})')));
+    log(await result(wc.executeJavaScript(5)));
+    log(await result(wc.executeJavaScriptInIsolatedWorld(7, [{ code: 'window.mark = 1; typeof document' }])));
+    log(await result(wc.executeJavaScript('typeof window.mark')));
+    "#,
+    );
+    let failed = "rejected: Script failed to execute, this normally means an error was thrown. Check the renderer console for the error.";
+    assert_eq!(lines[0], "3");
+    assert_eq!(lines[1], "{\"a\":[1,2],\"b\":\"x\"}");
+    assert_eq!(lines[2], "\"later\"");
+    assert_eq!(lines[3], "undefined");
+    assert_eq!(lines[4], "rejected: no");
+    assert_eq!(&lines[5..8], [failed, failed, failed]);
+    assert_eq!(lines[8], "rejected: An object could not be cloned.");
+    assert_eq!(lines[9], "5");
+    assert_eq!(lines[10], "\"object\"");
+    assert_eq!(lines[11], "\"undefined\"");
+}
+
+#[test]
+fn inserted_css_changes_the_computed_style_until_it_is_removed() {
+    // Electron 39.8.10: insertCSS answers a string key; the style is red, then black again.
+    let lines = run(r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await load(win, '<p id="p">hi</p>');
+    const color = () => wc.executeJavaScript('getComputedStyle(document.getElementById("p")).color');
+    const key = await wc.insertCSS('#p { color: red }');
+    log(typeof key, await color());
+    await wc.removeInsertedCSS(key);
+    log(await color());
+    log(typeof await wc.insertCSS('#p { color: blue }', { cssOrigin: 'user' }));
+    "#);
+    assert_eq!(lines, ["string rgb(255, 0, 0)", "rgb(0, 0, 0)", "string"]);
+}
+
+#[test]
+fn promises_settle_when_the_page_or_the_window_goes_away() {
+    // A script asked of a page whose document is replaced fails, so does one asked of a page that
+    // is gone, and a loadURL still waiting when its window is destroyed fails as ERR_FAILED (-2).
+    let lines = run(r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    await load(win, '<p>a</p>');
+    const stuck = wc.executeJavaScript('new Promise(() => {})').catch((e) => e.message.slice(0, 20));
+    await win.loadURL('data:text/html,second');
+    log('replaced', await stuck);
+    const other = new BrowserWindow({ show: false });
+    const pending = other.loadURL('data:text/html,never').catch((e) => e.code);
+    const script = other.webContents.executeJavaScript('1').catch((e) => e.message.slice(0, 20));
+    other.destroy();
+    log('destroyed', await pending, await script);
+    "#);
+    assert_eq!(lines[0], "replaced Script failed to exe");
+    assert_eq!(lines[1], "destroyed ERR_FAILED Script failed to exe");
+}
+
+#[test]
 fn history_entries_outside_the_list_are_none() {
     // Electron answers null and false for an index below 0 or not a number, never entry 0.
     let lines = run(r#"
@@ -194,4 +344,19 @@ fn history_entries_outside_the_list_are_none() {
     log(nav.getEntryAtIndex(-1), nav.getEntryAtIndex(NaN), nav.removeEntryAtIndex(-1), nav.removeEntryAtIndex(NaN), nav.length());
     "#);
     assert_eq!(lines, ["null null false false 2"]);
+}
+
+#[test]
+fn a_script_asked_of_a_load_that_is_replaced_before_it_commits_fails() {
+    // loadURL(a); executeJavaScript(x); loadURL(b): the page's isolate is replaced, whether or not
+    // `a` has committed, and what x was asked fails rather than waiting for ever.
+    let lines = run(r#"
+    const win = new BrowserWindow({ show: false });
+    const wc = win.webContents;
+    win.loadURL('data:text/html,a').catch(() => {});
+    const script = wc.executeJavaScript('1').catch((e) => e.message.slice(0, 20));
+    win.loadURL('data:text/html,b').catch(() => {});
+    log('script', await script);
+    "#);
+    assert_eq!(lines, ["script Script failed to exe"]);
 }
