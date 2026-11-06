@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use super::dialog::{DialogReply, DialogResult, DialogSpec};
+use super::menu::{MenuId, MenuItemId, MenuOp, TrayEvent, TrayId};
 use super::window::{WindowEvent, WindowOp, WindowOptions};
 use super::{ContentsId, WindowId};
 
@@ -19,7 +20,7 @@ pub enum ToShell {
         window: WindowId,
         op: WindowOp,
     },
-    /// The application menu, context menus, the tray and global shortcuts: P15 defines them.
+    /// The application menu, context menus, the tray and global shortcuts (P15).
     Menu(MenuOp),
     /// The app is ending: the shell closes what it has and leaves with this code.
     Quit {
@@ -52,10 +53,6 @@ pub enum ThemeSource {
     Dark,
 }
 
-/// Menus, trays and global shortcuts. Empty until P15 gives them their first variant.
-#[derive(Clone, Debug)]
-pub enum MenuOp {}
-
 /// What the shell tells the main process.
 #[derive(Clone, Debug)]
 pub enum FromShell {
@@ -64,9 +61,14 @@ pub enum FromShell {
         event: WindowEvent,
     },
     App(AppEvent),
+    /// A person chose a menu item, with the mouse or by its accelerator. `window` is the window
+    /// the menu belongs to or was popped up over, else the focused one; `modifiers` are the keys
+    /// held, as the click's `event` reports them.
     MenuClicked {
-        menu_item: u32,
+        menu_item: MenuItemId,
         window: Option<WindowId>,
+        triggered_by_accelerator: bool,
+        modifiers: verve_dom::Modifiers,
     },
     /// The displays as they are now, for `screen` (P14). The Hub keeps the latest, so what is
     /// sent before the main process is up is not lost.
@@ -83,6 +85,33 @@ pub enum FromShell {
         contents: ContentsId,
         down: bool,
         key: verve_dom::Key,
+    },
+    /// A menu is about to open: `'menu-will-show'`.
+    MenuWillShow {
+        menu: MenuId,
+    },
+    /// A menu closed: `'menu-will-close'`, and `call` is the `popup` it answers.
+    MenuWillClose {
+        menu: MenuId,
+        call: Option<u64>,
+    },
+    /// A person did something to a tray icon, which is at `bounds` (screen DIPs) and was touched at
+    /// `position`.
+    Tray {
+        tray: TrayId,
+        event: TrayEvent,
+        bounds: Rect,
+        position: Option<(f32, f32)>,
+        modifiers: verve_dom::Modifiers,
+    },
+    /// A tray icon moved or changed size; `getBounds` answers the latest.
+    TrayBounds {
+        tray: TrayId,
+        bounds: Rect,
+    },
+    /// The global shortcut registered as `id` was pressed.
+    Shortcut {
+        id: u32,
     },
 }
 

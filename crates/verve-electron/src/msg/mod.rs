@@ -15,6 +15,7 @@ pub use verve::clone::Cloned;
 
 mod dialog;
 mod input;
+mod menu;
 mod page;
 mod preferences;
 mod shell;
@@ -22,6 +23,7 @@ mod window;
 
 pub use dialog::*;
 pub use input::*;
+pub use menu::*;
 pub use page::*;
 pub use preferences::*;
 pub use shell::*;

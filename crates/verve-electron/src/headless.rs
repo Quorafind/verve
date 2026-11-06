@@ -307,6 +307,8 @@ impl HeadlessShell {
         self.say(FromShell::MenuClicked {
             menu_item: item,
             window: None,
+            triggered_by_accelerator: false,
+            modifiers: verve_dom::Modifiers::default(),
         });
     }
 
