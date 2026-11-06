@@ -198,7 +198,7 @@ pub(super) fn fetched(
         && result.status < 400
     {
         // What it imports is relative to where it ended up, not to where it was asked for.
-        let source: std::rc::Rc<str> = net::text(&bytes).into();
+        let source: std::rc::Rc<str> = net::decoded_text(&bytes).into();
         edges = edges_of(&source, &result.url, &map);
         let state = doc.state.borrow();
         let mut cache = state.load.modules.borrow_mut();

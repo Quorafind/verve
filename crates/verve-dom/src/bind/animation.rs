@@ -8,8 +8,8 @@
 //! (`play`, `pause`, `reverse`, `finish`, `cancel`, `commitStyles`) is done to that one
 //! animation. `persist()` is not supported and says so.
 //!
-//! R1: `class` and `WebIdlClass` are the legacy ones of `bind/mod.rs` (they register the class in
-//! the document's table, which `verve::native::class` does not); the rest comes from
+//! Its classes are made by `webidl_class` of `bind/mod.rs`, which registers them in the
+//! document's table as `verve::native::class` does not; everything else comes from
 //! `verve::native`.
 
 use std::sync::Arc;

@@ -3160,7 +3160,7 @@ const CELL_REFLECTED: &[(&str, &str, Reflect)] = &[
 
 // ─── Installing ─────────────────────────────────────────────────────────────────────────────
 
-fn plain_class(context: &mut Context, name: &'static str, parent: &str) -> JsResult<JsObject> {
+fn bare_interface(context: &mut Context, name: &'static str, parent: &str) -> JsResult<JsObject> {
     Ok(webidl_class(
         context,
         WebIdlClass {
@@ -3235,7 +3235,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     reflect(context, &html, HTML_REFLECTED)?;
     extend_prototype(context, &html, FOCUS_METHODS, STYLED_ACCESSORS)?;
     for name in PLAIN_HTML_CLASSES {
-        plain_class(context, name, "HTMLElement")?;
+        bare_interface(context, name, "HTMLElement")?;
     }
     full_class(
         context,
@@ -3361,7 +3361,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             ("height", "height", Reflect::Number(0)),
         ],
     )?;
-    plain_class(context, "HTMLAudioElement", "HTMLMediaElement")?;
+    bare_interface(context, "HTMLAudioElement", "HTMLMediaElement")?;
     full_class(
         context,
         "HTMLDialogElement",
@@ -3684,11 +3684,11 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         &[],
     )?;
     for (_, name) in SVG_CLASSES {
-        plain_class(context, name, "SVGGraphicsElement")?;
+        bare_interface(context, name, "SVGGraphicsElement")?;
     }
     let svg_svg = crate::state::class_prototype(context, "SVGSVGElement");
     extend_prototype(context, &svg_svg, super::svg::SVG_SVG_METHODS, &[])?;
-    plain_class(context, "MathMLElement", "Element")?;
+    bare_interface(context, "MathMLElement", "Element")?;
     // What an element hands out.
     webidl_class(
         context,

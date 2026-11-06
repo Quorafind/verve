@@ -19,7 +19,7 @@ pub(crate) fn is_network(scheme: &str) -> bool {
 
 /// The text of a document or script body: UTF-8, a byte order mark dropped. (Other encodings
 /// are P41's.)
-pub(crate) fn text(bytes: &[u8]) -> String {
+pub(crate) fn decoded_text(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     String::from_utf8_lossy(bytes).into_owned()
 }

@@ -217,8 +217,8 @@ pub fn fetch_internal(context: &mut Context, head: RequestHead, body: Option<Bod
   的 `console-message` 事件（现有 `take_console` 是拉取式，保留）。
 - `navigator.userAgent` 的产品名可配置（Electron 的 UA 带 `<appName>/<version>`）：`Runtime::set_user_agent(String)`。
 - 导出 `verve::events::emit_event(context, target, name, args)`（任务书原写 `emit`；`emit` 仍是私有的方法实现）供 `verve-electron` 写 EventEmitter 子类；以及把 `src/native.rs` 整体以
-  `verve::native` 公开（标注为嵌入方 API）。**它是全仓库唯一的原生函数工具箱**（`style.md` §1）：verve-dom 现在的
-  `bind/mod.rs` 是一套同名不同签名的副本，不要照它的方式做；R1 关卡会把 verve-dom 和根 crate 里的副本迁过来并删除。
+  `verve::native` 公开（标注为嵌入方 API）。**它是全仓库唯一的原生函数工具箱**（`style.md` §1）：verve-dom 的
+  `bind/mod.rs` 曾是一套同名不同签名的副本，R1 关卡已把 verve-dom 和根 crate 里的副本迁过来并删除。
 
 ## 步骤
 

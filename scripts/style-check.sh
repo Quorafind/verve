@@ -4,19 +4,16 @@
 #
 #   1. File length: a new file has at most 1500 lines; a file already longer is listed in
 #      ci/style/large-files.txt with its length then, and may not grow past it.
-#   2. One toolkit: the helpers in src/native.rs and src/encoding.rs are defined there only.
-#      Copies that predate the rule are listed in ci/style/toolkit-copies.txt until the refactor
-#      gates remove them; a new copy fails.
+#   2. One toolkit: the helpers in src/native.rs and src/encoding.rs are defined there only, and
+#      so are the names the refactor retired (`text`, `list`, `string`, `arg_string`, ...), and
+#      `ClassSpec`. Copies that predate the rule would be listed in ci/style/toolkit-copies.txt
+#      (empty since R1); a new copy fails.
 #   3. No dbg!, todo! or unimplemented! in library code; a TODO comment names its package (P31: …).
 #   4. Every new crate (verve-electron, verve-gpui, verve-layout) takes the workspace lints.
-#   5. verve-dom's legacy helpers in src/bind/mod.rs (`text`, `list`, `array`, `arg_string`,
-#      copies of verve::native with other signatures; style.md §1) gain no callers: the lines
-#      that call them, counted per file, may not pass ci/style/legacy-calls.txt, and a file not
-#      listed there may not call them at all.
-#   6. A realm is entered only in src/world.rs (`verve::in_realm` / `in_world`, which put the
+#   5. A realm is entered only in src/world.rs (`verve::in_realm` / `in_world`, which put the
 #      previous realm back); everyone else calls those.
 #
-# `scripts/style-check.sh --baseline` rewrites the three lists from the tree as it is: run it
+# `scripts/style-check.sh --baseline` rewrites the two lists from the tree as it is: run it
 # only when a refactor shrinks them, never to let a new violation in.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -24,12 +21,12 @@ cd "$(dirname "$0")/.."
 MAX_LINES=1500
 LARGE=ci/style/large-files.txt
 COPIES=ci/style/toolkit-copies.txt
-LEGACY=ci/style/legacy-calls.txt
-LEGACY_HOME=crates/verve-dom/src/bind/mod.rs
-LEGACY_HELPERS='text|list|array|arg_string'
 # Each helper has one home: the native-function toolkit in src/native.rs, the encoders in
 # src/encoding.rs. A definition of one of these names anywhere else is a copy.
-NATIVE='arg|js_text|text_of|type_error|range_error|coded_error|coded_error_value|object|function|closure|hidden|methods|exports|accessors|get|invoke|list_of|array|global|class|instance'
+NATIVE='arg|arg_text|js_text|text_of|type_error|range_error|coded_error|coded_error_value|object|function|closure|hidden|methods|exports|accessors|get|invoke|list_of|list_from|array|global|class|instance|constructor|plain_class|illegal_constructor'
+# Names that were copies once and were retired in R1 (verve-dom's `bind` helpers and the like):
+# they come back only through verve::native.
+RETIRED='text|list|string|arg_string|plain_object|define_class'
 ENCODING='hex|base64|unbase64|percent_decode|decode_base64|data_url'
 
 # Only the folders that exist: a crate without tests/ is not an error.
@@ -58,18 +55,10 @@ toolkit_copies() {
     {
         library_sources | grep -xF src/native.rs | tr '\n' '\0' | definitions "$ENCODING"
         library_sources | grep -xF src/encoding.rs | tr '\n' '\0' | definitions "$NATIVE"
+        library_sources | grep '^crates/verve-dom/src/' | tr '\n' '\0' | definitions "$RETIRED"
         library_sources | grep -vxE 'src/(native|encoding)\.rs' | tr '\n' '\0' |
             definitions "$NATIVE|$ENCODING"
     } | sed -E 's/^([^:]+):.*fn ([a-z_0-9]+).*/\1 \2/' | sort -u -k1,1 -k2,2
-    return 0
-}
-
-# "path lines" for each verve-dom source with lines that call a legacy helper: a bare or
-# `bind::` call, not a method (`.text(`) nor another module's function (`x::text(`).
-legacy_calls() {
-    library_sources | grep '^crates/verve-dom/src/' | grep -vxF "$LEGACY_HOME" | tr '\n' '\0' |
-        { xargs -0 -r grep -HE "(^|[^A-Za-z0-9_.:]|bind::)($LEGACY_HELPERS)\(" || true; } |
-        { grep -vE ":[^:]*fn ($LEGACY_HELPERS)\(" || true; } | awk -F: '{ count[$1]++ } END { for (f in count) print f, count[f] }' | sort
     return 0
 }
 
@@ -84,8 +73,7 @@ if [ "${1:-}" = "--baseline" ]; then
     mkdir -p ci/style
     large_files > "$LARGE"
     toolkit_copies > "$COPIES"
-    legacy_calls > "$LEGACY"
-    echo "wrote $LARGE ($(wc -l < "$LARGE") files), $COPIES ($(wc -l < "$COPIES") copies) and $LEGACY ($(wc -l < "$LEGACY") files)"
+    echo "wrote $LARGE ($(wc -l < "$LARGE") files) and $COPIES ($(wc -l < "$COPIES") copies)"
     exit 0
 fi
 
@@ -106,6 +94,12 @@ while read -r f name; do
     fail "$f defines its own \`$name\`: use verve::native / verve::encoding, or add what is missing there"
 done < <(toolkit_copies | grep -vxFf "$COPIES" || true)
 
+# A class spec of its own: native::PlainClass and the toolkit's ClassSpec are the ones.
+while IFS= read -r hit; do
+    fail "$hit (a class spec lives in src/native.rs only)"
+done < <(library_sources | grep -vxF src/native.rs | tr '\n' '\0' |
+    { xargs -0 -r grep -nHE '^ *(pub(\([a-z]+\))? )?struct ClassSpec\b' || true; })
+
 # 3. Banned macros and anonymous TODOs.
 while IFS= read -r hit; do
     fail "$hit (no dbg!/todo!/unimplemented! in library code)"
@@ -122,16 +116,7 @@ for crate in verve-electron verve-gpui verve-layout; do
         fail "$manifest must have \`[lints] workspace = true\`"
 done
 
-# 5. No new callers of verve-dom's legacy helpers.
-while read -r f n ceiling; do
-    if [ "$ceiling" = "-" ]; then
-        fail "$f calls verve-dom's legacy helpers ($LEGACY_HELPERS) on $n line(s): use verve::native (style.md §1)"
-    elif [ "$n" -gt "$ceiling" ]; then
-        fail "$f calls verve-dom's legacy helpers on $n line(s), more than its $ceiling: use verve::native (style.md §1)"
-    fi
-done < <(legacy_calls | with_ceiling "$LEGACY")
-
-# 6. Realms are entered only through verve::in_realm / in_world.
+# 5. Realms are entered only through verve::in_realm / in_world.
 while IFS= read -r hit; do
     fail "$hit (enter a realm with verve::in_world / in_realm, which put the previous one back)"
 done < <(library_sources | grep -vxF src/world.rs | tr '\n' '\0' |

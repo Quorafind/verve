@@ -44,8 +44,8 @@ use crate::state::shared;
 pub type Method = (&'static str, usize, NativeFunctionPointer);
 /// Runs the native `f` in a microtask, through the global `queueMicrotask`. If a script has
 /// broken that there is no one to tell, and nothing else to do: the work is dropped.
-/// R1: once `verve::native` is public (P03) this goes through the runtime's own microtask queue,
-/// which a script cannot replace.
+/// The runtime's own microtask queue is not reachable from here, so a script that has replaced
+/// `queueMicrotask` is what decides whether this runs.
 pub fn queue_microtask(context: &mut Context, name: &str, f: NativeFunctionPointer) {
     let task = function(context, name, 0, f);
     let queue = context

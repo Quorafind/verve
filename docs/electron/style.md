@@ -9,14 +9,14 @@
 **所有 crate 共用 `verve::native` 一套原生函数工具**（P03 把 `src/native.rs` 公开为 `verve::native`）。
 
 - 禁止在别的 crate 或模块里再写一份 `arg`、`js_text`、`text_of`、`type_error`、`coded_error`、`object`、`function`、
-  `closure`、`get`、`array`、`list_of`、`class`/`ClassSpec`、`hidden`、`exports`… 缺什么就**加进 `src/native.rs`**，
+  `closure`、`get`、`array`、`list_of`、`class`/`ClassSpec`/`plain_class`、`constructor`、`hidden`、`exports`… 缺什么就**加进 `src/native.rs`**，
   其他人一起用。`style-check` 会拦下这些名字的新定义。
 - 同理：base64、data: URL、percent-decode 只在 `src/encoding.rs`（R1 公开为 `verve::encoding`）；EventEmitter 子类只用
   `verve::events` 的辅助；结构化克隆只用 `verve::clone`。
-- 历史遗留：`crates/verve-dom/src/bind/mod.rs` 现在有一套同名不同签名的副本（`text`≈`js_text`、`list`≈`list_of`、
-  `array` 参数顺序相反）。**新代码不得再调用这些副本**；R1 关卡把 verve-dom 迁到 `verve::native` 并删除副本。
-  `style-check` 按文件数调用这些副本（`text`、`list`、`array`、`arg_string`）的行：只许比 `ci/style/legacy-calls.txt` 少，
-  不在表里的文件一处也不许有。
+- verve-dom 的 `bind/mod.rs` 曾有一套同名不同签名的副本（`text`、`list`、`string`、`arg_string`、`plain_object`…），R1 已迁到
+  `verve::native` 并删除；`style-check` 拦下 verve-dom 里这些名字的重新定义，`ci/style/toolkit-copies.txt` 已清空。verve-dom 自己的
+  `webidl_class`（登记在文档的类表里、方法可枚举、带 `toStringTag`）不是 `native::class`，名字也不同；`struct ClassSpec` 只在
+  `src/native.rs`。
 - 切换 Realm 只用 `verve::in_world` / `verve::in_realm`（`src/world.rs`，返回时放回原来的 Realm）；别处手写 `enter_realm` 会被
   `style-check` 拦下。
 - Electron 的 API 定义辅助（P02 的 `api/define.rs`）**建立在 `verve::native` 之上**，只加 Electron 特有的部分
@@ -111,7 +111,7 @@ pub(crate) fn bare_name(name: &str) -> &str {
 | 函数行数 | 80 | clippy `too_many_lines`（新 crate 开启） |
 | 参数个数 | 7 | clippy `too_many_arguments` |
 | 文件行数 | 1500（新文件）；旧超长文件不得增长 | `scripts/style-check.sh` |
-| verve-dom 旧副本的调用 | 每个文件不得增加；新文件为 0 | `scripts/style-check.sh` |
+| 工具箱副本（含 R1 退役的名字） | 0 | `scripts/style-check.sh` |
 | 手写 `enter_realm` | 只在 `src/world.rs` | `scripts/style-check.sh` |
 | 嵌套层级 | 3 | 审查 |
 | PR 净增（不含测试与夹具） | ~1500 行 | 审查 |
@@ -123,7 +123,7 @@ pub(crate) fn bare_name(name: &str) -> &str {
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-scripts/style-check.sh            # 文件长度棘轮、工具箱副本、禁用模式、旧副本调用棘轮、Realm 切换
+scripts/style-check.sh            # 文件长度棘轮、工具箱副本、禁用模式、Realm 切换
 ```
 
 新 crate（`verve-electron`、`verve-gpui`、`verve-layout`）在 `Cargo.toml` 写 `[lints] workspace = true`，
