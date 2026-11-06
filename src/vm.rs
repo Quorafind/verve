@@ -54,6 +54,7 @@ use crate::native::{
     ClassSpec, arg, array, class, closure, coded_error, coded_error_value, exports, get, hidden,
     invoke, js_text, list_of, object, settled, text_of,
 };
+use crate::world::in_realm;
 
 // ─── vm ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -255,14 +256,6 @@ fn require_context(value: &JsValue, context: &mut Context) -> JsResult<Realm> {
             "ERR_INVALID_ARG_TYPE",
         )
     })
-}
-
-/// Runs `f` with `realm` as the running realm.
-fn in_realm<R>(context: &mut Context, realm: &Realm, f: impl FnOnce(&mut Context) -> R) -> R {
-    let outer = context.enter_realm(realm.clone());
-    let out = f(context);
-    context.enter_realm(outer);
-    out
 }
 
 /// A context's options: `codeGeneration` (or `contextCodeGeneration`, for `runInNewContext`)

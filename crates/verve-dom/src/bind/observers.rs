@@ -101,6 +101,7 @@ fn record_id(this: &JsValue, context: &mut Context) -> JsResult<u32> {
             id,
             watch,
             object: object.downgrade(),
+            world: verve::current_world(context),
             kept: Vec::new(),
             transient: Vec::new(),
             targets: Vec::new(),
@@ -399,7 +400,7 @@ pub(crate) fn distribute(context: &mut Context) {
 
 fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsValue> {
     let record = plain_object(context);
-    let prototype = shared(context).borrow().prototype("MutationRecord");
+    let prototype = crate::state::class_prototype(context, "MutationRecord");
     record.set_prototype(Some(prototype));
     let target = wrap(context, mutation.target());
     set(&record, "target", target, context)?;
@@ -474,6 +475,15 @@ pub fn deliver_mutations(context: &mut Context) -> JsResult<()> {
         .map(|o| o.id)
         .collect();
     for id in due {
+        let world = with_record(id, context, |o| o.world).unwrap_or(verve::MAIN_WORLD);
+        verve::in_world(context, world, |cx| deliver_mutations_to(id, cx))?;
+    }
+    Ok(())
+}
+
+/// [`deliver_mutations`] to one observer, in the world it belongs to.
+fn deliver_mutations_to(id: u32, context: &mut Context) -> JsResult<()> {
+    {
         let record = with_record(id, context, |o| {
             o.transient.clear();
             o.object.upgrade().map(|object| {
@@ -486,7 +496,7 @@ pub fn deliver_mutations(context: &mut Context) -> JsResult<()> {
         })
         .flatten();
         let Some((observer, mutations, _kept)) = record else {
-            continue;
+            return Ok(());
         };
         let callback = observer.get(js_string!("__callback"), context)?;
         let mut records = Vec::new();
@@ -497,7 +507,7 @@ pub fn deliver_mutations(context: &mut Context) -> JsResult<()> {
             }
         }
         if records.is_empty() {
-            continue;
+            return Ok(());
         }
         let list = array(records, context);
         if let Err(error) = verve::call(
@@ -557,12 +567,22 @@ pub fn deliver_layout(context: &mut Context) -> JsResult<bool> {
         .collect();
     let mut told = false;
     for (id, watch) in observers {
+        let world = with_record(id, context, |o| o.world).unwrap_or(verve::MAIN_WORLD);
+        told |= verve::in_world(context, world, |cx| deliver_layout_to(id, watch, cx))?;
+    }
+    Ok(told)
+}
+
+/// [`deliver_layout`] to one observer, in the world it belongs to.
+fn deliver_layout_to(id: u32, watch: Watch, context: &mut Context) -> JsResult<bool> {
+    let mut told = false;
+    {
         let entries = match watch {
             Watch::Resize => resize_entries(context, id)?,
             _ => intersection_entries(context, id)?,
         };
         if entries.is_empty() {
-            continue;
+            return Ok(false);
         }
         let found = with_record(id, context, |o| o.object.upgrade()).flatten();
         if let Some(object) = found {
@@ -602,7 +622,7 @@ fn resize_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>> {
             }
         });
         let entry = plain_object(context);
-        let prototype = shared(context).borrow().prototype("ResizeObserverEntry");
+        let prototype = crate::state::class_prototype(context, "ResizeObserverEntry");
         entry.set_prototype(Some(prototype));
         let target = wrap(context, node);
         set(&entry, "target", target, context)?;
@@ -682,9 +702,7 @@ fn intersection_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>
             1.
         };
         let entry = plain_object(context);
-        let prototype = shared(context)
-            .borrow()
-            .prototype("IntersectionObserverEntry");
+        let prototype = crate::state::class_prototype(context, "IntersectionObserverEntry");
         entry.set_prototype(Some(prototype));
         let target = wrap(context, node);
         set(&entry, "target", target, context)?;
@@ -742,9 +760,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     }
     context.register_global_property(
         js_string!("WebKitMutationObserver"),
-        shared(context)
-            .borrow()
-            .class("MutationObserver")
+        crate::state::class_of(context, "MutationObserver")
             .expect("made")
             .0,
         boa_engine::property::Attribute::WRITABLE | boa_engine::property::Attribute::CONFIGURABLE,

@@ -1,0 +1,1180 @@
+{
+  "electron": "39.8.10",
+  "events": [
+    "app will-finish-launching",
+    "app ready",
+    "contents 1 did-start-loading",
+    "contents 1 dom-ready",
+    "contents 1 did-finish-load",
+    "contents 1 did-stop-loading",
+    "window 1 ready-to-show",
+    "app before-quit",
+    "window 1 close",
+    "window 1 closed",
+    "app will-quit",
+    "process exit"
+  ],
+  "console": [
+    {
+      "from": "renderer",
+      "text": "preload: globals function object object object function object function function undefined undefined"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: process _events,_eventsCount,_maxListeners,arch,argv,contextId,contextIsolated,crash,env,execPath,getBlinkMemoryInfo,getCPUUsage,getCreationTime,getHeapStatistics,getProcessMemoryInfo,getSystemMemoryInfo,getSystemVersion,hang,isMainFrame,pid,platform,sandboxed,type,uptime,version,versions"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: process fields renderer true true true win32 number object true true string"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: electron contextBridge,crashReporter,ipcRenderer,nativeImage,webFrame,webUtils"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require fs fails Error module not found: fs"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require path fails Error module not found: path"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require os fails Error module not found: os"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require events ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require timers ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require url ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require util fails Error module not found: util"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require buffer fails Error module not found: buffer"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require crypto fails Error module not found: crypto"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require child_process fails Error module not found: child_process"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require node:events ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require node:fs fails Error module not found: node:fs"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require electron ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require electron/renderer ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require electron/common ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: require ./missing fails Error module not found: ./missing"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: webFrame "
+    },
+    {
+      "from": "renderer",
+      "text": "preload: webUtils getPathForFile"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: ipcRenderer _events,_eventsCount,_maxListeners"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: readyState loading undefined undefined"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: window true true undefined"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose string ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose numbers ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose boolean ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose null ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose undefined ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose bigint ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose object ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose array ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose sparse array ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose array with property ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose getter ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose getter calls ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose non-enumerable ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose symbol key ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose null prototype ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose class instance ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose frozen ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose shared reference ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose cycle ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose deep 40 ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose deep 1100 fails TypeError Electron contextBridge recursion depth exceeded.  Nested objects deeper than 1000 are not supported."
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose function ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose arrow ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose async function ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose class ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose bound ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose object with function ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose resolved promise ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose rejected promise ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose thenable ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose error ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose custom error ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose type error ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose error with cause ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose date ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose regexp ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose map ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose set ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose arraybuffer ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose typed array ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose typed array view ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose float64 array ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose data view ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose blob ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose symbol ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose symbol value ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose weakmap fails Error An object could not be cloned."
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose proxy fails Error An object could not be cloned."
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose number object ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose string object ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose again Error Cannot bind an API on top of an existing property on the window object"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose location fails Error Cannot bind an API on top of an existing property on the window object"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose document fails Error Cannot bind an API on top of an existing property on the window object"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose Array fails Error Cannot bind an API on top of an existing property on the window object"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose number key fails TypeError Error processing argument at index 1, conversion failure from "
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose no value ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose string value ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose function value ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: expose null value ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: exposeInIsolatedWorld ok"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: executeInMainWorld function"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: executeInMainWorld \"object!2undefined\""
+    },
+    {
+      "from": "renderer",
+      "text": "Uncaught (in promise) Error: nope"
+    },
+    {
+      "from": "renderer",
+      "text": "page: globals undefined undefined undefined undefined object undefined undefined undefined"
+    },
+    {
+      "from": "renderer",
+      "text": "page: api descriptor configurable,enumerable,value,writable false true false undefined"
+    },
+    {
+      "from": "renderer",
+      "text": "page: api keys labels,get,take,takeLater,echo,callback,callbackSafe,keep,callKept,original,isOriginal,sameAsKept,mutate,thrower,throwValue,rejecter,later,thisIs,counter,bump,snapshot,proto,arrayPush,args,count,defaults,nested,async,ipc,done"
+    },
+    {
+      "from": "renderer",
+      "text": "page: api proto true true false false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct string => \"héllo\""
+    },
+    {
+      "from": "renderer",
+      "text": "returned string => \"héllo\""
+    },
+    {
+      "from": "renderer",
+      "text": "direct numbers => array Array len=7 [0, -0, NaN, Infinity, -Infinity, 1.5, 9007199254740992] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned numbers => array Array len=7 [0, -0, NaN, Infinity, -Infinity, 1.5, 9007199254740992] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct boolean => true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned boolean => true"
+    },
+    {
+      "from": "renderer",
+      "text": "direct null => null"
+    },
+    {
+      "from": "renderer",
+      "text": "returned null => null"
+    },
+    {
+      "from": "renderer",
+      "text": "direct undefined => undefined"
+    },
+    {
+      "from": "renderer",
+      "text": "returned undefined => undefined"
+    },
+    {
+      "from": "renderer",
+      "text": "direct bigint => 12345678901234567890n"
+    },
+    {
+      "from": "renderer",
+      "text": "returned bigint => 12345678901234567890n"
+    },
+    {
+      "from": "renderer",
+      "text": "direct object => object Object tag=Object {a: 1, b: \"two\", c: array Array len=2 [3, object Object tag=Object {d: 4} syms=0 hidden=0 frozen=true] extra=[], e: null, f: undefined} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned object => object Object tag=Object {a: 1, b: \"two\", c: array Array len=2 [3, object Object tag=Object {d: 4} syms=0 hidden=0 frozen=false] extra=[], e: null, f: undefined} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct array => array Array len=4 [1, \"a\", array Array len=1 [2] extra=[], object Object tag=Object {z: 1} syms=0 hidden=0 frozen=true] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned array => array Array len=4 [1, \"a\", array Array len=1 [2] extra=[], object Object tag=Object {z: 1} syms=0 hidden=0 frozen=false] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct sparse array => array Array len=3 [1, undefined, 3] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned sparse array => array Array len=3 [1, undefined, 3] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct array with property => array Array len=2 [1, 2] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned array with property => array Array len=2 [1, 2] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct getter => object Object tag=Object {plain: 1, computed: \"got\"} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned getter => object Object tag=Object {plain: 1, computed: \"got\"} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct getter calls => 1"
+    },
+    {
+      "from": "renderer",
+      "text": "returned getter calls => 2"
+    },
+    {
+      "from": "renderer",
+      "text": "direct non-enumerable => object Object tag=Object {shown: 1} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned non-enumerable => object Object tag=Object {shown: 1} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct symbol key => object Object tag=Object {a: 1} syms=1 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned symbol key => object Object tag=Object {a: 1} syms=1 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct null prototype => object Object tag=Object {k: \"v\"} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned null prototype => object Object tag=Object {k: \"v\"} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct class instance => object Object tag=Object {x: 1, y: 2} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned class instance => object Object tag=Object {x: 1, y: 2} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct frozen => object Object tag=Object {f: 1} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned frozen => object Object tag=Object {f: 1} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct shared reference => object Object tag=Object {a: object Object tag=Object {n: 1} syms=0 hidden=0 frozen=true, b: <same as $.a>} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned shared reference => object Object tag=Object {a: object Object tag=Object {n: 1} syms=0 hidden=0 frozen=false, b: <same as $.a>} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct cycle => object Object tag=Object {name: \"loop\", self: <same as $>} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned cycle => object Object tag=Object {name: \"loop\", self: <same as $>} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct deep 40 => object Object tag=Object {next: object Object tag=Object {next: object Object tag=Object {next: object Object tag=Object {next: object Object tag=Object {next: <deep>} syms=0 hidden=0 frozen=true} syms=0 hidden=0 frozen=true} syms=0 hidden=0 frozen=true} syms=0 hidden=0 frozen=true} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned deep 40 => object Object tag=Object {next: object Object tag=Object {next: object Object tag=Object {next: object Object tag=Object {next: object Object tag=Object {next: <deep>} syms=0 hidden=0 frozen=false} syms=0 hidden=0 frozen=false} syms=0 hidden=0 frozen=false} syms=0 hidden=0 frozen=false} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct deep 1100 => absent"
+    },
+    {
+      "from": "renderer",
+      "text": "returned deep 1100 throws Error: Uncaught TypeError: Electron contextBridge recursion depth exceeded.  Nested objects deeper than 1000 are not supported."
+    },
+    {
+      "from": "renderer",
+      "text": "direct function => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned function => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct arrow => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned arrow => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct async function => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned async function => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct class => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned class => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct bound => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned bound => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct object with function => object Object tag=Object {f: function Function name=\"\" length=0 own=[], n: 1} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned object with function => object Object tag=Object {f: function Function name=\"\" length=0 own=[], n: 1} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct resolved promise => promise Promise"
+    },
+    {
+      "from": "renderer",
+      "text": "returned resolved promise => promise Promise"
+    },
+    {
+      "from": "renderer",
+      "text": "direct rejected promise => promise Promise"
+    },
+    {
+      "from": "renderer",
+      "text": "returned rejected promise => promise Promise"
+    },
+    {
+      "from": "renderer",
+      "text": "direct thenable => object Object tag=Object {then: function Function name=\"\" length=0 own=[]} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned thenable => object Object tag=Object {then: function Function name=\"\" length=0 own=[]} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct error => error Error name=Error message=\"boom\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned error => error Error name=Error message=\"boom\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct custom error => error Error name=Error message=\"mine\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned custom error => error Error name=Error message=\"mine\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct type error => error Error name=Error message=\"bad type\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned type error => error Error name=Error message=\"bad type\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct error with cause => error Error name=Error message=\"outer\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned error with cause => error Error name=Error message=\"outer\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct date => date Date 2020-01-02T03:04:05.000Z"
+    },
+    {
+      "from": "renderer",
+      "text": "returned date => date Date 2020-01-02T03:04:05.000Z"
+    },
+    {
+      "from": "renderer",
+      "text": "direct regexp => regexp RegExp /a+b/gi"
+    },
+    {
+      "from": "renderer",
+      "text": "returned regexp => regexp RegExp /a+b/gi"
+    },
+    {
+      "from": "renderer",
+      "text": "direct map => map Map {1=>object Object tag=Object {a: 1} syms=0 hidden=0 frozen=false, \"k\"=>2}"
+    },
+    {
+      "from": "renderer",
+      "text": "returned map => map Map {1=>object Object tag=Object {a: 1} syms=0 hidden=0 frozen=false, \"k\"=>2}"
+    },
+    {
+      "from": "renderer",
+      "text": "direct set => set Set {1, \"two\"}"
+    },
+    {
+      "from": "renderer",
+      "text": "returned set => set Set {1, \"two\"}"
+    },
+    {
+      "from": "renderer",
+      "text": "direct arraybuffer => arraybuffer ArrayBuffer len=3 [9,8,7]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned arraybuffer => arraybuffer ArrayBuffer len=3 [9,8,7]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct typed array => view Uint8Array len=8 off=0 buf=8 [1,2,3,4,5,6,7,8]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned typed array => view Uint8Array len=8 off=0 buf=8 [1,2,3,4,5,6,7,8]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct typed array view => view Uint8Array len=3 off=2 buf=8 [3,4,5]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned typed array view => view Uint8Array len=3 off=2 buf=8 [3,4,5]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct float64 array => view Float64Array len=16 off=0 buf=16 [0,0,0,0,0,0,248,63,0,0,0,0,0,0,4,64]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned float64 array => view Float64Array len=16 off=0 buf=16 [0,0,0,0,0,0,248,63,0,0,0,0,0,0,4,64]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct data view => view DataView len=4 off=0 buf=4 [0,0,0,0]"
+    },
+    {
+      "from": "renderer",
+      "text": "returned data view => view DataView len=4 off=0 buf=4 [0,0,0,0]"
+    },
+    {
+      "from": "renderer",
+      "text": "direct blob => blob Blob size=3 type=text/plain"
+    },
+    {
+      "from": "renderer",
+      "text": "returned blob => blob Blob size=3 type=text/plain"
+    },
+    {
+      "from": "renderer",
+      "text": "direct symbol => symbol Symbol(top)"
+    },
+    {
+      "from": "renderer",
+      "text": "returned symbol => symbol Symbol(top)"
+    },
+    {
+      "from": "renderer",
+      "text": "direct symbol value => object Object tag=Object {s: symbol Symbol(inner)} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned symbol value => object Object tag=Object {s: symbol Symbol(inner)} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct weakmap => absent"
+    },
+    {
+      "from": "renderer",
+      "text": "returned weakmap throws Error: Uncaught Error: An object could not be cloned."
+    },
+    {
+      "from": "renderer",
+      "text": "direct proxy => absent"
+    },
+    {
+      "from": "renderer",
+      "text": "returned proxy throws Error: Uncaught Error: An object could not be cloned."
+    },
+    {
+      "from": "renderer",
+      "text": "direct number object => object other:Number tag=Number {} syms=0 hidden=0 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned number object => object other:Number tag=Number {} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct string object => object other:String tag=String {0: \"b\", 1: \"o\", 2: \"x\", 3: \"e\", 4: \"d\"} syms=0 hidden=1 frozen=true"
+    },
+    {
+      "from": "renderer",
+      "text": "returned string object => object other:String tag=String {0: \"b\", 1: \"o\", 2: \"x\", 3: \"e\", 4: \"d\"} syms=0 hidden=1 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct dom node => absent"
+    },
+    {
+      "from": "renderer",
+      "text": "returned dom node => object other:HTMLBodyElement tag=HTMLBodyElement {} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct event => absent"
+    },
+    {
+      "from": "renderer",
+      "text": "returned event => object Object tag=Object {isTrusted: false} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "direct url => absent"
+    },
+    {
+      "from": "renderer",
+      "text": "returned url => object Object tag=Object {} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "getter calls 2"
+    },
+    {
+      "from": "renderer",
+      "text": "received string => \"héllo\""
+    },
+    {
+      "from": "renderer",
+      "text": "received numbers => array Array len=7 [0, -0, NaN, Infinity, -Infinity, 1.5, 9007199254740992] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received boolean => true"
+    },
+    {
+      "from": "renderer",
+      "text": "received null => null"
+    },
+    {
+      "from": "renderer",
+      "text": "received undefined => undefined"
+    },
+    {
+      "from": "renderer",
+      "text": "received bigint => 12345678901234567890n"
+    },
+    {
+      "from": "renderer",
+      "text": "received object => object Object tag=Object {a: 1, b: \"two\", c: array Array len=2 [3, object Object tag=Object {d: 4} syms=0 hidden=0 frozen=false] extra=[], e: null, f: undefined} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received array => array Array len=4 [1, \"a\", array Array len=1 [2] extra=[], object Object tag=Object {z: 1} syms=0 hidden=0 frozen=false] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received sparse array => array Array len=3 [1, undefined, 3] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received array with property => array Array len=2 [1, 2] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received getter => object Object tag=Object {plain: 1, computed: \"got\"} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received getter calls => 1"
+    },
+    {
+      "from": "renderer",
+      "text": "received non-enumerable => object Object tag=Object {shown: 1} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received symbol key => object Object tag=Object {a: 1} syms=1 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received null prototype => object Object tag=Object {k: \"v\"} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received class instance => object Object tag=Object {x: 1, y: 2} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received frozen => object Object tag=Object {f: 1} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received shared reference => object Object tag=Object {a: object Object tag=Object {n: 1} syms=0 hidden=0 frozen=false, b: <same as $.a>} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received cycle => object Object tag=Object {name: \"loop\", self: <same as $>} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received deep 40 => object Object tag=Object {next: object Object tag=Object {next: object Object tag=Object {next: object Object tag=Object {next: object Object tag=Object {next: <deep>} syms=0 hidden=0 frozen=false} syms=0 hidden=0 frozen=false} syms=0 hidden=0 frozen=false} syms=0 hidden=0 frozen=false} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received deep 1100 throws TypeError: Electron contextBridge recursion depth exceeded.  Nested objects deeper than 1000 are not supported."
+    },
+    {
+      "from": "renderer",
+      "text": "received function => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received arrow => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received async function => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received class => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received bound => function Function name=\"\" length=0 own=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received object with function => object Object tag=Object {f: function Function name=\"\" length=0 own=[], n: 1} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received resolved promise => promise Promise"
+    },
+    {
+      "from": "renderer",
+      "text": "received rejected promise => promise Promise"
+    },
+    {
+      "from": "renderer",
+      "text": "received thenable => object Object tag=Object {then: function Function name=\"\" length=0 own=[]} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received error => error Error name=Error message=\"boom\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received custom error => error Error name=Error message=\"mine\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received type error => error Error name=Error message=\"bad type\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received error with cause => error Error name=Error message=\"outer\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "received date => date Date 2020-01-02T03:04:05.000Z"
+    },
+    {
+      "from": "renderer",
+      "text": "received regexp => regexp RegExp /a+b/gi"
+    },
+    {
+      "from": "renderer",
+      "text": "received map => map Map {1=>object Object tag=Object {a: 1} syms=0 hidden=0 frozen=false, \"k\"=>2}"
+    },
+    {
+      "from": "renderer",
+      "text": "received set => set Set {1, \"two\"}"
+    },
+    {
+      "from": "renderer",
+      "text": "received arraybuffer => arraybuffer ArrayBuffer len=3 [9,8,7]"
+    },
+    {
+      "from": "renderer",
+      "text": "received typed array => view Uint8Array len=8 off=0 buf=8 [1,2,3,4,5,6,7,8]"
+    },
+    {
+      "from": "renderer",
+      "text": "received typed array view => view Uint8Array len=3 off=2 buf=8 [3,4,5]"
+    },
+    {
+      "from": "renderer",
+      "text": "received float64 array => view Float64Array len=16 off=0 buf=16 [0,0,0,0,0,0,248,63,0,0,0,0,0,0,4,64]"
+    },
+    {
+      "from": "renderer",
+      "text": "received data view => view DataView len=4 off=0 buf=4 [0,0,0,0]"
+    },
+    {
+      "from": "renderer",
+      "text": "received blob => blob Blob size=3 type=text/plain"
+    },
+    {
+      "from": "renderer",
+      "text": "received symbol => symbol Symbol(top)"
+    },
+    {
+      "from": "renderer",
+      "text": "received symbol value => object Object tag=Object {s: symbol Symbol(inner)} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received weakmap throws Error: An object could not be cloned."
+    },
+    {
+      "from": "renderer",
+      "text": "received proxy throws Error: An object could not be cloned."
+    },
+    {
+      "from": "renderer",
+      "text": "received number object => object other:Number tag=Number {} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received string object => object other:String tag=String {0: \"b\", 1: \"o\", 2: \"x\", 3: \"e\", 4: \"d\"} syms=0 hidden=1 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received dom node => object other:HTMLBodyElement tag=HTMLBodyElement {} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received event => object Object tag=Object {isTrusted: false} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "received url => object Object tag=Object {} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "promise resolved object Object tag=Object {ok: array Array len=2 [1, 2] extra=[]} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "promise rejected error Error name=Error message=\"nope\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "preload: DOMContentLoaded interactive undefined"
+    },
+    {
+      "from": "renderer",
+      "text": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged."
+    },
+    {
+      "from": "renderer",
+      "text": "promise later object Object tag=Object {late: array Array len=2 [1, 2] extra=[]} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "promise async object Object tag=Object {v: array Array len=1 [1] extra=[]} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "promise rejecter error Error name=Error message=\"async fail\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "promise sent object Object tag=Object {p: 1} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "promise sent rejected error Error name=Error message=\"page reject\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "promise thenable \"thenable value\""
+    },
+    {
+      "from": "renderer",
+      "text": "call 5"
+    },
+    {
+      "from": "renderer",
+      "text": "call object object Object tag=Object {got: object Object tag=Object {x: array Array len=2 [1, 2] extra=[]} syms=0 hidden=0 frozen=false, extra: array Array len=1 [1] extra=[]} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "call this object"
+    },
+    {
+      "from": "renderer",
+      "text": "callback throws preload caught error Error name=Error message=\"page threw\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "callback throws string preload caught error Error name=Error message=\"An unknown exception occurred in the isolated context, an error occurred but a valid exception was not thrown.\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "keep kept kept fn"
+    },
+    {
+      "from": "renderer",
+      "text": "identity echo false true true"
+    },
+    {
+      "from": "renderer",
+      "text": "identity own true false"
+    },
+    {
+      "from": "renderer",
+      "text": "identity kept false"
+    },
+    {
+      "from": "renderer",
+      "text": "this object object"
+    },
+    {
+      "from": "renderer",
+      "text": "mutate object object Object tag=Object {a: 1, list: array Array len=1 [1] extra=[], touched: true} syms=0 hidden=0 frozen=false {\"a\":1,\"list\":[1]}"
+    },
+    {
+      "from": "renderer",
+      "text": "mutate array array Array len=2 [1, \"added\"] extra=[touched] [1]"
+    },
+    {
+      "from": "renderer",
+      "text": "thrower error Error name=Error message=\"thrown in preload\" stack cause=none extra=[] false true"
+    },
+    {
+      "from": "renderer",
+      "text": "throwValue \"text\" => error Error name=Error message=\"An unknown exception occurred in the isolated context, an error occurred but a valid exception was not thrown.\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "throwValue 5 => error Error name=Error message=\"An unknown exception occurred in the isolated context, an error occurred but a valid exception was not thrown.\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "throwValue object Object tag=Object {a: 1} syms=0 hidden=0 frozen=false => error Error name=Error message=\"An unknown exception occurred in the isolated context, an error occurred but a valid exception was not thrown.\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "throwValue error RangeError name=RangeError message=\"thrown error\" stack cause=none extra=[] => error Error name=Error message=\"thrown error\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "throwValue null => error Error name=Error message=\"An unknown exception occurred in the isolated context, an error occurred but a valid exception was not thrown.\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "throwValue undefined => error Error name=Error message=\"An unknown exception occurred in the isolated context, an error occurred but a valid exception was not thrown.\" stack cause=none extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "counter object Object tag=Object {n: 0, list: array Array len=1 [1] extra=[]} syms=0 hidden=0 frozen=true 1 object Object tag=Object {n: 0, list: array Array len=1 [1] extra=[]} syms=0 hidden=0 frozen=true object Object tag=Object {n: 1, list: array Array len=1 [1] extra=[]} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "proto object Object tag=Object {a: true} syms=0 hidden=0 frozen=false 2"
+    },
+    {
+      "from": "renderer",
+      "text": "args array Array len=3 [1, \"a\", object Object tag=Object {b: 2} syms=0 hidden=0 frozen=false] extra=[] 0 1 array Array len=2 [1, \"dflt\"] extra=[] array Array len=2 [1, \"dflt\"] extra=[] array Array len=2 [1, null] extra=[]"
+    },
+    {
+      "from": "renderer",
+      "text": "nested 42 object"
+    },
+    {
+      "from": "renderer",
+      "text": "class instance true true"
+    },
+    {
+      "from": "renderer",
+      "text": "page proto true true true true true true"
+    },
+    {
+      "from": "renderer",
+      "text": "ipc object Object tag=Object {viaMain: array Array len=2 [1, 2] extra=[]} syms=0 hidden=0 frozen=false"
+    },
+    {
+      "from": "renderer",
+      "text": "page: window true function true"
+    },
+    {
+      "from": "renderer",
+      "text": "page: end"
+    }
+  ],
+  "exitCode": 0
+}

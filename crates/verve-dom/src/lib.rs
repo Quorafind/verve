@@ -40,6 +40,7 @@ mod snapshot;
 mod state;
 mod storage;
 mod window_state;
+mod world;
 
 pub use window_state::{Align, FontFaceId, FontOutcome, ScrollRequest};
 
@@ -62,6 +63,7 @@ pub use rect::Rect;
 pub use snapshot::{Snapshot, SnapshotData};
 pub use state::FrameClock;
 pub use storage::{FileStorage, StorageBackend};
+pub use world::{create_world, insert_stylesheet, remove_stylesheet};
 
 use state::{Shared, SheetOwner, SheetRecord, State, shared};
 
@@ -183,6 +185,7 @@ pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Doc
         };
         s.frame_clock = options.frames;
         s.title_fallback = options.title.clone();
+        s.navigator = (options.user_agent.clone(), options.language.clone());
         s.load.loader = options.loader.take().map(Rc::from);
         s.load.active = s.load.loader.is_some();
         let document = s.dom.document;
@@ -202,6 +205,9 @@ pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Doc
         }
     }
     context.insert_data(state.clone());
+    verve::dom_events::set_world_counterpart(context, |target, cx| {
+        Ok(bind::node_id(target).map(|id| bind::node::wrap(cx, id)))
+    });
     install_classes(context, &options).map_err(|error| verve::describe(context, &error))?;
     let storage = options.storage;
     if let Some(storage) = storage {
@@ -213,7 +219,7 @@ pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Doc
     Document::of(runtime).ok_or_else(|| "the document did not install".to_owned())
 }
 
-fn install_classes(context: &mut Context, options: &Options) -> JsResult<()> {
+pub(crate) fn install_classes(context: &mut Context, options: &Options) -> JsResult<()> {
     bind::events::install(context)?;
     bind::node::install(context)?;
     bind::element::install(context)?;
@@ -533,31 +539,13 @@ impl Document {
     /// Adds (or replaces) a stylesheet of the embedder's, by name: after the user agent's and
     /// before the page's.
     pub fn set_stylesheet(&self, name: &str, css: &str) {
-        let mut state = self.state.borrow_mut();
-        let sheet = css::Sheet::parse(css);
         let owner = SheetOwner::Embedder(name.to_owned());
-        match state.sheets.iter_mut().find(|r| r.owner == owner) {
-            Some(record) => record.sheet = sheet,
-            None => {
-                let at = state
-                    .sheets
-                    .iter()
-                    .position(|r| {
-                        matches!(r.owner, SheetOwner::Element(_) | SheetOwner::Adopted(_))
-                    })
-                    .unwrap_or(state.sheets.len());
-                let tree = state.dom.document;
-                state.sheets.insert(at, SheetRecord { owner, sheet, tree });
-            }
-        }
-        state.sheets_changed();
+        self.state.borrow_mut().put_sheet(owner, css);
     }
 
     pub fn remove_stylesheet(&self, name: &str) {
-        let mut state = self.state.borrow_mut();
         let owner = SheetOwner::Embedder(name.to_owned());
-        state.sheets.retain(|r| r.owner != owner);
-        state.sheets_changed();
+        self.state.borrow_mut().drop_sheet(&owner);
     }
 
     // ─── Where things landed ────────────────────────────────────────────────────────────────
@@ -1626,9 +1614,7 @@ pub mod host {
         methods: &[Method],
         accessors: &[Accessor],
     ) -> JsResult<()> {
-        let prototype = crate::state::shared(context)
-            .borrow()
-            .class(class)
+        let prototype = crate::state::class_of(context, class)
             .map(|(_, p)| p)
             .ok_or_else(|| crate::bind::type_error(format!("verve-dom has no class {class}")))?;
         crate::bind::extend_prototype(context, &prototype, methods, accessors)

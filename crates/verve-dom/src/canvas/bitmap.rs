@@ -260,7 +260,7 @@ fn bitmap_source(value: &JsValue, context: &mut Context) -> JsResult<Option<Pixm
 }
 
 fn is_image_data(value: &JsValue, context: &mut Context) -> bool {
-    let prototype = shared(context).borrow().prototype("ImageData");
+    let prototype = crate::state::class_prototype(context, "ImageData");
     value
         .as_object()
         .and_then(|object| object.prototype())

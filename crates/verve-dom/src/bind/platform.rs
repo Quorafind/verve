@@ -86,7 +86,7 @@ pub fn attributes(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
     }
     let list = array(items.clone(), context);
     if let Some(object) = list.as_object() {
-        let prototype = shared(context).borrow().prototype("NamedNodeMap");
+        let prototype = crate::state::class_prototype(context, "NamedNodeMap");
         object.set_prototype(Some(prototype));
         super::hidden(&object, js_string!("__owner"), this.clone(), context)?;
         for ((name, _), attr) in pairs.iter().zip(items) {
@@ -2035,7 +2035,7 @@ fn element_constructor(
     class: &str,
     make: boa_engine::native_function::NativeFunctionPointer,
 ) -> JsResult<()> {
-    let prototype = shared(context).borrow().prototype(class);
+    let prototype = crate::state::class_prototype(context, class);
     let constructor: JsObject =
         FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(make))
             .name(JsString::from(name))
@@ -2105,7 +2105,7 @@ fn construct_option(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
 // ─── Installing ─────────────────────────────────────────────────────────────────────────────
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let element = shared(context).borrow().prototype("Element");
+    let element = crate::state::class_prototype(context, "Element");
     super::extend_prototype(context, &element, ATTRIBUTE_METHODS, &[])?;
     simple_class(
         context,

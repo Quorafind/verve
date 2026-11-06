@@ -343,15 +343,18 @@ const MODIFIER_METHODS: &[Method] = &[("getModifierState", 1, |this, args, cx| {
 pub fn install(context: &mut Context) -> JsResult<()> {
     let classes = verve::dom_events::classes(context)?;
     {
+        let world = verve::current_world(context);
         let state = shared(context);
         let mut state = state.borrow_mut();
         state
             .classes
-            .insert("EventTarget", classes.event_target.clone());
-        state.classes.insert("Event", classes.event.clone());
+            .insert((world, "EventTarget"), classes.event_target.clone());
         state
             .classes
-            .insert("CustomEvent", classes.custom_event.clone());
+            .insert((world, "Event"), classes.event.clone());
+        state
+            .classes
+            .insert((world, "CustomEvent"), classes.custom_event.clone());
     }
     // The runtime's own events beside those, for the document to fire too.
     for name in [
@@ -367,15 +370,16 @@ pub fn install(context: &mut Context) -> JsResult<()> {
                 .get(js_string!("prototype"), context)?
                 .as_object();
             if let Some(prototype) = prototype {
+                let world = verve::current_world(context);
                 shared(context)
                     .borrow_mut()
                     .classes
-                    .insert(name, (constructor, prototype));
+                    .insert((world, name), (constructor, prototype));
             }
         }
     }
     for (name, parent, fields) in CLASSES {
-        let parent = shared(context).borrow().class(parent).expect("made first");
+        let parent = crate::state::class_of(context, parent).expect("made first");
         let methods: &[Method] = if fields.iter().any(|(f, _)| *f == "ctrlKey") {
             MODIFIER_METHODS
         } else {
@@ -388,10 +392,11 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             fields,
             methods,
         )?;
+        let world = verve::current_world(context);
         shared(context)
             .borrow_mut()
             .classes
-            .insert(name, made.clone());
+            .insert((world, name), made.clone());
         context.register_global_property(
             JsString::from(*name),
             made.0,
@@ -400,7 +405,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         )?;
     }
     // `event.x` and `event.y` are `clientX` and `clientY`.
-    let mouse = shared(context).borrow().prototype("MouseEvent");
+    let mouse = crate::state::class_prototype(context, "MouseEvent");
     super::extend_prototype(
         context,
         &mouse,
@@ -435,7 +440,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             ),
         ],
     )?;
-    let keyboard = shared(context).borrow().prototype("KeyboardEvent");
+    let keyboard = crate::state::class_prototype(context, "KeyboardEvent");
     for (key, value) in [
         ("DOM_KEY_LOCATION_STANDARD", 0),
         ("DOM_KEY_LOCATION_LEFT", 1),
@@ -444,7 +449,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     ] {
         keyboard.set(JsString::from(key), value, false, context)?;
     }
-    let ui = shared(context).borrow().prototype("UIEvent");
+    let ui = crate::state::class_prototype(context, "UIEvent");
     super::extend_prototype(
         context,
         &ui,
@@ -459,7 +464,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     // `returnValue` of a `BeforeUnloadEvent` is a `DOMString` a handler may set: any text but the
     // empty one keeps the page (`false` is `"false"`), as the idiom in Electron's documentation
     // has it.
-    let unload = shared(context).borrow().prototype("BeforeUnloadEvent");
+    let unload = crate::state::class_prototype(context, "BeforeUnloadEvent");
     super::extend_prototype(
         context,
         &unload,
@@ -539,9 +544,7 @@ pub fn fire_event(
     for (key, value) in init {
         dict.set(JsString::from(*key), value.clone(), false, context)?;
     }
-    let constructor = shared(context)
-        .borrow()
-        .class(class)
+    let constructor = crate::state::class_of(context, class)
         .map(|(c, _)| c)
         .ok_or_else(|| super::type_error(format!("no event class {class}")))?;
     let event = constructor.construct(&[text(kind), dict.into()], None, context)?;
@@ -1051,10 +1054,10 @@ pub const WINDOW_EVENTS: &[&str] = &[
 /// Puts the handler properties on the element and document prototypes and the window.
 pub fn install_handlers(context: &mut Context) -> JsResult<()> {
     for owner in ["HTMLElement", "SVGElement", "MathMLElement", "Document"] {
-        let prototype = shared(context).borrow().prototype(owner);
+        let prototype = crate::state::class_prototype(context, owner);
         verve::dom_events::handler_accessors(context, &prototype, HANDLER_EVENTS)?;
     }
-    let window = shared(context).borrow().prototype("Window");
+    let window = crate::state::class_prototype(context, "Window");
     verve::dom_events::handler_accessors(context, &window, HANDLER_EVENTS)?;
     verve::dom_events::handler_accessors(context, &window, WINDOW_EVENTS)?;
     let _ = MODIFIERS;

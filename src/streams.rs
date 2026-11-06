@@ -18,7 +18,6 @@
 //! the realm.
 
 use std::collections::VecDeque;
-use std::rc::Rc;
 
 use boa_engine::{
     Context, JsData, JsError, JsObject, JsResult, JsString, JsSymbol, JsValue, NativeFunction,
@@ -31,7 +30,7 @@ use boa_engine::{
     },
     property::PropertyDescriptor,
 };
-use boa_gc::{Finalize, Trace};
+use boa_gc::{Finalize, Gc, Trace};
 
 use crate::native::{arg, array, get, hidden, invoke, js_text, object, text_of, type_error};
 
@@ -228,6 +227,7 @@ fn view_of_first(view: &JsObject, count: usize, context: &mut Context) -> JsResu
 // ─── The classes, made once ─────────────────────────────────────────────────────────────────
 
 /// Every class of the standard, for the realm: made at the first touch of any of them.
+#[derive(Trace, Finalize)]
 pub(crate) struct Classes {
     pub readable: JsObject,
     readable_proto: JsObject,
@@ -258,12 +258,12 @@ pub(crate) struct Classes {
     text_decoder_proto: JsObject,
 }
 
-pub(crate) fn classes(context: &mut Context) -> JsResult<Rc<Classes>> {
-    if let Some(classes) = context.get_data::<Rc<Classes>>() {
-        return Ok(classes.clone());
+pub(crate) fn classes(context: &mut Context) -> JsResult<Gc<Classes>> {
+    if let Some(classes) = crate::world::realm_data::<Gc<Classes>>(context) {
+        return Ok(classes);
     }
-    let classes = Rc::new(make_classes(context)?);
-    context.insert_data(classes.clone());
+    let classes = Gc::new(make_classes(context)?);
+    crate::world::set_realm_data(context, classes.clone());
     Ok(classes)
 }
 

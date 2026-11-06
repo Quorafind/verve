@@ -307,9 +307,7 @@ pub struct ClassSpec<'a> {
 /// Makes a class and remembers it by name.
 pub fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, JsObject)> {
     let parent = spec.parent.map(|name| {
-        shared(context)
-            .borrow()
-            .class(name)
+        crate::state::class_of(context, name)
             .unwrap_or_else(|| panic!("the parent class {name} is made first"))
     });
     let mut builder = boa_engine::object::ConstructorBuilder::new(
@@ -343,10 +341,11 @@ pub fn class(context: &mut Context, spec: ClassSpec<'_>) -> JsResult<(JsObject, 
             .configurable(true),
         context,
     )?;
+    let world = verve::current_world(context);
     shared(context)
         .borrow_mut()
         .classes
-        .insert(spec.name, (constructor.clone(), prototype.clone()));
+        .insert((world, spec.name), (constructor.clone(), prototype.clone()));
     if spec.global {
         context.register_global_property(
             JsString::from(spec.name),
@@ -425,7 +424,7 @@ pub fn prototype_of_target(new_target: &JsValue, context: &mut Context) -> JsRes
 
 /// An instance of one of the classes made here, made by the host itself.
 pub fn native_instance(context: &Context, class: &str, kind: Kind, id: u32) -> JsObject {
-    let prototype = shared(context).borrow().prototype(class);
+    let prototype = crate::state::class_prototype(context, class);
     JsObject::from_proto_and_data(
         prototype,
         Handle {
@@ -438,7 +437,7 @@ pub fn native_instance(context: &Context, class: &str, kind: Kind, id: u32) -> J
 
 /// The constructor of a class made here, by name.
 pub fn constructor_of(context: &Context, name: &str) -> Option<JsObject> {
-    shared(context).borrow().class(name).map(|(c, _)| c)
+    crate::state::class_of(context, name).map(|(c, _)| c)
 }
 
 /// Sets `(key, value)` pairs on a fresh object: an event's `init`, a rect.

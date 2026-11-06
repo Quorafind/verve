@@ -85,6 +85,14 @@ pub struct PortEnd {
     closed: AtomicBool,
 }
 
+// SAFETY: an end holds pipes and a flag, none of it garbage collected, so there is nothing for
+// the collector to find in it.
+unsafe impl boa_gc::Trace for PortEnd {
+    boa_gc::empty_trace!();
+}
+
+impl boa_gc::Finalize for PortEnd {}
+
 /// Two ends of one port, to give to two isolates.
 pub fn remote_port_pair() -> (PortEnd, PortEnd) {
     let (one, two) = (Arc::new(Pipe::default()), Arc::new(Pipe::default()));

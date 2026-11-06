@@ -42,6 +42,11 @@ pub(crate) fn read(
     if let Some(families) = fields.object("defaultFontFamily", context)? {
         prefs.default_font_family = font_families(&Fields::new(Some(&families)), context)?;
     }
+    if let Some(list) = fields.object("additionalArguments", context)? {
+        let items = verve::native::list_of(&list.into(), context)?;
+        let strings = items.iter().filter_map(|v| v.as_string());
+        prefs.additional_arguments = strings.map(|s| s.to_std_string_escaped()).collect();
+    }
     Ok(prefs)
 }
 

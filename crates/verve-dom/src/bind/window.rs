@@ -618,12 +618,8 @@ const MEDIA_QUERY_METHODS: &[Method] = &[
 fn match_media(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let query = arg_string(args, 0, context)?;
     let (target, list) = {
-        let state = shared(context);
-        let state = state.borrow();
-        (
-            state.class("EventTarget").expect("made").0,
-            state.class("MediaQueryList").expect("made").0,
-        )
+        let class = |name| crate::state::class_of(context, name).expect("made").0;
+        (class("EventTarget"), class("MediaQueryList"))
     };
     let object = target.construct(&[], Some(&list), context)?;
     object.define_property_or_throw(
@@ -878,9 +874,7 @@ fn install_screen(context: &mut Context) -> JsResult<()> {
         set(&screen, key, value, context)?;
     }
     set(&screen, "isExtended", false, context)?;
-    let target = shared(context)
-        .borrow()
-        .class("EventTarget")
+    let target = crate::state::class_of(context, "EventTarget")
         .expect("made")
         .0;
     let orientation = target.construct(&[], None, context)?;
@@ -1203,7 +1197,7 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
             global: true,
         },
     )?;
-    let media_proto = shared(context).borrow().prototype("MediaQueryList");
+    let media_proto = crate::state::class_prototype(context, "MediaQueryList");
     verve::dom_events::handler_accessors(context, &media_proto, &["change"])?;
     install_screen(context)?;
     install_navigator(context, options)?;

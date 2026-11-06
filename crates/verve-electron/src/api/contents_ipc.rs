@@ -82,6 +82,35 @@ pub(crate) fn contents_object(context: &mut Context, id: ContentsId) -> JsResult
     Ok(object)
 }
 
+/// A preload of page `id` could not be read or threw: `'preload-error'` is emitted on its
+/// `webContents` with the event, the preload's path and an `Error` of the name and message.
+pub(crate) fn preload_error(
+    context: &mut Context,
+    id: ContentsId,
+    path: String,
+    name: String,
+    message: String,
+) {
+    let emitted = (|| {
+        let object = contents_object(context, id)?;
+        let error = boa_engine::JsNativeError::error()
+            .with_message(message)
+            .into_opaque(context);
+        error.set(
+            boa_engine::js_string!("name"),
+            js_text(&name),
+            false,
+            context,
+        )?;
+        let event = define::event(context)?;
+        let args = [event.into(), js_text(&path), error.into()];
+        define::emit(context, &object, "preload-error", &args)
+    })();
+    if let Err(error) = emitted {
+        verve::report(context, &error);
+    }
+}
+
 /// The objects of page `id`, if they were made and the page has not been forgotten.
 pub(crate) fn page(context: &mut Context, id: ContentsId) -> JsResult<Option<Contents>> {
     Ok(ipc_main::state(context)?.pages.borrow().get(&id).cloned())

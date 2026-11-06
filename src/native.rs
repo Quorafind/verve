@@ -48,6 +48,11 @@ pub fn type_error(message: impl Into<String>) -> JsError {
     JsNativeError::typ().with_message(message.into()).into()
 }
 
+/// An `Error` with `message`.
+pub fn error(message: impl Into<String>) -> JsError {
+    JsNativeError::error().with_message(message.into()).into()
+}
+
 /// A `RangeError` with `message`.
 pub fn range_error(message: impl Into<String>) -> JsError {
     JsNativeError::range().with_message(message.into()).into()

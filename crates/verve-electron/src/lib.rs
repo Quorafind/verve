@@ -23,6 +23,7 @@ pub mod msg;
 mod os;
 mod oscrypt;
 mod pixels;
+mod preload;
 mod probe;
 pub mod renderer_guest;
 mod single_instance;

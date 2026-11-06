@@ -623,6 +623,15 @@ pub enum FromRenderer {
     UnloadReply {
         call: u64,
     },
+    /// A preload could not be read or threw (P21): the main process emits `'preload-error'` on
+    /// the page's `webContents` with `path` and an `Error` of this `name` and `message`.
+    PreloadError {
+        path: String,
+        name: String,
+        message: String,
+    },
+    /// `webFrame.setZoomFactor` (P21): the page's zoom factor is now this.
+    ZoomChanged(f64),
 }
 
 /// What `webPreferences` says of a page. A page is made with these and, when P20 makes its
@@ -713,6 +722,8 @@ pub struct WebPreferences {
     pub v8_cache_options: String,
     /// `transparent`.
     pub transparent: bool,
+    /// `additionalArguments`: strings added to the renderer's `process.argv`.
+    pub additional_arguments: Vec<String>,
 }
 
 /// `defaultFontFamily`: the family each generic name of CSS stands for.
@@ -786,6 +797,7 @@ impl Default for WebPreferences {
             enable_web_sql: true,
             v8_cache_options: "code".into(),
             transparent: true,
+            additional_arguments: Vec::new(),
         }
     }
 }

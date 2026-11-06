@@ -64,7 +64,7 @@ const SLOT_METHODS: &[Method] = &[
 
 /// Puts the slot methods on `HTMLSlotElement`.
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let prototype = shared(context).borrow().prototype("HTMLSlotElement");
+    let prototype = crate::state::class_prototype(context, "HTMLSlotElement");
     extend_prototype(context, &prototype, SLOT_METHODS, &[])
 }
 

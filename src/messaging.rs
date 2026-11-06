@@ -12,14 +12,14 @@
 
 mod remote;
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use boa_engine::{
     Context, JsObject, JsResult, JsString, JsValue, js_string,
     native_function::NativeFunctionPointer,
 };
+
+use boa_gc::{Finalize, GcRefCell, Trace};
 
 use crate::clone::Cloned;
 use crate::dom_events::{
@@ -31,15 +31,16 @@ use crate::native::{arg, closure, get, hidden, js_text, object, text_of, type_er
 pub use remote::{PortEnd, PortEvent, remote_port_pair};
 
 /// The classes, and the broadcast channels open in this realm.
+#[derive(Trace, Finalize)]
 pub(crate) struct Messaging {
     pub(crate) message_channel: JsObject,
     pub(crate) message_port: JsObject,
     port_proto: JsObject,
     pub(crate) broadcast_channel: JsObject,
     pub(crate) websocket: JsObject,
-    channels: RefCell<Vec<JsObject>>,
+    channels: GcRefCell<Vec<JsObject>>,
     /// The ports driven by an end that lives in another isolate; see [`adopt_port`].
-    remotes: RefCell<Vec<(JsObject, PortEnd)>>,
+    remotes: GcRefCell<Vec<(JsObject, PortEnd)>>,
 }
 
 pub(crate) fn make_classes(
@@ -63,7 +64,7 @@ pub(crate) fn make_classes(
         crate::dom_events::handler_of(this, "message")
     });
     let set = crate::native::function(context, "set onmessage", 1, |this, args, cx| {
-        set_handler(this, "message", arg(args, 0))?;
+        set_handler(this, "message", arg(args, 0), cx)?;
         start_port(this, cx)?;
         Ok(JsValue::undefined())
     });
@@ -146,8 +147,8 @@ pub(crate) fn make_classes(
         port_proto,
         broadcast_channel,
         websocket,
-        channels: RefCell::new(Vec::new()),
-        remotes: RefCell::new(Vec::new()),
+        channels: GcRefCell::new(Vec::new()),
+        remotes: GcRefCell::new(Vec::new()),
     })
 }
 
@@ -449,15 +450,24 @@ fn post_remote(
 
 /// Whether any port of this realm is driven by a remote end.
 pub(crate) fn active(context: &Context) -> bool {
-    context
-        .get_data::<Rc<crate::dom_events::Dom>>()
-        .is_some_and(|dom| !dom.messaging.remotes.borrow().is_empty())
+    crate::world::every_world::<boa_gc::Gc<crate::dom_events::Dom>>(context)
+        .iter()
+        .any(|dom| !dom.messaging.remotes.borrow().is_empty())
 }
 
 /// Hears what the remote ends have sent the ports of this realm. Answers whether any message
 /// came.
 pub(crate) fn poll(context: &mut Context) -> bool {
-    let Some(dom) = context.get_data::<Rc<crate::dom_events::Dom>>().cloned() else {
+    let mut any = false;
+    for world in 0..crate::world::count(context) as crate::WorldId {
+        any |= crate::world::in_world(context, world, poll_world);
+    }
+    any
+}
+
+/// [`poll`] for the ports of the world that is running.
+fn poll_world(context: &mut Context) -> bool {
+    let Some(dom) = crate::world::realm_data::<boa_gc::Gc<crate::dom_events::Dom>>(context) else {
         return false;
     };
     let mut heard = Vec::new();

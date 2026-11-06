@@ -3380,10 +3380,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ANCHOR_REFLECTED,
     )?;
     {
-        let (_, area) = shared(context)
-            .borrow()
-            .class("HTMLAreaElement")
-            .expect("made");
+        let (_, area) = crate::state::class_of(context, "HTMLAreaElement").expect("made");
         extend_prototype(context, &area, ANCHOR_METHODS, ANCHOR_ACCESSORS)?;
         reflect(
             context,
@@ -3411,7 +3408,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         crate::media::ACCESSORS,
         MEDIA_REFLECTED,
     )?;
-    let media = shared(context).borrow().prototype("HTMLMediaElement");
+    let media = crate::state::class_prototype(context, "HTMLMediaElement");
     media.set(js_string!("defaultPlaybackRate"), 1, false, context)?;
     full_class(
         context,
@@ -3646,7 +3643,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             ][..],
         ),
     ] {
-        let prototype = shared(context).borrow().prototype(name);
+        let prototype = crate::state::class_prototype(context, name);
         reflect(context, &prototype, reflected)?;
     }
     for (name, accessors) in [
@@ -3724,7 +3721,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ),
         ("HTMLSlotElement", &[][..]),
     ] {
-        let prototype = shared(context).borrow().prototype(name);
+        let prototype = crate::state::class_prototype(context, name);
         extend_prototype(context, &prototype, &[], accessors)?;
     }
     super::slot::install(context)?;
@@ -3742,7 +3739,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     for (_, name) in SVG_CLASSES {
         plain_class(context, name, "SVGGraphicsElement")?;
     }
-    let svg_svg = shared(context).borrow().prototype("SVGSVGElement");
+    let svg_svg = crate::state::class_prototype(context, "SVGSVGElement");
     extend_prototype(context, &svg_svg, SVG_SVG_METHODS, &[])?;
     plain_class(context, "MathMLElement", "Element")?;
     // What an element hands out.
@@ -3761,7 +3758,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     )?;
     {
         // Iterable, as a browser's is: `[...el.classList]`, `for (const c of el.classList)`.
-        let prototype = shared(context).borrow().prototype("DOMTokenList");
+        let prototype = crate::state::class_prototype(context, "DOMTokenList");
         let values = closure(
             context,
             "values",

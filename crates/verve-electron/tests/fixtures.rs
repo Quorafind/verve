@@ -68,6 +68,18 @@ fn quick_start_opens_its_window_and_quits_when_it_closes() {
     let window = app
         .window("Hello World!")
         .expect("the page titled the window");
+    // The page's preload fills in the versions once the document is parsed.
+    let filled = |app: &App| {
+        let text = app.page_text(window.id).unwrap_or_default();
+        ["Node.js 22", "Chromium 1", "Electron 39"]
+            .iter()
+            .all(|version| text.contains(version))
+    };
+    assert!(
+        app.run_until(filled, TIMEOUT),
+        "{:?}",
+        app.page_text(window.id)
+    );
     app.shell.user_close(window.id);
     assert_eq!(app.wait_exit(ENDS_WITHIN), 0);
 }
@@ -79,13 +91,11 @@ fn ipc_messages_travel_both_ways() {
 }
 
 #[test]
-#[ignore = "P21: contextBridge and preload scripts"]
 fn a_preload_exposes_only_its_bridge_to_an_isolated_page() {
     replays("preload-isolated");
 }
 
 #[test]
-#[ignore = "P21: preload scripts and nodeIntegration"]
 fn a_page_with_node_integration_requires_node_modules() {
     replays("preload-node");
 }
