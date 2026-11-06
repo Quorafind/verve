@@ -1,6 +1,6 @@
 # P16 protocol / session / net
 
-**依赖**：P20（渲染器加载管线）、P12（`Cloned` 与 IPC 路由模式）、P03（下文"需要 P03 追加"的内核钩子）  **规模**：M（偏 L）  **修改**：`crates/verve-electron/src/api/{protocol,session,cookies,web_request,download_item,net}.rs`；`crates/verve-electron/src/msg.rs`（追加）；`crates/verve-dom/src/bind/document.rs`（仅 `document.cookie` 改接后端）；内核钩子由 P03 落在 `src/`
+**依赖**：P20（渲染器加载管线）、P12（`Cloned` 与 IPC 路由模式）、P03（下文"需要 P03 追加"的内核钩子）  **规模**：M（偏 L）  **修改**：`crates/verve-electron/src/api/{protocol,session,cookies,web_request,download_item,net}.rs`；`crates/verve-electron/src/msg/page.rs`（追加）；`crates/verve-dom/src/bind/document.rs`（仅 `document.cookie` 改接后端）；内核钩子由 P03 落在 `src/`
 
 ## 目标
 
@@ -100,7 +100,7 @@ impl Runtime { pub fn set_browser_net(&mut self, net: Option<Box<dyn BrowserNet>
   `fetch` 是 Node/undici 的，不带 Cookie）——因此主进程的 `BrowserNet` 只给 `net` 模块用，不装到全局 `fetch` 上。
   P03 需让 `fetch_internal` 可显式传入 `BrowserNet`，而不仅是 Runtime 级设置。
 
-### 2. 追加到 `msg.rs`
+### 2. 追加到 `msg/page.rs`
 
 ```rust
 // 渲染器 → 主进程

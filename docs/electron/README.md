@@ -75,7 +75,7 @@ electron.exe（crates/verve-electron 的 bin）
 │     页面加载管线（HTML、<script>、<link>、<img>、@font-face、ESM）
 │     preload；contextIsolation=true 时 preload 在独立 Realm（P21）
 │
-└─ Hub（Arc，crates/verve-electron/src/hub.rs）
+└─ Hub（Arc，crates/verve-electron/src/hub/）
       所有线程间消息的路由表：WindowId ↔ ContentsId ↔ isolate 句柄 ↔ GPUI 窗口
 ```
 

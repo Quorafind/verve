@@ -24,8 +24,8 @@
 crates/verve-electron   (lib；没有 bin，不依赖 GPUI)
   src/lib.rs            pub mod 声明、ElectronOptions
   src/ids.rs            WindowId / ContentsId / 计数器
-  src/msg.rs            本文定义的全部消息类型（唯一来源）
-  src/hub.rs            Hub：路由与注册表；ShellPort
+  src/msg/              本文定义的全部消息类型（唯一来源）；按领域分文件：shell、window、dialog、page、input、preferences，`msg::X` 的路径不变
+  src/hub/              Hub：mod.rs（结构、启动、关闭）、renderers.rs（页面的 isolate 与代数检查）、windows.rs、shell.rs（含主题）、records.rs；ShellPort
   src/main_guest.rs     MainGuest: isolate::Guest（主进程）
   src/renderer_guest.rs RendererGuest: isolate::Guest（渲染器）
   src/api/mod.rs        require('electron') 的两种形态：main / renderer
@@ -75,7 +75,7 @@ crates/verve-gpui       (lib + bin "electron")
 
 新增例外必须先改这张表。
 
-## 消息类型（`crates/verve-electron/src/msg.rs`）
+## 消息类型（`crates/verve-electron/src/msg/`）
 
 这是契约，字段名和语义按此实现；需要增加变体时**只能追加**，并更新本文。
 
@@ -104,7 +104,7 @@ pub enum ToShell {
 
 /// P14：`DialogSpec::{Open, Save, MessageBox}`、`DialogReply::{Async, Sync(SyncSender<DialogResult>)}`、
 /// `DialogResult::{Open{canceled, file_paths}, Save{canceled, file_path}, MessageBox{response, checkbox_checked}, Closed}`、
-/// `ThemeSource::{System, Light, Dark}`。字段以 `crates/verve-electron/src/msg.rs` 为准，与 P14 文档第 2 节的草稿不同处：
+/// `ThemeSource::{System, Light, Dark}`。字段以 `crates/verve-electron/src/msg/` 为准，与 P14 文档第 2 节的草稿不同处：
 /// 路径一律 `String`（`default_path`；`DialogResult` 里的 `file_paths: Vec<String>`、`file_path: Option<String>`），不是 `Option<PathBuf>`；
 /// `MessageBox.default_id: i32`（`-1` 为没指定）；没有 `bookmarks` 和 `normalize_access_keys`（按钮文字在 `api/dialog.rs` 里已按平台处理）；
 /// 没有 `DialogSpec::ErrorBox`（用 `ToShell::ErrorBox`）；没有 `ToShell::Notification` 和 `FromShell::Theme`/`ThemeState`。
@@ -274,7 +274,7 @@ pub struct RendererView {
 }
 ```
 
-P13 第二段另加两个类型（`msg.rs`）：`EditCommand`（`Undo` `Redo` `Cut` `Copy` `Paste` `PasteAndMatchStyle` `Delete` `SelectAll` `Unselect` `ScrollToTop` `ScrollToBottom` `InsertText(String)`）与 `ContextMenuParams`（`x` `y` `link_url` `link_text` `src_url` `media_type` `is_editable` `selection_text` `title_text` `alt_text`；其余参数由主进程按页面地址与这些字段补全）。
+P13 第二段另加两个类型（`msg/page.rs`）：`EditCommand`（`Undo` `Redo` `Cut` `Copy` `Paste` `PasteAndMatchStyle` `Delete` `SelectAll` `Unselect` `ScrollToTop` `ScrollToBottom` `InsertText(String)`）与 `ContextMenuParams`（`x` `y` `link_url` `link_text` `src_url` `media_type` `is_editable` `selection_text` `title_text` `alt_text`；其余参数由主进程按页面地址与这些字段补全）。
 
 `MenuOp`、`CompositionEvent`、`GoneReason`、`LoadOptions`、`PointerKind`、`TitleBarStyle` 在本包给出最小定义，
 后续包（P15/P24/P13/P20/P32/P34）在其上**追加**。
@@ -310,7 +310,7 @@ P13 第二段另加两个类型（`msg.rs`）：`EditCommand`（`Undo` `Redo` `C
 | `ToRendererInput::{Drag, Paste, ClipboardContents}` | P24 |
 | `CompositionEvent` 具体化为 `Update { text, selection } \| Commit \| Cancel` | P24 |
 | `ToRenderer::Post { channel, message, ports }`、`FromRenderer::Post { channel, message, ports }`（`ipcRenderer.postMessage` / `webContents.postMessage`：带端口的消息；端口是 `verve::messaging::PortEnd`） | P12 |
-| `ToShell::Dialog { call, parent, spec, reply }`、`ToShell::SetThemeSource(ThemeSource)`、`FromShell::DialogResult { call, result }`，及 `DialogSpec`/`DialogReply`/`DialogResult`/`ThemeSource`（`msg.rs` 末尾，字段以它为准；`DialogReply::Sync` 带 `SyncSender<DialogResult>`）。`FromShell::Displays` 由 Hub 存下（`Hub::displays()`），主进程按需读取，所以启动时先于主进程发出的不会丢 | P14 |
+| `ToShell::Dialog { call, parent, spec, reply }`、`ToShell::SetThemeSource(ThemeSource)`、`FromShell::DialogResult { call, result }`，及 `DialogSpec`/`DialogReply`/`DialogResult`/`ThemeSource`（`msg/dialog.rs`，`ThemeSource` 在 `msg/shell.rs`，字段以它为准；`DialogReply::Sync` 带 `SyncSender<DialogResult>`）。`FromShell::Displays` 由 Hub 存下（`Hub::displays()`），主进程按需读取，所以启动时先于主进程发出的不会丢 | P14 |
 | 内核：`verve::isolate::Isolate::poker`（唤醒 isolate 线程）、`ClassSpec::new_only`、`verve::events::{emitter_class, emitter_init}` 公开 | P02 |
 
 verve-dom 侧的配套改动（由 P20/P23/P24 在 verve-dom 内完成）：`Request::Open(String)` → `Open { url, name, features }`；
@@ -323,16 +323,16 @@ verve-dom 侧的配套改动（由 P20/P23/P24 在 verve-dom 内完成）：`Req
 
 修正：
 - `FromRenderer::SendTo`：Electron 28 起已移除 `ipcRenderer.sendTo`，此变体保留给 `sendToHost`/内部用途，`ipcRenderer` 不再产生它。
-- 文中 `oneshot::Sender` 是 `SyncReply`（`msg.rs`）：包着容量 1 的 `std::sync::mpsc::SyncSender<Cloned>`，
+- 文中 `oneshot::Sender` 是 `SyncReply`（`msg/page.rs`）：包着容量 1 的 `std::sync::mpsc::SyncSender<Cloned>`，
   只有 `send(self, value)`——消耗自己、用 `try_send`，所以"只答一次、主进程永不阻塞"由类型保证；
   不答就丢掉它，等着的页面会因为发送端被丢而被放开：主进程已在退出则抛 `Main process exited`，否则得到 `{ error: 'reply was never sent' }`（Electron 事件被回收时的答复，P12 观测）。
 - `ToRenderer::Stop` 已删：P02 的加载是同步的，没有可停的东西；`webContents.stop()` 由 P13/P20 追加。
-- `WebPreferences`（`msg.rs`）P02 给出能解析的子集（`devTools`/`nodeIntegration*`/`preload`/`sandbox`/`partition`/
+- `WebPreferences`（`msg/preferences.rs`）P02 给出能解析的子集（`devTools`/`nodeIntegration*`/`preload`/`sandbox`/`partition`/
   `zoomFactor`/`javascript`/`webSecurity`/`allowRunningInsecureContent`/`images`，默认值同 Electron），P13 补全（第一阶段：`api/web_preferences.rs` 读 P13 文档表里的全部字段，除 `additionalArguments`，那是 P21 的）；
   P21 加 `additional_arguments: Vec<String>`（`additionalArguments`，追加到渲染器 `process.argv`）；
   `Hub::create_renderer(contents, prefs)` 把它存在页面的槽里（`Hub::preferences_of`），P20 在导航时用同一份重建 isolate。
 
-## Hub（`hub.rs`）
+## Hub（`hub/`）
 
 ```rust
 pub struct Hub { /* Arc 内部 */ }
@@ -434,7 +434,7 @@ Electron 有几十个类、几百个方法，绝大多数是"校验参数 → �
 
 1. 建两个 crate，加入 workspace；锁定 GPUI rev（与 `F:\dev\sandbox-v2\rebon\app\Cargo.toml` 当前所用同一个，
    写在注释里）。
-2. 写 `msg.rs`、`ids.rs`、`hub.rs`、`ShellPort`。
+2. 写 `msg/`、`ids.rs`、`hub/`、`ShellPort`。
 3. `MainGuest`、`RendererGuest`，带最小 `electron` 模块。
 4. `verve-gpui`：GPUI app + 每个 `CreateWindow` 开一个窗口 + DomView 把所有文本节点按文档顺序
    竖排画出来（占位；P30 建 verve-layout 后换成回放 DisplayList）。
@@ -462,7 +462,7 @@ Electron 有几十个类、几百个方法，绝大多数是"校验参数 → �
   `[patch."https://github.com/zed-industries/zed"]` 同一个：`Quorafind/zed-c@e679b519961d280cb878183709e31c28684fb5e0`，
   `gpui` 带 `version = "=0.2.2"`，`gpui_platform` 带 `font-kit`（同 Rebon）。`verve-electron` 用 `size.md` 定的特性集
   （`default-features = false, features = ["wasm"]`）。
-- **契约**：`ids.rs`、`msg.rs`（`Cloned` 即 `verve::clone::Cloned`；`SyncReply`；`WebPreferences` 子集）、`hub.rs`
+- **契约**：`ids.rs`、`msg/`（`Cloned` 即 `verve::clone::Cloned`；`SyncReply`；`WebPreferences` 子集）、`hub/`
   （`Hub`、`ShellPort`、`RendererHandle`）。窗口与页面的对应只有 Hub 记。
 - **两个 Guest**：`MainGuest`：`ProcessInfo { process_type: "browser", exit: ExitBehavior::Host(→ Hub::shutdown) }`，
   控制台走标准输出/错误；入口脚本是 Hub 发给它的第一个 job（isolate 与句柄先就位）。`RendererGuest::new(hub, contents,

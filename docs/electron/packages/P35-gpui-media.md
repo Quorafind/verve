@@ -97,7 +97,7 @@ RendererView 追加 images: Arc<ImageTable 快照>  ─────────�
 pub struct ImageFrames { pub width: u32, pub height: u32, pub frames: Vec<(Arc<[u8]> /* BGRA */, Duration)> }
 pub struct ImageTable { /* ImageKey -> Arc<ImageFrames>，不可变快照，Arc 共享 */ }
 
-// RendererView 追加（P02 契约追加，本包第一个 commit 只改文档与 msg.rs）
+// RendererView 追加（P02 契约追加，本包第一个 commit 只改文档与 msg/input.rs）
 pub images: Arc<ImageTable>,
 // PaintItem::Image 追加字段
 frame: u32,
