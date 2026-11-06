@@ -26,8 +26,8 @@ use boa_engine::{
 use serde::{Deserialize, Serialize};
 
 use crate::native::{
-    PlainClass, arg, define_global, function, hidden, js_text, list_from, object, plain_class,
-    text_of, type_error,
+    PlainClass, arg, arg_text, define_global, function, hidden, js_text, list_from, object,
+    plain_class, text_of, type_error,
 };
 use crate::shared;
 
@@ -920,7 +920,7 @@ const TARGET_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let Some(target) = this.as_object() else {
             return Ok(JsValue::undefined());
         };
-        let kind = text_of(&arg(args, 0), cx)?;
+        let kind = arg_text(args, 0, cx)?;
         let listener = arg(args, 1);
         if !listener.is_callable() {
             return Ok(JsValue::undefined());
@@ -943,7 +943,7 @@ const TARGET_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let Some(target) = this.as_object() else {
             return Ok(JsValue::undefined());
         };
-        let kind = text_of(&arg(args, 0), cx)?;
+        let kind = arg_text(args, 0, cx)?;
         let listener = arg(args, 1);
         let table = target.get(js_string!("__listeners"), cx)?;
         if let Some(table) = table.as_object() {
@@ -1221,7 +1221,7 @@ fn abort(context: &mut Context, tx: u32) -> JsResult<()> {
 // ─── indexedDB ──────────────────────────────────────────────────────────────────────────────
 
 fn open(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let name = text_of(&arg(args, 0), context)?;
+    let name = arg_text(args, 0, context)?;
     let asked = arg(args, 1);
     let asked = if asked.is_undefined() {
         None
@@ -1318,7 +1318,7 @@ fn open(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValu
 }
 
 fn delete_database(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let name = text_of(&arg(args, 0), context)?;
+    let name = arg_text(args, 0, context)?;
     let request = new_request(context, JsValue::null(), None, "IDBOpenDBRequest")?;
     {
         let state = idb(context);
@@ -1357,7 +1357,7 @@ fn string_list(context: &mut Context, names: Vec<String>) -> JsValue {
     let contains = FunctionObjectBuilder::new(
         context.realm(),
         NativeFunction::from_fn_ptr(|this, args, cx| {
-            let wanted = text_of(&arg(args, 0), cx)?;
+            let wanted = arg_text(args, 0, cx)?;
             Ok(list_from(this, cx)?
                 .iter()
                 .any(|v| {
@@ -1434,7 +1434,7 @@ const DATABASE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
                 "createObjectStore is only allowed in a version change.",
             )
         })?;
-        let store = text_of(&arg(args, 0), cx)?;
+        let store = arg_text(args, 0, cx)?;
         let options = arg(args, 1);
         let (key_path, auto) = match options.as_object() {
             Some(o) => (
@@ -1475,7 +1475,7 @@ const DATABASE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
                 "deleteObjectStore is only allowed in a version change.",
             )
         })?;
-        let store = text_of(&arg(args, 0), cx)?;
+        let store = arg_text(args, 0, cx)?;
         if let Some(db) = idb(cx).idb.borrow_mut().database(&name) {
             db.stores.remove(&store);
         }
@@ -1592,7 +1592,7 @@ fn tx_info(context: &Context, tx: u32) -> JsResult<(String, Mode, Vec<String>)> 
 const TRANSACTION_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("objectStore", 1, |this, args, cx| {
         let tx = tx_of(this, cx)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let (db, mode, stores) = tx_info(cx, tx)?;
         let known = idb(cx)
             .idb
@@ -1990,7 +1990,7 @@ const STORE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
                 "createIndex is only allowed in a version change.",
             ));
         }
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let key_path = key_path_of(&arg(args, 1), cx)?
             .ok_or_else(|| data_error("An index needs a key path."))?;
         let options = arg(args, 2);
@@ -2016,13 +2016,13 @@ const STORE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("deleteIndex", 1, |this, args, cx| {
         let (_, db, store, _) = target_of(this, cx, true)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         with_store(cx, &db, &store, |s| s.indexes.remove(&name))?;
         Ok(JsValue::undefined())
     }),
     ("index", 1, |this, args, cx| {
         let (tx, db, store, _) = target_of(this, cx, false)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let known = with_store(cx, &db, &store, |s| s.indexes.contains_key(&name))?;
         if !known {
             return Err(dom_error(

@@ -51,8 +51,8 @@ use boa_engine::{
 use boa_gc::{Finalize, GcRefCell, Trace};
 
 use crate::native::{
-    ClassSpec, arg, array, class, closure, coded_error, coded_error_value, exports, get, hidden,
-    invoke, js_text, list_of, object, settled, text_of,
+    ClassSpec, arg, arg_text, array, class, closure, coded_error, coded_error_value, exports, get,
+    hidden, invoke, js_text, list_of, object, settled, text_of,
 };
 use crate::world::in_realm;
 
@@ -559,20 +559,20 @@ const SCRIPT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 const VM_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("runInThisContext", 2, |_, args, cx| {
-        let code = text_of(&arg(args, 0), cx)?;
+        let code = arg_text(args, 0, cx)?;
         let filename = filename_of(&arg(args, 1), cx)?;
         let timeout = timeout_of(&arg(args, 1), cx)?;
         run_in_this_context(&code, &filename, timeout, cx)
     }),
     ("runInContext", 3, |_, args, cx| {
-        let code = text_of(&arg(args, 0), cx)?;
+        let code = arg_text(args, 0, cx)?;
         let realm = require_context(&arg(args, 1), cx)?;
         let filename = filename_of(&arg(args, 2), cx)?;
         let timeout = timeout_of(&arg(args, 2), cx)?;
         run_in_realm(&code, &filename, &realm, timeout, cx)
     }),
     ("runInNewContext", 3, |_, args, cx| {
-        let code = text_of(&arg(args, 0), cx)?;
+        let code = arg_text(args, 0, cx)?;
         let realm = new_context(&arg(args, 1), &arg(args, 2), cx)?;
         let filename = filename_of(&arg(args, 2), cx)?;
         let timeout = timeout_of(&arg(args, 2), cx)?;
@@ -598,7 +598,7 @@ const VM_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(realm_of(&arg(args, 0), cx)?.is_some().into())
     }),
     ("compileFunction", 3, |_, args, cx| {
-        let code = text_of(&arg(args, 0), cx)?;
+        let code = arg_text(args, 0, cx)?;
         let params = match arg(args, 1) {
             p if p.is_undefined() => Vec::new(),
             p => list_of(&p, cx)?,
@@ -636,7 +636,7 @@ pub(crate) fn vm_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
             name: "Script",
             length: 2,
             init: |this, args, cx| {
-                let code = text_of(&arg(args, 0), cx)?;
+                let code = arg_text(args, 0, cx)?;
                 let options = arg(args, 1);
                 let filename = filename_of(&options, cx)?;
                 check_syntax(&code, &filename, cx)?;

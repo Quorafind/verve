@@ -25,7 +25,9 @@ use boa_engine::{
     object::builtins::JsArray, property::PropertyDescriptor,
 };
 
-use crate::native::{arg, array, coded_error, exports, function, invoke, js_text, object, text_of};
+use crate::native::{
+    arg, arg_text, array, coded_error, exports, function, invoke, js_text, object, text_of,
+};
 use crate::{Level, console_line};
 
 /// The Node release `process.version` claims: the one Electron 39, and with it Obsidian's
@@ -185,7 +187,7 @@ const PROCESS_FUNCTIONS: &[(
         Ok(js_text(&crate::shared(cx).cwd.borrow()))
     }),
     ("chdir", 1, |_, args, cx| {
-        let to = text_of(&arg(args, 0), cx)?;
+        let to = arg_text(args, 0, cx)?;
         let current = std::path::PathBuf::from(crate::shared(cx).cwd.borrow().clone());
         let target = current.join(&to);
         if !target.is_dir() {
@@ -332,13 +334,13 @@ const PROCESS_FUNCTIONS: &[(
         ))
     }),
     ("binding", 1, |_, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Err(boa_engine::JsNativeError::error()
             .with_message(format!("No such module: {name}"))
             .into())
     }),
     ("_linkedBinding", 1, |_, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Err(boa_engine::JsNativeError::error()
             .with_message(format!("No such binding: {name}"))
             .into())
@@ -368,7 +370,7 @@ const PROCESS_FUNCTIONS: &[(
     ("constrainedMemory", 0, |_, _, _| Ok(0.into())),
     ("availableMemory", 0, |_, _, _| Ok((4u64 << 30).into())),
     ("getBuiltinModule", 1, |_, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Ok(crate::modules::builtin(cx, &name)?.unwrap_or_default())
     }),
 ];

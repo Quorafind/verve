@@ -19,7 +19,7 @@ use boa_engine::{
 };
 use boa_gc::{Finalize, Gc, Trace};
 
-use crate::native::{arg, array, get, invoke, js_text, list_of, object, text_of, type_error};
+use crate::native::{arg, arg_text, array, get, js_text, list_of, object, text_of, type_error};
 use crate::streams::{
     error_value, pending, prototype_for, reject, rejected, resolve, rethrow, symbol_method,
     type_error_value, u8array, web_class, when,
@@ -299,7 +299,7 @@ fn headers_iterator(this: &JsValue, context: &mut Context, which: u8) -> JsResul
         })
         .collect();
     let items = array(context, items);
-    invoke(&items, "values", &[], context)
+    crate::native::invoke(&items, "values", &[], context)
 }
 
 const HEADERS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
@@ -1204,7 +1204,7 @@ const RESPONSE_STATICS: &[(&str, usize, NativeFunctionPointer)] = &[
         .into())
     }),
     ("redirect", 2, |_, args, cx| {
-        let text = text_of(&arg(args, 0), cx)?;
+        let text = arg_text(args, 0, cx)?;
         let url = crate::native::construct_global(cx, "URL", &[js_text(&text)])
             .map_err(|_| type_error(format!("Failed to parse URL from {text}")))?;
         let href = text_of(&url.get(js_string!("href"), cx)?, cx)?;
@@ -1349,13 +1349,13 @@ fn form_iterator(this: &JsValue, context: &mut Context, which: u8) -> JsResult<J
         })
         .collect();
     let items = array(context, items);
-    invoke(&items, "values", &[], context)
+    crate::native::invoke(&items, "values", &[], context)
 }
 
 const FORM_DATA_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("append", 3, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let value = entry_value(&arg(args, 1), &arg(args, 2), cx)?;
         form.downcast_mut::<FormData>()
             .expect("a FormData")
@@ -1365,7 +1365,7 @@ const FORM_DATA_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("set", 3, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let value = entry_value(&arg(args, 1), &arg(args, 2), cx)?;
         let mut f = form.downcast_mut::<FormData>().expect("a FormData");
         match f.entries.iter().position(|e| e.name == name) {
@@ -1384,7 +1384,7 @@ const FORM_DATA_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("get", 1, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Ok(form_entries(&form)
             .into_iter()
             .find(|(n, _)| *n == name)
@@ -1392,7 +1392,7 @@ const FORM_DATA_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("getAll", 1, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let all: Vec<JsValue> = form_entries(&form)
             .into_iter()
             .filter(|(n, _)| *n == name)
@@ -1402,12 +1402,12 @@ const FORM_DATA_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("has", 1, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Ok(form_entries(&form).iter().any(|(n, _)| *n == name).into())
     }),
     ("delete", 1, |this, args, cx| {
         let form = form_of(this)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         form.downcast_mut::<FormData>()
             .expect("a FormData")
             .entries

@@ -13,7 +13,9 @@ use boa_engine::{Context, JsNativeError, JsResult, JsValue, js_string};
 use super::launch::{self, Exit, Mode, Parent};
 use super::spec::{self, Parsed, SpawnSpec, Stdio};
 use super::{denied, signals};
-use crate::native::{arg, array, get, global, invalid_arg_type, invoke, js_text, object, text_of};
+use crate::native::{
+    arg, arg_text, array, get, global, invalid_arg_type, invoke, js_text, object, text_of,
+};
 
 /// What is read from one pipe: the bytes kept, and a way to hear that the pipe has ended.
 struct Drain {
@@ -92,7 +94,7 @@ pub(super) fn exec_sync(
     let copy: JsValue = copy.into();
     let parsed = spec::parse(&arg(args, 0), &JsValue::undefined(), &copy, context)?;
     let settings = options_of(&copy, &JsValue::undefined(), context)?;
-    let command = text_of(&arg(args, 0), context)?;
+    let command = arg_text(args, 0, context)?;
     let result = run(parsed, &settings, context)?;
     show_stderr(&result, own_stdio, context)?;
     checked(result, &command, context)

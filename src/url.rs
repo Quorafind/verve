@@ -14,7 +14,7 @@ use boa_engine::{
 };
 
 use crate::native::{
-    PlainClass, arg, define_global, function, js_text, plain_class, text_of, type_error,
+    PlainClass, arg, arg_text, define_global, function, js_text, plain_class, text_of, type_error,
 };
 
 #[derive(Trace, Finalize, JsData)]
@@ -70,7 +70,7 @@ fn construct_url(
             "Class constructor URL cannot be invoked without 'new'",
         ));
     }
-    let input = text_of(&arg(args, 0), context)?;
+    let input = arg_text(args, 0, context)?;
     let base = match arg(args, 1) {
         b if b.is_undefined() => None,
         b => Some(text_of(&b, context)?),
@@ -225,7 +225,7 @@ macro_rules! part_accessors {
         &[$(($name,
             (|this, _, _| url_part_get(this, $name)) as NativeFunctionPointer,
             (|this, args, cx| {
-                let value = text_of(&arg(args, 0), cx)?;
+                let value = arg_text(args, 0, cx)?;
                 url_part_set(this, $name, &value)?;
                 Ok(JsValue::undefined())
             }) as NativeFunctionPointer,
@@ -271,7 +271,7 @@ const URL_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 const URL_STATICS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("canParse", 2, |_, args, cx| {
-        let input = text_of(&arg(args, 0), cx)?;
+        let input = arg_text(args, 0, cx)?;
         let base = match arg(args, 1) {
             b if b.is_undefined() => None,
             b => Some(text_of(&b, cx)?),
@@ -299,7 +299,7 @@ const URL_STATICS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(js_text(&url))
     }),
     ("revokeObjectURL", 1, |_, args, cx| {
-        let url = text_of(&arg(args, 0), cx)?;
+        let url = arg_text(args, 0, cx)?;
         crate::shared(cx).blobs.borrow_mut().remove(&url);
         Ok(JsValue::undefined())
     }),
@@ -419,12 +419,12 @@ fn pair_list(context: &mut Context, pairs: Vec<(String, String)>, which: u8) -> 
 
 const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("append", 2, |this, args, cx| {
-        let (name, value) = (text_of(&arg(args, 0), cx)?, text_of(&arg(args, 1), cx)?);
+        let (name, value) = (arg_text(args, 0, cx)?, arg_text(args, 1, cx)?);
         change_pairs(this, |p| p.push((name, value)))?;
         Ok(JsValue::undefined())
     }),
     ("set", 2, |this, args, cx| {
-        let (name, value) = (text_of(&arg(args, 0), cx)?, text_of(&arg(args, 1), cx)?);
+        let (name, value) = (arg_text(args, 0, cx)?, arg_text(args, 1, cx)?);
         change_pairs(this, |p| match p.iter().position(|(k, _)| *k == name) {
             Some(first) => {
                 p[first].1 = value;
@@ -439,7 +439,7 @@ const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(JsValue::undefined())
     }),
     ("delete", 2, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let value = match arg(args, 1) {
             v if v.is_undefined() => None,
             v => Some(text_of(&v, cx)?),
@@ -450,14 +450,14 @@ const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(JsValue::undefined())
     }),
     ("get", 1, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Ok(read_pairs(this)?
             .into_iter()
             .find(|(k, _)| *k == name)
             .map_or(JsValue::null(), |(_, v)| js_text(&v)))
     }),
     ("getAll", 1, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let values: Vec<JsValue> = read_pairs(this)?
             .into_iter()
             .filter(|(k, _)| *k == name)
@@ -466,7 +466,7 @@ const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(JsArray::from_iter(values, cx).into())
     }),
     ("has", 2, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let value = match arg(args, 1) {
             v if v.is_undefined() => None,
             v => Some(text_of(&v, cx)?),

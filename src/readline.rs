@@ -14,8 +14,8 @@ use boa_engine::{
 };
 
 use crate::native::{
-    ClassSpec, arg, array, class, closure, coded_error, exports, function, get, hidden, invoke,
-    js_text, list_of, object, text_of,
+    ClassSpec, arg, arg_text, array, class, closure, coded_error, exports, function, get, hidden,
+    invoke, js_text, list_of, object, text_of,
 };
 
 fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
@@ -244,7 +244,7 @@ fn interface_init(this: &JsObject, args: &[JsValue], context: &mut Context) -> J
 /// `question(query, [options], callback)`: the query written out, the callback given the next
 /// line.
 fn question(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let query = text_of(&arg(args, 0), context)?;
+    let query = arg_text(args, 0, context)?;
     write_out(this, &query, context)?;
     if let Some(callback) = args.iter().skip(1).find(|a| a.is_callable()) {
         let questions = get(this, "__questions", context)?;

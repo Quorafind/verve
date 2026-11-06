@@ -26,8 +26,8 @@ use boa_engine::{
 };
 
 use crate::native::{
-    arg, array, closure, coded_error, exports, function, get, invoke, js_text, object, text_of,
-    type_error,
+    arg, arg_text, array, closure, coded_error, exports, function, get, invoke, js_text, object,
+    text_of, type_error,
 };
 
 // ─── Reaching the engine's own functions ─────────────────────────────────────────────────────
@@ -429,12 +429,12 @@ impl Options {
         )?;
         let stylize: NativeFunctionPointer = if self.colors {
             |_, args, cx| {
-                let text = text_of(&arg(args, 0), cx)?;
-                let style = text_of(&arg(args, 1), cx)?;
+                let text = arg_text(args, 0, cx)?;
+                let style = arg_text(args, 1, cx)?;
                 Ok(js_text(&paint(&text, &style)))
             }
         } else {
-            |_, args, cx| Ok(js_text(&text_of(&arg(args, 0), cx)?))
+            |_, args, cx| Ok(js_text(&arg_text(args, 0, cx)?))
         };
         let stylize = function(context, "stylize", 2, stylize);
         out.set(js_string!("stylize"), stylize, false, context)?;
@@ -2485,7 +2485,7 @@ fn glob(pattern: &str, text: &str) -> bool {
 }
 
 fn debuglog(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let section = text_of(&arg(args, 0), context)?;
+    let section = arg_text(args, 0, context)?;
     let enabled = debug_enabled(&section, context)?;
     let logger = closure(
         context,
@@ -2614,7 +2614,7 @@ const UTIL_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("styleText", 2, |_, args, cx| {
         let formats = arg(args, 0);
-        let text = text_of(&arg(args, 1), cx)?;
+        let text = arg_text(args, 1, cx)?;
         let names: Vec<String> = if formats.is_object() {
             crate::native::list_of(&formats, cx)?
                 .iter()
@@ -3264,7 +3264,7 @@ fn mime(context: &mut Context, util: &JsObject) -> JsResult<()> {
             },
             methods: &[
                 ("get", 1, |this, args, cx| {
-                    let name = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+                    let name = arg_text(args, 0, cx)?.to_ascii_lowercase();
                     for pair in mime_pairs(this, cx)? {
                         if pair.0 == name {
                             return Ok(js_text(&pair.1));
@@ -3273,12 +3273,12 @@ fn mime(context: &mut Context, util: &JsObject) -> JsResult<()> {
                     Ok(JsValue::null())
                 }),
                 ("has", 1, |this, args, cx| {
-                    let name = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+                    let name = arg_text(args, 0, cx)?.to_ascii_lowercase();
                     Ok(mime_pairs(this, cx)?.iter().any(|p| p.0 == name).into())
                 }),
                 ("set", 2, |this, args, cx| {
-                    let name = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
-                    let value = text_of(&arg(args, 1), cx)?;
+                    let name = arg_text(args, 0, cx)?.to_ascii_lowercase();
+                    let value = arg_text(args, 1, cx)?;
                     let mut pairs = mime_pairs(this, cx)?;
                     match pairs.iter_mut().find(|p| p.0 == name) {
                         Some(pair) => pair.1 = value,
@@ -3288,7 +3288,7 @@ fn mime(context: &mut Context, util: &JsObject) -> JsResult<()> {
                     Ok(JsValue::undefined())
                 }),
                 ("delete", 1, |this, args, cx| {
-                    let name = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+                    let name = arg_text(args, 0, cx)?.to_ascii_lowercase();
                     let pairs = mime_pairs(this, cx)?
                         .into_iter()
                         .filter(|p| p.0 != name)
@@ -3348,7 +3348,7 @@ fn mime(context: &mut Context, util: &JsObject) -> JsResult<()> {
             name: "MIMEType",
             length: 1,
             init: |this, args, cx| {
-                let text = text_of(&arg(args, 0), cx)?;
+                let text = arg_text(args, 0, cx)?;
                 let (essence, rest) = text.split_once(';').unwrap_or((text.as_str(), ""));
                 let Some((kind, subtype)) = essence.trim().split_once('/') else {
                     return Err(coded_error(
@@ -3403,7 +3403,7 @@ fn mime(context: &mut Context, util: &JsObject) -> JsResult<()> {
                     |this, _, cx| get(this, "__type", cx),
                     Some(|this, args, cx| {
                         if let Some(o) = this.as_object() {
-                            let v = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+                            let v = arg_text(args, 0, cx)?.to_ascii_lowercase();
                             crate::native::hidden(&o, js_string!("__type"), js_text(&v), cx)?;
                         }
                         Ok(JsValue::undefined())
@@ -3414,7 +3414,7 @@ fn mime(context: &mut Context, util: &JsObject) -> JsResult<()> {
                     |this, _, cx| get(this, "__subtype", cx),
                     Some(|this, args, cx| {
                         if let Some(o) = this.as_object() {
-                            let v = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+                            let v = arg_text(args, 0, cx)?.to_ascii_lowercase();
                             crate::native::hidden(&o, js_string!("__subtype"), js_text(&v), cx)?;
                         }
                         Ok(JsValue::undefined())

@@ -20,7 +20,9 @@ use boa_engine::{
 };
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 
-use crate::native::{arg, closure, function, get, hidden, js_text, object, text_of, type_error};
+use crate::native::{
+    arg, arg_text, closure, function, get, hidden, js_text, object, text_of, type_error,
+};
 
 /// What a codec does: which format, and which way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1272,7 +1274,7 @@ fn construct_web_codec(
                 "Class constructor {name} cannot be invoked without 'new'"
             ))
         })?;
-    let format = text_of(&arg(args, 0), context)?;
+    let format = arg_text(args, 0, context)?;
     let kind = Kind::for_format(&format, compress).ok_or_else(|| {
         type_error(format!(
             "Failed to construct '{name}': Unsupported compression format: '{format}'"

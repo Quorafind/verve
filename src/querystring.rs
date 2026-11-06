@@ -12,7 +12,7 @@ use boa_engine::{
     native_function::NativeFunctionPointer, object::builtins::JsArray,
 };
 
-use crate::native::{arg, array, exports, get, js_text, list_of, object, text_of};
+use crate::native::{arg, arg_text, array, exports, get, js_text, list_of, object, text_of};
 
 // ─── Escaping ───────────────────────────────────────────────────────────────────────────────
 
@@ -217,13 +217,13 @@ const QUERYSTRING: &[(&str, usize, NativeFunctionPointer)] = &[
     ("stringify", 4, stringify),
     ("encode", 4, stringify),
     ("escape", 1, |_, args, cx| {
-        Ok(js_text(&escape(&text_of(&arg(args, 0), cx)?)))
+        Ok(js_text(&escape(&arg_text(args, 0, cx)?)))
     }),
     ("unescape", 2, |_, args, cx| {
-        Ok(js_text(&unescape(&text_of(&arg(args, 0), cx)?)))
+        Ok(js_text(&unescape(&arg_text(args, 0, cx)?)))
     }),
     ("unescapeBuffer", 2, |_, args, cx| {
-        let text = text_of(&arg(args, 0), cx)?;
+        let text = arg_text(args, 0, cx)?;
         crate::encoding::make_buffer(cx, unescape_bytes(&text, arg(args, 1).to_boolean()))
     }),
 ];
@@ -415,25 +415,25 @@ fn punycode_error(_: &mut Context, what: &str) -> boa_engine::JsError {
 
 const PUNYCODE: &[(&str, usize, NativeFunctionPointer)] = &[
     ("encode", 1, |_, args, cx| {
-        let text = text_of(&arg(args, 0), cx)?;
+        let text = arg_text(args, 0, cx)?;
         punycode_encode(&code_points(&text))
             .map(|t| js_text(&t))
             .ok_or_else(|| punycode_error(cx, "Overflow: input needs wider integers to process"))
     }),
     ("decode", 1, |_, args, cx| {
-        let text = text_of(&arg(args, 0), cx)?;
+        let text = arg_text(args, 0, cx)?;
         punycode_decode(&text)
             .map(|p| js_text(&from_points(&p)))
             .ok_or_else(|| punycode_error(cx, "Invalid input"))
     }),
     ("toASCII", 1, |_, args, cx| {
-        let text = text_of(&arg(args, 0), cx)?;
+        let text = arg_text(args, 0, cx)?;
         to_ascii(&text)
             .map(|t| js_text(&t))
             .ok_or_else(|| punycode_error(cx, "Overflow: input needs wider integers to process"))
     }),
     ("toUnicode", 1, |_, args, cx| {
-        let text = text_of(&arg(args, 0), cx)?;
+        let text = arg_text(args, 0, cx)?;
         to_unicode(&text)
             .map(|t| js_text(&t))
             .ok_or_else(|| punycode_error(cx, "Invalid input"))

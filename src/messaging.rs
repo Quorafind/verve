@@ -26,7 +26,7 @@ use crate::dom_events::{
     Kind, TargetData, dispatch, dom, dom_exception_error, handler_accessors, new_event,
     new_event_of, set_handler, web_class, with_target,
 };
-use crate::native::{arg, closure, get, hidden, js_text, object, text_of, type_error};
+use crate::native::{arg, arg_text, closure, get, hidden, js_text, object, text_of, type_error};
 
 pub use remote::{PortEnd, PortEvent, remote_port_pair};
 
@@ -532,7 +532,7 @@ fn make_channel(
             "Failed to construct 'BroadcastChannel': 1 argument required, but only 0 present.",
         ));
     }
-    let name = text_of(&arg(args, 0), context)?;
+    let name = arg_text(args, 0, context)?;
     let channel = JsObject::from_proto_and_data(
         prototype.clone(),
         TargetData::new(Kind::Channel {
@@ -633,7 +633,7 @@ fn make_socket(
             "Failed to construct 'WebSocket': 1 argument required, but only 0 present.",
         ));
     }
-    let given = text_of(&arg(args, 0), context)?;
+    let given = arg_text(args, 0, context)?;
     let mut url = url::Url::parse(&given).map_err(|_| {
         dom_exception_error(
             context,
@@ -841,7 +841,7 @@ const SOCKET_ACCESSORS: &[(&str, NativeFunctionPointer, Option<NativeFunctionPoi
         "binaryType",
         |this, _, _| socket_part(this, |_, _, kind, _| js_text(kind)),
         Some(|this, args, cx| {
-            let kind = text_of(&arg(args, 0), cx)?;
+            let kind = arg_text(args, 0, cx)?;
             if kind == "blob" || kind == "arraybuffer" {
                 socket_part(this, |_, _, own, _| *own = kind)?;
             }

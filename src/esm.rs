@@ -17,7 +17,7 @@ use url::Url;
 
 use crate::esm_resolve::{self as resolve, Mode};
 use crate::fs::sys;
-use crate::native::{arg, closure, js_text, text_of};
+use crate::native::{arg_text, closure, js_text};
 use crate::vfs::View;
 
 fn module_error(context: &mut Context, message: &str, code: &str) -> JsError {
@@ -876,7 +876,7 @@ impl ModuleLoader for Loader {
             "resolve",
             1,
             |_, args, parent: &JsString, context| {
-                let name = text_of(&arg(args, 0), context)?;
+                let name = arg_text(args, 0, context)?;
                 let loader = crate::shared(context).esm.clone();
                 let url = loader.resolve(
                     &name,

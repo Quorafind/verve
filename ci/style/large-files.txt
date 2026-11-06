@@ -10,7 +10,7 @@ src/fetch.rs 1718
 src/fs.rs 1884
 src/indexeddb.rs 2507
 src/intl.rs 1997
-src/network/http.rs 1766
+src/network/http.rs 1765
 src/path.rs 1507
 src/stream.rs 4600
 src/streams.rs 4030

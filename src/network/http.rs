@@ -3,8 +3,8 @@
 use super::proxy;
 use super::tcp::{self, emit, put};
 use crate::native::{
-    ClassSpec, arg, array, class, closure, coded_error_value, function, get, hidden, invoke,
-    js_text, list_of, object, text_of,
+    ClassSpec, arg, arg_text, array, class, closure, coded_error_value, function, get, hidden,
+    invoke, js_text, list_of, object, text_of,
 };
 use boa_engine::{
     Context, JsData, JsObject, JsResult, JsString, JsValue, js_string,
@@ -323,7 +323,7 @@ fn set_header(this: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<Js
     }
     crate::sockets::validate_header_name(&JsValue::undefined(), args, cx)?;
     crate::sockets::validate_header_value(&JsValue::undefined(), args, cx)?;
-    let name = text_of(&arg(args, 0), cx)?;
+    let name = arg_text(args, 0, cx)?;
     let key = JsString::from(name.to_ascii_lowercase());
     headers(this, cx)?.set(key.clone(), arg(args, 1), false, cx)?;
     if let Some(names) = get(this, "__headerNames", cx)?.as_object() {
@@ -467,17 +467,16 @@ fn wire(this: &JsValue, bytes: Vec<u8>, callback: JsValue, cx: &mut Context) -> 
 const OUTGOING: &[(&str, usize, NativeFunctionPointer)] = &[
     ("setHeader", 2, set_header),
     ("getHeader", 1, |this, args, cx| {
-        header_value(this, &text_of(&arg(args, 0), cx)?.to_ascii_lowercase(), cx)
+        header_value(this, &arg_text(args, 0, cx)?.to_ascii_lowercase(), cx)
     }),
     ("hasHeader", 1, |this, args, cx| {
         Ok(
-            (!header_value(this, &text_of(&arg(args, 0), cx)?.to_ascii_lowercase(), cx)?
-                .is_undefined())
-            .into(),
+            (!header_value(this, &arg_text(args, 0, cx)?.to_ascii_lowercase(), cx)?.is_undefined())
+                .into(),
         )
     }),
     ("removeHeader", 1, |this, args, cx| {
-        let key = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+        let key = arg_text(args, 0, cx)?.to_ascii_lowercase();
         headers(this, cx)?.delete_property_or_throw(JsString::from(key), cx)?;
         Ok(JsValue::undefined())
     }),
@@ -499,7 +498,7 @@ const OUTGOING: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(array(cx, values))
     }),
     ("appendHeader", 2, |this, args, cx| {
-        let old = header_value(this, &text_of(&arg(args, 0), cx)?.to_ascii_lowercase(), cx)?;
+        let old = header_value(this, &arg_text(args, 0, cx)?.to_ascii_lowercase(), cx)?;
         if old.is_undefined() {
             return set_header(this, args, cx);
         }

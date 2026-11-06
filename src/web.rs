@@ -11,7 +11,8 @@ use boa_engine::{
 };
 
 use crate::native::{
-    PlainClass, arg, define_global, function, js_text, object, plain_class, text_of, type_error,
+    PlainClass, arg, arg_text, define_global, function, js_text, object, plain_class, text_of,
+    type_error,
 };
 
 /// A class of this module: no getters, a constructor of no parameters.
@@ -565,7 +566,7 @@ fn construct_file(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     dress_blob(&file, bytes, &kind, context)?;
     file.set(
         js_string!("name"),
-        js_text(&text_of(&arg(args, 1), context)?),
+        js_text(&arg_text(args, 1, context)?),
         false,
         context,
     )?;

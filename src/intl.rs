@@ -29,7 +29,7 @@ use boa_engine::{
 };
 
 use crate::native::{
-    arg, array, closure, get, hidden, js_text, list_of, object, range_error, text_of, type_error,
+    arg, arg_text, array, get, hidden, js_text, list_of, object, range_error, text_of, type_error,
 };
 
 // ─── Options ────────────────────────────────────────────────────────────────────────────────
@@ -456,7 +456,7 @@ pub(crate) fn bound(
     if object.has_own_property(slot.clone(), context)? {
         return object.get(slot, context);
     }
-    let function = closure(context, "", 1, f, object.clone());
+    let function = crate::native::closure(context, "", 1, f, object.clone());
     hidden(&object, slot, function.clone(), context)?;
     Ok(function.into())
 }
@@ -666,8 +666,8 @@ fn collator_compare(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let data: CollatorData = data_of(&collator.clone().into(), "Collator.prototype.compare")?;
-    let a = text_of(&arg(args, 0), context)?;
-    let b = text_of(&arg(args, 1), context)?;
+    let a = arg_text(args, 0, context)?;
+    let b = arg_text(args, 1, context)?;
     let order = collate_with(
         &a,
         &b,
@@ -929,7 +929,7 @@ fn relative_args(
 ) -> JsResult<(Vec<(&'static str, String)>, &'static str)> {
     let data: RelativeData = data_of(this, what)?;
     let value = arg(args, 0).to_number(context)?;
-    let unit = relative_unit(&text_of(&arg(args, 1), context)?)?;
+    let unit = relative_unit(&arg_text(args, 1, context)?)?;
     Ok((relative_parts(&data, value, unit)?, unit))
 }
 
@@ -1362,7 +1362,7 @@ fn make_display_names(
 const DISPLAY_METHODS: Methods = &[
     ("of", 1, |this, args, cx| {
         let data: DisplayData = data_of(this, "DisplayNames.prototype.of")?;
-        let code = text_of(&arg(args, 0), cx)?;
+        let code = arg_text(args, 0, cx)?;
         Ok(display_name(&data, &code)?.map_or(JsValue::undefined(), |n| js_text(&n)))
     }),
     ("resolvedOptions", 0, |this, _, cx| {
@@ -1735,7 +1735,7 @@ fn make_segmenter(
 /// `segmenter.segment(text)`: the segments, iterable, with `containing(index)`.
 fn segment(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let data: SegmenterData = data_of(this, "Segmenter.prototype.segment")?;
-    let input = js_text(&text_of(&arg(args, 0), context)?);
+    let input = js_text(&arg_text(args, 0, context)?);
     let text = input.as_string().expect("a string").to_std_string_lossy();
     let word = data.granularity == "word";
     let pieces = segment_text(&text, &data.granularity);
@@ -1844,7 +1844,7 @@ fn route_prototypes(context: &mut Context) -> JsResult<()> {
                 ));
             }
             let a = text_of(this, cx)?;
-            let b = text_of(&arg(args, 0), cx)?;
+            let b = arg_text(args, 0, cx)?;
             let collator = make_collator(&object(cx), &[arg(args, 1), arg(args, 2)], cx)?;
             collator_compare(
                 &JsValue::undefined(),
@@ -1910,7 +1910,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
                 Ok(array(cx, items))
             }),
             ("supportedValuesOf", 1, |_, args, cx| {
-                let key = text_of(&arg(args, 0), cx)?;
+                let key = arg_text(args, 0, cx)?;
                 let values: Vec<&str> = match key.as_str() {
                     "calendar" => vec!["gregory", "iso8601"],
                     "collation" => vec!["default"],

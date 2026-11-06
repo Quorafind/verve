@@ -15,7 +15,7 @@ use boa_engine::{
     property::Attribute,
 };
 
-use crate::native::{arg, constructor, function, text_of, type_error};
+use crate::native::{arg, arg_text, constructor, function, text_of, type_error};
 
 // ─── Base64 and the rest ────────────────────────────────────────────────────────────────────
 
@@ -204,7 +204,7 @@ pub fn percent_decode_strict(text: &str) -> Result<Vec<u8>, &'static str> {
 // ─── atob and btoa ──────────────────────────────────────────────────────────────────────────
 
 fn atob(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let text = text_of(&arg(args, 0), context)?;
+    let text = arg_text(args, 0, context)?;
     let bytes = unbase64(&text).ok_or_else(|| {
         JsNativeError::error()
             .with_message("atob: the string to be decoded is not correctly encoded")
@@ -215,7 +215,7 @@ fn atob(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValu
 }
 
 fn btoa(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let text = text_of(&arg(args, 0), context)?;
+    let text = arg_text(args, 0, context)?;
     let mut bytes = Vec::with_capacity(text.len());
     for c in text.chars() {
         let code = c as u32;

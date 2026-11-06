@@ -26,7 +26,8 @@ use boa_engine::{
 
 use crate::fs::sys;
 use crate::native::{
-    ClassSpec, arg, array, class, closure, function, get, hidden, js_text, object, text_of,
+    ClassSpec, arg, arg_text, array, class, closure, function, get, hidden, js_text, object,
+    text_of,
 };
 use crate::vfs::View;
 
@@ -647,7 +648,7 @@ pub(crate) fn require_function(
         "resolve",
         2,
         |_, args, (folder, _): &(JsValue, JsValue), context| {
-            let name = text_of(&arg(args, 0), context)?;
+            let name = arg_text(args, 0, context)?;
             // `{ paths: [...] }`: the folders to resolve from instead of the module's own.
             let mut folders = vec![folder_of(folder)];
             if let Some(paths) = get(&arg(args, 1), "paths", context)?.as_object() {
@@ -673,7 +674,7 @@ pub(crate) fn require_function(
         "paths",
         1,
         |_, args, (folder, _): &(JsValue, JsValue), context| {
-            let name = text_of(&arg(args, 0), context)?;
+            let name = arg_text(args, 0, context)?;
             if is_builtin(context, &name) && !is_path(&name) {
                 return Ok(JsValue::null());
             }
@@ -774,11 +775,11 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
             statics: &[
                 ("createRequire", 1, create_require),
                 ("isBuiltin", 1, |_, args, cx| {
-                    let name = text_of(&arg(args, 0), cx)?;
+                    let name = arg_text(args, 0, cx)?;
                     Ok(is_builtin(cx, &name).into())
                 }),
                 ("_load", 3, |_, args, cx| {
-                    let name = text_of(&arg(args, 0), cx)?;
+                    let name = arg_text(args, 0, cx)?;
                     let parent = arg(args, 1);
                     let folder = match get(&parent, "filename", cx)? {
                         f if f.is_string() => PathBuf::from(crate::print(&f))
@@ -790,7 +791,7 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
                     require(cx, &folder, &name, parent.as_object().as_ref())
                 }),
                 ("_resolveFilename", 2, |_, args, cx| {
-                    let name = text_of(&arg(args, 0), cx)?;
+                    let name = arg_text(args, 0, cx)?;
                     let folder = match get(&arg(args, 1), "filename", cx)? {
                         f if f.is_string() => PathBuf::from(crate::print(&f))
                             .parent()
@@ -804,11 +805,11 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
                     }
                 }),
                 ("_nodeModulePaths", 1, |_, args, cx| {
-                    let folder = PathBuf::from(text_of(&arg(args, 0), cx)?);
+                    let folder = PathBuf::from(arg_text(args, 0, cx)?);
                     Ok(array(cx, lookup_paths(&folder)))
                 }),
                 ("wrap", 1, |_, args, cx| {
-                    let source = text_of(&arg(args, 0), cx)?;
+                    let source = arg_text(args, 0, cx)?;
                     Ok(js_text(&format!(
                         "(function (exports, require, module, __filename, __dirname) {{ {source}\n}});"
                     )))
@@ -824,7 +825,7 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
                 ("enableCompileCache", 0, |_, _, cx| Ok(object(cx).into())),
             ],
             methods: &[("require", 1, |this, args, cx| {
-                let name = text_of(&arg(args, 0), cx)?;
+                let name = arg_text(args, 0, cx)?;
                 let folder = match get(this, "filename", cx)? {
                     f if f.is_string() => PathBuf::from(crate::print(&f))
                         .parent()

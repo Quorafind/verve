@@ -19,7 +19,7 @@ use boa_engine::{
 };
 
 use crate::encoding::{base64, bytes_of};
-use crate::native::{arg, constructor, function, get, hidden, js_text, object, text_of};
+use crate::native::{arg, arg_text, constructor, function, get, hidden, js_text, object, text_of};
 
 // ─── Errors as Node words them ───────────────────────────────────────────────────────────────
 
@@ -1678,7 +1678,7 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
                 make(cx, out)
             }),
             ("resolveObjectURL", 1, |_, args, cx| {
-                let url = text_of(&arg(args, 0), cx)?;
+                let url = arg_text(args, 0, cx)?;
                 let bytes = crate::shared(cx).blobs.borrow().get(&url).cloned();
                 match bytes {
                     Some(bytes) => {

@@ -25,8 +25,8 @@ use sha2::digest::DynDigest;
 use std::cell::RefCell;
 
 use crate::native::{
-    arg, array, closure, coded_error, function, get, hidden, js_text, methods, object, text_of,
-    type_error,
+    arg, arg_text, array, closure, coded_error, function, get, hidden, js_text, methods, object,
+    text_of, type_error,
 };
 
 // ─── Randomness ─────────────────────────────────────────────────────────────────────────────
@@ -933,7 +933,7 @@ fn jwk_alg(alg: KeyAlg, length: usize) -> Option<String> {
 
 /// `importKey(format, keyData, algorithm, extractable, usages)`, done now.
 fn import_key(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let format = text_of(&arg(args, 0), context)?;
+    let format = arg_text(args, 0, context)?;
     let alg = key_alg(&arg(args, 2), context)?;
     let extractable = arg(args, 3).to_boolean();
     let usages = usages_of(&arg(args, 4), context)?;
@@ -1218,7 +1218,7 @@ const SUBTLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     subtle_method!("importKey", 5, import_key),
     subtle_method!("exportKey", 2, |args, cx| {
-        let format = text_of(&arg(args, 0), cx)?;
+        let format = arg_text(args, 0, cx)?;
         export_key(&format, &arg(args, 1), cx)
     }),
     subtle_method!("generateKey", 3, |args, cx| {
@@ -1284,7 +1284,7 @@ const SUBTLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(same_bytes(&Mac::once(hash, &secret, &data), &signature).into())
     }),
     subtle_method!("wrapKey", 4, |args, cx| {
-        let format = text_of(&arg(args, 0), cx)?;
+        let format = arg_text(args, 0, cx)?;
         let exported = export_key(&format, &arg(args, 1), cx)?;
         let bytes = if format == "jwk" {
             let json = cx.intrinsics().objects().json();
@@ -1312,7 +1312,7 @@ const SUBTLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         array_buffer(out, cx)
     }),
     subtle_method!("unwrapKey", 7, |args, cx| {
-        let format = text_of(&arg(args, 0), cx)?;
+        let format = arg_text(args, 0, cx)?;
         let wrapped = crate::encoding::bytes_of(&arg(args, 1), cx)?
             .ok_or_else(|| type_error("unwrapKey: the data is not a BufferSource"))?;
         let algorithm = arg(args, 3);
@@ -1756,7 +1756,7 @@ fn create_cipher(
     prototype: &JsObject,
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let name = text_of(&arg(args, 0), context)?;
+    let name = arg_text(args, 0, context)?;
     let (size, mode) = cipher_named(&name)
         .ok_or_else(|| coded_error(context, "Invalid cipher type", "ERR_CRYPTO_UNKNOWN_CIPHER"))?;
     let key = key_bytes(&arg(args, 1), &JsValue::undefined(), context)?;
@@ -2280,7 +2280,7 @@ const CRYPTO_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
         make_secret(bytes, cx)
     }),
     ("generateKeySync", 2, |_, args, cx| {
-        let kind = text_of(&arg(args, 0), cx)?;
+        let kind = arg_text(args, 0, cx)?;
         let length = number_member(&arg(args, 1), "length", cx)?.unwrap_or(0.) as usize;
         if !matches!(kind.as_str(), "hmac" | "aes") || length == 0 || !length.is_multiple_of(8) {
             return Err(coded_error(
@@ -2293,7 +2293,7 @@ const CRYPTO_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("generateKey", 3, |_, args, cx| {
         let callback = arg(args, 2);
-        let kind = text_of(&arg(args, 0), cx)?;
+        let kind = arg_text(args, 0, cx)?;
         let length = number_member(&arg(args, 1), "length", cx)?.unwrap_or(0.) as usize;
         let outcome =
             if matches!(kind.as_str(), "hmac" | "aes") && length > 0 && length.is_multiple_of(8) {

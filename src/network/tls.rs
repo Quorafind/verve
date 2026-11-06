@@ -5,8 +5,8 @@ use super::{
     tcp,
 };
 use crate::native::{
-    ClassSpec, arg, class, closure, function, get, hidden, invoke, js_text, list_of, object,
-    text_of,
+    ClassSpec, arg, arg_text, class, closure, function, get, hidden, invoke, js_text, list_of,
+    object, text_of,
 };
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 use std::{
@@ -522,7 +522,7 @@ fn connect(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue>
     Ok(value)
 }
 fn check_identity(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
-    let host = text_of(&arg(args, 0), cx)?
+    let host = arg_text(args, 0, cx)?
         .trim_end_matches('.')
         .to_ascii_lowercase();
     let cert = arg(args, 1);
@@ -695,7 +695,7 @@ pub(crate) fn install(module: &JsObject, cx: &mut Context) -> JsResult<()> {
                     o
                 };
                 contexts.set(
-                    JsString::from(text_of(&arg(args, 0), cx)?),
+                    JsString::from(arg_text(args, 0, cx)?),
                     arg(args, 1),
                     false,
                     cx,
