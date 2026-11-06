@@ -41,11 +41,11 @@ pub(crate) struct Classes {
 }
 
 fn classes(context: &mut Context) -> JsResult<Rc<Classes>> {
-    if let Some(classes) = context.get_data::<Rc<Classes>>() {
-        return Ok(classes.clone());
+    if let Some(classes) = crate::world::realm_data::<Rc<Classes>>(context) {
+        return Ok(classes);
     }
     let classes = Rc::new(make_classes(context)?);
-    context.insert_data(classes.clone());
+    crate::world::set_realm_data(context, classes.clone());
     Ok(classes)
 }
 

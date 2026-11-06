@@ -164,13 +164,13 @@ pub(crate) struct Dom {
     pub(crate) messaging: crate::messaging::Messaging,
 }
 
-/// The realm's classes, made the first time any of them is needed.
+/// The classes of the running world, made the first time any of them is needed.
 pub(crate) fn dom(context: &mut Context) -> JsResult<Rc<Dom>> {
-    if let Some(dom) = context.get_data::<Rc<Dom>>() {
-        return Ok(dom.clone());
+    if let Some(dom) = crate::world::realm_data::<Rc<Dom>>(context) {
+        return Ok(dom);
     }
     let dom = Rc::new(make_classes(context)?);
-    context.insert_data(dom.clone());
+    crate::world::set_realm_data(context, dom.clone());
     Ok(dom)
 }
 
@@ -785,6 +785,7 @@ pub(crate) fn new_event_of(
 
 /// The window's own listeners, once a host made the global object a target; see
 /// [`install_window_target`].
+#[derive(Clone)]
 struct WindowTarget(JsObject);
 
 /// The object holding `this`'s listeners: `this` itself, or — for the global object, or no
@@ -792,11 +793,12 @@ struct WindowTarget(JsObject);
 fn holder(this: &JsValue, context: &Context) -> Option<JsObject> {
     match this.as_object() {
         Some(object) if object.downcast_ref::<TargetData>().is_some() => Some(object.clone()),
-        Some(object) => context
-            .get_data::<WindowTarget>()
+        Some(object) => crate::world::realm_data::<WindowTarget>(context)
             .filter(|_| JsObject::equals(&object, &context.global_object()))
-            .map(|window| window.0.clone()),
-        None if this.is_undefined() => context.get_data::<WindowTarget>().map(|w| w.0.clone()),
+            .map(|window| window.0),
+        None if this.is_undefined() => {
+            crate::world::realm_data::<WindowTarget>(context).map(|w| w.0)
+        }
         None => None,
     }
 }
@@ -1492,12 +1494,12 @@ pub fn hold(object: &JsObject, f: impl FnOnce(&mut Vec<JsObject>)) {
 /// target. The methods themselves are the host's to put where the window finds them (on its
 /// prototype, as a browser's `Window.prototype` inherits them from `EventTarget`).
 pub fn install_window_target(context: &mut Context) -> JsResult<JsObject> {
-    if let Some(window) = context.get_data::<WindowTarget>() {
-        return Ok(window.0.clone());
+    if let Some(window) = crate::world::realm_data::<WindowTarget>(context) {
+        return Ok(window.0);
     }
     let prototype = classes(context)?.event_target.1;
     let target = JsObject::from_proto_and_data(prototype, TargetData::new(Kind::Plain));
-    context.insert_data(WindowTarget(target.clone()));
+    crate::world::set_realm_data(context, WindowTarget(target.clone()));
     Ok(target)
 }
 

@@ -88,6 +88,7 @@ mod vm;
 mod wasm;
 mod web;
 mod worker;
+mod world;
 mod zlib;
 
 pub use code_cache::CodeCacheStats;
@@ -114,6 +115,7 @@ pub use process::{
     CHROME_VERSION, ELECTRON_VERSION, ExitBehavior, MODULES_VERSION, NODE_VERSION, ProcessInfo,
     UncaughtBehavior,
 };
+pub use world::{MAIN_WORLD, WorldId, current_world, world_realm};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};

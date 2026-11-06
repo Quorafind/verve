@@ -449,15 +449,29 @@ fn post_remote(
 
 /// Whether any port of this realm is driven by a remote end.
 pub(crate) fn active(context: &Context) -> bool {
-    context
-        .get_data::<Rc<crate::dom_events::Dom>>()
-        .is_some_and(|dom| !dom.messaging.remotes.borrow().is_empty())
+    crate::world::every_world::<Rc<crate::dom_events::Dom>>(context)
+        .iter()
+        .any(|dom| !dom.messaging.remotes.borrow().is_empty())
 }
 
 /// Hears what the remote ends have sent the ports of this realm. Answers whether any message
 /// came.
 pub(crate) fn poll(context: &mut Context) -> bool {
-    let Some(dom) = context.get_data::<Rc<crate::dom_events::Dom>>().cloned() else {
+    let mut any = false;
+    for world in 0..crate::world::count(context) as crate::WorldId {
+        let Some(realm) = crate::world::world_realm(context, world) else {
+            continue;
+        };
+        let previous = context.enter_realm(realm);
+        any |= poll_world(context);
+        context.enter_realm(previous);
+    }
+    any
+}
+
+/// [`poll`] for the ports of the world that is running.
+fn poll_world(context: &mut Context) -> bool {
+    let Some(dom) = crate::world::realm_data::<Rc<crate::dom_events::Dom>>(context) else {
         return false;
     };
     let mut heard = Vec::new();
