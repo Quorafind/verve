@@ -305,6 +305,7 @@ P13 第二段另加两个类型（`msg/page.rs`）：`EditCommand`（`Undo` `Red
 | `ToRendererInput::Visibility(bool)`（`document.visibilityState`） | P13 / P34 |
 | `FromRenderer::Font(..)`、`ToRendererInput::FontsChanged`（`@font-face` 注册到 GPUI 文字系统） | P31 |
 | `ToRendererInput::Choose { select, value }`（`<select>` 下拉弹层选中） | P32 |
+| `RendererView.display_list`（`Option<Arc<verve_layout::DisplayList>>`，随 `verve-layout` 接入渲染器时加）；`DisplayList.rasters`、`DisplayList.root`（页面的滚动容器）与进程内唯一的 `revision`、`Hitbox` 的形状、滚动帧 `PushScroll`/`PopScroll`（滚动只改 `Scroller` 的 offset）见 P30 的「契约调整」 | P30 |
 | `RendererView.images`、`PaintItem::Image.frame`、`DisplayList.chunks` | P35 / P33 |
 | `FromRenderer::{ProtocolRequest, ZoomChanged, PreloadError}`、`ToRenderer::ProtocolResponse` | P20 / P21 |
 | `ToRendererInput::{Drag, Paste, ClipboardContents}` | P24 |

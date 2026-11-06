@@ -52,7 +52,7 @@ P13）。换算：`css = position / zoom`。无边框窗口里内容区原点就
 
 `ScrollDelta::Pixels(p)` → `deltaMode = 0`，`deltaX/Y = -p.x / -p.y`（GPUI 与 DOM 方向相反，实现时用真实 Electron 校对符号）；
 `ScrollDelta::Lines(l)` → 按 Chromium 乘 40px 转成像素（`deltaMode` 仍为 0，与 Chromium 一致）。`shift` + 竖直滚轮 → 横向。
-滚动本身的处理见 P30"滚动"一节。`ctrl` + 滚轮 → 发给主进程做缩放（P13 的 `zoom-changed`），不滚动。
+滚动本身的处理见 P30"滚动"一节：滚轮的目标是命中元素向上最近的、能往该方向滚的 `Scroller`，滚不动再链到外层。命中与光标用 `DisplayList::resolved_hitboxes`/`hit_test`，不要自己推帧的栈。`ctrl` + 滚轮 → 发给主进程做缩放（P13 的 `zoom-changed`），不滚动。
 
 ### 键盘
 

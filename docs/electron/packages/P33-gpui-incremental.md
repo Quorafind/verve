@@ -44,7 +44,8 @@
 - `DisplayList.chunks: Vec<Chunk>`，`Chunk { id: ChunkId, revision: u64, range: Range<usize> /* items 下标 */, bounds: Rect, translate: [f32; 2], opacity: f32, clip: Option<Rect> }`。
 - 一个块 = 一个层叠上下文，或一个分区（`set_partition` 标记的子树），或一个滚动容器的内容。块内容只有在其节点有 Layout/Paint 级变化时才
   重生成并 `revision += 1`；只有 `Composite` 级变化时只改块头的 `translate/opacity`。
-- 滚动容器内容是独立块：滚动只改块的 `translate`，不重生成项（滚动不触发布局、不触发重出显示列表）。
+- 滚动容器内容是独立块：滚动只改块的 `translate`，不重生成项（滚动不触发布局、不触发重出显示列表）。P30 的契约是 `PushScroll { node }`/`PopScroll` 包住帧里的项（项按偏移为 0 摆放），
+  偏移只在 `Scroller` 项里：块的 `translate` 就是 −offset(node)，块里的项在滚动时一个字节不变。
 - 跨线程传递：`Arc<DisplayList>` 内的每个块的 items 也是 `Arc<[PaintItem]>`，新列表复用未变块的 `Arc`（零拷贝）。
 
 ### 3. GPUI 侧回放

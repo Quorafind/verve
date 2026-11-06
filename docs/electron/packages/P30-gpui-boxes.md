@@ -25,7 +25,7 @@
 | 四边不同颜色的边框、`dotted/double/groove…` | 一个 `border_color`，`BorderStyle` 只有 `Solid / Dashed` | 不够 |
 | 多色标渐变、`radial/conic-gradient` | `linear_gradient(angle, from, to)` 只有两个色标 | 不够 |
 | `transform: rotate/scale` 一个盒子 | 只有 `svg()`/精灵图支持 `TransformationMatrix`；`Quad` 没有变换 | 不够 |
-| 一个子树的整体 `opacity` | `Window::with_element_opacity` 是 `pub(crate)` | 需要改 fork |
+| 一个子树的整体 `opacity` | `Window::with_element_opacity` 是 `pub(crate)`；公开的只有 `Styled::opacity`（`Div` 画子树时套用） | 不改 fork，见「契约调整」 |
 | `box-shadow`（含 inset、多层） | `Vec<BoxShadow>`，有 `inset` | 够 |
 | block/flex/float 布局 | GPUI 自己依赖的 `taffy =0.13` 开了 `block_layout`、`flexbox`、`grid`、`float_layout` | **直接用 taffy** |
 
@@ -72,7 +72,7 @@ Hub.renderer_view(id) ───────────────────�
     的补丁（改为 `pub`），或定期重建这个包装。
   - 垂直度量：GPUI 给的是 Windows 的 ascent（Consolas 14.719 vs hhea 11.883），`line-height: normal` 用哪个要与 Chrome 对齐，
     P31 决定。
-- 仍需要的 fork 补丁：`Window::with_element_opacity` 改 `pub`（不透明度分组）、`finish_frame` 改 `pub`。写进 fork 的一个 commit。
+- 不改 fork（协调者决定：fork 在 GitHub 上，本包不推送）。不透明度分组见下面的「契约调整」；`WindowTextSystem::finish_frame` 属于工作线程上的文字塑形，归 P31。
 - 退回方案（GPUI 线程布局、几何晚一帧）**不需要**。
 
 ## 背景（先读）
@@ -121,7 +121,7 @@ impl LayoutEngine {
     pub fn display_list(&self) -> Arc<DisplayList>;
 }
 
-pub struct DisplayList { pub revision: u64, pub items: Vec<PaintItem>, pub chunks: Vec<Chunk> /* P33 */ }
+pub struct DisplayList { pub revision: u64, pub items: Vec<PaintItem>, pub rasters: Vec<RasterSpec>, pub root: Option<NodeId> /* P33 追加 chunks */ }
 
 pub enum PaintItem {
     Box { node: NodeId, bounds: Rect, radii: [f32; 4], background: Vec<Fill>, border: Border, shadows: Vec<Shadow> },
@@ -131,9 +131,9 @@ pub enum PaintItem {
     Control { node: NodeId, bounds: Rect, kind: ControlKind },                                                         // P32
     PushClip { bounds: Rect, radii: [f32; 4] }, PopClip,
     PushOpacity(f32), PopOpacity,
-    PushTranslate([f32; 2]), PopTranslate,
-    Hitbox { node: NodeId, bounds: Rect, cursor: Cursor, app_region: Option<AppRegion> },                              // P32/P34
-    Scroller { node: NodeId, viewport: Rect, content: [f32; 2], offset: [f32; 2] },
+    PushScroll { node: NodeId }, PopScroll,          // 滚动帧：其中的项按“该容器及外层帧偏移为 0”摆放，回放时平移 −offset(node)
+    Hitbox { node: NodeId, bounds: Rect, cursor: Cursor, app_region: Option<AppRegionKind> },                          // P32/P34
+    Scroller { node: NodeId, viewport: Rect, content: [f32; 2], offset: [f32; 2], scrollbar: bool },                  // 在自己的帧之外
 }
 pub enum Fill { Color([f32; 4]), Linear { angle: f32, stops: Vec<([f32; 4], f32)> }, Raster(ImageKey) /* 复杂渐变栅格化 */ }
 pub struct Border { pub widths: [f32; 4], pub colors: [[f32; 4]; 4], pub styles: [BorderLine; 4] }
@@ -142,21 +142,74 @@ pub struct Border { pub widths: [f32; 4], pub colors: [[f32; 4]; 4], pub styles:
 ### verve-dom：布局提供者（同步几何）
 
 ```rust
+/// 一次布局的结果：provider 的答复。
+pub struct Layout {
+    /// 每个已渲染元素的 border box（视口坐标，滚动已计入）。
+    pub rects: Vec<(NodeId, Rect)>,
+    /// 每个滚动容器（页面用根元素）的滚动偏移，已夹取到可达范围：`scrollTop`/`scrollLeft` 的答案。
+    pub scroll_offsets: Vec<(NodeId, [f32; 2])>,
+    /// 每个已渲染元素的 `[scrollWidth, scrollHeight]`（来源是 `LayoutEngine::scroll_extent`）。
+    pub scroll_extents: Vec<(NodeId, [f32; 2])>,
+}
+
 impl Document {
     /// 脚本读几何（getBoundingClientRect、offset*/client*/scroll*、elementFromPoint、getComputedStyle 的
-    /// width/height 用到的值）而当前布局已过期时调用：先 update() 出快照，再交给 provider 算，
-    /// 用返回的 rects 替换 state.rects（等同 set_layout，但不触发观察者回调重入）。
-    pub fn set_layout_provider(&self, provider: Option<Box<dyn FnMut(&Update) -> Vec<(NodeId, Rect)>>>);
+    /// width/height 用到的值）而当前布局已过期时调用：先取出快照（`Update`），再交给 provider 算，
+    /// 用返回的 `Layout` 无声地替换 `rects`、`scroll_offsets` 与滚动范围（等同 set_layout，但不触发观察者回调，
+    /// 也不发 `scroll` 事件）。provider 取走的 `Changes` 留给下一次 `update()`。
+    pub fn set_layout_provider(&self, provider: Option<Box<dyn FnMut(&Update) -> Layout>>);
+    /// 过期就现在布局（发布视图前用）。
+    pub fn ensure_layout(&self);
+    /// 把布局变化告诉 ResizeObserver/IntersectionObserver：有 provider 的页面每个回合末自己调用。
+    pub fn deliver_layout(&self, runtime: &mut verve::Runtime);
 }
 ```
 
-"过期"的判定：自上次布局以来 `Changes` 非空或视口变化。没有 provider 时行为不变（现有测试必须仍过）。
+"过期"的判定：自上次布局以来 `Changes` 非空（含动画改了样式的节点，它们不动任何修订号），或修订号、视口变化。
+没有 provider 时行为不变（现有测试必须仍过）。
+
+脚本的滚动：`scrollTo`/`scrollBy`/`scrollTop = …` 只把请求的偏移写进文档（`request_scroll`，一次 `scroll` 事件由它的定时器发），
+布局在下一次读取时把它夹取到可达范围并写回，所以 `scrollTop = 9999` 立刻读到夹取后的值、`scrollBy` 只加一次。
+`Request::Scroll` 里只有 `Reveal`（`scrollIntoView`）还要渲染器用 `apply_scroll` 处理；`To`/`By` 不需要。
+`scrollWidth`/`scrollHeight` 读 `scroll_extents`，不受滚动偏移影响。
 
 ### `msg/input.rs` 追加
 
 ```rust
 pub struct RendererView { /* P02 原有字段 */ pub display_list: Option<Arc<verve_layout::DisplayList>> }
 ```
+
+`ToRendererInput::Layout` 在 `msg/input.rs` 里已经标了废弃（P02 之后），本包不再重复；变体保留。`display_list` 字段随 `verve-layout`
+接入渲染器（`renderer_guest.rs` 依赖它）一起加进 `RendererView`，不在 crate 存在之前加。
+
+### 契约调整（P30 实现前确定，2026-11-07）
+
+- **不透明度分组不改 fork。** `PushOpacity`/`PopOpacity` 成对出现；回放它们的办法由 `DomElement` 决定（见下面的盒子绘制规则）。
+  `finish_frame`、`TextMeasurer` 的 GPUI 实现、字形画法的核对属于 P31，本包只定义 `TextMeasurer` 和无头测量器。
+- **依赖。** `verve-layout` 依赖 `verve-dom`（读 `Snapshot`、`Rect`、`ScrollRequest`、`css::color`/`length_calc`）和 `taffy =0.13.0`（与 GPUI
+  同一份，只开 `std taffy_tree flexbox grid block_layout float_layout content_size`），**不依赖 GPUI**。复杂渐变（径向、圆锥、`repeating-*`）的栅格化是 verve-gpui 自己的逐像素代码（`raster.rs`），在 GPUI 线程上画；软件绘制（`--screenshot`）用已在依赖图里的
+  `tiny-skia 0.11` 这一份，不增加第二份，PNG 用 `image 0.25` 的编码器。
+- **`Fill::Raster` 的来源。** `DisplayList` 带 `rasters: Vec<RasterSpec>`（渐变的解析结果、尺寸、`ImageKey`），由 Shell 在 GPUI 线程上据此栅格化
+  （按窗口缩放，每边最多 2048 设备像素，超出的由绘制方拉伸；straight alpha），渲染器线程不画；`Fill::Raster(key)` 引用它。`DisplayList.chunks` 仍由 P33 追加，`PaintItem::Image.frame` 由 P35 追加（见 P02 的追加表）。
+- **`DisplayList.root` 与 `revision`。** `root: Option<NodeId>` 是页面的滚动容器，滚轮链在这里结束；页面不滚动（或 `html{overflow:hidden}`）时为 `None`。
+  `revision` 在整个进程内唯一（静态 `AtomicU64`），导航换了引擎也不会重复，Shell 与截屏靠它判断是不是同一份列表。
+- **`Hitbox` 的形状（P32、P34 消费）。** `Hitbox { node, bounds, cursor, app_region }`：`bounds` 是边框盒（所在帧的空间，CSS 像素），
+  并只裁到**同一帧里**的裁剪（`overflow: hidden` 而不可手动滚动的祖先）；`cursor` 是计算样式 `cursor` 的枚举（`Cursor`，缺省 `Auto`；`cursor` 本来就继承，所以不必再找祖先）；`app_region` 是 `AppRegionKind`（`Drag`/`NoDrag`），来自
+  `-webkit-app-region`（或标准名 `app-region`）。P34 的 `app_region::AppRegion` 是 `{ rect, drag }`：`rect` 取解析后的命中盒的 `bounds`，`drag = (kind == Drag)`。
+  `pointer-events: none` 的元素不出 `Hitbox`。`Hitbox` 按绘制顺序排列。**P32、P34 不自己推栈**：用 `DisplayList::resolved_hitboxes(offset_of)`（窗口坐标、已按帧偏移平移并裁到所在裁剪）
+  和 `DisplayList::hit_test(x, y, offset_of)`；`offset_of(node)` 是 Shell 本地预测的偏移（比列表新时），没有就读 `Scroller` 的。
+- **滚动帧：`PushScroll { node }` / `PopScroll`（取代契约里的 `PushTranslate`/`PopTranslate`）。** 可手动滚动的容器（`overflow: auto/scroll` 且有内容可滚，页面在
+  内）是一个*帧*：帧里的项按“该容器及其外层所有帧的偏移都为 0”摆放，回放方在 `PushScroll` 处平移 −offset(node)；偏移取 Shell 本地预测的（比列表新时），否则取
+  该容器 `Scroller { node, offset }` 里的值。所以**一次滚动只改 `Scroller` 的 offset，列表里别的项一个字节不变**（P33 的块因此不重建，Shell 可以立刻本地滚动，
+  渲染器的偏移随后为准）。容器自己的 `PushClip` 和 `Scroller` 在它的帧之外；帧里的 `PushClip` 才是帧内裁剪。不可手动滚动的容器（`overflow: hidden/clip`、
+  没有内容可滚的）不是帧：它们的滚动偏移、`position: sticky` 的位移、`transform: translate` 都直接加在位置上。`Scroller` 多一个 `scrollbar: bool`
+  （`scrollbar-width: none` 时为假）。`LayoutEngine::rect`/`rects`（脚本几何）仍是视口坐标，滚动已计入。
+  v1 偏差：Shell 本地预测期间，帧内的 sticky 盒随所在帧一起走，渲染器重新发布时才纠正。
+- **`LayoutEngine::update` 的形状。** `update(&Snapshot, &Changes) -> bool`（有变化为真）；另有 `rect`、`client_rects`、`scroll_extent`、
+  `scroll_offset(s)`、`apply_scroll`（答复移动过的 `(NodeId, [f32; 2])`，由调用方交给 `Document::set_scroll_offsets`）、`hit_test`、`display_list`。
+- **行内内容（P31 之前）。** 文字节点不进布局；`display: inline` 的元素自己不建盒，它的子元素像 `display: contents` 那样提升到父盒（`<a><div>…</div></a>` 照常排）；`inline-block`/`inline-flex`/`inline-grid` 与替换元素暂按块级盒参与
+  块流，宽度 `auto` 时不收缩。P31 的行内格式化上下文接管这些，接口在 `tree.rs` 里分出“行内游程”的那一处。
+- **`::before`/`::after`。** 生成盒没有 `NodeId`，P30 不为它们建盒；带文字的是 P31 的，没有文字的装饰性方块暂不画。
 
 ## CSS → taffy 映射规则
 
@@ -173,12 +226,12 @@ pub struct RendererView { /* P02 原有字段 */ pub display_list: Option<Arc<ve
 | `position: relative` | taffy `Relative` + inset |
 | `position: absolute` | taffy `Absolute`；包含块 = 最近的非 static 祖先：taffy 只认父节点，所以**把绝对定位节点挂到其包含块对应的 taffy 节点下**（DOM 父子与 taffy 父子可以不同，映射表记录） |
 | `position: fixed` | 同上，包含块是视口：挂到根，偏移不受滚动影响 |
-| `position: sticky` | 布局时按 `relative` 处理；绘制时按最近滚动容器的偏移和 `top/bottom/left/right` 阈值夹取出平移量（`PushTranslate`） |
+| `position: sticky` | 布局时按 `relative` 处理；摆放时按最近滚动容器的偏移和 `top/bottom/left/right` 阈值夹取出位移，直接加进位置（不出父盒） |
 | 尺寸、`min/max-*`、`box-sizing`、百分比、`auto`、`aspect-ratio` | taffy 原生支持；百分比基于包含块；`calc()` 由 P22 在计算样式里化简成 `px`/`%` 组合，taffy 0.13 不支持的混合 calc 退回 `auto` 并记录 |
 | `margin`（含 `auto`）、`padding`、`border-*-width` | taffy 原生 |
 | `gap`、`flex-*`、`align-*`、`justify-*`、`order` | taffy 原生（`order` 在建树时按值稳定排序子节点） |
 | `grid-template-*`、`grid-area`、`grid-auto-*`、命名线 | taffy 0.13 原生支持轨道列表、`repeat()`、`minmax()`、`fr`；命名区域在建树时解析成行列号 |
-| `overflow: hidden/clip/scroll/auto` | taffy `Overflow`；绘制时 `PushClip`；`scroll/auto` 且内容超出 → `Scroller` 项 |
+| `overflow: hidden/clip/scroll/auto` | taffy `Overflow`；绘制时 `PushClip`；`scroll/auto` 且内容超出（或 `scroll`）→ `PushScroll` 帧和 `Scroller` 项；一轴非 `visible` 时另一轴按 `auto` |
 
 ## 层叠与绘制顺序
 
@@ -191,14 +244,14 @@ pub struct RendererView { /* P02 原有字段 */ pub display_list: Option<Arc<ve
 
 - 背景色：`PaintQuad` 的 `background`。`linear-gradient` 两个色标 → GPUI `linear_gradient`；角度为 0/90/180/270
   的多色标 → 切成多个相邻的两色标 quad；其他（多色标斜角、`radial-gradient`、`conic-gradient`、`repeating-*`）→ `Fill::Raster`：
-  在渲染器线程用 P25 的 tiny-skia 栅格化成图片，按 (渐变文本, 尺寸) 缓存。
+  由 Shell 在 GPUI 线程上用 verve-gpui 自己的代码（`raster.rs`）栅格化成图片，按 (渐变, 缩放) 缓存，每边最多 2048 设备像素（见「契约调整」）。
 - 边框：四边颜色和样式相同 → 一个 `PaintQuad`（`border_widths`、`border_color`、`BorderStyle::Solid/Dashed`）。
   不同 → 每边用 `paint_path` 画梯形（含圆角时退回一个 quad 用上边颜色，记录为已知偏差）。`dotted` 画成 `Dashed`，
   `double/groove/ridge/inset/outset` 画成 `Solid`（`inset/outset` 按亮暗调整颜色）。
 - 圆角：`corner_radii`；椭圆半径（`10px / 20px`）取较小值。
 - `box-shadow`：GPUI `BoxShadow`（含 `inset`、多层，顺序与 CSS 一致：第一层在最上）。
-- `opacity`：`PushOpacity`，GPUI 侧用 fork 里改为 `pub` 的 `with_element_opacity`。
-- `transform`：v1 只支持 `translate*()` 和 `matrix()` 中的平移分量（`PushTranslate`，不影响布局，影响 `rects` 与命中）；
+- `opacity`：`PushOpacity`。GPUI 侧不改 fork：优先用公开的 `Styled::opacity` 套一层 `Div` 回放组内的绘制项；做不到就把 alpha 乘进组内每一项（重叠的后代各自混合，是已知偏差，写进「状态」）。
+- `transform`：v1 只支持 `translate*()` 和 `matrix()` 中的平移分量（直接加进位置，不影响布局，影响 `rects` 与命中）；
   `scale/rotate/skew` 对盒子不生效（P35 对 `<img>`/`<svg>` 生效），并在 `console.warn` 只提示一次。动画由 P22 产出每帧计算值。
 - `visibility: hidden`：不出 `Box`/`Glyphs`，但保留布局；`visible` 的后代仍要画。
 - `outline`：画在盒子外侧的第二个 quad（不占布局）；`outline-offset` 支持。
@@ -208,9 +261,9 @@ pub struct RendererView { /* P02 原有字段 */ pub display_list: Option<Arc<ve
 
 - 滚动偏移的唯一真相在渲染器：`Snapshot.scroll_offsets`。脚本的 `Request::Scroll` 由 `RendererGuest` 拦截，交给
   `LayoutEngine::apply_scroll` 夹取，再 `Document::set_scroll_offsets`（触发 `scroll` 事件），**不再发给 Shell**。
-- 滚轮：Shell 在 `Scroller` 项上收到滚轮时，先本地平移该容器的绘制（立即响应），同时发
-  `ToRendererInput::Wheel`；渲染器派发 `wheel` 事件，未被 `preventDefault` 就按同样的量 `apply_scroll` 并发布。
-  Shell 收到新显示列表后以渲染器的偏移为准（本地预测值丢弃）。
+- 滚轮：目标是命中元素向上最近的、能往该方向滚的帧（`Scroller`），滚不动了就链到外一层，不是指针下最上面的 `Scroller`。Shell 先改本地偏移（回放时 `PushScroll` 平移，
+  立即响应），同时发 `ToRendererInput::Wheel`；渲染器派发 `wheel` 事件，未被 `preventDefault` 就按同样的量 `apply_scroll` 并发布。
+  Shell 收到新显示列表后以渲染器的偏移为准（本地预测值丢弃）；因为一次滚动只改 `Scroller`，这张列表和上一张只差偏移。
 - 滚动条：v1 画 GPUI 风格的覆盖式细滚动条（悬停变粗），不占布局；`::-webkit-scrollbar` 样式不支持（记录）。
   `scrollbar-width: none` 时不画。
 
