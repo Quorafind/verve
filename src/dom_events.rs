@@ -1137,7 +1137,7 @@ fn report_rejection(context: &mut Context, value: &JsValue) {
 }
 
 /// An `on…` attribute's turn in a dispatch: its value now called, a `false` it answers
-/// cancelling the event.
+/// cancelling the event — for `beforeunload`, any answer but `null` or `undefined`.
 fn call_handler(
     holder: &JsObject,
     this: &JsValue,
@@ -1158,9 +1158,9 @@ fn call_handler(
         return Ok(JsValue::undefined());
     };
     let answer = crate::call(context, &handler, this, &[event.clone().into()])?;
-    if answer == JsValue::from(false)
-        && let Some(data) = event.downcast_ref::<EventData>()
-    {
+    let cancelled = answer == JsValue::from(false)
+        || (kind == "beforeunload" && !answer.is_null_or_undefined());
+    if cancelled && let Some(data) = event.downcast_ref::<EventData>() {
         cancel(&mut data.0.borrow_mut());
     }
     Ok(answer)
