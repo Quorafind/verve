@@ -13,10 +13,10 @@ use boa_engine::{
     Context, Finalize, JsData, JsObject, JsResult, JsString, JsValue, Trace, js_string,
     object::builtins::JsProxyBuilder, property::PropertyKey,
 };
+use verve::native::{arg, hidden};
 
 use super::node::{read_dom, wrap};
 use crate::dom::{Dom, NodeId};
-use verve::native::{arg, hidden};
 
 type Query = Rc<dyn Fn(&Dom) -> Vec<NodeId>>;
 

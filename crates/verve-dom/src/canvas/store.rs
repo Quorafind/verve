@@ -10,6 +10,7 @@ use std::sync::Arc;
 use boa_engine::object::WeakJsObject;
 use boa_engine::{Context, JsError, JsObject, JsResult, JsValue};
 use tiny_skia::{PathBuilder, Pixmap};
+use verve::native::type_error;
 
 use crate::bind::node::wrap;
 use crate::bind::{Kind, handle_of, native_instance};
@@ -19,7 +20,6 @@ use crate::canvas::fonts::FontStack;
 use crate::canvas::paint::{GradientSpec, PatternSpec};
 use crate::dom::NodeId;
 use crate::state::{State, shared};
-use verve::native::type_error;
 
 /// The number a canvas, gradient, pattern, path or bitmap is stored under.
 pub type CanvasId = u32;

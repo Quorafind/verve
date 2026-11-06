@@ -2,13 +2,13 @@
 //! and the rest, answered as a document without a renderer can (zero lengths, identity matrices).
 
 use boa_engine::JsValue;
+use verve::native::{self};
 
 use super::element::{painted, rect_object};
 use super::node::{read_dom, wrap_opt};
 use super::{Accessor, Method, node_of, set};
 use crate::Rect;
 use crate::dom::Namespace;
-use verve::native::{self};
 
 pub const SVG_ACCESSORS: &[Accessor] = &[
     (

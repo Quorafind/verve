@@ -11,6 +11,10 @@ use boa_engine::{
     object::builtins::JsProxyBuilder,
     property::{Attribute, PropertyDescriptor},
 };
+use verve::native::{
+    self, arg, arg_text, closure, function, get, illegal_constructor, js_text, list_of, text_of,
+    type_error,
+};
 
 use super::node::{read_dom, wrap};
 use super::{
@@ -19,10 +23,6 @@ use super::{
 };
 use crate::css::MediaQuery;
 use crate::state::{FrameClock, shared};
-use verve::native::{
-    self, arg, arg_text, closure, function, get, illegal_constructor, js_text, list_of, text_of,
-    type_error,
-};
 
 // ─── Location and history ───────────────────────────────────────────────────────────────────
 

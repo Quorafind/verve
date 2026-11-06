@@ -11,12 +11,12 @@
 use std::collections::HashSet;
 
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, object::builtins::JsPromise};
+use verve::native::{self, arg, arg_text, js_text, list_of, text_of, type_error};
 
 use super::node::{existing_wrapper, read_dom, with_dom, wrap};
 use super::{Method, dom_error};
 use crate::dom::{AttrChange, Namespace, NodeId, is_custom_element_name};
 use crate::state::shared;
-use verve::native::{self, arg, arg_text, js_text, list_of, text_of, type_error};
 
 /// A tag `customElements.define` was given a class for.
 pub struct Definition {

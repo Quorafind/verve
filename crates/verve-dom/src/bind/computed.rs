@@ -6,12 +6,12 @@
 //! declaration is about is kept on its [`Handle`], where a script cannot reach it.
 
 use boa_engine::{Context, JsObject, JsResult, JsValue};
+use verve::native::{arg, arg_text, function, get, js_text, type_error};
 
 use super::{Handle, Kind, Method, native_instance};
 use crate::css::{PseudoElement, Style, style_of, style_of_part};
 use crate::dom::NodeId;
 use crate::state::shared;
-use verve::native::{arg, arg_text, function, get, js_text, type_error};
 
 /// What a computed style declaration is about.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -12,15 +12,15 @@
 //! each animation frame.
 
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
+use verve::native::{
+    self, arg, function, get, hidden, illegal_constructor, js_text, list_of, text_of, type_error,
+};
 
 use super::node::{node_list, read_dom, wrap, wrap_opt};
 use super::{Kind, Method, WebIdlClass, handle_instance, handle_of, node_of, set, webidl_class};
 use crate::Rect;
 use crate::dom::{Mutation, NodeId};
 use crate::state::{MutationOptions, ObservedTarget, ObserverRecord, Watch, shared};
-use verve::native::{
-    self, arg, function, get, hidden, illegal_constructor, js_text, list_of, text_of, type_error,
-};
 
 fn construct(
     new_target: &JsValue,

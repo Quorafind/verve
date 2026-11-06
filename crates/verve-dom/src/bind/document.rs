@@ -2,6 +2,9 @@
 //! with `DOMParser`, `XMLSerializer` and `DOMImplementation`.
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
+use verve::native::{
+    self, arg, arg_text, function, hidden, illegal_constructor, js_text, text_of, type_error,
+};
 
 use super::node::{PARENT_NODE_ACCESSORS, PARENT_NODE_METHODS, read_dom, with_dom, wrap, wrap_opt};
 use super::{
@@ -10,9 +13,6 @@ use super::{
 };
 use crate::dom::{Dom, Namespace, NodeId, NodeKind};
 use crate::state::shared;
-use verve::native::{
-    self, arg, arg_text, function, hidden, illegal_constructor, js_text, text_of, type_error,
-};
 
 /// The document a document's member is asked of: a parsed one, or the window's.
 fn document_of(this: &JsValue, context: &Context) -> NodeId {

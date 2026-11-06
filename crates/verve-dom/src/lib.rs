@@ -66,7 +66,6 @@ pub use storage::{FileStorage, StorageBackend};
 pub use world::{create_world, insert_stylesheet, remove_stylesheet};
 
 use state::{Shared, SheetOwner, SheetRecord, State, shared};
-
 use verve::native::js_text;
 
 /// What a script asked of the window that only the embedder can do.

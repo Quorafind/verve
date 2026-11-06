@@ -18,6 +18,10 @@ use boa_engine::{
     object::FunctionObjectBuilder,
     property::{Attribute, PropertyDescriptor},
 };
+use verve::native::{
+    self, arg, arg_text, function, get, hidden, illegal_constructor, js_text, list_of, text_of,
+    type_error,
+};
 
 use super::node::{ancestry, read_dom, with_dom, wrap, wrap_opt};
 use super::{
@@ -26,10 +30,6 @@ use super::{
 };
 use crate::dom::{Dom, NodeId, NodeKind, ShadowMode, SlotAssignment};
 use crate::state::shared;
-use verve::native::{
-    self, arg, arg_text, function, get, hidden, illegal_constructor, js_text, list_of, text_of,
-    type_error,
-};
 
 // ─── Attributes ─────────────────────────────────────────────────────────────────────────────
 

@@ -5,11 +5,11 @@ use ::image::ImageEncoder;
 use boa_engine::object::builtins::JsUint8ClampedArray;
 use boa_engine::{Context, JsObject, JsResult, JsValue};
 use tiny_skia::Pixmap;
+use verve::native::{arg, get, js_text};
 
 use crate::bind::{Kind, handle_instance, native_instance, set};
 use crate::canvas::context2d::Canvas2d;
 use crate::canvas::image::{premultiply, unpremultiply};
-use verve::native::{arg, get, js_text};
 
 /// An `ImageData` object of a size and straight RGBA bytes.
 pub fn make_image_data(

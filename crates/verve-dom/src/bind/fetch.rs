@@ -1,9 +1,9 @@
 //! DOM 地址解析与传输分离；真正的请求仍经过安装前的 Verve fetch 和权限链。
 
 use boa_engine::{Context, JsResult, js_string};
+use verve::native::{self, arg, closure, get, js_text, text_of, type_error};
 
 use crate::state::shared;
-use verve::native::{self, arg, closure, get, js_text, text_of, type_error};
 
 /// The getter of `Response.prototype.url`, as the runtime made it.
 fn response_url_getter(context: &mut Context) -> Option<boa_engine::JsValue> {

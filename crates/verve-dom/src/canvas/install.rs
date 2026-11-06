@@ -3,6 +3,7 @@
 
 use boa_engine::property::Attribute;
 use boa_engine::{Context, JsResult, JsValue, js_string, native_function::NativeFunctionPointer};
+use verve::native::{arg, arg_text, function, illegal_constructor};
 
 use crate::bind::{
     self, Accessor, Kind, Method, WebIdlClass, dom_error, extend_prototype, handle_instance,
@@ -20,7 +21,6 @@ use crate::canvas::pixels::construct_image_data;
 use crate::canvas::properties::install_properties;
 use crate::canvas::store::{owner_of_context, this_handle};
 use crate::state::shared;
-use verve::native::{arg, arg_text, function, illegal_constructor};
 
 /// A class: its constructor, its own methods and accessors, and methods it shares with another.
 struct Entry {

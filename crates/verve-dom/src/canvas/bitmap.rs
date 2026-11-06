@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use boa_engine::{Context, JsResult, JsValue};
 use tiny_skia::{BlendMode, FilterQuality, IntRect, Pixmap, PixmapPaint, Transform};
+use verve::native::{self, arg, arg_text, get, text_of};
 
 use crate::bind::{Accessor, Kind, Method, dom_error, handle_of, native_instance};
 use crate::canvas::context2d::{Canvas2d, CanvasOwner};
@@ -15,7 +16,6 @@ use crate::canvas::source::source_pixmap;
 use crate::canvas::store::{canvas_object, read_canvas, this_handle};
 use crate::canvas::{Axis, finite_numbers};
 use crate::state::shared;
-use verve::native::{self, arg, arg_text, get, text_of};
 
 /// An `ImageBitmap` object holding `pixmap`.
 pub fn make_bitmap(context: &mut Context, pixmap: Arc<Pixmap>) -> JsValue {

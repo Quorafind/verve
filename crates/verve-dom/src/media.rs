@@ -9,11 +9,11 @@ use boa_engine::{
     object::{WeakJsObject, builtins::JsPromise},
     property::PropertyDescriptor,
 };
+use verve::native::{self, arg, js_text, type_error};
 
 use crate::bind::{self, Accessor, Method, dom_error, node_of};
 use crate::state::shared;
 use crate::{Document, NodeId};
-use verve::native::{self, arg, js_text, type_error};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MediaSettings {

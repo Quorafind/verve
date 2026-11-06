@@ -2,9 +2,9 @@
 //! `TypeError`, as WebIDL has it.
 
 use boa_engine::{Context, JsError, JsResult, JsValue};
+use verve::native::{get, text_of, type_error};
 
 use crate::Align;
-use verve::native::{get, text_of, type_error};
 
 /// `scrollIntoView`'s argument: `true` (the default) lines the top up, `false` the bottom, an
 /// options object says `block`, `inline` and `behavior`.

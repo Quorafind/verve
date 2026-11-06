@@ -3,9 +3,9 @@
 
 use boa_engine::{Context, JsResult, JsValue};
 use tiny_skia::Transform;
+use verve::native::get;
 
 use crate::bind::platform::{Matrix, from_2d, make_matrix, matrix_of};
-use verve::native::get;
 
 /// The 2D part of a `DOMMatrix`'s sixteen numbers, column by column as CSS writes them.
 pub fn to_transform(matrix: &Matrix) -> Transform {

@@ -7,11 +7,11 @@
 //! Where they stand is kept on the object itself (`referenceNode`, `currentNode`).
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
+use verve::native::{self, arg, function, get};
 
 use super::node::{read_dom, wrap};
 use super::{call_method, node_of, set};
 use crate::dom::{Dom, NodeId, NodeKind};
-use verve::native::{self, arg, function, get};
 
 const SHOW_ALL: u32 = u32::MAX;
 const FILTER_ACCEPT: u32 = 1;

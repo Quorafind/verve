@@ -2,12 +2,12 @@
 //! told once for each slot whose assigned nodes changed, in a microtask.
 
 use boa_engine::{Context, JsResult, JsValue};
+use verve::native::{self, arg, get};
 
 use super::node::{read_dom, with_dom, wrap};
 use super::{Method, extend_prototype, node_of, queue_microtask};
 use crate::dom::NodeId;
 use crate::state::shared;
-use verve::native::{self, arg, get};
 
 /// The slots of a shadow tree and what is assigned to each, told to `slotchange`.
 #[derive(Default)]

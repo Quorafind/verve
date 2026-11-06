@@ -46,12 +46,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use boa_engine::{Context, JsResult, JsValue};
+use verve::native::arg;
 
 use crate::bind::node::{read_dom, with_dom};
 use crate::bind::node_of;
 use crate::dom::{Dom, NodeId};
 use crate::state::State;
-use verve::native::arg;
 
 #[cfg(feature = "canvas")]
 pub(crate) use element::{CANVAS_ACCESSORS, CANVAS_METHODS};

@@ -10,6 +10,9 @@ use boa_engine::{
     object::builtins::JsProxyBuilder,
     property::{PropertyDescriptor, PropertyKey},
 };
+use verve::native::{
+    self, arg, arg_text, closure, get, hidden, illegal_constructor, js_text, text_of, type_error,
+};
 
 use super::node::{
     CHILD_NODE_ACCESSORS, CHILD_NODE_METHODS, PARENT_NODE_ACCESSORS, PARENT_NODE_METHODS, read_dom,
@@ -22,9 +25,6 @@ use super::{
 use crate::dom::{Dom, NodeId, ShadowMode, camel_name, css_name};
 use crate::state::shared;
 use crate::{Align, Rect};
-use verve::native::{
-    self, arg, arg_text, closure, get, hidden, illegal_constructor, js_text, text_of, type_error,
-};
 
 /// The class of an HTML element, by its tag.
 pub fn html_class(tag: &str) -> &'static str {

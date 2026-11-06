@@ -11,6 +11,9 @@
 //! everything connected lives as long as the page.
 
 use boa_engine::{Context, JsObject, JsResult, JsValue};
+use verve::native::{
+    self, arg, arg_text, get, illegal_constructor, js_text, list_of, text_of, type_error,
+};
 
 use super::{
     Accessor, Method, WebIdlClass, dom_error, node_arg, node_id, node_of, opt_string,
@@ -18,9 +21,6 @@ use super::{
 };
 use crate::dom::{Dom, Namespace, Node, NodeId, NodeKind};
 use crate::state::shared;
-use verve::native::{
-    self, arg, arg_text, get, illegal_constructor, js_text, list_of, text_of, type_error,
-};
 
 /// What distinguishes a node's number among host targets: bit 40. An animation's is bit 41, in
 /// `bind/animation.rs`.

@@ -5,6 +5,7 @@
 use boa_engine::property::PropertyDescriptor;
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue};
 use tiny_skia::{BlendMode, Color, FilterQuality, LineCap, LineJoin};
+use verve::native::{arg, closure, js_text, text_of};
 
 use crate::bind::{Kind, handle_of};
 use crate::canvas::context2d::DrawState;
@@ -13,7 +14,6 @@ use crate::canvas::store::{canvas_object, read_canvas, this_handle};
 use crate::canvas::text::{Align, Baseline, TextStyle};
 use crate::css::ROOT_FONT_SIZE;
 use crate::state::shared;
-use verve::native::{arg, closure, js_text, text_of};
 
 /// What a property reads back.
 enum Reading {

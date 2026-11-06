@@ -15,6 +15,9 @@ use boa_engine::{
     object::builtins::{JsFunction, JsPromise},
 };
 use boa_gc::GcRefCell;
+use verve::native::{
+    self, arg, function, get, hidden, illegal_constructor, js_text, text_of, type_error,
+};
 
 use super::{
     Accessor, Method, WebIdlClass, call_method, constructor_of, dom_error, prototype_of_target,
@@ -22,9 +25,6 @@ use super::{
 };
 use crate::state::shared;
 use crate::{FontFaceId, FontOutcome, Request};
-use verve::native::{
-    self, arg, function, get, hidden, illegal_constructor, js_text, text_of, type_error,
-};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FaceStatus {

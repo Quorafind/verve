@@ -7,12 +7,12 @@
 //! for the network.
 
 use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
-
-use super::{Accessor, Method, WebIdlClass, call_method, set, webidl_class};
-use crate::state::shared;
 use verve::native::{
     self, arg, arg_text, closure, get, illegal_constructor, js_text, list_of, text_of, type_error,
 };
+
+use super::{Accessor, Method, WebIdlClass, call_method, set, webidl_class};
+use crate::state::shared;
 
 const EVENTS: &[&str] = &[
     "abort",

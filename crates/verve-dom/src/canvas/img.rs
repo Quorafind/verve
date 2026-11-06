@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use boa_engine::object::WeakJsObject;
 use boa_engine::{Context, JsObject, JsResult, JsValue, builtins::promise::ResolvingFunctions};
+use verve::native::{self, arg, closure, js_text, text_of};
 
 use crate::Request;
 use crate::bind::element::{Reflect, absolute_url};
@@ -19,7 +20,6 @@ use crate::canvas::image::{ElementImage, Keep, Status, image_size};
 use crate::canvas::{Axis, set_dimension};
 use crate::dom::NodeId;
 use crate::state::{State, shared};
-use verve::native::{self, arg, closure, js_text, text_of};
 
 pub const IMAGE_ACCESSORS: &[Accessor] = &[
     (

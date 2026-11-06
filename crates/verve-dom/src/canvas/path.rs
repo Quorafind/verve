@@ -8,13 +8,13 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use boa_engine::{Context, JsError, JsResult, JsValue};
 use tiny_skia::{FillRule, Mask, Path, PathBuilder, Point, Transform};
+use verve::native::{arg, list_of, type_error};
 
 use crate::bind::{Kind, Method, dom_error, handle_of};
 use crate::canvas::finite_numbers;
 use crate::canvas::matrix::transform_argument;
 use crate::canvas::store::{CanvasStore, illegal_invocation, this_handle};
 use crate::state::shared;
-use verve::native::{arg, list_of, type_error};
 
 /// The commands `CanvasRenderingContext2D` and `Path2D` share.
 pub const PATH_METHODS: &[Method] = &[

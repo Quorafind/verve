@@ -9,12 +9,12 @@
 
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 use verve::dom_events::FieldDefault as F;
+use verve::native::{self, arg, arg_text, js_text, type_error};
 
 use super::node::{read_dom, with_dom, wrap};
 use super::{Method, node_id};
 use crate::dom::{Dom, NodeId, NodeKind};
 use crate::state::shared;
-use verve::native::{self, arg, arg_text, js_text, type_error};
 
 /// The next target on an event's path from `target`: a node's parent, the window from its
 /// document, a shadow root's host — for an event that crosses shadow boundaries (`composed`).

@@ -5,6 +5,7 @@
 
 use boa_engine::{Context, JsResult, JsValue};
 use tiny_skia::Pixmap;
+use verve::native::{self, arg, arg_text, get, js_text, text_of};
 
 use crate::bind::node::read_dom;
 use crate::bind::{Accessor, Kind, Method, dom_error, node_of};
@@ -13,7 +14,6 @@ use crate::canvas::pixels::{DEFAULT_JPEG_QUALITY, Encoded, ImageType, encode};
 use crate::canvas::store::{CanvasId, canvas_object};
 use crate::canvas::{Axis, element_dimension, element_size, write_dimension};
 use crate::state::shared;
-use verve::native::{self, arg, arg_text, get, js_text, text_of};
 
 pub const CANVAS_ACCESSORS: &[Accessor] = &[
     (
