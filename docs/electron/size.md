@@ -264,3 +264,15 @@ functions under that filter, so the split is not itemised.)
 Fourth review's fixes (the `file:` rule decided by the document, `Isolate::retire` split into its own kernel commit, the captured `Response.prototype.url` getter): 33,838,592 bytes, +184,832 (+0.55 %) against the base and +5,120 against the third round.
 
 
+
+## P14: system integration A
+
+`electron/p14-system-a`: `cargo build --release -p verve-gpui --bin electron --features jit` is 34,126,336 bytes against 33,839,104 for
+`docs/electron-plan` `125d2d8c` (the figure the coordinator gave; the base was not rebuilt), +287,232 bytes (+0.85 %); the task allowed 1.2 MB and
+the aim was 600 KB or less. The cap (35,651,584) leaves 1.53 MB.
+
+No new crate edge: `image` is now declared once in `[workspace.dependencies]` with the feature list `verve-dom` already used (`bmp, gif, ico,
+jpeg, png, webp`), so `nativeImage` adds no codec; `getrandom` was in the graph through `verve`. `rfd`, `arboard` and the `windows` crate were
+not added: the clipboard, DPAPI, `ShellExecuteW`, the recycle bin, the idle time and power queries are `windows-sys` calls (feature flags
+only), and the shell's dialogs are GPUI's own prompts. The per-piece split was not measured (`cargo bloat` was stopped by the coordinator
+to spare the shared machine); the whole figure is the only measurement, to be itemised by the main session if wanted.
