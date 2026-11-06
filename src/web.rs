@@ -525,6 +525,58 @@ pub fn new_blob(bytes: Vec<u8>, kind: &str, context: &mut Context) -> JsResult<J
     Ok(blob.into())
 }
 
+/// Which file on the host's disk each `File` made by [`file_with_path`] is, kept where script
+/// cannot see it: a weak map that only Rust reads.
+struct FilePaths(boa_engine::object::builtins::JsWeakMap);
+
+/// A new `File` of `bytes` named `name`, of MIME type `kind`, that the host found at `path`
+/// (a file the user picked or dropped). Script cannot read the path; the host asks
+/// [`path_of_file`], which is how Electron's `webUtils.getPathForFile` answers. A `File` the
+/// page makes with `new File()` has no path.
+///
+/// # Errors
+///
+/// The runtime has no `File` class to make one with.
+pub fn file_with_path(
+    context: &mut Context,
+    bytes: Vec<u8>,
+    name: &str,
+    kind: &str,
+    path: &std::path::Path,
+) -> JsResult<JsValue> {
+    let class = crate::native::global(context, "File")?;
+    let file = made_by(&class, context)?;
+    dress_blob(&file, bytes, kind, context)?;
+    file.set(js_string!("name"), js_text(name), false, context)?;
+    let modified = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(web_time::UNIX_EPOCH).ok())
+        .map_or(0., |since| since.as_millis() as f64);
+    file.set(js_string!("lastModified"), modified, false, context)?;
+    let map = match context.get_data::<FilePaths>() {
+        Some(FilePaths(map)) => map.clone(),
+        None => {
+            let map = boa_engine::object::builtins::JsWeakMap::new(context);
+            context.insert_data(FilePaths(map.clone()));
+            map
+        }
+    };
+    let shown = js_text(&path.to_string_lossy());
+    map.set(&file, shown, context)?;
+    Ok(file.into())
+}
+
+/// Where the host found `file`, when it was made by [`file_with_path`] (in any world).
+pub fn path_of_file(file: &JsValue, context: &mut Context) -> Option<std::path::PathBuf> {
+    let object = file.as_object()?;
+    let FilePaths(map) = context.get_data::<FilePaths>()?;
+    let map = map.clone();
+    let path = map.get(&object, context).ok()?;
+    let path = path.as_string()?.to_std_string_escaped();
+    Some(path.into())
+}
+
 fn dress_blob(blob: &JsObject, bytes: Vec<u8>, kind: &str, context: &mut Context) -> JsResult<()> {
     let size = bytes.len();
     let data = JsUint8Array::from_iter(bytes, context)?;
