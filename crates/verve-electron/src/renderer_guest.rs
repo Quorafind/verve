@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use verve::isolate::{Guest, InterruptHandle, Outbox as IsolateOutbox};
-use verve::{Level, ProcessInfo, Runtime};
+use verve::{Level, Runtime};
 use verve_dom::{Document, FrameClock, LoadEvent, Options};
 
 use crate::api::{self, ipc_renderer::Outbox};
@@ -21,7 +21,7 @@ use crate::loader::ElectronLoader;
 use crate::msg::{
     FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
-use crate::probe;
+use crate::{preload, probe};
 
 /// One page: the runtime its scripts run in, its document, and what it has yet to tell the main
 /// process.
@@ -52,7 +52,7 @@ impl RendererGuest {
         let mut runtime = Runtime::new();
         runtime.set_vfs(hub.overlay());
         // A page without Node resolves its modules as a browser does.
-        runtime.set_web_modules(!prefs.node_integration);
+        runtime.set_web_modules(!preload::page_has_node(&prefs));
         api::install_page(
             &mut runtime,
             Arc::clone(hub),
@@ -75,6 +75,7 @@ impl RendererGuest {
             },
         )
         .expect("a page's document installs");
+        preload::prepare(&mut runtime, &document, &prefs, &outbox, hub.overlay());
         Self {
             runtime,
             document,
@@ -188,7 +189,8 @@ impl RendererGuest {
     /// is told to the main process as the loader reports it.
     fn load(&mut self, url: &str) {
         self.require_from(url);
-        self.document.navigate_initial(&mut self.runtime, url);
+        self.document
+            .navigate_initial_with(&mut self.runtime, url, preload::run);
         self.collect();
     }
 
@@ -197,18 +199,14 @@ impl RendererGuest {
     /// the working directory, and is replaced once the page's address is known.
     fn require_from(&mut self, url: &str) {
         let prefs = &self.prefs;
-        if !(prefs.node_integration && !prefs.context_isolation && !prefs.sandbox) {
+        if !preload::page_has_node(prefs) || prefs.sandbox {
             return;
         }
-        let folder = url::Url::parse(url)
-            .ok()
-            .filter(|url| url.scheme() == "file")
-            .and_then(|url| url.to_file_path().ok())
-            .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
-        if let Some(folder) = folder {
+        if let Some(folder) = preload::page_folder(url) {
             let require = self.runtime.global_require_in(&folder);
-            let defined = verve::native::define_global(self.runtime.context(), "require", require);
-            api::define::report(self.runtime.context(), defined);
+            let context = self.runtime.context();
+            let defined = preload::define_page_node(context, require, url, &folder);
+            api::define::report(context, defined);
         }
     }
 
@@ -251,12 +249,7 @@ impl RendererGuest {
 /// Makes the realm's `process` a renderer's, and sends its console lines to `outbox`: the main
 /// process hears of them as [`FromRenderer::Console`] events.
 fn set_up_process(runtime: &mut Runtime, outbox: &Outbox) {
-    let info = ProcessInfo {
-        title: "electron".into(),
-        process_type: Some("renderer".into()),
-        ..ProcessInfo::default()
-    };
-    if let Err(error) = runtime.set_process_info(info) {
+    if let Err(error) = runtime.set_process_info(preload::renderer_info()) {
         eprintln!("electron: process could not be set up: {error}");
     }
     let sink = Rc::clone(outbox);

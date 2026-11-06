@@ -7,6 +7,7 @@ pub(crate) mod browser_window;
 pub(crate) mod clipboard;
 pub(crate) mod command_line;
 pub(crate) mod contents_ipc;
+pub(crate) mod context_bridge;
 pub mod define;
 pub(crate) mod dialog;
 pub(crate) mod ipc_main;
@@ -21,8 +22,10 @@ pub(crate) mod safe_storage;
 pub(crate) mod screen;
 pub(crate) mod shell;
 pub(crate) mod system_preferences;
+pub(crate) mod web_frame;
 pub(crate) mod web_frame_main;
 pub(crate) mod web_preferences;
+pub(crate) mod web_utils;
 pub(crate) mod window_events;
 pub(crate) mod window_geometry;
 pub(crate) mod window_lifecycle;
@@ -168,10 +171,7 @@ fn renderer_module_with_system(context: &mut Context, name: &str) -> JsResult<Js
     Ok(exports)
 }
 
-/// A page's `require('electron')`.
+/// A page's `require('electron')`: the members the world that asks has.
 fn renderer_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
-    let exports = native::object(context);
-    let ipc_renderer = ipc_renderer::ipc_renderer(context);
-    exports.set(js_string!("ipcRenderer"), ipc_renderer, false, context)?;
-    Ok(exports.into())
+    Ok(crate::preload::electron_exports(context)?.into())
 }

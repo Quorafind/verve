@@ -19,6 +19,7 @@ use verve::clone::Cloned;
 use verve::events::emitter_init;
 use verve::messaging::{adopt_port, release_port};
 use verve::native::{self, ClassSpec, NewOnly, arg, js_text};
+use verve::{WorldId, current_world};
 
 use super::define::{self, Args};
 use crate::hub::Hub;
@@ -44,9 +45,12 @@ pub(crate) struct IpcRenderer {
     contents: ContentsId,
     /// The document the page is in: the Hub hears nothing from one that has been replaced.
     generation: u64,
-    object: JsObject,
-    /// An `invoke` waits for its answer here: how to settle its promise, and the channel it asked.
-    calls: RefCell<HashMap<u64, (ResolvingFunctions, String)>>,
+    /// The `ipcRenderer` each world has, made when first asked for: a world's own, so that what
+    /// it calls and the promises it gets are its own.
+    objects: RefCell<HashMap<WorldId, JsObject>>,
+    /// An `invoke` waits for its answer here: how to settle its promise, the channel it asked and
+    /// the world it asked from.
+    calls: RefCell<HashMap<u64, (ResolvingFunctions, String, WorldId)>>,
     outbox: Outbox,
     /// A function that does nothing: calling it is how a page waiting in `sendSync` finds out it
     /// is being stopped, since the engine asks at every call.
@@ -59,6 +63,32 @@ pub(crate) fn install(
     hub: Arc<Hub>,
     (contents, generation): (ContentsId, u64),
 ) -> JsResult<()> {
+    let state = IpcRenderer {
+        hub,
+        contents,
+        generation,
+        objects: RefCell::new(HashMap::new()),
+        calls: RefCell::new(HashMap::new()),
+        outbox: Rc::new(RefCell::new(Vec::new())),
+        nothing: native::function(context, "", 0, |_, _, _| Ok(JsValue::undefined())),
+    };
+    context.insert_data(Rc::new(state));
+    Ok(())
+}
+
+fn state(context: &Context) -> Rc<IpcRenderer> {
+    context
+        .get_data::<Rc<IpcRenderer>>()
+        .cloned()
+        .expect("a page's electron module is installed before ipcRenderer is used")
+}
+
+/// `ipcRenderer`, the object `require('electron')` answers in the world that is running.
+pub(crate) fn ipc_renderer(context: &mut Context) -> JsResult<JsObject> {
+    let world = current_world(context);
+    if let Some(object) = state(context).objects.borrow().get(&world) {
+        return Ok(object.clone());
+    }
     let emitter = define::emitter(context)?;
     let (class, _) = native::class(
         context,
@@ -78,29 +108,11 @@ pub(crate) fn install(
         },
     )?;
     let object = class.construct(&[], None, context)?;
-    let state = IpcRenderer {
-        hub,
-        contents,
-        generation,
-        object,
-        calls: RefCell::new(HashMap::new()),
-        outbox: Rc::new(RefCell::new(Vec::new())),
-        nothing: native::function(context, "", 0, |_, _, _| Ok(JsValue::undefined())),
-    };
-    context.insert_data(Rc::new(state));
-    Ok(())
-}
-
-fn state(context: &Context) -> Rc<IpcRenderer> {
-    context
-        .get_data::<Rc<IpcRenderer>>()
-        .cloned()
-        .expect("a page's electron module is installed before ipcRenderer is used")
-}
-
-/// `ipcRenderer`, the object `require('electron')` answers.
-pub(crate) fn ipc_renderer(context: &Context) -> JsObject {
-    state(context).object.clone()
+    state(context)
+        .objects
+        .borrow_mut()
+        .insert(world, object.clone());
+    Ok(object)
 }
 
 /// The channel argument of a call, read as Electron's native binding reads it: the channel is
@@ -141,7 +153,7 @@ fn call_remote(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let (promise, resolving) = JsPromise::new_pending(context);
     ipc.calls
         .borrow_mut()
-        .insert(call, (resolving, channel.clone()));
+        .insert(call, (resolving, channel.clone(), current_world(context)));
     ipc.outbox.borrow_mut().push(FromRenderer::Invoke {
         call,
         channel,
@@ -234,42 +246,64 @@ pub(crate) fn flush(context: &Context) {
 /// The page hears what the main process sent.
 pub(crate) fn receive(context: &mut Context, message: ToRenderer) {
     let heard = match message {
-        ToRenderer::Ipc { channel, args, .. } => {
-            ipc::unpack(&args, context).and_then(|args| emit(context, &channel, args, Vec::new()))
-        }
+        ToRenderer::Ipc { channel, args, .. } => emit_everywhere(context, &channel, |cx| {
+            Ok((ipc::unpack(&args, cx)?, Vec::new()))
+        }),
         ToRenderer::Post {
             channel,
             message,
             ports,
-        } => post_heard(context, &channel, &message, ports),
+        } => {
+            let mut ends = Some(ports);
+            // The ports go to the first world that hears the message: a port has one owner.
+            emit_everywhere(context, &channel, |cx| {
+                let mut ports = Vec::new();
+                for end in ends.take().unwrap_or_default() {
+                    ports.push(adopt_port(end, cx)?);
+                }
+                Ok((vec![message.to_value(cx)?], ports))
+            })
+        }
         ToRenderer::InvokeReply { call, result } => settle(context, call, result),
         _ => Ok(()),
     };
     define::report(context, heard);
 }
 
-fn post_heard(
+/// Emits `channel` on the `ipcRenderer` of every world that has one, each in its own world with
+/// the arguments and ports `make` makes there: a preload hears what the main process sends, and
+/// so does a page with Node.
+fn emit_everywhere(
     context: &mut Context,
     channel: &str,
-    message: &Cloned,
-    ends: Vec<verve::messaging::PortEnd>,
+    mut make: impl FnMut(&mut Context) -> JsResult<(Vec<JsValue>, Vec<JsValue>)>,
 ) -> JsResult<()> {
-    let mut ports = Vec::new();
-    for end in ends {
-        ports.push(adopt_port(end, context)?);
+    let worlds: Vec<(WorldId, JsObject)> = {
+        let ipc = state(context);
+        let objects = ipc.objects.borrow();
+        let mut worlds: Vec<_> = objects.iter().map(|(w, o)| (*w, o.clone())).collect();
+        worlds.sort_by_key(|(world, _)| *world);
+        worlds
+    };
+    for (world, object) in worlds {
+        if verve::world_realm(context, world).is_none() {
+            continue;
+        }
+        verve::in_world(context, world, |cx| {
+            make(cx).and_then(|(args, ports)| emit(cx, &object, channel, args, ports))
+        })?;
     }
-    let message = message.to_value(context)?;
-    emit(context, channel, vec![message], ports)
+    Ok(())
 }
 
-/// Emits `channel` on `ipcRenderer` with an `IpcRendererEvent` and `args`.
+/// Emits `channel` on `object`, an `ipcRenderer`, with an `IpcRendererEvent` and `args`.
 fn emit(
     context: &mut Context,
+    object: &JsObject,
     channel: &str,
     args: Vec<JsValue>,
     ports: Vec<JsValue>,
 ) -> JsResult<()> {
-    let object = ipc_renderer(context);
     let ports = native::array(context, ports);
     let event = define::record(
         context,
@@ -277,16 +311,31 @@ fn emit(
     )?;
     let mut all = vec![event.into()];
     all.extend(args);
-    define::emit(context, &object, channel, &all)
+    define::emit(context, object, channel, &all)
 }
 
 /// The answer to an `invoke`: its value, or an `Error` that says the remote method failed and
 /// how.
 fn settle(context: &mut Context, call: u64, result: Result<Cloned, Cloned>) -> JsResult<()> {
     let waiting = state(context).calls.borrow_mut().remove(&call);
-    let Some((resolving, channel)) = waiting else {
+    let Some((resolving, channel, world)) = waiting else {
         return Ok(());
     };
+    if verve::world_realm(context, world).is_none() {
+        return Ok(());
+    }
+    verve::in_world(context, world, |cx| {
+        settle_in_world(cx, &resolving, &channel, result)
+    })
+}
+
+/// [`settle`], with the world the call was made in the running one.
+fn settle_in_world(
+    context: &mut Context,
+    resolving: &ResolvingFunctions,
+    channel: &str,
+    result: Result<Cloned, Cloned>,
+) -> JsResult<()> {
     match result {
         Ok(value) => {
             let value = value.to_value(context)?;
