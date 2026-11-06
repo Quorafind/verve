@@ -19,12 +19,7 @@ crates/verve-dom/src/canvas/img.rs 3
 crates/verve-dom/src/canvas/install.rs 2
 crates/verve-dom/src/canvas/path.rs 1
 crates/verve-dom/src/canvas/pixels.rs 1
-crates/verve-dom/src/canvas/properties.rs 3
+crates/verve-dom/src/canvas/properties.rs 2
 crates/verve-dom/src/css/animate.rs 1
-crates/verve-dom/src/css/counters.rs 1
-crates/verve-dom/src/css/media.rs 1
-crates/verve-dom/src/css/selector.rs 1
-crates/verve-dom/src/field.rs 1
 crates/verve-dom/src/lib.rs 6
-crates/verve-dom/src/load/net.rs 1
 crates/verve-dom/src/media.rs 4
