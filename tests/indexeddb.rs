@@ -165,3 +165,15 @@ fn databases_are_kept_on_disk() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_interface_prototype_names_its_constructor() {
+    let mut rt = Runtime::new();
+    assert_eq!(
+        js(
+            &mut rt,
+            "['IDBDatabase', 'IDBRequest', 'IDBKeyRange'].every((n) => globalThis[n].prototype.constructor === globalThis[n])"
+        ),
+        "true"
+    );
+}
