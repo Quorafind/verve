@@ -1,0 +1,213 @@
+# P35 图片 / SVG / canvas 表面
+
+**依赖**：P30 P25（P20 的加载器提供字节）  **规模**：M  **修改**：`crates/verve-layout/src/replaced.rs`（新）、`images.rs`（新）；`crates/verve-gpui/src/images.rs`（新）、`dom_element.rs`；`crates/verve-electron/src/renderer_guest.rs`（图片/媒体表）
+
+## 目标
+
+把"替换元素"和图片类内容画出来：`<img>`、CSS `background-image: url()`、`list-style-image`、`<picture>/srcset` 的选择结果、
+内联 `<svg>`、`<canvas>`（2D，像素由 P25 产出）、`<video>` 的当前帧（v1 有限支持，见下）。同时给布局提供固有尺寸
+（`naturalWidth/naturalHeight`、`object-fit`、`aspect-ratio`）。
+
+## 背景（先读）
+
+- P30（`PaintItem::Image { node, bounds, clip, image: ImageKey, fit }`、`Fill::Raster`）、P25（canvas 2D 像素缓冲与图片解码）、
+  P20（加载器：`file://`、自定义协议、`http(s)`、`data:`、`blob:` → 字节）。
+- verve-dom：`Snapshot.media: HashMap<NodeId, MediaState>`、`MediaCommand`/`MediaCommandKind`（`Load/Play/Pause/Seek/…/Dispose`）、
+  `MediaUpdate`（`Metadata/FrameReady/Playing/…`）、`media.rs` 顶部说明（"GUI 无关的媒体协议，宿主负责解码器、时钟与像素"）。
+- GPUI：`elements/img.rs`（`img()`、`ImageSource::{Resource, Render(Arc<RenderImage>), Image(Arc<Image>), Custom}`、`ImageStyle`）、
+  `assets.rs`（`RenderImage`：BGRA 帧，`RenderImage::new(frames)`）、`style.rs` 的 `ObjectFit::{Fill, Contain, Cover, ScaleDown, None}`、
+  `window.rs` 的 `paint_image(bounds, corner_radii, data: Arc<RenderImage>, frame_index, grayscale)`、`elements/svg.rs`（`svg().path()`、
+  `with_transformation(Transformation)`）、`svg_renderer.rs`（GPUI 自带 usvg/resvg 栅格化）、`elements/surface.rs`（macOS `CVPixelBuffer` 视频表面）。
+
+## 设计
+
+### 图片管线
+
+```
+渲染器线程                                                 GPUI 线程
+<img src> / background-image / srcset 选中的 URL
+  → P20 Loader 取字节（带缓存，按 URL）
+  → 解码（P25 的 decode：png/jpeg/gif/webp/ico/bmp；svg 走下面的 SVG 路径）
+     ├─ 只读头部拿尺寸：立刻给 naturalWidth/Height，触发布局
+     └─ 全量解码成 RGBA → 转 BGRA（GPUI 要求）→ Arc<ImageFrames>
+  → ImageTable: ImageKey → Arc<ImageFrames>（引用计数，节点删除时释放）
+  → 'load' / 'error' 事件、img.decode() resolve、complete=true
+DisplayList: PaintItem::Image { image: ImageKey, … }
+RendererView 追加 images: Arc<ImageTable 快照>  ─────────▶  ImageKey → Arc<gpui::RenderImage>（首次见到时构造，缓存）
+                                                           window.paint_image(bounds, radii, render_image, frame, false)
+```
+
+- 解码在渲染器线程会阻塞脚本：大图（> 1 MP）放到 Verve 已有的后台工作线程池（或新建一个固定 1 线程的解码线程，**不按图片开线程**），
+  完成后作为任务回到渲染器线程。`img.decoding = 'sync'` 也异步解码（Chromium 也不保证同步）。
+- `RenderImage` 只在 GPUI 线程构造（它带 GPUI 的 `ImageId`），同一 `ImageKey` 只构造一次；`ImageKey` 不再出现在任何显示列表 3 帧后丢弃，
+  并调用 `window.drop_image` / `cx.drop_image`（GPUI 释放图集纹理；按实际 API 名）。
+- 动图 GIF/APNG/WebP：`ImageFrames` 带每帧时长；渲染器按帧时钟（P33 `Frame`）推进当前帧号，放进 `PaintItem::Image.frame`（追加字段），
+  页面不可见时停止推进。
+- 内存上限：解码后像素总量超过 256 MB 时按最近最少使用淘汰不可见图片（再次可见时重新解码）。
+
+### 布局（固有尺寸与 object-fit）
+
+- 替换元素在 `verve-layout` 里是原子盒，taffy 测量函数返回固有尺寸；`width/height` 属性作为表现提示（`aspect-ratio: auto w / h`，避免加载前跳动）。
+- 未加载/加载失败：0×0（有 `alt` 时 Chromium 显示替代文字与破图图标，v1：失败时若有 `alt` 按行内文本排 `alt`）。
+- `object-fit`：`fill/contain/cover/scale-down/none` → GPUI `ObjectFit` 同名（`none` 时按固有尺寸）；`object-position`：GPUI 不支持，
+  由本包自己算目标矩形 + `PushClip` 裁剪，再用 `ObjectFit::Fill` 画到算好的矩形（所以统一自己算，不依赖 GPUI 的 fit）。
+- `image-rendering: pixelated` → 最近邻：GPUI 不支持采样方式选择，v1 在解码阶段按显示尺寸整数倍放大预缩放（只在放大倍数 ≥ 2 时），记录偏差。
+- `srcset`/`sizes`/`<picture><source media type>`：按 `devicePixelRatio` 和布局宽度选源（选择逻辑放 P20 或本包，**本包负责**，因为需要布局宽度）。
+
+### background-image
+
+- `url()` 层：与 `<img>` 同一管线。`background-size: cover/contain/<len>`、`background-position`、`background-repeat`（`repeat` 时按瓦片
+  多次 `paint_image`，裁剪到盒子；瓦片数 > 500 时先在 CPU 拼一张大图）、`background-clip: border-box/padding-box/content-box`、多层背景（按 CSS 顺序，最后一层在最下）。
+- 渐变层见 P30（`Fill::Linear` / `Fill::Raster`）。
+
+### 内联 `<svg>`
+
+- 布局：`<svg>` 是替换元素，尺寸取 `width/height` 属性或 CSS，否则按 `viewBox` 比例，默认 300×150。
+- 绘制：把 `<svg>` 子树（含 `<use>` 引用、`<style>`、`currentColor` 解析为计算后的 `color`、`fill/stroke` 等计算样式）序列化为 SVG 文本，
+  用 usvg 解析 + resvg 栅格化成 `ImageFrames`（GPUI 已经依赖 resvg/usvg —— 直接复用同一版本，**不重复引入**；确认 `cargo tree -d` 无重复），
+  按 (序列化文本哈希, 设备像素尺寸) 缓存。子树变化（`Changes.nodes` 包含其子孙）时重新序列化。
+- 图标类小 SVG（≤ 64px，单色，大量重复，如 lucide/Material 图标）：同一文本哈希只栅格化一次，颜色在序列化时已固定。
+- `<img src="x.svg">` 与 `background-image: url(x.svg)`：同样用 resvg 按显示尺寸栅格化（缩放后重新栅格化，不拉伸位图）。
+- SVG 元素的 DOM 几何：`getBBox()`、`getBoundingClientRect()` 用 usvg 树算出的包围盒回填（通过 P30 的布局提供者），满足图表库（ECharts/d3 svg 模式）的测量。
+- 动画（SMIL）、`<foreignObject>`：不支持。
+
+### canvas 2D 表面
+
+- P25 在渲染器线程维护每个 `<canvas>` 的像素缓冲（tiny-skia `Pixmap`，尺寸 = `canvas.width × canvas.height`）。每次绘制命令后标脏。
+- 帧边界（rAF 回调后或任务结束时）若脏：把缓冲转 BGRA，生成新的 `ImageKey` 版本（同一 canvas 复用一个 key，带递增 `generation`），
+  GPUI 侧见到 generation 变化时重建 `RenderImage`（并释放旧的）。
+- 布局：替换元素，固有尺寸 = `width/height` 属性（CSS 像素）；CSS 尺寸不同时缩放显示。
+- `toDataURL/toBlob/getImageData` 由 P25 直接读缓冲，与本包无关。
+- 性能：1920×1080 的 canvas 每帧全量上传约 8 MB，60 fps 下可接受但浪费；v1 记录脏矩形，P33 之后可考虑局部上传（GPUI 不支持局部更新纹理，需 fork 改动，暂不做）。
+
+### `<video>` / `<audio>`（v1 范围）
+
+- verve-dom 已有 GUI 无关的媒体协议：渲染器把 `MediaCommand` 交给宿主，宿主回 `MediaUpdate`。本包实现一个**最小宿主**：
+  - `<audio>`：v1 不出声（不引入音频解码与输出栈，体积考虑），`Load` 后回 `MediaUpdate::Error { code: 4 /* MEDIA_ERR_SRC_NOT_SUPPORTED */ }`。
+  - `<video>`：同样回不支持；`poster` 属性的图片按 `<img>` 画。
+  - 预留接口：`trait MediaBackend { fn handle(&mut self, cmd: MediaCommand) -> Vec<MediaUpdate>; fn current_frame(&self, node: NodeId) -> Option<Arc<ImageFrames>> }`，
+    后续可接平台解码（Windows Media Foundation / macOS AVFoundation，经 GPUI `surface()` 在 macOS 零拷贝），作为可选 feature，不进默认 20 MB 预算。
+- 在 P41 兼容矩阵中登记"音视频不支持"。
+
+## 接口契约
+
+```rust
+// verve-layout（渲染器与 Shell 共用）
+// ImageKey 在 P30 里已经是 `ImageKey(pub u64)`，没有单独的 generation 字段，也不加：
+//   最高两位：`1x` = 渐变栅格（P30：散列 | 1<<63，第 62 位随意）；`01` = canvas 表面（第二阶段，generation 编进低位）；
+//   `00` = 页面图片地址（已解析的 URL）的 62 位散列（`key_for_url`）。同一地址永远是同一个键；
+//   两个地址有 2^-62 的概率撞键，撞了就显示同一张图（不处理）。
+pub struct ImageFrames { pub width: u32, pub height: u32, pub frames: Vec<(Arc<[u8]> /* straight-alpha BGRA */, Duration)> }
+pub struct ImageTable { /* ImageKey -> Arc<ImageFrames>，不可变快照；渲染器每次有新图就换一个新的 Arc */ }
+
+// RendererView 追加（P02 契约追加表里 P35 那一行）
+pub images: Arc<ImageTable>,
+// PaintItem::Image 追加字段；bounds 是整张图（已按 object-fit/position 算好）要画进的矩形，
+// clip 是可见范围（内容盒），fit 只记录样式里的关键字，Shell 不再用它
+frame: u32,
+// Fill 追加一种：背景图层（`background-image: url()`）。area/tile 都相对盒子的 border box 左上角
+Fill::Picture { image: ImageKey, area: Rect, tile: Rect, step: [f32; 2], count: [u32; 2], frame: u32 }
+// Snapshot 追加（verve-dom）：
+//   image_sources: HashMap<NodeId, (String, f32)>   每个 <img> 现在显示的地址与像素密度（srcset 选出的）
+//   base_url: String                                 解析 CSS url() 用的文档基地址
+```
+
+- **解码**：渲染器里有一个固定的解码线程（`ImageDecoder`），显示列表点名的、`Snapshot.images` 里有字节的地址交给它，结果回到页面线程后进 `ImageTable`；
+  解码线程每完成一张就用 `verve::Waker` 叫醒页面线程（没有 waker 时才退回 `next_due` 的 5 ms 轮询）。显示列表不再点名的图片，其像素从表里退出。
+  **所有**图片都在这个线程上解码（任务书原写"超过 1 MP 才放后台"，统一了更简单）；头部给出的像素数超过 64 MP 的图不解码。
+- **画哪一帧**：Shell 只画 `frame`；第一阶段恒为 0，动图见第二阶段。
+- **第一阶段的偏差**：`<img>` 的 `border-radius` 不裁图（`PaintItem::Image` 没有 `radii`）；每层最多 4096 块瓦片，超出的部分不画（`space`/`round` 都实现了）。
+
+## 步骤
+
+1. `ImageTable` 与 `RendererView.images`；GPUI 侧 `ImageKey → RenderImage` 缓存与释放。
+2. `<img>`：加载、头部尺寸、`load/error` 事件、`decode()`、`complete`、`naturalWidth`；布局固有尺寸；`object-fit/position`。
+3. `background-image` 多层、平铺、定位、尺寸。
+4. 内联 SVG 序列化 + resvg 栅格化 + 缓存；`getBBox`。
+5. canvas 表面（与 P25 对接）。
+6. GIF 动画帧推进。
+7. 媒体最小宿主（不支持）与 `poster`。
+
+## 验收
+
+- `cargo test -p verve-electron --test images`（无头）：`data:` PNG 的 `<img>` 触发 `load`，`naturalWidth` 正确；坏图触发 `error`；
+  `img.decode()` resolve；`object-fit: cover` 的 `Image` 项目标矩形与裁剪矩形符合预期；`<canvas>` 画一个红色矩形后显示列表出现对应 `ImageKey`，
+  generation 递增；内联 SVG 的 `getBBox()` 宽高正确；`<video>` 触发 `error` 且 `error.code === 4`。
+- 夹具 `tests/electron/apps/images/`：PNG/JPEG/GIF 动图/WebP/SVG 图标网格/背景平铺/canvas 时钟动画；截图与真实 Electron 对比差异像素 < 3%（动画帧除外）。
+- 内存：加载 200 张 1 MP 图片的滚动页面，进程工作集 < 400 MB，滚出视口后回落。
+
+## 不做
+
+音视频播放、WebGL/`OffscreenCanvas` 的 GPU 路径、SVG SMIL 动画与 `<foreignObject>`、`filter` 作用于图片、CSS `image-set()`（可映射到 srcset，可选）、
+`border-image`、`mask-image`、颜色管理（ICC 配置文件忽略，按 sRGB）。
+
+## 状态
+
+### 第一阶段（步骤 1–3、7）
+
+**做了**：
+
+- **契约**（第一个提交，见「接口契约」）：`ImageKey` 仍是 `ImageKey(pub u64)`（P30 已定义，没有 generation 字段；canvas 的 generation 第二阶段编进低位，第 62 位留给 canvas 表面）；页面图片的键是已解析 URL 的 62 位散列 `key_for_url`。`ImageFrames`/`ImageTable`（`verve-layout/src/images.rs`）、`RendererView.images`、`PaintItem::Image.frame`、`Fill::Picture`、`Snapshot.image_sources`/`base_url`。
+- **verve-dom**：
+  - `canvas/sources.rs`：`srcset`（`x`/`w` 描述符）、`sizes`（媒体条件、`calc()`、`vw`）和 `<picture><source media type>` 的选择；`img.rs::sync` 改用它，`currentSrc`/`naturalWidth` 随之（自然尺寸 = 像素 ÷ 密度，向下取整）。
+  - 样式里的图片：`background-image`/`list-style-image` 的 `url()` 和 `<video poster>` 在帧里被发现（`sync_images` 扫描改动/重算样式的节点），作为 `Request::Image` 交给加载器，只请求一次；字节到达或失败时 `touch()`，布局重做（`set_image_bytes` 原来漏了，评审后补上，`tests/images.rs` 有一条经 127.0.0.1 的 http 取图的测试）；背景图和 `<img>` 共用一个地址时，字节按 `Keep::Always` 保留（`<img>` 不再引用也不丢）。`poster=""` 不请求。
+  - `background` 简写现在拆成逐层的 `background-image/-position/-size/-repeat/-origin/-clip`（原来整条文字塞进 `background-image`），并且总是写全部长属性（`background:red` 会把图片、位置、尺寸、重复复位；CSS 全局关键字抄进每个长属性，含 `var()` 的值整条保留）。
+  - UA 样式表加了 `video { object-fit: contain }` 和 `audio:not([controls]) { display: none }`（Electron 39.8.10 观察到 `<audio>` 无 `controls` 时矩形为 0×0）。
+- **verve-layout**：`<img>` 的固有尺寸（图片到了就是图片的尺寸；只给一边的属性时按比例；加载前 `width`/`height` 属性同时给出时作为宽高比提示）；尺寸按 `props.rs::Follow` 分三种，由 `layout.rs::scale_ratio_heights` 在第一遍之后补：给了宽（样式或属性）没给高，高 = 实际宽 ÷ 比例；给了高没给宽，宽 = 实际高 × 比例；都没给，用图片的尺寸并按 CSS 2.1 10.4 的表被两边的 `min-`/`max-` 限制（`constrain`，不再用 taffy 的 `aspect_ratio`，它会把一边的限制带到另一边，而 Chromium 对给定的那一边不这样做）；样式里的 `width`/`height`（包括 `auto`）压过属性；`<video>` 没有尺寸时按 `poster` 的尺寸（40×20 的 poster 得 40×20，Electron 39.8.10 观察到）；`object-fit`/`object-position` 自己算目标矩形，`PaintItem::Image.bounds` 是整张图的矩形、`clip` 是内容盒（不用 `PushClip`）；`background-image: url()` 多层、`size`（`cover/contain/长度/auto`）、`position`（含四值边偏移）、`repeat`（`repeat/no-repeat/repeat-x/-y/space/round`）、`origin`/`clip`，输出 `Fill::Picture`，每层最多 4096 块瓦片。
+- **verve-electron**：`page_images.rs`——**一个**固定的解码线程（`verve-image-decoder`），显示列表点名且 `Snapshot.images` 里有字节的地址交给它（同一地址换了字节就重新解码），结果在页面线程汇成新的 `Arc<ImageTable>`（straight-alpha BGRA，用 P25 的 `decode`/`unpremultiply`）；解码线程用 `verve::Waker` 叫醒页面（没有 waker 才 5 ms 轮询）；头部像素数超过 64 MP 的图解码前就放弃；解码 panic 被 `catch_unwind` 接住，线程死了就复位 `pending` 并在下一个任务时重启；列表不再点名或文档不再持有的地址退出表；每个地址的键按字节分配的地址缓存，不在每帧对（可能几 MB 的）`data:` 地址做散列。`media_host.rs`：`MediaBackend` trait 和 `Unsupported`——`Load` 回 `Error { code: 4 }`，`Play` 回 `CommandFailed`，其余不回；`RendererGuest::drain` 里 `serve_media()`。`HeadlessShell::display_list(window)` 留下页面最后发布的显示列表和图片表供测试读。
+- **verve-gpui**：`pictures.rs` 扩展（没有第二套机制）：`Pictures::set_table/image`，页面图片按键缓存成带全部帧的 `RenderImage`，表里换了新的 `ImageFrames`（`Arc` 指针不同）就重做并让旧的退役，没画的帧末放弃、下一帧还给图集；不透明度小于 1 时同渐变一样用 alpha 副本。`plan.rs`：`Shape::Picture`（`PaintItem::Image` 和 `Fill::Picture` 的每块瓦片）；`dom_element.rs` 用 `paint_image(visible, bounds, radii, …)`（GPUI 的 fork 里前一个矩形是可见范围，后一个是整张图的矩形）；`screenshot.rs` 用 tiny-skia `Pattern` 画（`render_with`、`png`/`write` 多了 `images` 参数；`render` 不变）。`Look` 多了第四项 `Arc<ImageTable>`，`Window::show_images`，`DomView::show_images`。
+
+**Electron 39.8.10 的观察**（`show: false`、800×600、`--force-device-scale-factor` 1/2/3，scratch profile；脚本在草稿目录 `p35/obs/`）：
+
+- `<img>` 加载失败：无 `alt`、无尺寸属性 → 16×16（破图图标）；有非空 `alt` → 一个 `16 + 文字宽` × 21 的行内盒，**忽略** `width`/`height` 属性；`alt=""` 或没有 `src` 且无 `alt` → 0×0；失败且只有 `width="100" height="50"` → 100×50。
+- 4×2 的图：无属性 → 4×2；`width=100` → 100×50；`height=20` → 40×20；`max-width:2px` → 2×1；`width=100 height=100` → 100×100；`width:50%`（800 宽）→ 400×200（比例保持）。
+- 无属性的 `<svg>`、`<canvas>`、`<video>` 是 300×150；`<svg viewBox="0 0 40 20">` 无尺寸时宽是容器宽、高按 2:1；`<svg width=50>` 是 50×150；`<audio>` 无 `controls` 是 0×0，有 `controls` 是 300×54；`<video src>` 指向不存在的文件：`error.code === 4`，`networkState` 3；没有 `src` 时 `error` 是 `null`。
+- `object-fit`/`object-position`：用 `capturePage()` 量红色像素的包围盒（40×20 与 200×100 的图在 100×100 的盒里，全部组合）。**`object-position` 的长度对 `fill` 和 `cover` 也生效**（`fill` + `10px 20px` 的可见范围是 `[10,20,90,80]`）；`25% 75%` 的 `contain` 得 y=37.5，截图量得 38。DPR 2 时包围盒恰好翻倍。表在 `replaced.rs` 的测试里。
+- `srcset`：**经 http 取图**时按规范选（DPR 1：`1x,2x,3x` → 1x；`1.5x,2.5x` → 1.5x；DPR 2 → 2x/2.5x；`src` 是 1x 候选；`150px` 的 `sizes` 在 DPR 1 选 200w、在 DPR 2 选 300w；`sizes` 的媒体条件按窗口宽度；`calc(50vw - 100px)`；无 `sizes` 是 `100vw`）。`naturalWidth` = 像素 ÷ 密度并向下取整（10÷1.5 → 6，而 `width` 是 7）。**图片用 `data:` URL 时，Chromium 总是选最大的候选**（与 DPR 无关），所以测试里的选择只在 `sources.rs` 的单元测试里按规范断言。`<picture>`：媒体不匹配的 `source` 被跳过，`type="image/webp"`/`image/png` 的被采用，不认识的 `type` 被跳过，`<source media="(min-width: 700px)">` 在 800 宽时被采用。
+
+**没做 / 偏差**：
+
+- **破图盒与 `alt` 文字**：图片加载失败、没有尺寸属性时没有 16×16 的图标盒，`alt` 文字没有排进行内（现在是 0×0）；快照里没有"加载失败"的信息，要加一个字段才能区分"还在加载"和"失败"。上面观察到的数字都在，留给下一次。
+- **`list-style-image`**：URL 会被请求和解码，但 `list-style` 的标记（`::marker`）本身还没有画图（P31 的标记是文字）。
+- **`image-rendering: pixelated`**：未做（GPUI 没有采样选择；任务书里的整数倍预放大没实现）。
+- **解码线程**：所有图片都在那一个线程上解码（任务书原写大于 1 MP 才放后台）；`Snapshot.images` 里的图片只要文档还持有就一直在表里，**没有 256 MB 的 LRU**（背景图 `Keep::Always` 永不放；`<img>` 的在没有元素引用后释放）。
+- **SVG**（`<img src=x.svg>` 和背景）：布局有尺寸（头部读出），解码返回 `Unsupported`，所以不画；第二阶段。
+- `background-attachment`、`background-clip: text` 忽略；圆角盒的背景图只有铺满整个盒子时才带圆角，而且每块瓦片只在碰到区域那个角的地方圆（GPUI 与软件绘制一致）；`<img>` 的 `border-radius` 不裁图（`PaintItem::Image` 没有 `radii`），Chromium 会裁；`background-size` 对渐变层不起作用（原来就如此）。样式里的相对 `url()` 按文档地址解析，不是按样式表地址。
+- `<img>` 的 `srcset`/`<source>` 在视口或 DPR 变化后不会重选（只在该元素的属性变化时选）；`<source>` 本身的属性变化不会让 `<img>` 重选。
+- `PaintItem::Image.frame` 恒为 0（动图是第二阶段）。
+- **GPUI 的取整**：比圆角半径还小的瓦片在 GPUI 里近乎方形（GPUI 对每块单独取整并限制半径）；GPUI 把只露出一部分的小图的子矩形取整到整个纹素（`window.rs`），位置会有偏差；软件绘制是精确的。
+- **每帧的地址拷贝**：`Snapshot` 的 `images`/`image_sources` 每帧还要复制每个图片地址（大的 `data:` 地址有几 MB），只改了布局和解码线程这一侧的散列，没改快照。
+- **评审后留下的**：
+  - 每层超过 4096 块瓦片时多出的部分是空的（如 1×1 的瓦片铺 1000×800）；任务书说的"CPU 预铺"没做（要给预铺的图合成一个新键）；
+  - flex 容器里 `<img>` 的拉伸（Chromium 把 `<img width=40>` 在 100px 高的 flex 行里拉成 40×100，Verve 是 40×20）没做，也没有对应测试；
+  - `::before`/`::after` 里的 `url()` 不会被请求（`sync_images` 只读元素的样式）；
+  - P25 的 `decode` 先预乘再由 `still` 反预乘，低 alpha 的颜色会量化（还没有 straight-alpha 选项）；
+  - `image_size` 不看 EXIF 方向而 `decode` 会转，带旋转的手机 JPEG 固有尺寸会宽高颠倒；
+  - 布局每次读 `<img>` 仍要对地址做一次散列（`snapshot.images.get`），只在布局重做时发生，不在每帧；
+  - 解码后的像素在 CPU 上有两份（`ImageTable` 与 `RenderImage`）；
+  - 页面图片在 GPUI 里不画之后保留 300 帧才还给图集，来回滚动不会重新拷贝和上传；列表不点名但文档还持有字节的图片，解码好的像素在 128 MiB 的预算内保留（最久没被点名的先丢），隐藏再显示不会空白；
+  - 历史：gpui 测试在 `feat(gpui): Draw pictures and background tiles…` 之后单独一个提交，video/audio 的 UA 规则在 `feat(layout)` 里（要重排提交）；两者都没改。
+- 顺序：测试 `tests/images.rs` 的 `srcset` 一条用 `data:` URL，只验证 `src` 与 `srcset` 的配合（见观察）。
+
+**任务书「修改」之外动过的文件**：`verve-dom` 的 `css/shorthand.rs`、`css/values.rs`（UA 样式）、`snapshot.rs`、`update.rs`、`canvas/{document,image,img,mod}.rs`；`verve-electron` 的 `headless.rs`、`lib.rs`、`msg/input.rs`；`verve-gpui` 的 `shell.rs`、`window.rs`、`capture.rs`、`dom_view.rs`、`plan.rs`；`verve-layout` 的 `props.rs`、`layout.rs`、`paint.rs`、`paint_style.rs`、`display_list.rs`、`lib.rs`。
+
+**给其他包**：P24/P43 二期：`RendererView` 只在末尾多了 `images`；`Look` 多了第四项。P33：`Fill::Picture` 的瓦片在 `lower_tiles` 里展开，块缓存可以直接缓存 `Shape::Picture`。
+
+**要跑的测试**（一次一条）：
+
+```
+cargo test --locked -p verve-dom canvas::sources
+cargo test --locked -p verve-dom css::shorthand
+cargo test --locked -p verve-dom --test css
+cargo test --locked -p verve-dom --test canvas
+cargo test --locked -p verve-dom --test media
+cargo test --locked -p verve-layout
+cargo test --locked -p verve-electron --lib page_images
+cargo test --locked -p verve-electron --lib media_host
+cargo test --locked -p verve-electron --test images
+cargo test --locked -p verve-electron --test headless
+cargo test --locked -p verve-electron --test geometry
+cargo test --locked -p verve-gpui --features jit --lib
+cargo test --locked -p verve-gpui --features jit --test boxes
+cargo clippy --locked --workspace --all-targets -- -D warnings
+```

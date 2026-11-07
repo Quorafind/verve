@@ -92,16 +92,31 @@ RendererView 追加 images: Arc<ImageTable 快照>  ─────────�
 ## 接口契约
 
 ```rust
-// verve-layout / verve-electron 共用
-#[derive(Copy, Clone, Hash, Eq, PartialEq)] pub struct ImageKey { pub id: u64, pub generation: u32 }
-pub struct ImageFrames { pub width: u32, pub height: u32, pub frames: Vec<(Arc<[u8]> /* BGRA */, Duration)> }
-pub struct ImageTable { /* ImageKey -> Arc<ImageFrames>，不可变快照，Arc 共享 */ }
+// verve-layout（渲染器与 Shell 共用）
+// ImageKey 在 P30 里已经是 `ImageKey(pub u64)`，没有单独的 generation 字段，也不加：
+//   最高两位：`1x` = 渐变栅格（P30：散列 | 1<<63，第 62 位随意）；`01` = canvas 表面（第二阶段，generation 编进低位）；
+//   `00` = 页面图片地址（已解析的 URL）的 62 位散列（`key_for_url`）。同一地址永远是同一个键；
+//   两个地址有 2^-62 的概率撞键，撞了就显示同一张图（不处理）。
+pub struct ImageFrames { pub width: u32, pub height: u32, pub frames: Vec<(Arc<[u8]> /* straight-alpha BGRA */, Duration)> }
+pub struct ImageTable { /* ImageKey -> Arc<ImageFrames>，不可变快照；渲染器每次有新图就换一个新的 Arc */ }
 
-// RendererView 追加（P02 契约追加，本包第一个 commit 只改文档与 msg/input.rs）
+// RendererView 追加（P02 契约追加表里 P35 那一行）
 pub images: Arc<ImageTable>,
-// PaintItem::Image 追加字段
+// PaintItem::Image 追加字段；bounds 是整张图（已按 object-fit/position 算好）要画进的矩形，
+// clip 是可见范围（内容盒），fit 只记录样式里的关键字，Shell 不再用它
 frame: u32,
+// Fill 追加一种：背景图层（`background-image: url()`）。area/tile 都相对盒子的 border box 左上角
+Fill::Picture { image: ImageKey, area: Rect, tile: Rect, step: [f32; 2], count: [u32; 2], frame: u32 }
+// Snapshot 追加（verve-dom）：
+//   image_sources: HashMap<NodeId, (String, f32)>   每个 <img> 现在显示的地址与像素密度（srcset 选出的）
+//   base_url: String                                 解析 CSS url() 用的文档基地址
 ```
+
+- **解码**：渲染器里有一个固定的解码线程（`ImageDecoder`），显示列表点名的、`Snapshot.images` 里有字节的地址交给它，结果回到页面线程后进 `ImageTable`；
+  解码线程每完成一张就用 `verve::Waker` 叫醒页面线程（没有 waker 时才退回 `next_due` 的 5 ms 轮询）。显示列表不再点名的图片，其像素从表里退出。
+  **所有**图片都在这个线程上解码（任务书原写"超过 1 MP 才放后台"，统一了更简单）；头部给出的像素数超过 64 MP 的图不解码。
+- **画哪一帧**：Shell 只画 `frame`；第一阶段恒为 0，动图见第二阶段。
+- **第一阶段的偏差**：`<img>` 的 `border-radius` 不裁图（`PaintItem::Image` 没有 `radii`）；每层最多 4096 块瓦片，超出的部分不画（`space`/`round` 都实现了）。
 
 ## 步骤
 
