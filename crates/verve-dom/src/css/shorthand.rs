@@ -95,18 +95,146 @@ fn radius(style: &mut Style, key: &str, value: &str) {
     style.insert(key.to_owned(), value.to_owned());
 }
 
+/// One layer of a `background` shorthand, as the longhands it sets.
+struct Layer {
+    image: String,
+    position: Vec<String>,
+    size: Vec<String>,
+    repeat: Vec<String>,
+    boxes: Vec<String>,
+}
+
+/// Whether a word after the `/` of a `background` is part of its size.
+fn is_size_word(word: &str) -> bool {
+    matches!(word, "auto" | "cover" | "contain")
+        || word.starts_with("calc(")
+        || word.ends_with('%')
+        || word.starts_with(|c: char| c.is_ascii_digit() || c == '.' || c == '-')
+}
+
+fn background_layer(text: &str) -> Layer {
+    let mut layer = Layer {
+        image: "none".into(),
+        position: Vec::new(),
+        size: Vec::new(),
+        repeat: Vec::new(),
+        boxes: Vec::new(),
+    };
+    let mut sizing = false;
+    // `center/cover` is three words: a `/` outside a function stands alone.
+    let words = split_outside(text, ' ').into_iter().flat_map(|word| {
+        let word = word.trim().to_owned();
+        if word.contains('(') || !word.contains('/') {
+            return vec![word];
+        }
+        let mut pieces = Vec::new();
+        for (at, piece) in word.split('/').enumerate() {
+            if at > 0 {
+                pieces.push("/".to_owned());
+            }
+            pieces.push(piece.to_owned());
+        }
+        pieces
+    });
+    for token in words {
+        match token.as_str() {
+            "" => {}
+            "/" => sizing = true,
+            "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round" => {
+                layer.repeat.push(token);
+            }
+            "border-box" | "padding-box" | "content-box" => layer.boxes.push(token),
+            "scroll" | "fixed" | "local" => {}
+            _ if token.starts_with("url(") || token.contains("gradient(") => layer.image = token,
+            "none" => {}
+            _ if sizing && is_size_word(&token) => {
+                sizing = layer.size.is_empty() && token != "cover" && token != "contain";
+                layer.size.push(token);
+            }
+            _ if color(&token).is_some() || token == "currentcolor" => {}
+            _ => {
+                sizing = false;
+                layer.position.push(token);
+            }
+        }
+    }
+    layer
+}
+
 fn background(style: &mut Style, _: &str, value: &str) {
-    // The color is what a drawer reads; the rest is kept whole.
+    const INITIAL: [&str; 7] = [
+        "transparent",
+        "none",
+        "0% 0%",
+        "auto",
+        "repeat",
+        "padding-box",
+        "border-box",
+    ];
+    const LONGHANDS: [&str; 7] = [
+        "background-color",
+        "background-image",
+        "background-position",
+        "background-size",
+        "background-repeat",
+        "background-origin",
+        "background-clip",
+    ];
+    style.insert("background".into(), value.to_owned());
+    // A `var()` cannot be split before it is read: the longhands hold their initial values, marked
+    // as a guess, until the cascade reads the variable and opens the shorthand again.
+    let varied = value.contains("var(");
+    for longhand in LONGHANDS {
+        if varied {
+            style.insert(pending(longhand), String::new());
+        } else {
+            style.remove(&pending(longhand));
+        }
+    }
+    if varied {
+        for (longhand, initial) in LONGHANDS.iter().zip(INITIAL) {
+            style.insert((*longhand).into(), initial.into());
+        }
+        return;
+    }
+    let layers: Vec<Layer> = split_outside(value, ',')
+        .iter()
+        .map(|layer| background_layer(layer))
+        .collect();
+    // The color is what a drawer reads: the last word of the last layer that is one.
     let color = split_outside(value, ' ')
         .into_iter()
         .map(|p| p.trim().to_owned())
-        .rfind(|p| color(p).is_some() || p.starts_with("var(") || p == "currentcolor")
+        .rfind(|p| color(p).is_some() || p == "currentcolor")
         .unwrap_or_else(|| "transparent".to_owned());
     style.insert("background-color".into(), color);
-    if value.contains("url(") || value.contains("gradient(") {
-        style.insert("background-image".into(), value.to_owned());
-    }
-    style.insert("background".into(), value.to_owned());
+    let join =
+        |part: &dyn Fn(&Layer) -> String| layers.iter().map(part).collect::<Vec<_>>().join(", ");
+    let or = |words: &[String], default: &str| {
+        if words.is_empty() {
+            default.to_owned()
+        } else {
+            words.join(" ")
+        }
+    };
+    style.insert("background-image".into(), join(&|l| l.image.clone()));
+    style.insert(
+        "background-position".into(),
+        join(&|l| or(&l.position, "0% 0%")),
+    );
+    style.insert("background-size".into(), join(&|l| or(&l.size, "auto")));
+    style.insert(
+        "background-repeat".into(),
+        join(&|l| or(&l.repeat, "repeat")),
+    );
+    let origin = |l: &Layer| or(&l.boxes[..l.boxes.len().min(1)], "padding-box");
+    style.insert("background-origin".into(), join(&origin));
+    let clip = |l: &Layer| match l.boxes.as_slice() {
+        [] => "border-box".to_owned(),
+        [only] => only.clone(),
+        [_, clip, ..] => clip.clone(),
+    };
+    style.insert("background-clip".into(), join(&clip));
 }
 
 fn gap(style: &mut Style, _: &str, value: &str) {
@@ -364,6 +492,45 @@ mod tests {
         let mut style = Style::new();
         expansion(key).expect("a shorthand")(&mut style, key, value);
         style
+    }
+
+    #[test]
+    fn a_background_shorthand_opens_into_its_layers() {
+        let style = opened(
+            "background",
+            "url(a/b.png) no-repeat center/cover content-box, linear-gradient(red, blue) 10px 20px / 5px auto, #fff",
+        );
+        assert_eq!(
+            style["background-image"],
+            "url(a/b.png), linear-gradient(red, blue), none"
+        );
+        assert_eq!(style["background-position"], "center, 10px 20px, 0% 0%");
+        assert_eq!(style["background-size"], "cover, 5px auto, auto");
+        assert_eq!(style["background-repeat"], "no-repeat, repeat, repeat");
+        assert_eq!(
+            style["background-origin"],
+            "content-box, padding-box, padding-box"
+        );
+        assert_eq!(style["background-color"], "#fff");
+    }
+
+    #[test]
+    fn a_background_without_an_image_resets_every_longhand() {
+        let style = opened("background", "red");
+        assert_eq!(style["background-color"], "red");
+        for (longhand, initial) in [
+            ("background-image", "none"),
+            ("background-position", "0% 0%"),
+            ("background-size", "auto"),
+            ("background-repeat", "repeat"),
+            ("background-origin", "padding-box"),
+            ("background-clip", "border-box"),
+        ] {
+            assert_eq!(style[longhand], initial, "{longhand}");
+        }
+        let style = opened("background", "var(--bg)");
+        assert_eq!(style["background-repeat"], "repeat");
+        assert!(style.contains_key(&pending("background-repeat")));
     }
 
     #[test]

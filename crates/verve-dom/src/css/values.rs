@@ -163,6 +163,18 @@ pub(super) fn format_px(px: f32) -> String {
 /// Writes a declaration, opening up the shorthands this engine reads as their longhands, and
 /// the keywords every property takes.
 pub(super) fn set_declared(style: &mut Style, key: &str, value: &str, inherited: &Style) {
+    let keyword = matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+    );
+    if keyword && expansion(key).is_some() {
+        // A keyword on a shorthand is the keyword on each of its longhands.
+        for longhand in super::shorthand::longhands(key) {
+            if longhand != key {
+                set_declared(style, &longhand, value, inherited);
+            }
+        }
+    }
     match value.trim().to_ascii_lowercase().as_str() {
         "inherit" => {
             match inherited.get(key) {
@@ -191,7 +203,10 @@ pub(super) fn set_declared(style: &mut Style, key: &str, value: &str, inherited:
     match expansion(key) {
         Some(expand) => expand(style, key, value),
         None => {
-            if key.starts_with("animation") || key.starts_with("transition") {
+            if key.starts_with("animation")
+                || key.starts_with("transition")
+                || key.starts_with("background")
+            {
                 style.remove(&pending(key));
             }
             style.insert(key.to_owned(), value.to_owned());
@@ -406,6 +421,12 @@ pub fn initial_value(property: &str, tag: Option<&str>) -> Option<&'static str> 
         "opacity" => "1",
         "color" => "rgb(0, 0, 0)",
         "background-color" => "rgba(0, 0, 0, 0)",
+        "background-image" => "none",
+        "background-size" => "auto",
+        "background-position" => "0% 0%",
+        "background-repeat" => "repeat",
+        "background-origin" => "padding-box",
+        "background-clip" => "border-box",
         "font-size" => "16px",
         "font-weight" => "400",
         "font-style" => "normal",
