@@ -78,6 +78,11 @@ pub fn coded_error(context: &mut Context, message: &str, code: &str) -> JsError 
     JsError::from_opaque(error.into())
 }
 
+/// A `TypeError` with Node's `code` on it: `ERR_INVALID_URL` of `new URL('nonsense')`.
+pub fn coded_type_error(context: &mut Context, message: &str, code: &str) -> JsError {
+    crate::events::coded_type_error(context, message, code)
+}
+
 /// The same, as a value: what a callback or an `error` event is handed.
 pub fn coded_error_value(context: &mut Context, message: &str, code: &str) -> JsValue {
     coded_error(context, message, code)
