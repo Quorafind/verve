@@ -6,15 +6,17 @@
 //! parent). [`Reader::inherited_length`] therefore finds the element the value was written on and
 //! reads it against that element's font size.
 
+use std::sync::Arc;
+
 use verve_dom::css::{Style, color_with};
 use verve_dom::{NodeId, Snapshot};
 
 use super::breaks::{OverflowWrap, WordBreak};
 use super::space::{Transform, WhiteSpace};
-use crate::display_list::{DecorationKind, Rgba};
+use crate::display_list::{Border, DecorationKind, Rgba};
 use crate::fonts::{self, FontRegistry, Platform};
 use crate::measure::{FontKey, FontMetrics, TextMeasurer};
-use crate::paint_style::border_side_width;
+use crate::paint_style::{Paint, border_side_width};
 use crate::shadow;
 use crate::value::{Dim, Units, length_percent, number, pixels, words};
 
@@ -76,6 +78,15 @@ pub struct TextDecoration {
     pub thickness: Option<f32>,
     /// `text-underline-offset` as a length; `None` is `auto`.
     pub offset: Option<f32>,
+}
+
+/// What an inline element paints of its own box: see [`SpanBox::paint`](super::SpanBox).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpanPaint {
+    pub background: Rgba,
+    pub border: Border,
+    /// The radii that are lengths, top left, top right, bottom right, bottom left.
+    pub radii: [f32; 4],
 }
 
 /// One `text-shadow`.
@@ -614,6 +625,24 @@ pub(crate) fn edges_of(env: &Env, node: NodeId) -> Edges {
         padding,
         border,
     }
+}
+
+/// What an inline element paints of its own box: a plain background colour, a border and rounded
+/// corners; `None` when it has none of them.
+pub(crate) fn span_paint(env: &Env, node: NodeId) -> Option<Arc<SpanPaint>> {
+    let reader = unit_reader(env, node);
+    let color = reader
+        .text("color")
+        .and_then(|text| color_with(text, [0., 0., 0., 1.]))
+        .unwrap_or([0., 0., 0., 1.]);
+    let paint = Paint::read(env.snapshot, node, &reader.units, color);
+    (paint.background_color[3] > 0. || paint.border.is_visible()).then(|| {
+        Arc::new(SpanPaint {
+            background: paint.background_color,
+            border: paint.border.clone(),
+            radii: paint.px_radii(),
+        })
+    })
 }
 
 /// The decorations an element's own `text-decoration` draws.

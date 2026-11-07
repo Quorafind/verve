@@ -175,6 +175,7 @@ impl<'a> Collector<'a> {
             parent: self.stack.last().copied(),
             style,
             edges,
+            paint: style::span_paint(self.env, node),
         });
         let index = self.spans.len() - 1;
         self.stack.push(index);

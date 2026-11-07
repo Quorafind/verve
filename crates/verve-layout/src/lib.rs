@@ -37,7 +37,7 @@ pub use gradient::{
     gradient_line, is_gradient,
 };
 pub use inline::{
-    DecorationStyle, Fragment, InlineLayout, LineBox, SpanBox, Stop, TextDecoration, TextFragment,
-    TextPaint, TextShadow,
+    DecorationStyle, Fragment, InlineLayout, LineBox, SpanBox, SpanPaint, Stop, TextDecoration,
+    TextFragment, TextPaint, TextShadow,
 };
 pub use measure::{FontKey, FontMetrics, HeadlessMeasurer, PlacedGlyph, ShapedRun, TextMeasurer};

@@ -119,6 +119,15 @@ impl Paint {
         resolved
     }
 
+    /// The corner radii that are lengths, in pixels; a percentage is none. An inline element has no
+    /// one box to take a percentage of.
+    pub(crate) fn px_radii(&self) -> [f32; 4] {
+        self.radii.map(|(x, y)| {
+            let px = |dim: Dim| if let Dim::Px(px) = dim { px } else { 0. };
+            px(x).min(px(y)).max(0.)
+        })
+    }
+
     /// The backgrounds back to front for a box of `size`. Gradients the shell cannot paint as
     /// they are become [`Fill::Raster`] with a spec added to `rasters`.
     pub(crate) fn fills(&self, size: [f32; 2], rasters: &mut Vec<RasterSpec>) -> Vec<Fill> {

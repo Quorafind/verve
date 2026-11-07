@@ -26,7 +26,7 @@ use verve_dom::{NodeId, Rect};
 
 pub(crate) use collect::{Collector, Plan, has_content};
 pub(crate) use ifc::{Atom, Ifc, Parts};
-pub use style::{DecorationStyle, TextDecoration, TextPaint, TextShadow};
+pub use style::{DecorationStyle, SpanPaint, TextDecoration, TextPaint, TextShadow};
 
 use crate::measure::ShapedRun;
 
@@ -107,4 +107,6 @@ pub struct SpanBox {
     pub starts: bool,
     /// The line has the element's end.
     pub ends: bool,
+    /// The element's own background and border, if it has any.
+    pub paint: Option<Arc<SpanPaint>>,
 }

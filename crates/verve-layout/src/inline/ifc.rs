@@ -10,7 +10,7 @@ use verve_dom::NodeId;
 use super::InlineLayout;
 use super::chunks::{self, Chunk};
 use super::space::{CharMap, Processed};
-use super::style::{Edges, TextPaint, TextStyle};
+use super::style::{Edges, SpanPaint, TextPaint, TextStyle};
 use crate::measure::{PlacedGlyph, ShapedRun, TextMeasurer};
 use crate::value::Dim;
 
@@ -107,6 +107,8 @@ pub(crate) struct Span {
     pub parent: Option<usize>,
     pub style: Arc<TextStyle>,
     pub edges: Edges,
+    /// Its background and border, if it has any.
+    pub paint: Option<Arc<SpanPaint>>,
 }
 
 /// An atomic inline: a box taffy lays out, which a line holds as one unbreakable thing.

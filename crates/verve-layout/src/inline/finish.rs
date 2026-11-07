@@ -493,6 +493,7 @@ impl Geometry<'_> {
                 rect,
                 starts,
                 ends,
+                paint: self.ifc.spans[span].paint.clone(),
             });
         }
     }
