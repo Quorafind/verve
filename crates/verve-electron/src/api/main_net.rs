@@ -151,7 +151,12 @@ fn read_file(context: &mut Context, address: &str, respond: Responder) {
     match crate::files::read(overlay.as_ref(), &path) {
         Ok(bytes) => {
             let kind = super::mime::of_path(&path).to_owned();
-            respond.head(200, "OK".into(), vec![("content-type".into(), kind)]);
+            // The date of a file on the disk; a file packed in `app.asar` has none to give.
+            let mut headers = vec![("content-type".to_owned(), kind)];
+            headers.extend(
+                crate::files::last_modified(&path).map(|date| ("last-modified".to_owned(), date)),
+            );
+            respond.head(200, "OK".into(), headers);
             for piece in bytes.chunks(crate::msg::BODY_CHUNK) {
                 respond.chunk(piece.to_vec());
             }

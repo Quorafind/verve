@@ -275,6 +275,22 @@ fn net_fetch_reads_files_and_servers_and_builds_a_plain_response() {
     assert_eq!(out["bad"], "TypeError");
 }
 
+/// Electron 39.8.10 answers a `file:` fetch with `content-type` and `last-modified` and nothing
+/// else (probe2, `netfetch-file`): the date is the file's own, in an HTTP date's form.
+#[test]
+fn net_fetch_of_a_file_carries_the_files_modified_time() {
+    let out = main_says(
+        "const file = path.join(__dirname, 'data.json');
+         const r = await net.fetch(pathToFileURL(file).toString());
+         note('names', [...r.headers.keys()].sort());
+         note('date', r.headers.get('last-modified'));
+         note('mtime', require('fs').statSync(file).mtime.toUTCString());",
+        &[("data.json", r#"{"a":1}"#)],
+    );
+    assert_eq!(out["names"], json!(["content-type", "last-modified"]));
+    assert_eq!(out["date"], out["mtime"]);
+}
+
 #[test]
 fn net_answers_whether_the_machine_is_online_and_resolves_hosts() {
     let out = main_says(
