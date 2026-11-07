@@ -44,6 +44,15 @@ impl Builder<'_> {
             self.generated(node, PseudoElement::Before, &mut steps);
             self.flatten(node, flex, areas, &mut steps);
             self.generated(node, PseudoElement::After, &mut steps);
+        } else if let Some((text, style)) = crate::controls::shown_text(self.snapshot, node)
+            && !text.is_empty()
+        {
+            // A control shows its value as text of its own box.
+            steps.push(Step::Inline(Plan::Generated {
+                owner: node,
+                text,
+                style,
+            }));
         }
         self.assemble(owner, node, steps, flex, out);
     }
@@ -76,6 +85,7 @@ impl Builder<'_> {
             blockify: flex,
         };
         let mut props = read(&context, child);
+        crate::controls::adjust(snapshot, &*self.measurer, child, &mut props, flex);
         let is_slot = snapshot.dom.get(child).and_then(|n| n.tag()) == Some("slot");
         if is_slot && snapshot.style(child, "display").is_none() {
             props.display = Display::Contents;
@@ -165,8 +175,9 @@ impl Builder<'_> {
             .iter()
             .all(|step| matches!(step, Step::Inline(_) | Step::Atomic(..)));
         if inline_only && !flex {
-            // The block itself holds the lines.
-            if self.has_content(&steps) {
+            // The block itself holds the lines. A control holds them even with no text, to
+            // measure by and to stand on a baseline.
+            if self.has_content(&steps) || self.boxes[owner].props.intrinsic != [None; 2] {
                 self.fill(owner, owner_node, steps, out);
             }
             return;

@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use verve_dom::{NodeId, Rect};
 
+use crate::controls::{ControlKind, ControlLook};
 use crate::gradient::Gradient;
 use crate::measure::{FontKey, PlacedGlyph};
 
@@ -438,6 +439,7 @@ pub enum PaintItem {
         node: NodeId,
         bounds: Rect,
         kind: ControlKind,
+        look: ControlLook,
     },
     /// Everything up to the matching [`PaintItem::PopClip`] is cut to `bounds` with rounded corners.
     PushClip {
@@ -593,10 +595,6 @@ pub enum ObjectFit {
     None,
     ScaleDown,
 }
-
-/// The form controls the shell draws itself (P32 gives it its variants).
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ControlKind {}
 
 /// A CSS `cursor`, inherited as the style is. A keyword this does not list is `Auto`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

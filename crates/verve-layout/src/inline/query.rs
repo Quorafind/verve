@@ -283,7 +283,7 @@ pub(crate) fn selection_rects(
 }
 
 /// How far from the fragment's left edge the caret stands before byte `byte` of the node's text.
-fn x_at(fragment: &TextFragment, byte: usize) -> f32 {
+pub(crate) fn x_at(fragment: &TextFragment, byte: usize) -> f32 {
     let stops: &[Stop] = &fragment.stops;
     let mut at = 0.;
     for stop in stops {

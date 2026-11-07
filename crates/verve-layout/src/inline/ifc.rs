@@ -170,6 +170,8 @@ pub(crate) struct Ifc {
     pub webkit_box: bool,
     pub measurer: Arc<dyn TextMeasurer>,
     pub(super) chunks: Vec<Chunk>,
+    /// The content size of a form control, which it measures as whatever its text is.
+    pub(crate) intrinsic: [Option<f32>; 2],
     laid: HashMap<u32, Arc<InlineLayout>>,
     min: Option<f32>,
     max: Option<f32>,
@@ -199,10 +201,20 @@ impl Ifc {
             webkit_box: parts.webkit_box,
             measurer,
             chunks,
+            intrinsic: [None; 2],
             laid: HashMap::new(),
             min: None,
             max: None,
         }
+    }
+
+    /// Where the baseline of a control with no text is: its text's, were it centred in the
+    /// control's height. `None` for a box that is not a control.
+    pub(crate) fn empty_baseline(&self) -> Option<f32> {
+        let height = self.intrinsic[1]?;
+        let metrics = self.root.metrics;
+        let content = metrics.ascent + metrics.descent;
+        Some((height - content) / 2. + metrics.ascent)
     }
 
     /// The lines at a content width of `width`; `f32::INFINITY` lays out without wrapping.
@@ -265,16 +277,21 @@ impl Ifc {
         available: Size<AvailableSpace>,
         fills_room: bool,
     ) -> Size<f32> {
-        let width = known.width.unwrap_or_else(|| match available.width {
-            AvailableSpace::MinContent => self.min_content(),
-            AvailableSpace::MaxContent => self.max_content(),
-            // A box that fills the room takes all of it, even when a word is wider (it breaks
-            // there with `overflow-wrap`); one that shrinks to fit never gets narrower than
-            // its longest unbreakable run.
-            AvailableSpace::Definite(room) if fills_room => room,
-            AvailableSpace::Definite(room) => self.max_content().min(room).max(self.min_content()),
-        });
-        let height = known.height.unwrap_or_else(|| {
+        let width = known
+            .width
+            .or(self.intrinsic[0])
+            .unwrap_or_else(|| match available.width {
+                AvailableSpace::MinContent => self.min_content(),
+                AvailableSpace::MaxContent => self.max_content(),
+                // A box that fills the room takes all of it, even when a word is wider (it breaks
+                // there with `overflow-wrap`); one that shrinks to fit never gets narrower than
+                // its longest unbreakable run.
+                AvailableSpace::Definite(room) if fills_room => room,
+                AvailableSpace::Definite(room) => {
+                    self.max_content().min(room).max(self.min_content())
+                }
+            });
+        let height = known.height.or(self.intrinsic[1]).unwrap_or_else(|| {
             // A line box wider than the room is still laid out as wide as it is: only an
             // unbounded width makes the lines not wrap.
             self.layout(width).height

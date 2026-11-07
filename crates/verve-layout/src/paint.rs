@@ -14,6 +14,7 @@
 
 use verve_dom::Rect;
 
+mod control;
 mod text;
 
 pub(crate) use text::Text;
@@ -291,6 +292,7 @@ impl Painter<'_> {
             });
         }
         self.picture(index, rect);
+        self.control(index, rect);
         if paint.outline.is_some() {
             self.outlines.push(index);
         }
