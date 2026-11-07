@@ -356,3 +356,19 @@ Where it goes (`cargo bloat --release --crates`, unstripped, before the rework):
 -p verve-gpui --bin electron --features jit` is 35,659,264 bytes against 35,588,096 for `df018328` (P15 and P30 merged), +71,168
 bytes, within the 100 KB budget. The filter table, the colours and the parent-console attach are hand-written, with no `tracing`
 or `env_logger`.
+
+## P31: inline layout and text through GPUI's text system
+
+`electron/p31-inline-text` at its tested tip (713e900b; merged as `7d8fb819` after P43): `cargo build --release -p verve-gpui --bin
+electron --features jit` is 36,048,384 bytes against 35,588,096 for `df018328` (P15 and P30 merged), +460,288 bytes (+1.29 %). The
+budget was 300 KB, re-set to 350 KB after the first measure (+445,440). The 110 KB over it was accepted so that P16 and P31 could
+merge, and the cut is left to P42. `docs/electron-plan` with P15, P30, P43 and P31 merged is 36,118,016 bytes, +458,752 on P43's
+35,659,264; the cap (37,748,736) leaves 1,630,720 bytes.
+
+The cost is P31's own code:
+- the inline formatting context: lines, breaks, atomic inlines, and whole-block RTL;
+- the text measurer on GPUI's shared text system, with its shape and resolve caches;
+- `@font-face` loading and reading a face's names;
+- the text items, selection and caret of the display list.
+
+Candidates for P42: the monomorphised paint and measurer paths, and the font-table parsing.
