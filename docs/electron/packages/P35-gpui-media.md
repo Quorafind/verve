@@ -230,3 +230,62 @@ cargo test --locked -p verve-gpui --features jit --lib
 cargo test --locked -p verve-gpui --features jit --test boxes
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
+
+### 第二阶段（步骤 4–6、夹具、内存）
+
+本阶段的代码只做了 `cargo check`（agent 不跑测试）；下面列的测试都还没有跑过，由协调者跑。
+
+**做了**：
+
+- **契约**（第一个提交，见「第二阶段的契约」，`ImageTable` 带矢量图那句由 fixup 补正）：canvas 的键、`DisplayList.vectors`、`ImageTable::vector`、`ImageFrames.loops`、`Layout.svg_boxes`。
+- **内联 `<svg>`（步骤 4）**：`verve-layout/src/svg.rs`。
+  - 布局阶段（`update()`，不是每次滚动）把 `<svg>` 子树连同计算样式写成 SVG 文本：属性照抄，`style` 里补 CSS 设出来的 `fill`/`stroke`/…（`PROPERTIES`），继承的 `color`/`font-*`/`visibility` 在根上和变化处写出（`currentColor` 因此按计算后的 `color` 解析），`display:none` 写出，`<style>`/`<script>`/`<foreignObject>` 不写；没有 `id` 的元素补 `__v<序号>`（按元素顺序编号，不按节点，所以两个相同图标的文本相同）；根的 `width`/`height` 换成内容盒的大小。
+  - 键是文本的 62 位散列；相同文本在 `DisplayList.vectors` 里只放一份。`<svg>` 里面没有盒子（`flow.rs` 不展开它的子节点；`<canvas>` 的后备内容同样不展开）。
+  - 栅格化在 Shell：`verve_layout::rasterize_svg`（resvg 0.46，与 GPUI 同版本同特性，`verve-layout` 直接依赖；`cargo tree -d` 不出现 image/resvg/usvg/tiny-skia/fontdb 的第二份）。GPUI 一侧 `Pictures::page` 按 `(键, 设备像素宽, 设备像素高)` 缓存（尺寸变了重画，不拉伸），60 帧没画到的还给图集；软件绘制（`screenshot.rs`）按 CSS 像素画。含 `<text` 的才载入系统字体（一次）。
+  - `<img src=x.svg>` 与 `background-image: url(x.svg)`：`PageImages` 对 SVG 字节不解码，把文本放进 `ImageTable::vector`，Shell 同样按显示尺寸栅格化（第一阶段留下的 `Unsupported` 补上了）。
+  - 几何：usvg 树里每个有 `id` 的节点的两个盒子——`getBBox`（元素自己的用户空间，不含描边，也不含元素自己的 `transform`）和 `getBoundingClientRect`（页面坐标，含 viewBox 缩放和所有 `transform`，也不含描边）。前者经 `Layout.svg_boxes` 进文档，后者并入布局的 `rects`。`<svg>` 根的 `getBBox` 是内容的并集，根自己的 client rect 仍是布局盒。盒子按文本缓存（同一文本只解析一次）。
+- **canvas 表面（步骤 5）**：布局读 `Snapshot.canvases`，`read_surface` 给出 `Replaced`（固有尺寸 = 画布的像素数，`object-fit`/`object-position` 照常），键是 `canvas_key(节点, generation)`。`PageImages::sync_surfaces` 只转换显示列表点名的那个 generation（预乘 RGBA → straight BGRA），旧 generation 的键随即离开表；Shell 画到新 generation 时 `Pictures::image` 立刻让同一槽位的旧 `RenderImage` 退役。P25 的 `commit_canvases` 本来就在帧边界发布 generation。
+- **动图（步骤 6）**：`page_frames.rs`：GIF、APNG、动画 WebP 逐帧读（`image::AnimationDecoder`，每帧已合成整图），读到 256 MiB 就停；GIF 的循环次数读 NETSCAPE2.0（没有扩展播一遍，计数 N 播 N+1 遍，0 无限）。`PageImages::animate` 为显示列表点名的多帧图各记起点，按时间算帧号并改写列表（`DisplayList::with_frames`，新 revision）；`next_due` 返回到下一次换帧的剩余时间（定时器，不是 5 ms 轮询）；不再点名的图停止计时，再点名从第 0 帧开始。
+- **夹具与对比**：`tests/electron/apps/images/`（`gen.js` 在真 Electron 里画出 PNG/JPEG/WebP 并内联，`main.js` 抓图，`expected-chromium.png` 是 Electron 39.8.10 的 `capturePage()`）；`crates/verve-gpui/tests/images.rs` 两条 `#[ignore]` 的测试（见下）。对比脚本 `SCRATCH\p35\images-compare.ps1`。
+- **内存**：`images.rs` 的 `two_hundred_megapixel_pictures_that_scroll_…`：写 200 张 1000×1000 的 PNG 和一个竖排、每 100 ms 滚 1500 px 的页面，每秒读一次进程工作集（PowerShell），二十秒；峰值要小于 400 MB，且最后一次读数小于峰值。显示列表只点名的图才解码、GPUI 对窗口外的 `Shape::Picture` 不上传（第一阶段评审留下的两项，第一阶段已做）。
+
+**Electron 39.8.10（Chromium 142）的观察**（`show: false`，DPR 1，scratch profile；脚本在草稿目录 `p35/obs2/`）：
+
+- `<svg width=200 height=100 viewBox="0 0 100 50" style="position:absolute;left:10px;top:20px">` 里：`<rect x=10 y=5 width=30 height=20 stroke-width=4>` 的 `getBBox()` 是 `10 5 30 20`（用户单位，不含描边），`getBoundingClientRect()` 是 `30 30 60 40`（不含描边，含 viewBox 的 2 倍）；`<g transform="translate(50,10)"><circle cx=10 cy=10 r=8>` 的 `<g>` 与圆都是 `getBBox` `2 2 16 16`（不含 `<g>` 自己的 `transform`）、client `114 44 32 32`；带 `transform="rotate(90)"` 的 path：`getBBox` `0 0 20 10`，client `-10 20 20 40`；`<svg>` 自己的 `getBBox` 是内容的并集 `-10 0 78 28`（含旋转后的 path）。
+- GIF：帧时长 0 或 10 ms 的显示约 100 ms；20 ms 以上按文件里的时长（50 ms 实测周期 47 ms，100 ms 约 95–100 ms，110 ms 约 110 ms）。NETSCAPE2.0 计数 0 无限循环；没有这个扩展播一遍后停在最后一帧；计数 1 播两遍（红蓝红蓝）、计数 2 播三遍，都停在最后一帧。
+- 隐藏窗口（`show: false`）里 GIF **不动**：2.5 s 后 `capturePage()` 仍是第一帧（红）。所以夹具对比把 GIF 的 64×64 方块排除在外。（`capturePage()` 的采样间隔约 17 ms，上面的周期是这样量出来的。）
+
+**没做 / 偏差**：
+
+- 第一阶段留下的三项：`<img>` 的 `border-radius` 裁剪（`PaintItem::Image` 仍没有 `radii`）、破图盒与 `alt`、flex 里 `<img>` 的拉伸，**都没做**（预算花在 SVG/canvas/动图/夹具上）；观察到的数字仍在上面第一阶段的记录里。
+- canvas 没有记录脏矩形（只整张转换、整张上传；任务书说记录，但没有使用者，留给 P33）。每个 generation 都在页面线程上整张转 BGRA（1920×1080 约 8 MB）。
+- 动图改写显示列表是整张列表的拷贝（`with_frames`，每次换帧一次）：条目很多的页面换帧会有 O(条目) 的开销，P33 的块缓存之后应只改动有动图的块。动图只在显示列表点名时计时，没有"页面不可见就停"的判断（渲染器不知道窗口是否被遮住；`hidden` 的页面本来不出帧）。
+- 无限循环的动图会让 `--screenshot` 等不到"列表 600 ms 不变"（它每 100 ms 换一次 revision）；夹具的 GIF 只播两遍。`getBBox` 与 `getBoundingClientRect` 对嵌套带 `transform` 的元素取的是 usvg 的盒子（上面的观察对得上），但 `<use>` 引用的、`<text>`（字体用系统字体，度量与 Chromium 不同）、`<foreignObject>`（不支持）没有对照观察。
+- 动画 WebP 与 APNG 的解码走同一个函数，但没有测试数据；GIF 的 disposal 由 `image` 的 `GifDecoder` 处理，没有单独测。
+- 256 MB 的 LRU 仍然没有（第一阶段说过）。
+- 夹具：`expected-chromium.png` 是在这台机器上用 Electron 39.8.10 抓的；JPEG、WebP 的解码器（Chromium 的 libjpeg-turbo/libwebp，Verve 的 `image`）有差别，边缘按 3% 的预算放过。
+
+**任务书「修改」之外动过的文件**：`verve-dom` 的 `layout_provider.rs`、`state.rs`、`bind/svg.rs`、`canvas/image.rs`、`canvas/mod.rs`；`verve-electron` 的 `page_layout.rs`、`renderer_guest.rs`（只在 `next_due`/`publish` 里加几行）、`lib.rs`；`verve-gpui` 的 `plan.rs`、`app_region.rs`（测试里补 `vectors` 字段）；`Cargo.lock`（`verve-layout` 多了对 `resvg` 的依赖，图里没有新包）。
+
+**给其他包**：`DisplayList` 多了 `vectors`，`ImageFrames` 多了 `loops`，`verve_dom::Layout` 多了 `svg_boxes`（字面量构造的要补，`..Default::default()` 的不用）。P33：`DisplayList::with_frames` 是动图换帧的入口；`Pictures` 对 canvas 键按槽位（`canvas_slot`）退役。P32 二期：没有碰 `PaintItem::Control`。
+
+**要跑的测试**（一次一条）：
+
+```
+cargo test --locked -p verve-layout --lib svg
+cargo test --locked -p verve-layout --lib images
+cargo test --locked -p verve-layout --test images
+cargo test --locked -p verve-dom --test layout_provider
+cargo test --locked -p verve-electron --lib page_frames
+cargo test --locked -p verve-electron --lib page_images
+cargo test --locked -p verve-electron --test images
+cargo test --locked -p verve-electron --test headless
+cargo test --locked -p verve-gpui --features jit --lib
+cargo test --locked -p verve-gpui --features jit --test boxes
+cargo test --locked -p verve-gpui --features jit --test text_fixture
+cargo clippy --locked --workspace --all-targets -- -D warnings
+# 开真窗口：
+cargo test --locked -p verve-gpui --features jit --test images -- --ignored the_picture_the_electron_binary
+cargo test --locked -p verve-gpui --features jit --test images -- --ignored --nocapture two_hundred
+# 或者：SCRATCH\p35\images-compare.ps1 [-Regenerate] [-Memory]
+```
