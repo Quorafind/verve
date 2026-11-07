@@ -32,7 +32,6 @@ impl HeadlessShell {
     pub fn snapshot(&self, window: WindowId) -> Option<verve_dom::Snapshot>;
 }
 pub struct HeadlessOptions {
-    pub layout: FakeLayout,               // 默认 BlockStack：每个块元素占满宽度、每行文本 16px 高，依次往下排
     pub displays: Vec<Display>,           // 默认一个 1920x1080 @1x
     pub dark: bool,
 }
@@ -40,9 +39,9 @@ pub struct HeadlessOptions {
 
 - 窗口状态机与真实 Shell 一致：`show:false` 的窗口不可见、`Close` 先发 `CloseRequested`… 由本包实现，
   P34 实现真实版时以此为参照（**两边行为必须一样**，P34 会跑同一组测试的有头版本）。
-- `FakeLayout::BlockStack` 让 `getBoundingClientRect`、`ResizeObserver`、`IntersectionObserver` 在无头下有合理的值。
-  **P30 合并后**：布局在渲染器线程由 `verve-layout` 完成，无头模式改为 `FakeLayout::Engine`——同一个布局引擎配
-  P30 提供的无头 `TextMeasurer`（每字 0.5em 宽），`BlockStack` 只作为 P30 之前的过渡。
+- **布局（P30 之后）**：无头 Shell 不布局。每个页面在自己的线程里用 `verve-layout` 和无头 `TextMeasurer`（每字 0.5em 宽）布局，
+  所以 `getBoundingClientRect`、`ResizeObserver`、`IntersectionObserver` 在无头下有真的值（文字要等 P31 才进布局）。
+  P00 原有的 `FakeLayout::BlockStack`、`HeadlessOptions.layout` 和 `ToRendererInput::Layout` 的往返都已删除（`verve_electron::FakeLayout` 不再导出）。
 
 ### 测试辅助（`crates/verve-electron/tests/support/mod.rs`）
 
@@ -88,7 +87,7 @@ impl App {
 
 ## 步骤
 
-1. `HeadlessShell` + `FakeLayout`。
+1. `HeadlessShell`（当时还带一个 `FakeLayout`；P30 之后页面自己布局，它没有了）。
 2. 测试辅助库。
 3. 夹具应用与 `record.cjs`；先用真实 Electron 录 `hello`、`ipc`、`lifecycle` 三份 `expected.json`。
 4. 每个夹具一个**先标 `#[ignore]` 的**测试骨架（`tests/fixtures.rs`），对应包完成时去掉 ignore。
@@ -108,12 +107,12 @@ impl App {
 
 ### 完成了什么
 
-- **`HeadlessShell`**（`headless.rs` + `headless/window.rs` + `headless/layout.rs`，不依赖 GPUI）。
+- **`HeadlessShell`**（`headless.rs` + `headless/window.rs`，不依赖 GPUI；`headless/layout.rs` 随 P30 删除）。
   `HeadlessShell::new(&hub, HeadlessOptions) -> Arc<Self>`（弱引用 Hub，同时让 Hub 开始记 console）；
   `windows() -> Vec<HeadlessWindow>`、`received() -> Vec<ToShell>`、`exit_code()`、`snapshot(window) -> Option<Snapshot>`、
   `user_close(window)`（走 `CloseRequested` 往返）、`resize(window, w, h)`、`click(window, selector)`、`type_text(window, text)`、
   `menu_click(item)`、`set_dark(bool)`；`headless::run(&hub, entry) -> i32` 是 `--headless` 的主循环。
-  `HeadlessOptions { layout, displays, dark, trace }`（默认一块 1920x1080@1x、浅色、`BlockStack`、不 trace）。
+  `HeadlessOptions { displays, dark, trace }`（默认一块 1920x1080@1x、浅色、不 trace；原有的 `layout` 字段随 P30 删除）。
   `HeadlessWindow { id, contents, title, bounds, visible, focused, minimized, maximized, fullscreen, closed }`。
 - **窗口状态机的规则**全部写在 `headless/window.rs` 的模块文档里（P34 的真实 Shell 照它实现、跑同一组测试）；要点：
   关闭后忽略一切操作且只发一次 `Closed`；创建时在主显示器工作区居中（`fullscreen` 则占满显示器），不发事件；
@@ -124,9 +123,9 @@ impl App {
   （Windows）的观测值**，冻结在 `tests/electron/apps/window-state/expected.json`；只有 `Center` 与 `Destroy` 是本 Shell 自己定的。
   `Resized` 同时给页面发 `ToRendererInput::Viewport`，`Focus`/`Blur` 发 `Focus(bool)`；创建时发 `Viewport`、`ColorScheme`、
   （聚焦时）`Focus(true)`。其余操作（进度条、图标、透明度、任务栏…）只记进 `received()`。
-- **`FakeLayout::BlockStack`**：块元素占满父宽、依次往下排，高度是内容高度；文字每行 16px、每个非空白字符 8px，超出行宽就折行
+- **`FakeLayout::BlockStack`**（P30 已删除，只留作记录）：块元素占满父宽、依次往下排，高度是内容高度；文字每行 16px、每个非空白字符 8px，超出行宽就折行
   （内联元素本身不拆）；`inline*` 的 `display` 与未设置 display 的元素排在行内；忽略 margin/padding/border/显式尺寸。
-  每次页面发布新视图，Shell 就算一次布局，**和上次不同才**以 `ToRendererInput::Layout` 发回（不会因此循环）。
+  每次页面发布新视图，Shell 就算一次布局，**和上次不同才**以 `ToRendererInput::Layout` 发回（不会因此循环）。P30 之后页面自己布局，Shell 不再发，`RendererGuest::input` 忽略这个变体。
 - **测试辅助** `tests/support/mod.rs`：`App::launch(dir)`、`launch_script(main_js, files)`、`launch_script_in(.., dark)`、
   `run_until(cond, timeout)`、`window(title)`、`page_text(window)`、`eval_main(js)`、`eval_renderer(contents, js)`（结果是 JSON，
   抛错则测试失败；`eval_main` 在全局作用域求值，要让测试看的东西，应用得挂在 `globalThis` 上）、`console()`、`exit_code(timeout)`、
@@ -134,7 +133,7 @@ impl App {
 - **Hub/Guest 的小改动**（任务书「修改」之外，为上面所必需）：`Hub::to_main` / `Hub::on_renderer` 公开（不等待的 job 入口）；
   `Hub::record_console` / `console_lines`（`ConsoleLine { contents, text }`，主进程行在 console sink 里记，页面行在
   `Hub::from_renderer` 里记，**只有开了才记**）；`MainGuest::eval`、`RendererGuest::{eval, click, type_text}`，
-  `RendererGuest::input` 处理 `Layout`（`msg.rs` 里该变体的文档相应改了）；新文件 `probe.rs`（共用的 JSON 求值）。
+  `RendererGuest::input` 当时处理 `Layout`（P30 之后忽略，`msg/input.rs` 里该变体的文档相应改了）；新文件 `probe.rs`（共用的 JSON 求值）。
 - **夹具**（`tests/electron/apps/`）：`hello`、`quick-start`（electron/electron-quick-start 的最后一个提交
   `91a1d64abdeb31e7506d19434c46a3a541ffd3cb`，原样复制，只去掉 `.git`/`.github`；**许可证是 CC0 1.0，不是 MIT**，见 `SOURCE.md`）、
   `ipc`、`preload-isolated`、`preload-node`、`multi-window`、`protocol`、`menu-tray`、`dialogs`、`child`、`asar`（只有源码，包由
@@ -158,7 +157,7 @@ impl App {
 
 ### 没完成 / 不是本包范围的
 
-- `lifecycle`、`single-instance` 夹具与录制（P10）；`FakeLayout::Engine`（P30 之后）。
+- `lifecycle`、`single-instance` 夹具与录制（P10）；`FakeLayout::Engine`（不做了：P30 让页面自己布局，没有 `FakeLayout`）。
 - Shell 不发 `ToRendererInput::Frame`（`requestAnimationFrame` 在无头下不会被驱动；发了会让动画页面空转），也不发
   `FromShell::Displays`（`HeadlessShell::new` 时主进程还没起来，消息会丢；P14 要决定怎么交付，例如在 `AppEvent::Ready` 时）。
 - 对话框预设答复（P14）、菜单/托盘消息的处理（`ToShell::Menu` 现在是空枚举，P15）。
@@ -192,13 +191,12 @@ impl App {
 - **P13**：窗口事件顺序有真实录制（`window-state`），`headless/window.rs` 的规则就是它；`multi-window` 夹具与
   `window-state` 测试归你。`'ready-to-show'` 在 Verve 里还没有，`hello` 用 `win.once('ready-to-show', () => win.show())` 兜住。
 - **P20**：`hello`/`react-vite`/`protocol`/`quick-start` 需要你的页面加载器；`RendererGuest::click`/`type_text`/`eval` 与 `Layout`
-  输入是我加的，你替换 `load` 时保留。`react-vite` 需要 `<script type="module">`。
+  输入是我加的（`Layout` 输入已随 P30 作废），你替换 `load` 时保留。`react-vite` 需要 `<script type="module">`。
 - **P34**：`headless/window.rs` 是纯函数（`Window::apply(op, display) -> Vec<WindowEvent>`），建议把它的测试搬成对 `ShellPort` 的
   通用测试，用来跑真实 Shell；`Center`、`Destroy` 没有 Electron 观测。
 - **P41**：`fixtures.rs` 的 `replays(name)` 就是矩阵的一行：跑夹具、逐进程比较 console 与退出码；`expected.json` 的格式是
   `{ electron, events[], console[{from,text}], exitCode }`，用 `record.cjs` 重录。
-- **P30**：`FakeLayout::BlockStack` 的字符宽 8px、行高 16px 要和你的无头 `TextMeasurer`（每字 0.5em）对齐；入口只有
-  `FakeLayout::boxes`，换成 `Engine` 时在它的 `match` 里加一支。
+- **P30**：已完成：无头 Shell 没有布局了，页面用 `verve-layout`（无头测量器每字 0.5em）自己布局；依赖 BlockStack 几何的 `tests/headless.rs`、`tests/web_contents.rs` 的期望已改（见 P30 的「状态」）。
 
 ### 验证（本机，Windows，`CARGO_BUILD_JOBS=6`）
 
