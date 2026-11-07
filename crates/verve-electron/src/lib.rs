@@ -25,6 +25,7 @@ pub mod menu;
 pub mod msg;
 mod os;
 mod oscrypt;
+mod page_layout;
 mod page_script;
 mod pixels;
 mod preload;
@@ -35,7 +36,7 @@ mod window_state;
 
 use std::path::PathBuf;
 
-pub use headless::{FakeLayout, HeadlessOptions, HeadlessShell, HeadlessWindow};
+pub use headless::{HeadlessOptions, HeadlessShell, HeadlessWindow};
 pub use hub::{ConsoleLine, Hub, RendererHandle, ShellPort};
 pub use main_guest::MainGuest;
 pub use pixels::{NativeImage, Representation};

@@ -6925,6 +6925,7 @@ dependencies = [
  "verve",
  "verve-asar",
  "verve-dom",
+ "verve-layout",
  "windows-sys 0.61.2",
 ]
 
@@ -6936,16 +6937,29 @@ dependencies = [
  "global-hotkey",
  "gpui",
  "gpui_platform",
+ "image",
  "muda",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "raw-window-handle",
+ "tiny-skia",
  "tray-icon",
  "verve",
  "verve-dom",
  "verve-electron",
+ "verve-layout",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "verve-layout"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "taffy",
+ "verve",
+ "verve-dom",
 ]
 
 [[package]]

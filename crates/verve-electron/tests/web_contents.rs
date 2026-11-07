@@ -4,8 +4,9 @@
 //! `tests/electron/web-contents/observe` and are frozen here; a test says so when its number comes
 //! from Verve's own rules instead.
 //!
-//! The headless shell lays a page out as a stack of blocks, 16 px a line and 8 px a character
-//! (`FakeLayout::BlockStack`), so `display: block` elements are where a pointer can find them.
+//! A page lays itself out on its own thread (`verve-layout`, with the headless text measurer), so
+//! `display: block` elements with a height are where a pointer can find them. Text is not laid
+//! out until P31, so a test that aims at an element gives it a height.
 #![allow(clippy::unwrap_used)]
 
 mod support;
@@ -327,7 +328,7 @@ fn input_events_click_and_type_in_the_page() {
     let lines = run(r#"
     const win = new BrowserWindow({ show: false });
     const wc = win.webContents;
-    await load(win, '<button id="b" style="display:block">press</button><a id="a" style="display:block" href="https://example.com/x">link text</a><div id="e" contenteditable style="display:block">edit</div><input id="i">');
+    await load(win, '<style>body{margin:0}button,a,div{display:block;box-sizing:border-box;height:16px;margin:0;padding:0;border:0}</style><button id="b">press</button><a id="a" href="https://example.com/x">link text</a><div id="e" contenteditable>edit</div><input id="i">');
     await wc.executeJavaScript("window.clicks = 0; document.getElementById('b').addEventListener('click', () => window.clicks++)");
     wc.sendInputEvent({ type: 'mouseDown', x: 5, y: 5, button: 'left', clickCount: 1 });
     wc.sendInputEvent({ type: 'mouseUp', x: 5, y: 5, button: 'left', clickCount: 1 });

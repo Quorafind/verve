@@ -33,15 +33,19 @@ pub mod field;
 pub mod html;
 mod inner_text;
 mod input;
+mod layout_provider;
 mod load;
 mod media;
 mod rect;
 mod snapshot;
 mod state;
 mod storage;
+mod update;
 mod window_state;
 mod world;
 
+pub use layout_provider::{Layout, LayoutProvider};
+pub use update::{Changes, Update};
 pub use window_state::{Align, FontFaceId, FontOutcome, ScrollRequest};
 
 use std::cell::{Ref, RefCell};
@@ -282,37 +286,6 @@ pub(crate) fn hit_test(state: &State, x: f32, y: f32) -> Vec<NodeId> {
     path
 }
 
-/// What changed since the drawer last asked.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Changes {
-    /// Every node changed — its own state (attributes, classes, text, value) or its children.
-    pub nodes: Vec<NodeId>,
-    /// Every node whose computed style is not what it was.
-    pub restyled: Vec<NodeId>,
-    /// The partitions with something new to draw: for each changed or restyled node, the
-    /// partition it is in (and its parent's, for a node that came or went).
-    pub partitions: Vec<NodeId>,
-    /// Nodes freed by [`Document::sweep`]: forget what was kept against them.
-    pub removed: Vec<NodeId>,
-    /// The stylesheets changed, so every style was worked out again.
-    pub restyled_all: bool,
-}
-
-impl Changes {
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
-            && self.restyled.is_empty()
-            && self.removed.is_empty()
-            && !self.restyled_all
-    }
-}
-
-/// A snapshot and what changed since the last: [`Document::update`]'s answer.
-pub struct Update {
-    pub snapshot: Snapshot,
-    pub changes: Changes,
-}
-
 /// The handle whoever draws the document keeps. Every method that dispatches events takes the
 /// runtime, runs the microtasks the listeners queued, and leaves the document settled.
 #[derive(Clone)]
@@ -330,6 +303,8 @@ pub(crate) struct View {
     partitions: HashSet<NodeId>,
     removed: Vec<NodeId>,
     restyled_all: bool,
+    /// What a layout took from the next update ([`Document::set_layout_provider`]).
+    carried: Changes,
     /// The element a button went down on, for the click its release makes.
     pressed: Option<NodeId>,
     /// The element the pointer was last over.
@@ -378,49 +353,6 @@ impl Document {
 
     pub fn body(&self) -> NodeId {
         self.state.borrow().dom.body
-    }
-
-    /// Brings the styles up to date and answers a snapshot, with what changed since the last
-    /// update.
-    pub fn update(&self) -> Update {
-        self.absorb();
-        self.sync_images();
-        self.commit_canvases();
-        let snapshot = self.snapshot();
-        let mut view = self.view.borrow_mut();
-        let mut nodes: Vec<NodeId> = view.changed.drain().collect();
-        nodes.sort_unstable();
-        let mut restyled: Vec<NodeId> = view.restyled.drain().collect();
-        restyled.sort_unstable();
-        let mut partitions: Vec<NodeId> = view.partitions.drain().collect();
-        partitions.sort_unstable();
-        let changes = Changes {
-            nodes,
-            restyled,
-            partitions,
-            removed: std::mem::take(&mut view.removed),
-            restyled_all: std::mem::take(&mut view.restyled_all),
-        };
-        Update { snapshot, changes }
-    }
-
-    /// A snapshot of the document and its styles, without taking what changed.
-    pub fn snapshot(&self) -> Snapshot {
-        self.absorb();
-        let state = self.state.borrow();
-        let view = self.view.borrow();
-        Snapshot(Arc::new(SnapshotData {
-            dom: state.dom.clone(),
-            styles: view.computed.clone(),
-            revision: state.dom.revision.wrapping_add(state.revision),
-            viewport: (state.env.width, state.env.height),
-            url: state.url.to_string(),
-            scroll_offsets: state.scroll_offsets.clone(),
-            media: state.media.snapshot(),
-            canvases: canvas::snapshot_canvases(&state),
-            images: state.images.snapshot(),
-            pseudo: view.computed.pseudo().clone(),
-        }))
     }
 
     /// Every node's style, up to date.
@@ -622,7 +554,10 @@ impl Document {
         self.deliver_layout(runtime);
     }
 
-    fn deliver_layout(&self, runtime: &mut verve::Runtime) {
+    /// Tells the resize and intersection observers whose targets moved or changed size. A drawer
+    /// that reports boxes does it with them; a page whose layout is the provider's does it
+    /// itself, after each turn.
+    pub fn deliver_layout(&self, runtime: &mut verve::Runtime) {
         let context = runtime.context();
         if bind::observers::watching_layout(context)
             && let Err(error) = bind::observers::deliver_layout(context)
@@ -737,6 +672,14 @@ impl Document {
         view.changed.retain(|id| !gone.contains(id));
         view.restyled.retain(|id| !gone.contains(id));
         view.partitions.retain(|id| !gone.contains(id));
+        let carried = &mut view.carried;
+        for nodes in [
+            &mut carried.nodes,
+            &mut carried.restyled,
+            &mut carried.partitions,
+        ] {
+            nodes.retain(|id| !gone.contains(id));
+        }
         view.removed.extend(freed_all.iter().copied());
         freed_all.len()
     }
@@ -746,11 +689,11 @@ impl Document {
     /// The element under `(x, y)`, from what was last painted: what the pointer's events
     /// target. `None` outside every painted box.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
-        hit_test(&self.state.borrow(), x, y).first().copied()
+        hit_test(&self.laid(), x, y).first().copied()
     }
 
     fn pointer_target(&self, pointer: &Pointer) -> NodeId {
-        let state = self.state.borrow();
+        let state = self.laid();
         hit_test(&state, pointer.x, pointer.y)
             .first()
             .copied()
@@ -1026,13 +969,7 @@ impl Document {
     /// A press on `node` from start to end — down, up, click — as a pointer at its painted
     /// box's middle: for a drawer that hit tests itself, and for tests.
     pub fn press(&self, runtime: &mut verve::Runtime, node: NodeId) -> bool {
-        let rect = self
-            .state
-            .borrow()
-            .rects
-            .get(&node)
-            .copied()
-            .unwrap_or_default();
+        let rect = self.laid().rects.get(&node).copied().unwrap_or_default();
         let pointer = Pointer {
             x: rect.x + rect.width / 2.,
             y: rect.y + rect.height / 2.,

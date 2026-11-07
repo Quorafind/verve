@@ -154,6 +154,13 @@ pub struct State {
     pub adopted: BTreeMap<NodeId, Vec<(u32, JsObject)>>,
     /// Where the drawer last painted each node it measured.
     pub rects: HashMap<NodeId, Rect>,
+    /// Works `rects` out again when a script reads them after the document changed, if a layout
+    /// provider is installed ([`crate::Document::set_layout_provider`]).
+    pub layout_hook: Option<Rc<dyn Fn()>>,
+    /// `[scrollWidth, scrollHeight]` of each box, as the provider last worked them out.
+    pub scroll_extents: HashMap<NodeId, [f32; 2]>,
+    /// The revision and viewport the provider last laid the document out for.
+    pub laid: Option<(u64, (f32, f32))>,
     pub scroll_offsets: HashMap<NodeId, [f32; 2]>,
     pub requests: Vec<Request>,
     pub media: crate::media::MediaStore,
@@ -230,6 +237,9 @@ impl State {
             constructed_sheets: HashMap::new(),
             adopted: BTreeMap::new(),
             rects: HashMap::new(),
+            layout_hook: None,
+            scroll_extents: HashMap::new(),
+            laid: None,
             scroll_offsets: HashMap::new(),
             requests: Vec::new(),
             media: crate::media::MediaStore::default(),
@@ -291,6 +301,14 @@ impl State {
 
     pub fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// The revision and viewport a layout of the document is for.
+    pub fn layout_key(&self) -> (u64, (f32, f32)) {
+        (
+            self.dom.revision.wrapping_add(self.revision),
+            (self.env.width, self.env.height),
+        )
     }
 
     pub fn class(&self, world: WorldId, name: &str) -> Option<(JsObject, JsObject)> {

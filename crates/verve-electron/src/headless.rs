@@ -3,11 +3,10 @@
 //! something. P00 builds its end-to-end assertions on this, and the state machine here — the
 //! rules are in [`window`] — is the one the real shell runs: P34 keeps them in step.
 //!
-//! Pages are laid out by a [`FakeLayout`] on every view they publish, so `getBoundingClientRect`
-//! and the observers answer without a drawer. The shell never waits for a page or the main
-//! process: it is called on their threads.
+//! Pages lay themselves out on their own threads (`verve-layout`, with its headless text
+//! measurer), so `getBoundingClientRect` and the observers answer without a drawer. The shell
+//! never waits for a page or the main process: it is called on their threads.
 
-mod layout;
 mod menu;
 mod window;
 
@@ -15,9 +14,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
-use verve_dom::{NodeId, Snapshot};
+use verve_dom::Snapshot;
 
-pub use layout::FakeLayout;
 pub use menu::{HeadlessPopup, HeadlessTray};
 pub use window::HeadlessWindow;
 
@@ -33,8 +31,6 @@ use window::Window;
 /// What a headless shell is told about the machine it pretends to be.
 #[derive(Clone, Debug)]
 pub struct HeadlessOptions {
-    /// How the pages' boxes are worked out.
-    pub layout: FakeLayout,
     /// The displays; the first is the primary one that windows open on.
     pub displays: Vec<Display>,
     /// Whether the system theme is dark: what each page's `prefers-color-scheme` is told.
@@ -45,10 +41,9 @@ pub struct HeadlessOptions {
 }
 
 impl Default for HeadlessOptions {
-    /// One 1920 x 1080 display at 1x, a light theme, block-stack layout.
+    /// One 1920 x 1080 display at 1x, a light theme.
     fn default() -> Self {
         Self {
-            layout: FakeLayout::default(),
             displays: vec![Display::default()],
             dark: false,
             trace: false,
@@ -60,7 +55,6 @@ impl Default for HeadlessOptions {
 pub struct HeadlessShell {
     /// Held weakly: the Hub holds the shell, and neither keeps the other alive.
     hub: Weak<Hub>,
-    layout: FakeLayout,
     displays: Mutex<Vec<Display>>,
     trace: bool,
     state: Mutex<State>,
@@ -88,11 +82,10 @@ struct State {
     exit: Option<i32>,
 }
 
-/// What the shell has of a page: the last document it published and the boxes it was given.
+/// What the shell has of a page: the last document it published.
 #[derive(Default)]
 struct Page {
     snapshot: Option<Snapshot>,
-    boxes: Vec<(NodeId, verve_dom::Rect)>,
 }
 
 /// What a message did, to be said to the app once the shell's own state is let go.
@@ -200,20 +193,9 @@ impl State {
         }
     }
 
-    /// Takes a view the page published and lays it out; answers the boxes if they are new.
-    fn settle(
-        &mut self,
-        contents: ContentsId,
-        snapshot: Snapshot,
-        layout: FakeLayout,
-    ) -> Option<Vec<(NodeId, verve_dom::Rect)>> {
-        let boxes = layout.boxes(&snapshot);
-        let page = self.pages.entry(contents).or_default();
-        page.snapshot = Some(snapshot);
-        (page.boxes != boxes).then(|| {
-            page.boxes.clone_from(&boxes);
-            boxes
-        })
+    /// Takes a view the page published.
+    fn settle(&mut self, contents: ContentsId, snapshot: Snapshot) {
+        self.pages.entry(contents).or_default().snapshot = Some(snapshot);
     }
 }
 
@@ -223,7 +205,6 @@ impl HeadlessShell {
     pub fn new(hub: &Arc<Hub>, options: HeadlessOptions) -> Arc<Self> {
         let shell = Arc::new(Self {
             hub: Arc::downgrade(hub),
-            layout: options.layout,
             displays: Mutex::new(options.displays.clone()),
             trace: options.trace,
             state: Mutex::new(State {
@@ -576,9 +557,7 @@ impl HeadlessShell {
         }
     }
 
-    /// Takes the views the pages published and gives each page the boxes of its new document. A
-    /// layout that comes out as the last one is not sent again, which is what ends the loop of a
-    /// page that publishes a view for having been laid out.
+    /// Takes the views the pages published: the document each window shows, and its first paint.
     fn pump(&self) {
         let Some(hub) = self.hub.upgrade() else {
             return;
@@ -595,9 +574,7 @@ impl HeadlessShell {
             let Some(update) = hub.renderer_view(contents).and_then(|view| view.update) else {
                 continue;
             };
-            if let Some(boxes) = state.settle(contents, update.snapshot, self.layout) {
-                hub.input(contents, ToRendererInput::Layout(boxes));
-            }
+            state.settle(contents, update.snapshot);
             // The first snapshot of a window that is shown is its first paint.
             let shown = state.windows.values_mut().find(|window| {
                 window.shown.contents == contents && window.shown.visible && !window.painted

@@ -1,5 +1,5 @@
-//! The headless shell as a test sees it: what it lays out, what a person's click and window
-//! resize do to a page, and how the app's console and realms are read.
+//! The headless shell as a test sees it: the boxes a page lays out for itself, what a person's
+//! click and window resize do to a page, and how the app's console and realms are read.
 
 mod support;
 
@@ -9,7 +9,7 @@ const PAGE: &str = r#"
 const { BrowserWindow } = require('electron');
 console.log('main says hi');
 const win = new BrowserWindow({ title: 'page', width: 500, height: 300 });
-win.loadURL('data:text/html,<div id="a">hello world</div><p id="p"><span id="s">ab</span> cd</p><button id="b">go</button>');
+win.loadURL('data:text/html,<style>html,body{margin:0}div,p,button{display:block;box-sizing:border-box;height:16px;margin:0;padding:0;border:0}</style><div id="a">hello world</div><p id="p"><span id="s">ab</span> cd</p><button id="b">go</button>');
 "#;
 
 /// An app whose window has shown its page: the app, the window's id and its page's.
@@ -32,15 +32,15 @@ fn rect(app: &App, contents: u32, id: &str) -> String {
 }
 
 #[test]
-fn blocks_stack_over_the_full_width_and_text_is_sixteen_pixels_a_line() {
+fn blocks_stack_over_the_full_width_in_the_pages_own_layout() {
     let (app, _, contents) = shown();
-    // The boxes arrive after the page's first view: wait for the layout, not the page.
+    // The page lays itself out (`verve-layout`) when a script reads a box; the window's width
+    // is the one thing it waits for, and the shell sends it once the window is up.
     assert!(app.run_until(|app| rect(app, contents, "a") == "[0,0,500,16]", TIMEOUT));
     assert_eq!(rect(&app, contents, "p"), "[0,16,500,16]");
-    // Eight pixels a character: "ab" is two of them.
-    assert_eq!(rect(&app, contents, "s"), "[0,16,16,16]");
-    // A button sits in a line like text, as wide as its label.
-    assert_eq!(rect(&app, contents, "b"), "[0,32,16,16]");
+    // A button laid out as a block takes the line under the paragraph. What text is as wide as
+    // is P31's: until its inline layout lands, a box is only as tall as its style says.
+    assert_eq!(rect(&app, contents, "b"), "[0,32,500,16]");
 }
 
 #[test]
@@ -52,8 +52,8 @@ fn resizing_a_window_tells_the_page_and_lays_it_out_again() {
         |app| app.eval_renderer(contents, "innerWidth") == "40",
         TIMEOUT
     ));
-    // "hello world" is ten characters, 80 px, in a 40 px line: two lines.
-    assert!(app.run_until(|app| rect(app, contents, "a") == "[0,0,40,32]", TIMEOUT));
+    // A block is as wide as the window it is in.
+    assert!(app.run_until(|app| rect(app, contents, "a") == "[0,0,40,16]", TIMEOUT));
     assert_eq!(app.shell.windows()[0].bounds.width, 40.);
 }
 

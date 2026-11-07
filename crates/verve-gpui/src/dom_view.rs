@@ -1,22 +1,90 @@
-//! One window's page: the text of the document's text nodes, in the order the document has them.
+//! One window's page: the display list its renderer published, drawn by [`DomElement`], and
+//! scrolled ahead of the renderer by the wheel.
 //!
-//! This is P02's whole drawing. It reads nothing of the styles but `display: none` and lays
-//! nothing out: P30 replaces it with the display list `verve-layout` makes on the page's own
-//! thread, and P31 with the shaped lines `TextSystem` gives.
+//! The renderer lays the page out on its own thread (`verve-layout`) and says what to draw as a
+//! [`DisplayList`]. The view keeps the last one it was given. A wheel turned over it moves the
+//! nearest container that can move at once (the offset kept here is the *prediction*, and the
+//! frames of the list are moved by it), and is told to the renderer as
+//! [`ToRendererInput::Wheel`]; the renderer's own offsets arrive with its next list and win.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{Context, IntoElement, ParentElement, Render, Rgba, Styled, Window, div, rgb};
-use verve_dom::Snapshot;
+use verve_dom::NodeId;
+use verve_electron::msg::ToRendererInput;
+use verve_layout::DisplayList;
 
 use crate::app_region::{self, AppRegion};
+use crate::dom_element::DomElement;
+use crate::frame_stats::FrameStats;
+use crate::pictures::Pictures;
+use crate::plan::{self, Plan};
 
 /// What is called as each frame of a window is built.
 type Drawn = Rc<dyn Fn(&Window)>;
 
+/// What a window tells the page under it: the wheel, for now.
+pub(crate) type Tell = Rc<dyn Fn(ToRendererInput)>;
+
+/// What the view and its element share.
+#[derive(Default)]
+pub(crate) struct DomState {
+    pub list: Option<Arc<DisplayList>>,
+    /// The offsets the wheel scrolled containers to since the list came.
+    pub predicted: HashMap<NodeId, [f32; 2]>,
+    /// Counts the changes of `predicted`, so a plan is made again only when it must be.
+    generation: u64,
+    /// What the list comes to under the predicted offsets, for the list and the generation it was
+    /// made for.
+    plan: Option<(Arc<DisplayList>, u64, Rc<Plan>)>,
+    pub pictures: Pictures,
+    /// How big the page was drawn, in CSS pixels.
+    pub viewport: (f32, f32),
+    pub tell: Option<Tell>,
+    pub stats: Option<FrameStats>,
+}
+
+impl DomState {
+    /// The wheel moved `node` to `to`.
+    pub(crate) fn predict(&mut self, node: NodeId, to: [f32; 2]) {
+        self.predicted.insert(node, to);
+        self.generation += 1;
+    }
+
+    /// What the list comes to now: kept from the frame before while the list and the predicted
+    /// offsets are the same, since the frame is built from it twice (hitboxes, shapes).
+    pub(crate) fn plan(&mut self) -> Option<Rc<Plan>> {
+        let list = self.list.clone()?;
+        if let Some((seen, generation, plan)) = &self.plan
+            && Arc::ptr_eq(seen, &list)
+            && *generation == self.generation
+        {
+            return Some(Rc::clone(plan));
+        }
+        let predicted = &self.predicted;
+        let made = Rc::new(plan::plan(&list, &|node| predicted.get(&node).copied()));
+        self.plan = Some((list, self.generation, Rc::clone(&made)));
+        Some(made)
+    }
+}
+
+/// What showing a list changed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Shown {
+    /// The list was the one already shown, and no prediction was waiting to be undone.
+    Unchanged,
+    /// The list was the same, and the renderer's offsets took the place of a prediction.
+    Redraw,
+    /// A list that was not shown before.
+    New,
+}
+
 /// What a window draws: the page as it was last published.
 pub struct DomView {
-    snapshot: Option<Snapshot>,
+    state: Rc<RefCell<DomState>>,
     /// What shows where the page has no background of its own: `None` is a transparent window.
     background: Option<Rgba>,
     regions: Vec<AppRegion>,
@@ -27,20 +95,24 @@ pub struct DomView {
 impl DomView {
     /// A view with nothing to draw yet, over `background` (`None` for a window that is transparent).
     pub fn new(background: Option<Rgba>) -> Self {
+        let state = DomState {
+            stats: FrameStats::from_env(),
+            ..DomState::default()
+        };
         Self {
-            snapshot: None,
+            state: Rc::new(RefCell::new(state)),
             background,
             regions: Vec::new(),
             drawn: None,
         }
     }
 
-    /// The colour under the page, `None` for none.
+    /// The color under the page, `None` for none.
     pub fn set_background(&mut self, background: Option<Rgba>) {
         self.background = background;
     }
 
-    /// The parts of the window that drag it: P30 hands them over as it lays the page out.
+    /// The parts of the window that drag it: they come from the display list's hitboxes.
     pub fn set_app_regions(&mut self, regions: Vec<AppRegion>) {
         self.regions = regions;
     }
@@ -50,9 +122,50 @@ impl DomView {
         self.drawn = Some(drawn);
     }
 
-    /// Draws `snapshot` from the next frame on.
-    pub fn show(&mut self, snapshot: Snapshot) {
-        self.snapshot = Some(snapshot);
+    /// Tells the page what a person does to the window with `tell`.
+    pub(crate) fn on_input(&mut self, tell: Tell) {
+        self.state.borrow_mut().tell = Some(tell);
+    }
+
+    /// Draws `list` from the next frame on. The renderer's offsets win over the ones the wheel
+    /// predicted, so every list that arrives ends the prediction, also the one that is already
+    /// shown: that is what a wheel the page prevented, or one that moved nothing, publishes.
+    pub fn show(&mut self, list: Arc<DisplayList>) -> Shown {
+        let mut state = self.state.borrow_mut();
+        let predicted = !state.predicted.is_empty();
+        if predicted {
+            state.predicted.clear();
+            state.generation += 1;
+        }
+        // Lists are numbered across the process, so one number is one list.
+        if state
+            .list
+            .as_ref()
+            .is_some_and(|seen| seen.revision == list.revision)
+        {
+            return if predicted {
+                Shown::Redraw
+            } else {
+                Shown::Unchanged
+            };
+        }
+        state.list = Some(list);
+        Shown::New
+    }
+
+    /// The list the window draws.
+    pub fn list(&self) -> Option<Arc<DisplayList>> {
+        self.state.borrow().list.clone()
+    }
+
+    /// How big the page was drawn last, in CSS pixels; zero before the first frame.
+    pub fn viewport(&self) -> (f32, f32) {
+        self.state.borrow().viewport
+    }
+
+    /// The color under the page.
+    pub fn background(&self) -> Option<Rgba> {
+        self.background
     }
 }
 
@@ -66,61 +179,58 @@ impl Render for DomView {
         if let Some(drawn) = &self.drawn {
             drawn(window);
         }
-        let mut page = div().flex().flex_col().size_full();
+        let mut page = div().size_full();
         if let Some(background) = self.background {
             page = page.bg(background);
         }
-        for text in self.snapshot.iter().flat_map(texts) {
-            page = page.child(div().flex_shrink_0().child(text));
-        }
-        page.child(app_region::layer(&self.regions))
+        page.child(DomElement::new(Rc::clone(&self.state)))
+            .child(app_region::layer(&self.regions))
     }
-}
-
-/// The text of every text node the document draws, in document order. Whitespace-only nodes are
-/// not drawn: a browser's layout collapses them, which is P30's and P31's to do properly.
-fn texts(snapshot: &Snapshot) -> Vec<String> {
-    let dom = &snapshot.dom;
-    dom.subtree(dom.document)
-        .into_iter()
-        .filter(|id| snapshot.is_rendered(*id))
-        .filter(|id| dom.get(*id).is_some_and(|node| node.is_text()))
-        .filter_map(|id| dom.get(id).and_then(|node| node.data()).map(str::to_owned))
-        .filter(|text| !text.trim().is_empty())
-        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A page whose `<h1>` says hi and whose hidden `<p>` says nothing a person sees.
-    fn page(markup: &str) -> Snapshot {
-        let mut runtime = verve::Runtime::new();
-        let document =
-            verve_dom::install(&mut runtime, verve_dom::Options::default()).expect("a document");
-        let root = document.document_node();
-        let body = document.body();
-        verve_dom::host::with_dom(runtime.context(), |dom| {
-            dom.empty(body);
-            verve_dom::html::parse_document(dom, root, markup);
-        });
-        document.snapshot()
+    fn list(revision: u64) -> Arc<DisplayList> {
+        Arc::new(DisplayList {
+            revision,
+            ..DisplayList::default()
+        })
     }
 
     #[test]
-    fn the_texts_are_the_documents_in_order() {
-        assert_eq!(
-            texts(&page("<h1>hi</h1><p>there</p>")),
-            vec!["hi".to_owned(), "there".to_owned()]
-        );
+    fn a_list_replaces_the_one_before_it_and_the_same_list_changes_nothing() {
+        let mut view = DomView::new(None);
+        assert_eq!(view.show(list(1)), Shown::New);
+        assert_eq!(view.show(list(1)), Shown::Unchanged);
+        assert_eq!(view.show(list(2)), Shown::New);
+        assert_eq!(view.list().map(|list| list.revision), Some(2));
     }
 
     #[test]
-    fn a_hidden_subtree_is_not_drawn() {
-        assert_eq!(
-            texts(&page("<h1>hi</h1><p style=\"display: none\">gone</p>")),
-            vec!["hi".to_owned()]
-        );
+    fn every_list_that_arrives_ends_the_prediction() {
+        let mut view = DomView::new(None);
+        view.show(list(1));
+        view.state.borrow_mut().predict(7, [0., 40.]);
+        // The renderer prevented the wheel and published the list it had: the view is not left
+        // scrolled by a prediction nobody confirmed.
+        assert_eq!(view.show(list(1)), Shown::Redraw);
+        assert!(view.state.borrow().predicted.is_empty());
+        view.state.borrow_mut().predict(7, [0., 40.]);
+        assert_eq!(view.show(list(2)), Shown::New);
+        assert!(view.state.borrow().predicted.is_empty());
+    }
+
+    #[test]
+    fn the_plan_is_made_again_only_when_the_list_or_the_prediction_changed() {
+        let mut view = DomView::new(None);
+        view.show(list(1));
+        let first = view.state.borrow_mut().plan().expect("a plan");
+        let again = view.state.borrow_mut().plan().expect("a plan");
+        assert!(Rc::ptr_eq(&first, &again));
+        view.state.borrow_mut().predict(7, [0., 40.]);
+        let moved = view.state.borrow_mut().plan().expect("a plan");
+        assert!(!Rc::ptr_eq(&first, &moved));
     }
 }

@@ -1,9 +1,10 @@
 //! `-webkit-app-region`: the parts of a window a person drags it by.
 //!
-//! P30 lays a page out and says, for every element whose style has `-webkit-app-region: drag` or
-//! `no-drag`, where it is: an [`AppRegion`] per element, in document order, in the window's own
-//! coordinates. The drag area is what the `drag` rectangles cover minus what a later `no-drag`
-//! one does (a button in a title bar), and a drag rectangle after a `no-drag` one covers it again.
+//! The page's display list says, for every element whose style has `-webkit-app-region: drag` or
+//! `no-drag`, where it is ([`regions_of`]): an [`AppRegion`] per element, in paint order (a later
+//! one is on top of an earlier one), in the window's own coordinates. The drag area is what the
+//! `drag` rectangles cover minus what a later `no-drag` one does (a button in a title bar), and a
+//! drag rectangle after a `no-drag` one covers it again.
 //! Each rectangle of the area becomes a hitbox the system asks about when it works out where a
 //! click is: Windows answers it `HTCAPTION`, so dragging, a double click that maximizes and Aero
 //! Snap are the system's own. On macOS the window is moved by the app, from the mouse down.
@@ -21,6 +22,25 @@ pub struct AppRegion {
     pub rect: Rect,
     /// `true` for `drag`, `false` for `no-drag`.
     pub drag: bool,
+}
+
+/// The regions a page's display list holds: its hitboxes that have a `-webkit-app-region`, placed
+/// in the window.
+pub(crate) fn regions_of(list: &verve_layout::DisplayList) -> Vec<AppRegion> {
+    list.resolved_hitboxes(&|_| None)
+        .into_iter()
+        .filter_map(|hitbox| {
+            hitbox.app_region.map(|kind| AppRegion {
+                rect: Rect {
+                    x: hitbox.bounds.x,
+                    y: hitbox.bounds.y,
+                    width: hitbox.bounds.width,
+                    height: hitbox.bounds.height,
+                },
+                drag: kind == verve_layout::AppRegionKind::Drag,
+            })
+        })
+        .collect()
 }
 
 /// What `rect` leaves of itself when `hole` is taken out: up to four rectangles.
@@ -132,6 +152,34 @@ mod tests {
 
     fn covered(area: &[Rect]) -> f32 {
         area.iter().map(|piece| piece.width * piece.height).sum()
+    }
+
+    #[test]
+    fn the_regions_of_a_list_are_its_hitboxes_that_have_one() {
+        use verve_layout::{AppRegionKind, Cursor, DisplayList, PaintItem};
+        let hitbox = |node, kind, x| PaintItem::Hitbox {
+            node,
+            bounds: verve_dom::Rect::new(x, 0., 10., 10.),
+            cursor: Cursor::Auto,
+            app_region: kind,
+        };
+        let list = DisplayList {
+            revision: 1,
+            items: vec![
+                hitbox(1, Some(AppRegionKind::Drag), 0.),
+                hitbox(2, None, 20.),
+                hitbox(3, Some(AppRegionKind::NoDrag), 5.),
+            ],
+            rasters: Vec::new(),
+            root: None,
+        };
+        assert_eq!(
+            regions_of(&list),
+            [
+                drag(rect(0., 0., 10., 10.)),
+                no_drag(rect(5., 0., 10., 10.))
+            ]
+        );
     }
 
     #[test]

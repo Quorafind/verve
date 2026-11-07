@@ -4,7 +4,7 @@
 //! are not; [`Reporter`] tells the main process what became of it. A window is made hidden and
 //! shown by [`open`] once it has its frame, place and limits, so it never appears in any other.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -20,9 +20,10 @@ use verve_electron::ids::{ContentsId, WindowId};
 use verve_electron::msg::{
     Display, Rect, TitleBarStyle, ToRendererInput, ToShell, WindowEvent, WindowOp, WindowOptions,
 };
+use verve_layout::DisplayList;
 
 use crate::app_region::AppRegion;
-use crate::dom_view::{DomView, white};
+use crate::dom_view::{DomView, Shown, white};
 use crate::platform::{self, Native, Target};
 use crate::report::Reporter;
 use crate::shell::{Inbox, Item};
@@ -30,6 +31,9 @@ use crate::shell::{Inbox, Item};
 /// How long the main process may take to answer a close before a second try closes the window
 /// without it: the page is not responding.
 const UNRESPONSIVE: Duration = Duration::from_secs(5);
+
+/// What a window draws: its display list, the size its page was drawn at, and the color under it.
+pub type Look = (Arc<DisplayList>, (f32, f32), Option<Rgba>);
 
 /// A window the shell has open.
 pub(crate) struct Window {
@@ -43,6 +47,8 @@ pub(crate) struct Window {
     native: Rc<Native>,
     reporter: Rc<Reporter>,
     asked: Rc<Cell<Option<Instant>>>,
+    /// The regions the last display list had, to see when they change.
+    regions: RefCell<Vec<AppRegion>>,
 }
 
 /// What a window needs to be made.
@@ -60,13 +66,13 @@ pub(crate) fn framed(options: &WindowOptions) -> bool {
     options.frame && options.title_bar_style == TitleBarStyle::Default
 }
 
-/// The colour under a window's page: none for a transparent window, white unless it was given.
+/// The color under a window's page: none for a transparent window, white unless it was given.
 fn background(options: &WindowOptions) -> Option<Rgba> {
     let given = options.background_color.map(color_of);
     (!options.transparent).then(|| given.unwrap_or_else(white))
 }
 
-/// `[r, g, b, a]` as the colour GPUI paints.
+/// `[r, g, b, a]` as the color GPUI paints.
 fn color_of([r, g, b, a]: [u8; 4]) -> Rgba {
     rgba(u32::from_be_bytes([r, g, b, a]))
 }
@@ -144,9 +150,9 @@ pub(crate) fn open(opening: Opening, display: &Display, cx: &mut AsyncApp) -> Op
         owner,
     } = opening;
     let bounds = opening_bounds(options, display);
-    let colour = background(options);
+    let color = background(options);
     let opened = cx.open_window(gpui_options(options, bounds), |_, cx| {
-        cx.new(|_| DomView::new(colour))
+        cx.new(|_| DomView::new(color))
     });
     let handle = match opened {
         Ok(handle) => handle,
@@ -169,6 +175,7 @@ pub(crate) fn open(opening: Opening, display: &Display, cx: &mut AsyncApp) -> Op
         native,
         reporter,
         asked,
+        regions: RefCell::new(Vec::new()),
     };
     window.guard(cx, options.closable, inbox, id);
     window.start(options, cx);
@@ -186,8 +193,10 @@ impl Window {
         );
         let themed = inbox.clone();
         let (native, painted) = (Rc::clone(&self.native), Rc::clone(&self.reporter));
+        let told = Rc::clone(&self.reporter);
         // An error is a window that is gone before it was set up, and it needs nothing then.
         let _ = self.handle.update(cx, move |view, window, cx| {
+            view.on_input(Rc::new(move |input| told.input(input)));
             view.on_draw(Rc::new(move |window| {
                 if let Some(look) = native.looked(window) {
                     painted.sync(look);
@@ -352,6 +361,37 @@ impl Window {
             window.prompt(level, message, detail, answers, cx)
         });
         asked.ok().map(|chosen| async move { chosen.await.ok() })
+    }
+
+    /// Hands the window the display list its page published, and the regions it is dragged by if
+    /// the list is a new one. The same list again only ends the wheel's prediction.
+    pub fn show_list(&self, list: Arc<DisplayList>, cx: &mut AsyncApp) {
+        let shown = self.handle.update(cx, |view, _, cx| {
+            let shown = view.show(Arc::clone(&list));
+            if shown != Shown::Unchanged {
+                cx.notify();
+            }
+            shown
+        });
+        if !matches!(shown, Ok(Shown::New)) {
+            return;
+        }
+        let regions = crate::app_region::regions_of(&list);
+        if *self.regions.borrow() != regions {
+            self.regions.replace(regions.clone());
+            self.set_app_regions(regions, cx);
+        }
+    }
+
+    /// What the window draws now: its display list, how big the page was drawn and the color
+    /// under it. `None` for a window that is gone.
+    pub fn look(&self, cx: &mut AsyncApp) -> Option<Look> {
+        self.handle
+            .update(cx, |view, _, _| {
+                Some((view.list()?, view.viewport(), view.background()))
+            })
+            .ok()
+            .flatten()
     }
 
     /// Sets the regions the window is dragged by.

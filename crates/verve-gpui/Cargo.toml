@@ -20,6 +20,12 @@ async-channel = "2"
 verve-electron = { path = "../verve-electron" }
 # The document a window draws.
 verve-dom = { path = "../verve-dom" }
+# The boxes of a page and the display list a window draws; the software painter's picture is
+# tiny-skia's, the one `verve-dom` already links.
+verve-layout = { path = "../verve-layout" }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+# The pictures GPUI paints (a rasterised gradient is one): the version GPUI itself uses.
+image = { workspace = true }
 # The system's handle of a GPUI window, for the parts of a window GPUI does not do.
 raw-window-handle = "0.6"
 # `file://` addresses are decoded the way the rest of the app does.

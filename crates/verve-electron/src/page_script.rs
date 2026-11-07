@@ -183,11 +183,6 @@ pub(crate) fn person(
             pointer,
             ..
         } => document.pointer_move(runtime, &pointer),
-        ToRendererInput::Wheel {
-            pointer, dx, dy, ..
-        } => {
-            document.wheel(runtime, &pointer, dx, dy);
-        }
         ToRendererInput::Key { down: true, key } => {
             document.key_down(runtime, &key);
         }

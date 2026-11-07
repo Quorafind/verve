@@ -15,6 +15,7 @@ use verve_electron::ids::WindowId;
 use verve_electron::msg::{AppEvent, FromShell, ToRendererInput, ToShell, WindowOp};
 
 use crate::app_region::AppRegion;
+use crate::capture::Capture;
 use crate::dialog;
 use crate::native::{self, Native};
 use crate::platform;
@@ -114,6 +115,8 @@ pub(crate) struct Shell {
     dark: Option<bool>,
     /// Menus, tray icons and global hotkeys.
     native: Native,
+    /// The screenshot `--screenshot` asked for, until it is taken.
+    capture: Option<Capture>,
 }
 
 impl Shell {
@@ -127,7 +130,13 @@ impl Shell {
             messages,
             windows: BTreeMap::new(),
             dark: None,
+            capture: None,
         }
+    }
+
+    /// Takes a picture of the first window's page once it has settled, then ends the app.
+    pub fn capture(&mut self, capture: Capture) {
+        self.capture = Some(capture);
     }
 
     /// Does what the main process asked since the last wake, hands each window what its page
@@ -137,6 +146,12 @@ impl Shell {
             self.apply(item, cx);
         }
         self.draw(cx);
+        if let Some(capture) = &mut self.capture
+            && capture.poll(self.windows.values().next(), cx)
+        {
+            self.capture = None;
+            cx.update(|cx| cx.quit());
+        }
         if self.hub.exit_code().is_some() {
             self.native.release();
             cx.update(|cx| cx.quit());
@@ -278,14 +293,14 @@ impl Shell {
     /// Hands each window what its page published since the last turn.
     fn draw(&mut self, cx: &mut AsyncApp) {
         for window in self.windows.values() {
-            let Some(update) = self
+            let Some(list) = self
                 .hub
                 .renderer_view(window.contents)
-                .and_then(|view| view.update)
+                .and_then(|view| view.display_list)
             else {
                 continue;
             };
-            window.show(move |view| view.show(update.snapshot), cx);
+            window.show_list(list, cx);
         }
     }
 }

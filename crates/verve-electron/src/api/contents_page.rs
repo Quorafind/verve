@@ -198,10 +198,14 @@ fn input_of(event: &JsObject, context: &mut Context) -> JsResult<Vec<ToRendererI
             };
             vec![at(PointerKind::Down), at(PointerKind::Up)]
         }
+        // Electron's `deltaX`/`deltaY` are Blink's `WebMouseWheelEvent` deltas: positive when the
+        // wheel turned away from the person (the page scrolls up and left). The page's own
+        // `WheelEvent.deltaX`/`deltaY` are their negation: Electron 39.8.10 on Windows turns
+        // `deltaY: -20` into a `wheel` event with `deltaY` 20 and `scrollY` 20.
         "mouseWheel" => vec![ToRendererInput::Wheel {
             pointer,
-            dx: fields.f32("deltaX", 0., context)?,
-            dy: fields.f32("deltaY", 0., context)?,
+            dx: -fields.f32("deltaX", 0., context)?,
+            dy: -fields.f32("deltaY", 0., context)?,
             target: None,
         }],
         "keyDown" | "rawKeyDown" => vec![ToRendererInput::Key { down: true, key }],
