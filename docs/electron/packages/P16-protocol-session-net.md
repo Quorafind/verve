@@ -313,6 +313,45 @@ HTTP 缓存（`clearCache` resolve、`getCacheSize` 返回 0）、Chromium Cooki
 - `registerSchemesAsPrivileged` 在 ready 之后调用的错误是 `protocol.registerSchemesAsPrivileged should be called before app is ready`。
 - 页面的 `fetch()` 对没有 `supportFetchAPI` 的 scheme 以 `TypeError: Failed to fetch` 拒绝且不调用处理器，XHR 不受此限。
 
+### 阶段 2a 契约（cookie 罐与 webRequest；与上文冲突处以本节为准）
+
+- **消息用类型化的结构，不用 `Cloned`**：`msg/net.rs` 追加 `Cookie`、`SameSite`、`CookieCause`、`CookieChange`、`WebRequestStage`、`WebRequestDetails`、`WebRequestReply`；
+  `msg/page.rs` 末尾追加 `FromRenderer::{Cookies { session, changes }, WebRequest { call, session, stage, details }, Navigating}` 与
+  `ToRenderer::WebRequestReply { call, reply }`。`details` 在主进程里才变成 JS 对象（补 `webContents`、`frame`），渲染器只带 Rust 数据。
+  只有会改请求的三个阶段（`BeforeRequest`、`BeforeSendHeaders`、`HeadersReceived`）等回复；其余阶段 `call == 0`，不回复。
+  `Navigating`：页面在同一个 isolate 里要载入别的文档了，它之前向主进程要的东西全部作废（取消仍在服务的处理器应答与读者）。Hub 对已载入过的页面换新 isolate
+  （`renew_for_navigation`），旧 isolate 说不出话，所以那条路径由主进程在 `navigation::start` 里取消（`protocol_serve::cancel_all`）；`Navigating` 只留给不换 isolate 的载入。
+- **罐在 `Session` 里**（`hub/cookies.rs`）：`CookieStore { jar: Mutex<Jar>, file, dirty, last_write, watched }`，渲染器线程与主进程线程都直接读写，不经消息。
+  `Jar` 的每个会改罐的方法返回 `Vec<CookieChange>`，由调用者决定怎么告诉主进程（渲染器：`FromRenderer::Cookies`，且只在 `session.cookies` 被脚本取过之后才发；主进程：直接 emit `changed`）。
+  `Jar` 是纯逻辑（RFC 6265 的域匹配、路径匹配、`Secure`、`HttpOnly`、`SameSite`、过期、host-only、`__Secure-`/`__Host-` 前缀）；`Set-Cookie` 行由 `cookie` crate（`default-features = false`）解析。
+  没有公共后缀表：单标签的 `Domain` 只有等于主机名本身时才接受；这个缺口登记给 P41。
+- **持久化**：`<storage_path>/Cookies.json`（默认会话是 `<userData>/Cookies.json`，`persist:x` 是 `<userData>/Partitions/x/Cookies.json`），只存有过期时间的 cookie
+  （会话 cookie 不落盘，与 Chromium 默认一致）；`flushStore()`、`Hub::shutdown`、`CookieStore` 被丢弃时写；运行中一次改动若距上次写盘已过 30 秒才写。内存分区与 `fromPath` 之外无文件。
+  `Hub` 记着 `userData`（`MainState::new` 与 `app.setPath('userData')` 告诉它），罐在第一次被用到时才按当时的路径读入。
+- **`document.cookie`**：verve-dom 的 `CookieBackend`（`get(url) -> String`、`set(url, line)`）与 `Options::cookies`；页面线程的实现读写同一个 `CookieStore`，读不到 `HttpOnly`，写不了 `HttpOnly`。
+- **`before_send` / `headers_received` / `notify` 的接线**（`net_watch.rs`，页面与主进程共用）：`before_send` 先附 `Cookie`，再依次问 `onBeforeRequest`、`onBeforeSendHeaders`（它们看得到已附的 `Cookie`，与 Electron 一致）；
+  `headers_received` 先问 `onHeadersReceived`，再把（可能被改过的）`Set-Cookie` 存进罐，最后放行，所以 `fetch` 的 promise 兑现时 `document.cookie` 已经有它。
+  `notify` 对应其余五个阶段。没有监听者或 filter 不匹配时不发任何消息（`Session::wants`，原子读）。
+- **主进程的请求用不用 cookie**：`net.fetch` 默认 `credentials: 'include'`，用；`net.request` 默认不用，`useSessionCookies: true` 或 `credentials: 'include'` 才用，`credentials: 'omit'` 不用（观察自 Electron 39.8.10，探针 `probe5`，加上 `lib/browser/api/net-fetch.ts`）。
+- **SameSite**：页面的请求按页面地址与请求地址的 site（没有公共后缀表时取主机名最后两段）判断，跨 site 的子资源请求不附 `Strict`/`Lax`/未指明的 cookie，也不存它们；主进程的请求不判断。
+  凭证模式（`credentials: 'omit'`）内核没有告诉宿主，页面请求一律附 cookie，这一点登记给 P41。
+- **观察（Electron 39.8.10，`probe5`）**：
+  - `Cookie`：`name, value, domain, hostOnly, path, secure, httpOnly, session, expirationDate（仅持久）, sameSite`；host-only 的 `domain` 不带点，域 cookie 带点；API 设置不给 `sameSite` 得 `lax`，`Set-Cookie` 不给得 `unspecified`；
+    `sameSite: 'no_restriction'` 存成 `secure: true`；回环主机上 `Secure` cookie 在 `http:` 也发；`get()` 按「路径长者在前，同长按建立先后」排序，覆盖写入的 cookie 排到最后；无名 cookie 的 `Cookie` 头只有值。
+  - `set` 的错误：缺 `url` 为 `Error: Missing required option 'url'`；`url` 不能解析、`domain` 与 `url` 不符是 `Error: Failed to set cookie - The cookie was set with an invalid Domain attribute.EXCLUDE_INVALID_DOMAIN, DO_NOT_WARN, NO_EXEMPTION`；
+    名字或值含 `;`/控制字符是 `Error: Failed to set cookie - The cookie contains ASCII control charactersEXCLUDE_DISALLOWED_CHARACTER, DO_NOT_WARN, NO_EXEMPTION`；`sameSite` 非法是 `Error: Failed to convert 'bogus' to an appropriate cookie same site value`；
+    非对象是 `TypeError: Error processing argument at index 0, conversion failure from x`；`get()`、`remove()` 无参数是 `TypeError: Insufficient number of arguments.`；`remove` 的 `url` 不能解析时 promise 照常兑现。
+  - `changed(event, cookie, cause, removed)`：`event` 是空 `Event`；设置是 `'explicit'`、`removed: false`；覆盖先发旧的 `'overwrite'`、`removed: true`，再发新的；`remove` 是 `'explicit'`、`removed: true`。
+  - `webRequest`：`details` 的字段次序（`BeforeRequest`：`id, url, method, timestamp, resourceType, [frame, webContents, webContentsId,] referrer, [uploadData,] redirectURL`；
+    `BeforeSendHeaders`/`SendHeaders`：同前，无 `redirectURL`，末尾 `requestHeaders`；`HeadersReceived`/`ResponseStarted`/`Completed`：`id, url, method, timestamp, resourceType, ip, fromCache, statusLine, statusCode, responseHeaders, [frame, webContents, webContentsId,] referrer, [uploadData]`，`Completed` 末尾加 `error: 'net::OK'`；
+    `BeforeRedirect`：同 `HeadersReceived`，末尾 `redirectURL`；`ErrorOccurred`：`id, url, method, timestamp, resourceType, [frame, webContents, webContentsId,] referrer, error`）；
+    页面的 `fetch` 与 XHR 都是 `resourceType: 'xhr'`；重定向的各跳共用一个 `id`；主进程的请求没有 `frame`/`webContents`/`webContentsId`，其 `referrer` 为 `''`；`timestamp` 是毫秒级的浮点时间；
+    请求头名是大写词首（`User-Agent`），响应头值是数组；`statusLine` 形如 `HTTP/1.1 200 OK`；`uploadData` 是 `[{ type: 'rawData', bytes: Buffer }]`；通知阶段的监听器只收到 `details`。
+  - `webRequest` 的错误：`onX(5)` 是 `TypeError: Must pass null or a Function`；filter 没有 `urls` 数组是 `TypeError: Parameter 'filter' must have property 'urls'.`；坏模式是 `TypeError: Invalid url pattern nonsense: Missing scheme separator.`
+    （模式解析的其余文本取自 `electron.exe` 里的字符串表：`Invalid scheme.`、`Wrong scheme type.`、`Host can not be empty.`、`Invalid host wildcard.`、`Empty path.`、`Invalid port.`、`Invalid host.`）。
+  - 取消的请求在页面里是 `TypeError: Failed to fetch`；`redirectURL` 的跳转被 `fetch` 当作重定向（`response.redirected === true`，`response.url` 是新地址）；
+    `onBeforeSendHeaders` 里改的头到达服务器；`onHeadersReceived` 改的响应头页面读得到。
+
 ## 状态
 
 ### 阶段 1（钩子、protocol、net；会话只做值类方法）
