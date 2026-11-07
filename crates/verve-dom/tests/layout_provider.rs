@@ -180,3 +180,47 @@ fn what_an_animation_restyled_makes_the_layout_stale() {
         );
     });
 }
+
+#[test]
+fn an_inline_elements_client_rects_follow_a_change_with_no_range_call_before_them() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        page.eval(
+            "window.span = document.body.appendChild(document.createElement('span'));
+             span.textContent = 'x'",
+        );
+        let span = page.find("span");
+        // One box for each child of the body: a change to the document moves what the span has.
+        page.document
+            .set_layout_provider(Some(Box::new(move |update| {
+                let dom = &update.snapshot.dom;
+                let count = dom.children(dom.body).len();
+                let lines = (0..count)
+                    .map(|line| Rect::new(0., line as f32 * 10., 10., 10.))
+                    .collect();
+                Layout {
+                    rects: vec![(span, Rect::new(0., 0., 10., 10.))],
+                    fragments: vec![(span, lines)],
+                    ..Layout::default()
+                }
+            })));
+        assert_eq!(page.eval("span.getClientRects().length"), "1");
+        page.eval("document.body.appendChild(document.createElement('b'))");
+        assert_eq!(page.eval("span.getClientRects().length"), "2");
+    });
+}
+
+#[test]
+fn the_text_position_under_a_point_comes_from_the_position_provider() {
+    on_page(|| {
+        let page = Page::new(Options::default());
+        assert_eq!(page.document.text_position_at(1., 2.), None);
+        let body = page.find("body");
+        page.document
+            .set_position_provider(Some(Box::new(move |x, y| {
+                (x < y).then_some((body, x as usize))
+            })));
+        assert_eq!(page.document.text_position_at(1., 2.), Some((body, 1)));
+        assert_eq!(page.document.text_position_at(3., 2.), None);
+    });
+}

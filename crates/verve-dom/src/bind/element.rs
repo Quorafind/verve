@@ -1113,7 +1113,7 @@ const ELEMENT_METHODS: &[Method] = &[
     }),
     ("getClientRects", 0, |this, _, cx| {
         let id = node_of(this)?;
-        let lines = shared(cx).borrow().fragments.get(&id).cloned();
+        let lines = crate::layout_provider::fragments_of(cx, id);
         let rects = lines.unwrap_or_else(|| vec![painted(cx, id)]);
         let items = rects
             .into_iter()

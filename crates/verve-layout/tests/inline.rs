@@ -6,10 +6,13 @@
 
 mod common;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use common::{Laid, lay_out, on_page};
-use verve_dom::NodeId;
+use verve::Runtime;
+use verve_dom::{Layout, NodeId, Options};
 use verve_layout::{Fragment, HeadlessMeasurer, LayoutEngine};
 
 const BASE: &str = "<style>html,body{margin:0}div{font-size:10px}</style>";
@@ -603,6 +606,77 @@ fn two_thousand_paragraphs_lay_out() {
             engine
                 .rect(node)
                 .is_some_and(|rect| rect.height > 2000. * 10.)
+        );
+    });
+}
+
+/// A page whose document asks the engine for geometry the way the shell's page does.
+fn scripted(html: &str) -> (Runtime, Rc<RefCell<LayoutEngine>>) {
+    let mut runtime = Runtime::new();
+    let document = verve_dom::install(
+        &mut runtime,
+        Options {
+            viewport: (800., 600.),
+            ..Options::default()
+        },
+    )
+    .expect("the document installs");
+    let html = serde_json::to_string(&format!("{BASE}{html}")).expect("a string");
+    runtime
+        .eval(&format!("document.body.innerHTML = {html};"))
+        .expect("the page's markup");
+    let engine = Rc::new(RefCell::new(LayoutEngine::new(Arc::new(HeadlessMeasurer))));
+    let layout = Rc::clone(&engine);
+    document.set_layout_provider(Some(Box::new(move |update| {
+        let mut engine = layout.borrow_mut();
+        engine.update(&update.snapshot, &update.changes);
+        Layout {
+            rects: engine.rects().collect(),
+            fragments: engine.fragments().collect(),
+            ..Layout::default()
+        }
+    })));
+    let ranges = Rc::clone(&engine);
+    document.set_range_provider(Some(Box::new(move |start, end| {
+        ranges.borrow().range_rects(start, end)
+    })));
+    (runtime, engine)
+}
+
+fn eval(runtime: &mut Runtime, source: &str) -> String {
+    match runtime.eval(source) {
+        Ok(value) => verve::print(&value),
+        Err(error) => panic!("script failed: {error}"),
+    }
+}
+
+#[test]
+fn a_script_reads_two_boxes_for_a_range_over_two_lines() {
+    on_page(|| {
+        let (mut runtime, _engine) =
+            scripted(r#"<div id="d" style="width:50px">aaa <span id="s">bbb ccc</span></div>"#);
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "window.r = document.createRange(); r.selectNodeContents(document.getElementById('s')); r.getClientRects().length"
+            ),
+            "2"
+        );
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "document.getElementById('s').getClientRects().length"
+            ),
+            "2"
+        );
+        assert_eq!(eval(&mut runtime, "r.getBoundingClientRect().height"), "20");
+        // A range inside one line has one box.
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "window.q = document.createRange(); q.setStart(document.getElementById('d').firstChild, 0); q.setEnd(document.getElementById('d').firstChild, 2); q.getClientRects().length"
+            ),
+            "1"
         );
     });
 }

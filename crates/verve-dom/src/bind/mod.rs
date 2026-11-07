@@ -21,6 +21,7 @@ pub mod live;
 pub mod node;
 pub mod observers;
 pub mod platform;
+pub mod range_rects;
 pub mod reveal;
 pub mod slot;
 pub mod svg;

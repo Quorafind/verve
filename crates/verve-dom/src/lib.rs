@@ -44,7 +44,7 @@ mod update;
 mod window_state;
 mod world;
 
-pub use layout_provider::{Layout, LayoutProvider};
+pub use layout_provider::{Boundary, Layout, LayoutProvider, PositionProvider, RangeProvider};
 pub use update::{Changes, Update};
 pub use window_state::{Align, FontFaceId, FontOutcome, ScrollRequest};
 

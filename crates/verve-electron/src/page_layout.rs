@@ -36,6 +36,7 @@ impl PageLayout {
                     .rects()
                     .filter_map(|(node, _)| Some((node, engine.scroll_extent(node)?)))
                     .collect(),
+                fragments: engine.fragments().collect(),
             }
         })));
         Self {
