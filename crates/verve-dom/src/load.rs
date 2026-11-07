@@ -25,7 +25,7 @@ mod script;
 mod sheets;
 
 pub(crate) use handlers::attribute;
-pub(crate) use net::{claims, fetch_response, is_network, navigable};
+pub(crate) use net::{allows_fetch, claims, fetch_response, forwards, is_network, navigable};
 pub(crate) use script::{connected, install, write};
 
 /// What a page fetches as it loads: its scripts, sheets, images, fonts, icons — and what its
@@ -37,6 +37,18 @@ pub trait Loader: 'static {
     /// Whether this loader answers `scheme` (file, app, custom ones registered by P16).
     /// http/https/data/blob go through Verve's own fetch unless the loader claims them.
     fn handles(&self, scheme: &str) -> bool;
+    /// Whether a page's `fetch` and `XMLHttpRequest` of `scheme` are answered by the realm's own
+    /// `fetch`, which the embedder's `BrowserNet` hooks (streamed bodies, the request's headers
+    /// and body, abort), instead of by [`Loader::fetch`]. The page's own loads of the scheme
+    /// (scripts, sheets, images) still go through [`Loader::fetch`].
+    fn forwards(&self, _scheme: &str) -> bool {
+        false
+    }
+    /// Whether `fetch()`, which XHR is not, may use a scheme that [`Loader::forwards`]: a custom
+    /// scheme registered without `supportFetchAPI` is refused by `fetch()` alone.
+    fn allows_fetch(&self, _scheme: &str) -> bool {
+        true
+    }
 }
 
 /// What is asked of a [`Loader`].
@@ -289,6 +301,9 @@ pub(crate) struct Load {
     /// The document's own `fetch` (which asks the loader for the addresses it answers), as it was
     /// installed: what `XMLHttpRequest` asks through, whatever the page does to `window.fetch`.
     pub dom_fetch: Option<boa_engine::JsValue>,
+    /// [`Load::dom_fetch`] for `XMLHttpRequest`, which unlike `fetch()` may use every scheme the
+    /// loader forwards.
+    pub dom_xhr_fetch: Option<boa_engine::JsValue>,
     pub module_scripts_started: usize,
     pub phase: Phase,
     painted: bool,

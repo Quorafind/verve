@@ -34,9 +34,29 @@ fn loader_handles(context: &Context, scheme: &str) -> bool {
         .is_some_and(|loader| loader.handles(scheme))
 }
 
-/// Whether a page's `fetch` of `url` is the loader's to answer.
+/// Whether a page's `fetch` of `url` is the loader's to answer: it handles the scheme, and does
+/// not leave it to the realm's own `fetch`.
 pub(crate) fn claims(context: &Context, url: &Url) -> bool {
-    loader_handles(context, url.scheme())
+    loader_handles(context, url.scheme()) && !forwards(context, url)
+}
+
+/// Whether the loader has the realm's own `fetch` answer the scheme of `url`.
+pub(crate) fn forwards(context: &Context, url: &Url) -> bool {
+    loader_says(context, |loader| loader.forwards(url.scheme()))
+}
+
+/// Whether `fetch()` may use the scheme of `url`, which the loader forwards.
+pub(crate) fn allows_fetch(context: &Context, url: &Url) -> bool {
+    loader_says(context, |loader| loader.allows_fetch(url.scheme()))
+}
+
+fn loader_says(context: &Context, ask: impl FnOnce(&dyn super::Loader) -> bool) -> bool {
+    shared(context)
+        .borrow()
+        .load
+        .loader
+        .as_ref()
+        .is_some_and(|loader| ask(loader.as_ref()))
 }
 
 /// Whether the page may send itself to `url` besides the network's addresses: Chromium blocks

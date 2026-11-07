@@ -191,7 +191,7 @@ const XHR_METHODS: &[Method] = &[
             set(&init, "body", body, cx)?;
         }
         fire(this, "loadstart", cx)?;
-        let dom_fetch = shared(cx).borrow().load.dom_fetch.clone();
+        let dom_fetch = shared(cx).borrow().load.dom_xhr_fetch.clone();
         let fetch = match dom_fetch {
             Some(fetch) => fetch,
             None => cx.global_object().get(js_string!("fetch"), cx)?,
