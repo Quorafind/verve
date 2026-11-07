@@ -511,3 +511,116 @@ fn a_paste_and_an_undo_that_changed_something_are_handled_and_one_with_nothing_t
         assert!(undone);
     });
 }
+
+#[test]
+fn a_click_away_during_a_composition_ends_it_as_it_stands_and_the_keyboard_works_after() {
+    on_page(|| {
+        let mut page = page();
+        let name = page.find("#name");
+        page.document.focus(&mut page.runtime, Some(name));
+        page.eval(
+            "globalThis.trace = []; for (const kind of ['compositionend', 'blur', 'input', 'keydown']) \
+               document.addEventListener(kind, (e) => trace.push(kind + (e.data ? '=' + e.data : '') + (kind === 'keydown' ? ':' + e.key : '')), true);",
+        );
+        page.document.compose(&mut page.runtime, "jia", None);
+        trace(&mut page);
+        // Observed in Electron 39.8.10 (p32-review2 `imeblur` probe): the composed text stays,
+        // `compositionend` comes before `blur`, and there is no further update or `input`.
+        click_at(&mut page, 20., 15.);
+        assert_eq!(trace(&mut page), "compositionend=jia blur");
+        assert_eq!(page.eval("document.getElementById('name').value"), "jia");
+        // The keyboard then works at the new focus: no `Process` key.
+        page.document.key_down(&mut page.runtime, &Key::char('x'));
+        assert_eq!(trace(&mut page), "keydown:x");
+        assert!(!page.document.is_composing());
+    });
+}
+
+#[test]
+fn which_keydowns_are_handled_is_frozen_from_electron_39_8_10() {
+    on_page(|| {
+        let mut page = page();
+        page.eval(
+            "document.body.insertAdjacentHTML('beforeend', '<a id=\"lnk\" href=\"#x\">l</a><input id=\"ro\" readonly><div id=\"ed\" contenteditable></div>')",
+        );
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        // `(target, key, unhandled)`: the coordinator's `probe-keys` `keys`/`keys3` probes put a
+        // menu item on each key; unhandled is the item being clicked. Ctrl+A on the body is the
+        // one row that differs from Chromium (it selects the page there; verve-dom selects
+        // nothing), and is frozen as verve-dom has it.
+        let rows: Vec<(Option<&str>, Key, bool)> = vec![
+            (Some("#name"), Key::named("Enter"), true),
+            (Some("#notes"), Key::named("Enter"), true),
+            (Some("#notes"), chord("Enter", ctrl), true),
+            (Some("#go"), Key::named("Enter"), true),
+            (Some("#go"), Key::char(' '), true),
+            (Some("#check"), Key::char(' '), true),
+            (Some("#name"), Key::char(' '), true),
+            (None, Key::char(' '), true),
+            (Some("#check"), Key::named("Backspace"), true),
+            (Some("#ro"), Key::named("Backspace"), true),
+            (Some("#name"), Key::named("Escape"), true),
+            (Some("#lnk"), Key::named("Enter"), false),
+            (Some("#name"), Key::named("Tab"), false),
+            (Some("#name"), Key::named("Backspace"), false),
+            (Some("#name"), Key::named("Delete"), false),
+            (Some("#name"), Key::named("ArrowUp"), false),
+            (Some("#name"), chord("a", ctrl), false),
+            (None, chord("a", ctrl), true),
+        ];
+        for (selector, key, unhandled) in rows {
+            let node = selector.map(|s| page.find(s));
+            page.document.focus(&mut page.runtime, node);
+            let got = page.document.key_down_unhandled(&mut page.runtime, &key);
+            assert_eq!(got, unhandled, "{selector:?} {key:?}");
+        }
+    });
+}
+
+#[test]
+fn an_undo_in_an_editing_region_that_has_something_to_undo_is_handled() {
+    on_page(|| {
+        let mut page = page();
+        page.eval("document.body.insertAdjacentHTML('beforeend', '<div id=\"ed\" contenteditable></div>')");
+        let ed = page.find("#ed");
+        page.document.focus(&mut page.runtime, Some(ed));
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        // Nothing to undo yet: the menu's. After typing, the undo runs and the key is handled.
+        assert!(
+            page.document
+                .key_down_unhandled(&mut page.runtime, &chord("z", ctrl))
+        );
+        page.document.key_down(&mut page.runtime, &Key::char('x'));
+        assert_eq!(page.eval("document.getElementById('ed').textContent"), "x");
+        assert!(
+            !page
+                .document
+                .key_down_unhandled(&mut page.runtime, &chord("z", ctrl))
+        );
+    });
+}
+
+#[test]
+fn a_key_taken_by_an_input_method_is_handled() {
+    on_page(|| {
+        let mut page = page();
+        let name = page.find("#name");
+        page.document.focus(&mut page.runtime, Some(name));
+        page.document.compose(&mut page.runtime, "ni", None);
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        assert!(
+            !page
+                .document
+                .key_down_unhandled(&mut page.runtime, &chord("b", ctrl))
+        );
+    });
+}

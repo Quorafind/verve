@@ -654,6 +654,9 @@ pub fn set_focus_from(context: &mut Context, id: Option<NodeId>, trusted: bool) 
     if before == id {
         return Ok(());
     }
+    if let Some(before) = before.filter(|b| read_dom(context, |dom| dom.exists(*b))) {
+        crate::ime::end_for_blur(context, before)?;
+    }
     with_dom(context, |dom| {
         dom.focused = id;
         dom.focus_visible = id.is_some_and(|id| shows_focus_ring(dom, id));

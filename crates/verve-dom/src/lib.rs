@@ -747,7 +747,7 @@ impl Document {
     /// focusable thing it is in; away, for none). Answers whether nothing prevented it.
     pub fn pointer_down(&self, runtime: &mut verve::Runtime, pointer: &Pointer) -> bool {
         let target = self.pointer_target(pointer);
-        self.press_down(runtime, target, pointer)
+        self.press_down(runtime, target, pointer, true)
     }
 
     /// [`Document::pointer_down`] on `node`, without hit testing.
@@ -757,10 +757,16 @@ impl Document {
         node: NodeId,
         pointer: &Pointer,
     ) -> bool {
-        self.press_down(runtime, node, pointer)
+        self.press_down(runtime, node, pointer, true)
     }
 
-    fn press_down(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) -> bool {
+    fn press_down(
+        &self,
+        runtime: &mut verve::Runtime,
+        target: NodeId,
+        pointer: &Pointer,
+        placed: bool,
+    ) -> bool {
         self.person(Act::Press);
         self.hover_node(runtime, Some(target), pointer);
         let held = match pointer.button {
@@ -818,7 +824,7 @@ impl Document {
         }
         // After the focus has moved: Chromium focuses before it selects.
         if allowed {
-            self.drag_pressed(runtime, target, pointer);
+            self.drag_pressed(runtime, target, (pointer, placed));
         }
         runtime.run_microtasks();
         allowed
@@ -846,7 +852,7 @@ impl Document {
 
     fn release(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) -> bool {
         self.person(Act::Release);
-        if let Some(dropped) = self.drag_released(runtime, pointer) {
+        if let Some(dropped) = self.drag_released(runtime, target, pointer) {
             return dropped;
         }
         let none = person::fields(pointer, pointer.buttons, 0);
@@ -916,7 +922,7 @@ impl Document {
             count: 1,
             ..Pointer::default()
         };
-        self.press_down(runtime, node, &pointer);
+        self.press_down(runtime, node, &pointer, false);
         self.release(runtime, node, &pointer)
     }
 
@@ -1071,7 +1077,8 @@ impl Document {
             && let Some(host) = self.editable_host(target)
             && self.edit_key(runtime, host, key)
         {
-            self.acted(key.key.chars().count() != 1 || key.modifiers.ctrl || key.modifiers.meta);
+            let typed = key.key.chars().count() == 1 && !key.modifiers.ctrl && !key.modifiers.meta;
+            self.acted(!typed && key.key != "Enter");
             return;
         }
         let chord = key.modifiers.ctrl || key.modifiers.meta;
@@ -1131,13 +1138,19 @@ impl Document {
                     let context = runtime.context();
                     let _ = bind::events::click(context, target, &[], true);
                 }
+                // A link is clicked on the keydown; a button, on the `keypress` (Electron 39.8.10,
+                // menu-order `keys3` probe): only the link's is a command of the keydown.
+                self.acted(!self.is_button_like(target));
             }
             "Backspace" | "Delete" if field => {
                 let word = chord || key.modifiers.alt;
                 let backward = key.key == "Backspace";
                 self.delete_in(runtime, target, backward, word);
+                self.acted(true);
             }
+            "ArrowUp" | "ArrowDown" if field => self.acted(true),
             "ArrowLeft" | "ArrowRight" | "Home" | "End" if field => {
+                self.acted(true);
                 let shift = key.modifiers.shift;
                 let word = chord || key.modifiers.alt;
                 bind::node::with_dom(runtime.context(), |dom| {
@@ -1167,8 +1180,13 @@ impl Document {
                         draft.select_all();
                     }
                 });
+                self.acted(true);
             }
-            "Tab" => self.tab(runtime, target, key.modifiers.shift),
+            "Tab" => {
+                let before = self.focused();
+                self.tab(runtime, target, key.modifiers.shift);
+                self.acted(self.focused() != before);
+            }
             _ => {}
         }
     }

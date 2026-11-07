@@ -444,3 +444,41 @@ fn remember(cx: &Context, composition: Composition) {
         push_step(cx, composition.target, "insertText", started, step);
     }
 }
+
+/// The focus is leaving `leaving` while an input method is composing in it: the composition ends
+/// as it stands, with `compositionend` and nothing else (Electron 39.8.10, the p32-review2
+/// `imeblur` probe: the composed text stays, `compositionend` comes before `blur`, no further
+/// update and no `input`). Without this the composition would stay open and every later key would
+/// be taken as a `Process` key of the field the focus left.
+pub(crate) fn end_for_blur(cx: &mut Context, leaving: NodeId) -> JsResult<()> {
+    let shared = crate::state::shared(cx);
+    let open = {
+        let state = shared.borrow();
+        let c = state
+            .editing
+            .composition
+            .as_ref()
+            .filter(|c| c.target == leaving);
+        c.map(|c| (c.node, c.start, c.len))
+    };
+    let Some((node, start, len)) = open else {
+        return Ok(());
+    };
+    let text = with_dom(cx, |dom| match node {
+        Some(node) => {
+            let all: Vec<u16> = dom.text_content(node).encode_utf16().collect();
+            let end = (start + len).min(all.len());
+            String::from_utf16_lossy(&all[start.min(end)..end])
+        }
+        None => {
+            let draft = dom.get_mut(leaving).and_then(|n| n.draft.as_mut());
+            draft.map_or_else(String::new, |draft| {
+                let spelled = draft.marked().map(|range| draft.text()[range].to_owned());
+                draft.unmark();
+                spelled.unwrap_or_default()
+            })
+        }
+    });
+    shared.borrow_mut().editing.composition = None;
+    composition_event(cx, leaving, "compositionend", &text)
+}

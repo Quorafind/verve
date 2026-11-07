@@ -1165,7 +1165,7 @@ fn key_action(cx: &mut Context, host: NodeId, key: &Key) -> JsResult<bool> {
     } else {
         Granularity::Character
     };
-    let printable = key.key.chars().count() == 1 && !chord;
+    let printable = key.key.chars().count() == 1 && !chord && !key.modifiers.alt;
     if printable || key.key == "Enter" {
         return typed_key(cx, host, key, printable);
     }

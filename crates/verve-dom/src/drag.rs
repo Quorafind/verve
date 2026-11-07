@@ -233,13 +233,13 @@ impl Document {
         &self,
         runtime: &mut verve::Runtime,
         target: NodeId,
-        pointer: &Pointer,
+        (pointer, placed): (&Pointer, bool),
     ) {
         self.arm(target, pointer);
         let armed = matches!(*self.phase(), Phase::Pressed(_));
         self.view.borrow_mut().drag.anchor = None;
         if !armed && pointer.button == 0 {
-            self.begin_selecting(runtime, target, pointer);
+            self.begin_selecting(runtime, target, pointer, placed);
         }
     }
 
@@ -251,7 +251,13 @@ impl Document {
     /// on a button, a link or a draggable element leaves the selection, a press on text is
     /// `selectstart` then a caret, and a canceled `selectstart` keeps the old selection
     /// (`p24-review3/out-select.txt`).
-    fn begin_selecting(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) {
+    fn begin_selecting(
+        &self,
+        runtime: &mut verve::Runtime,
+        target: NodeId,
+        pointer: &Pointer,
+        placed: bool,
+    ) {
         let in_control = {
             let state = self.state.borrow();
             let mut at = Some(target);
@@ -268,7 +274,7 @@ impl Document {
             }
             found
         };
-        if in_control || self.pointer_target(pointer) != target {
+        if in_control || !placed {
             return;
         }
         let Some(position) = self.text_position_at(pointer.x, pointer.y) else {
@@ -358,7 +364,7 @@ impl Document {
             found
         };
         *self.phase() = match source {
-            Some(source) if pointer.button == 0 => Phase::Pressed(Press {
+            Some(source) if pointer.button == 0 && pointer.count <= 1 => Phase::Pressed(Press {
                 source,
                 x: pointer.x,
                 y: pointer.y,
@@ -377,12 +383,16 @@ impl Document {
 
     /// The pointer moved during a drag: the drag moves, and nothing else hears of it. Answers
     /// whether it was one.
-    pub(crate) fn drag_moved(&self, runtime: &mut verve::Runtime, pointer: &Pointer) -> bool {
+    pub(crate) fn drag_moved(
+        &self,
+        runtime: &mut verve::Runtime,
+        target: NodeId,
+        pointer: &Pointer,
+    ) -> bool {
         let Some(mut active) = self.take_active() else {
             return false;
         };
         self.drag_event(runtime, &active, pointer);
-        let target = self.pointer_target(pointer);
         self.aim(runtime, &mut active, target, pointer, true);
         *self.phase() = Phase::Active(active);
         runtime.run_microtasks();
@@ -464,6 +474,7 @@ impl Document {
     pub(crate) fn drag_released(
         &self,
         runtime: &mut verve::Runtime,
+        target: NodeId,
         pointer: &Pointer,
     ) -> Option<bool> {
         let Some(mut active) = self.take_active() else {
@@ -474,7 +485,6 @@ impl Document {
             }
             return None;
         };
-        let target = self.pointer_target(pointer);
         if active.over != Some(target) {
             self.aim(runtime, &mut active, target, pointer, true);
         }
@@ -536,7 +546,7 @@ impl Document {
             let live = related.filter(|n| self.state.borrow().dom.exists(*n));
             live.map_or(JsValue::null(), |n| wrap(runtime.context(), n))
         };
-        let mut init = crate::person::fields(pointer, pointer.buttons, 0);
+        let mut init = crate::person::fields(pointer, 0, 0);
         init.push(("dataTransfer", transfer.clone().into()));
         init.push(("relatedTarget", related));
         self.fire(runtime, target, "DragEvent", kind, &init)

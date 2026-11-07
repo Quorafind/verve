@@ -57,7 +57,7 @@ impl Document {
     /// came onto hear their events, a `:hover` rule follows, and `target` hears `pointermove` and
     /// `mousemove`.
     pub fn pointer_move_on(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) {
-        if self.drag_moved(runtime, pointer) {
+        if self.drag_moved(runtime, target, pointer) {
             return;
         }
         self.hover_node(runtime, Some(target), pointer);
@@ -182,56 +182,33 @@ impl Document {
     }
 
     /// [`Document::key_down`], and whether the page left the key alone: neither prevented it nor
-    /// used it for something other than typing a character. A menu accelerator acts on such a key
-    /// (Electron 39.8.10: Ctrl+B in a plain input is the menu's, Ctrl+A in one is not). What the
-    /// default action did is read from the action itself ([`Document::acted`]): a copy or cut that
-    /// copied something, a paste, an undo that changed something, an editing key in a region. A
-    /// keydown that cancelled a drag (Escape) returns `false` from `key_down` and counts as handled.
+    /// ran an editing or navigation command on the keydown itself. A menu accelerator acts on such a
+    /// key. What ran is read from the action ([`Document::acted`]), and "ran" means the command
+    /// was enabled, not that it changed anything. Electron 39.8.10 (menu items on keys, the
+    /// coordinator's `probe-keys` `keys`, `keys2` and `keys3` probes):
+    ///
+    /// - handled: a delete (also at the end of a field, where it deletes nothing), a caret move
+    ///   (Up in an input or a textarea's first line too), select all, an undo or redo that was
+    ///   enabled, Tab that moved the focus, Enter on a link, copy, cut and paste;
+    /// - unhandled: typing a character, Enter (a line break, a form's submit, a button's press: they
+    ///   come from `keypress`), Space (typing, or a button's press on `keyup`), Ctrl+Enter, Escape,
+    ///   Backspace in a read-only field or on a checkbox, Ctrl+Z with nothing to undo, Ctrl+A on
+    ///   the body (verve-dom selects nothing there).
+    ///
+    /// A key taken by an input method (`Process`) is handled: no accelerator matches it.
     pub fn key_down_unhandled(&self, runtime: &mut verve::Runtime, key: &Key) -> bool {
-        let target = self.key_target();
+        let composing = self.is_composing();
         self.state.borrow_mut().key_acted = false;
         let allowed = self.key_down(runtime, key);
-        let acted = self.state.borrow().key_acted || self.default_acts(target, key);
-        allowed && !acted
+        let acted = self.state.borrow().key_acted;
+        allowed && !acted && !composing
     }
 
-    /// The keydown's default action did something besides type: see [`Document::key_down_unhandled`].
+    /// The keydown's default action ran a command: see [`Document::key_down_unhandled`].
     pub(crate) fn acted(&self, did: bool) {
         if did {
             self.state.borrow_mut().key_acted = true;
         }
-    }
-
-    /// Whether the keydown's default action at `target` does something besides typing that the
-    /// default action does not report itself: in a text field the caret's keys, delete, select all,
-    /// Enter, and Tab, which moves the focus; a press of a button or a link.
-    fn default_acts(&self, target: NodeId, key: &Key) -> bool {
-        let held = key.modifiers;
-        let chord = held.ctrl || held.meta;
-        let (field, host) = {
-            let state = self.state.borrow();
-            let dom = &state.dom;
-            let tag = dom.get(target).and_then(|n| n.tag());
-            let field = matches!(tag, Some("input" | "textarea"));
-            (field, dom.editing_host(target).is_some())
-        };
-        let typing = field || host;
-        let name = key.key.as_str();
-        match name {
-            "Tab" => true,
-            "a" | "A" if chord => true,
-            "Backspace" | "Delete" | "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown"
-            | "Home" | "End" => typing,
-            "Enter" => typing || self.is_button_like(target) || self.is_link(target),
-            " " => self.is_button_like(target),
-            _ => false,
-        }
-    }
-
-    fn is_link(&self, id: NodeId) -> bool {
-        let state = self.state.borrow();
-        let node = state.dom.get(id);
-        node.is_some_and(|n| n.tag() == Some("a") && n.attr("href").is_some())
     }
 }
 
