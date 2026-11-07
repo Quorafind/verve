@@ -46,6 +46,15 @@ impl Cloned {
         copy::into(&self.0, context)
     }
 
+    /// How many elements the clone has, when it is an array; a diagnostic counts what an IPC call
+    /// carried this way without making it again.
+    pub fn array_len(&self) -> Option<usize> {
+        match &self.0 {
+            Tree::Array(items) => Some(items.len()),
+            _ => None,
+        }
+    }
+
     /// A clone of `undefined`.
     pub fn undefined() -> Self {
         Self(Tree::Undefined)

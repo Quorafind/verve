@@ -128,6 +128,18 @@ fn a_clone_carries_every_kind_of_value_between_realms() {
 }
 
 #[test]
+fn a_clone_of_an_array_counts_its_elements() {
+    let mut rt = Runtime::new();
+    let clone = |source: &str, rt: &mut Runtime| {
+        let value = rt.eval(source).unwrap();
+        Cloned::from_value(&value, rt.context()).unwrap()
+    };
+    assert_eq!(clone("[]", &mut rt).array_len(), Some(0));
+    assert_eq!(clone("[1, 'a', {}]", &mut rt).array_len(), Some(3));
+    assert_eq!(clone("({ length: 2 })", &mut rt).array_len(), None);
+}
+
+#[test]
 fn a_clone_of_an_error_can_be_made_without_a_realm() {
     let mut rt = Runtime::new();
     let cloned = Cloned::from_error_message("Error", "it failed");
