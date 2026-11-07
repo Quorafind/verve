@@ -50,6 +50,14 @@ pub enum ToRendererInput {
     /// Files, text or markup are dragged in from the system (P24; P34 makes it from GPUI's
     /// file-drop events).
     Drag(DragInput),
+    /// An option of a `<select>` was picked in the shell's popup: `index` is its place among the
+    /// options the display list gives for the select (`SelectOption`, hidden ones left out), not
+    /// its value, which two options may share. The page hears `input` and `change` unless the
+    /// option is disabled or was the chosen already (P32).
+    Choose {
+        select: verve_dom::NodeId,
+        index: usize,
+    },
 }
 
 /// A drag from outside the window, as the shell sees it.

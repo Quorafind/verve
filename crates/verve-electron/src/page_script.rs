@@ -209,6 +209,11 @@ pub(crate) fn person(
             CompositionEvent::Commit(text) => document.commit_composition(runtime, &text),
             CompositionEvent::Cancel => document.cancel_composition(runtime),
         },
+        ToRendererInput::Choose { select, index } => {
+            if let Some(select) = live(document, Some(select)) {
+                document.choose_option(runtime, select, index);
+            }
+        }
         _ => {}
     }
     None

@@ -1462,6 +1462,32 @@ impl Document {
         }
         runtime.run_microtasks();
     }
+
+    /// One of a `<select>`'s listed options chosen, by its index among the ones the list shows
+    /// (hidden options are not counted): `input` and `change`. An option that cannot be chosen,
+    /// or one that is already the chosen, is ignored.
+    pub fn choose_option(&self, runtime: &mut verve::Runtime, select: NodeId, index: usize) {
+        let changed = bind::node::with_dom(runtime.context(), |dom| {
+            let option = *dom.listed_options(select).get(index)?;
+            let select_off = dom
+                .get(select)
+                .is_some_and(|n| n.attr("disabled").is_some());
+            if select_off
+                || dom.option_disabled(option)
+                || dom.selected_option(select) == Some(option)
+            {
+                return None;
+            }
+            let at = dom.options(select).iter().position(|o| *o == option)?;
+            dom.select_index(select, Some(at));
+            Some(())
+        });
+        if changed.is_some() {
+            self.fire(runtime, select, "Event", "input", &[]);
+            self.fire(runtime, select, "Event", "change", &[]);
+        }
+        runtime.run_microtasks();
+    }
 }
 
 /// The legacy `keyCode` of a key, as browsers answer it.
