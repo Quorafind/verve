@@ -1,0 +1,8 @@
+initial false false null
+open returns 
+close returns 
+toggle returns 
+inspectElement returns 
+after false false null []
+default window false false null
+closeDevTools when closed 
