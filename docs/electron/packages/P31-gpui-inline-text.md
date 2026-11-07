@@ -322,3 +322,78 @@ cargo test --locked -p verve-electron --test headless
 cargo clippy --locked -p verve-layout -p verve-dom -p verve-electron --all-targets -- -D warnings
 ```
 
+
+### 第二阶段：真字体、画字、选区、`@font-face`
+
+**做了**：
+
+- **`GpuiMeasurer`**（`crates/verve-gpui/src/text_measurer.rs`）：`TextMeasurer` 建在 App 共享的 `Arc<TextSystem>` 上（Shell 启动时 `Hub::set_text_measurer(...)` 装上，之后建的页面都用它；没装就是无头测量器）。
+  `FontKey` = GPUI `FontId` 的数字，渲染器线程与绘制线程同一个实例所以 id 通用；`resolve` 在族名表里挑第一个**已安装**的族（`all_font_names`）作主字体、其余作 `FontFallbacks`（所以未安装的 `Helvetica` 不会让 GPUI 掉进 `.ZedMono`），带缓存；
+  `shape` 用 `WindowTextSystem::layout_line`，按 (文本, 字体, 字号) 缓存，回退字体换字时每个字形带着画它的 `font` 与 `is_emoji`。
+  **`finish_frame` 的替代**：测量器按字节算缓存：`WindowTextSystem` 塑形累计超过 4 MB（文字加字形）后，在**一次布局结束时**整个重建；已塑形表超过 32 MB 清空；`metrics` 表超过 8192 项清空（之前按条数 4096/40000，`pre.textContent += line` 这类越长越大的文本节点每改一次留一份，O(n²)）。
+  这个“布局结束”有了调用点：`TextMeasurer::finish_layout()`（默认空），`LayoutEngine::update`（整体重排后）与 `replace` 的末尾各调一次，`GpuiMeasurer` 在里面做上面的重建。
+  **补丁公开 `WindowTextSystem::finish_frame` 之后**：`finish_layout` 里改成调 `finish_frame`，删 `shaped_bytes` 与 `SHAPED_BUDGET`。
+  **`line_gap`**：GPUI 的 `FontMetrics::line_gap` 读得到（DirectWrite 的 `lineGap` = hhea 总行高减去 Windows ascent+descent，Arial 67/2048），但 `TextSystem` 没有公开取它的函数，所以测量器带一张小表（`LINE_GAPS`：Arial、Times New Roman、Yu Gothic (UI)、SimSun），
+  其余字体按 0。**补丁公开 `TextSystem::font_metrics`（或 `line_gap`）之后**删这张表。
+  **取整**：`metrics` 把 ascent、descent、line_gap 各自四舍五入（Blink 的 `SimpleFontData` 就是这样），布局里 `line-height: normal` = 三者之和。
+- **Chromium 的数字（Electron 39.8.10，Windows 10，DPR 1，隐藏窗口，探针在 `SCRATCH\p31\probe1`）**，冻结在 `crates/verve-gpui/tests/text.rs` 的头注里：
+  `line-height: normal` 一行 `Hxg`：Segoe UI 13/16/20px = 17/21/27，Arial 15/18/23，Consolas 15/19/23，Times New Roman 16/18/23，Courier New 15/18/23，Microsoft YaHei UI 16px = 20；
+  基线：Segoe UI 16px 在行顶下 17，Consolas 15，Times New Roman 14（= 取整后的 ascent，也就是 GPUI/DirectWrite 的 Windows ascent，**不是 hhea**：Consolas hhea 是 11.883，Chromium 用 14.719 → 15）；
+  行里夹中文或 emoji 不让行变高（21 → 21，YaHei UI 比 Segoe UI 矮；回退字体更高时 Chromium 会加高，我们仍不会，见下）；`Hxg` 宽 Segoe UI 28.125、Arial 28.453、Consolas 26.391、Times 27.563；
+  `<sub>`/`<sup>` 的位移与第一阶段记下的一致：`sub` 向下 `size/5 + 1`、`sup` 向上 `size/3 + 1`（父字号 16px：4.2 与 6.33；16px 行里 `<sub>` 盒顶在 10.516、`<sup>` 在 0、行高 27.516）。
+  **探针里的另一个发现**：这台 zh-CN 机器上 Electron 的 `sans-serif`、`serif`、`monospace` 全都落到 Microsoft YaHei（`Hxg` 宽 30.594），所以夹具用显式的族名，不依赖通用族。
+- **显示列表出字**（`crates/verve-layout/src/paint/text.rs`，契约见上面“第二阶段的契约”）：行内元素的 `Box`（`SpanPaint`：纯色背景、边框、px 圆角；`slice` 去掉另一行那一侧的边框与圆角）→ 选区 `Box`（行盒高度）→ 每个文本片段的阴影 `Glyphs`、`Glyphs`、`Decoration`。
+  全部在盒自己的裁剪与滚动框之内（块自己是滚动容器时，它的文字在它自己的框里）；被祖先裁剪完全盖掉的行不出项。文字在层叠上下文里排在浮动之后、定位盒之前。
+  装饰的几何是近似的（下划线顶在基线下 `size/10`、线粗 `max(1, size/16)`、删除线在 x 高一半、上划线在 ascent），`double/dotted/dashed` 画成实线，`wavy` 用 GPUI 的波浪下划线；没有用字体自己的下划线位置与粗细。
+- **GPUI 回放**（`plan.rs`、`dom_element.rs`）：`Shape::Glyphs`/`Shape::Decoration`（窗口坐标，不透明度乘进颜色）；`paint_glyph`（emoji 用 `paint_emoji`），下划线 `paint_underline`、删除线 `paint_strikethrough`。
+  **帧成本**：plan 仍是每个 list 与滚动预测算一次；回放时 `Glyphs` 先按（窗口、它自己的裁剪）剔除，只有看得见的行才去问文本系统（2000 段的页面每帧只有几十行）。
+  软件画家（`--screenshot`）没有字体：`Glyphs` 不画，`Decoration` 画成一条杠，所以 `--screenshot` 的图里没有字，没有任何测试比较窗口里字的像素。
+- **选区**：`LayoutEngine::set_selection`（DOM 端点），`PageLayout::show_selection` 在每次发布前从 `Document::selection_boundaries` 读窗口的选区；颜色 `#3390FF` 加 45% 不透明度，文字仍是原色（Chromium 选中文字变白，`::selection` 是 P22 的）。
+  命中（点 → 文本位置）是 `text_position_at`（第一阶段），现在绑到 `document.caretRangeFromPoint` 与 `document.caretPositionFromPoint`（`bind/caret.rs`）；**鼠标拖选等 P32 转发指针**，到时 P32 调 `Document::text_position_at` 设选区即可。
+- **`@font-face` 通道**：见上面的契约：渲染器线程直接 `add_fonts`（不加 `FromRenderer::Font`/`FontsChanged`，P02 表里那一行划掉了）。`Document::set_font_provider`（verve-dom）在字节到手时（`new FontFace(f, buffer)`，或 `load()` 取回 `url()` 后的 `settle_font_bytes`）问宿主，
+  答 true 才 `loaded`；`PageLayout` 的钩子 = `measurer.add_face` + `LayoutEngine::register_font` + 让文档的布局失效，`document.fonts.ready` 在这之后 resolve，所以之后量到的宽度是新字体的。
+  GPUI 的 `add_fonts` 按字体自己 name 表的族名登记：`add_face` 读字节里的 `name` 表（`font_name.rs`：nameID 16，没有就 1；Windows 平台、UTF-16BE；美国英语在前），逐个问文字系统“有没有这个族”，取第一个有的；都没有就返回 false，**不会把能用的面换成解析不到的名字**。
+  同一份字节（页面重载、另一页）按字节的哈希只 `add_fonts` 一次；同一别名的第二个字重/斜体（常规 + 粗体）各自登记，`resolve` 按字重与斜体取最近的。别名表（CSS 族名 → 字体面）是**页面自己的**：`Hub` 经 `TextMeasurer::for_page()` 给每个页面一个测量器，页面之间共用文字系统与缓存（`resolved` 按替换后的名字键，`runs` 按 (字体, 字号, 文本)），所以页面 B 的 `font-family: Brand` 看不到页面 A 的 `Brand`，A 注册也不清别人的缓存。
+  **做不到的**：`add_fonts` 进的是 app 共用的 `TextSystem`，是全局的、撤不掉：字体字节一经任何页面声明就留在 app 的字体集里，内部族名与系统已装的族同名（如 Consolas）时，DirectWrite 先搜自定义集合，所以这个面对**所有页面**盖过系统同名族；`delete`/`clear` 一个 `FontFace` 不会反注册它。
+  “某个族系统有没有”由文字系统自己答（`resolve_font` 不落到回退即有），按名字缓存：`Microsoft YaHei`、`SimSun`、`SimHei` 这类在中文系统里本地化名为“微软雅黑”等的族不再被丢掉。
+  只有 ttf/otf（woff/woff2 的字节 `add_fonts` 不收，face 置为 `error`）；样式表里的 `@font-face` 规则 verve-dom 还没读（P22），只有脚本的 `FontFace` 走这条通道。
+- **测试**（全部没有跑过）：`verve-layout --test text_paint`（无头：字形、装饰、行内盒、选区、顺序、裁剪）；`verve-gpui --lib`（plan 的 Glyphs/Decoration）；`verve-dom --test fonts`/`layout_provider`（字体钩子、caret、选区端点）；
+  `verve-gpui --test text`（Windows 真字体、无窗口：混排每个字形有宽度且无缺字、YaHei UI 为中文回退、Chromium 的行高/基线/宽度/sub/sup、注册的面改变宽度）；`--test text_fixture`（夹具的每个块的行数与每行上下沿、块的位置与高度，与 Chromium 差 ≤ 2px）；
+  两个 `#[ignore = "opens real windows"]`：夹具的 `--screenshot`（只验退出码与尺寸）与 `text-2000` 的帧时间（p95 < 4 ms，release）。夹具与 Electron 的基准：`tests/electron/apps/text/`（`expected-chromium.json` 与 `.png`，`VERVE_TEXT_JSON=… VERVE_TEXT_PNG=… electron tests/electron/apps/text` 重做）。
+
+**没做 / 已知偏差**：
+
+- 回退字体比主字体高时，行高不随之增加（Chromium 会）：`line-height: normal` 只用主字体的 `metrics`（这台机器的探针里 YaHei UI 比 Segoe UI 矮，没有遇到）。
+- 行内元素还没有 `Hitbox`（`<a>` 的点击与 `cursor: pointer`）；`position: relative` 的行内元素、`::before`/`::after` 的盒子、列表标记（`::marker`）仍如第一阶段所记。
+- 选中文字不变白；`text-shadow` 不模糊；`text-decoration-style` 的 `double/dotted/dashed` 画实线；下划线位置与粗细是近似。
+- **emoji 不跟不透明度与颜色 alpha**：GPUI 的 `paint_emoji` 不带颜色，`with_element_opacity` 在 fork 里是 `pub(crate)`。淡到 alpha 约为 0 的 emoji 不画，半透明的画满不透明。用户备好的 fork 补丁（`with_element_opacity` 公开）之后在 `paint_glyphs` 里包一层即可。已写进 `plan.rs` 的偏差表。
+- **字形的纵向偏移被丢掉**：`ShapedGlyph.position.y` 没进 `PlacedGlyph`，所以靠它定位的符号（夹具里“تُكتب”的 damma 之类）位置不对。
+- **行内元素各自的 `visibility`** 没读：`visibility` 只看文字所在的块（`TextPaint`/`SpanPaint` 不带它）。
+- **`user-select: none` 的文字不再被选区高亮**（`selection_rects` 跳过它），但 `range_rects` 与 `getClientRects` 仍给它的盒子。
+- **字体在 app 里是全局的**：见上面“做不到的”。页面之间的别名表是分开的，字节不是。
+- **注册的面只在第一个族名时有效**：DirectWrite 的回退只搜系统字体，所以 `font-family: system-ui, Brand` 里的 `Brand` 不会被用到。
+- **`FontFace` 在构造时就注册**（有字节时），而不是 `document.fonts.add`；`delete`/`clear` 不反注册。
+- **下划线与上划线现在画在字下**，删除线在字上（Chromium 的 `TextFragmentPainter`）；契约在“第二阶段的契约”里改了。
+- **`LINE_GAPS` 里 Yu Gothic (UI) 与 SimSun 两行没有在 Electron 里探过**（按字体表算的）；Arial 与 Times New Roman 探过。
+- **选区**仍是每个文本片段一个矩形（不是每行一个），相邻片段之间可能有缝；`selection_rects` 的按行过滤仍是 O(行 × 段)；选区项的 `node` 是 0。
+- **`caretPositionFromPoint`** 返回普通对象（没有 `CaretPosition` 类和 `getClientRect()`），视口外不返回 null，非有限参数不抛；这三件没做。
+- 原子行内盒仍在 `flow()` 里与块一起画，在浮动之前（附录 E 要它们跟着行画）。
+- `font-feature-settings` 与 `font-variant-numeric` 没接（`resolve` 没地方放）。
+- “在窗口里验证 `paint_glyph` 画出的字对”没有做（我不开窗口）：测试 `mixed_chinese_english_and_emoji_shape_to_real_glyphs` 证明渲染器线程塑出的 id 非缺字、字体 id 来自同一个 `TextSystem`，但画到屏上要你在窗口里看一眼（`electron tests/electron/apps/text`）。
+- 体积：第二阶段新增 `GpuiMeasurer`、出项、回放与字体通道，没有新依赖（`unicode-linebreak` 是第一阶段的，约 21 KB）。中央测得超预算（+445,440 字节，预算 300 KB，新目标 ≤ 350 KB）；这一轮的削减：`ShapedRun.glyphs` 改成 `Arc<[PlacedGlyph]>`（片段与显示列表共用，不再每次建列表复制）；`paint_command` 的大分支拆成小函数；重复的辅助函数合并（`set_boundary`、测试支撑）。我没有量，预期的缩减在几 KB 到十几 KB；单态化最多的 `paint/text.rs` 与 `text_measurer.rs` 请用 cargo bloat 看。
+- **改了“修改”范围之外的文件**：verve-dom 的 `bind/`、`state.rs`、`load.rs`、`window_state.rs`（字体钩子、选区端点、caretRangeFromPoint）；verve-electron 的 `hub/`（`set_text_measurer`，在第一个页面建出之后再调会 panic）、`page_layout.rs`、`renderer_guest.rs`；verve-gpui 的 `plan.rs`、`screenshot.rs`、`lib.rs`、`font_name.rs`（新）；verve-layout 的 `measure.rs`、`engine.rs`、`paint.rs`（滚动条画在块内文字之上：`flow_with_floats` 在文字之后按内层到外层补 `scroller`）。
+
+**要跑的测试**（一次一条）：
+
+```
+cargo test --locked -p verve-layout --test text_paint
+cargo test --locked -p verve-layout --lib
+cargo test --locked -p verve-dom --test fonts
+cargo test --locked -p verve-dom --test layout_provider
+cargo test --locked -p verve-electron --test geometry
+cargo test --locked -p verve-gpui --features jit --lib
+cargo test --locked -p verve-gpui --features jit --test text
+cargo test --locked -p verve-gpui --features jit --test text_fixture
+cargo test --locked -p verve-gpui --features jit --test text_fixture -- --ignored   (真窗口)
+VERVE_FRAME_STATS=1 target\release\electron.exe tests\electron\apps\text-2000      (release 帧时间)
+```
