@@ -28,6 +28,7 @@ mod pixels;
 mod preload;
 mod probe;
 pub mod renderer_guest;
+mod renderer_net;
 mod single_instance;
 mod window_state;
 

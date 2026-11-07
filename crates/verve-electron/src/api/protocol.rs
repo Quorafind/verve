@@ -6,14 +6,19 @@
 //! the app *registers* is its own (`app:`); one it *intercepts* is a built-in's (`http`, `https`,
 //! `file`), whose handler stands in for the network. `handle` picks between the two by the
 //! scheme's name. The module's own functions (`protocol.handle`) are the default session's.
+//!
+//! `registerSchemesAsPrivileged` is the app's, not a session's: it says which custom schemes have
+//! an origin (`standard`), are secure contexts (`secure`), may be `fetch`ed (`supportFetchAPI`),
+//! and is only allowed before the app is ready.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use boa_engine::{Context, JsObject, JsResult, JsValue};
-use verve::native::{self, arg};
+use verve::native::{self, arg, js_text};
 
-use super::define::{self, Args, Kind};
+use super::define::{self, Args, Fields, Kind};
+use crate::hub::{Privileged, Privileges};
 use crate::msg::SessionId;
 
 /// How a handler is called and what it answers with.
@@ -293,6 +298,23 @@ fn drop_entry(context: &mut Context, session: SessionId, scheme: &str, intercept
 /// The `protocol` module: the app-wide privileges and the default session's `Protocol`.
 pub(crate) fn make(context: &mut Context) -> JsResult<JsValue> {
     let module = native::object(context);
+    module.set(
+        boa_engine::js_string!("registerSchemesAsPrivileged"),
+        native::function(
+            context,
+            "registerSchemesAsPrivileged",
+            1,
+            register_privileged,
+        ),
+        false,
+        context,
+    )?;
+    module.set(
+        boa_engine::js_string!("getStandardSchemes"),
+        native::function(context, "getStandardSchemes", 0, standard_schemes),
+        false,
+        context,
+    )?;
     for (index, (name, length, _)) in METHODS.iter().enumerate() {
         let method = native::closure(context, name, *length, forward, index);
         module.set(boa_engine::JsString::from(*name), method, false, context)?;
@@ -310,4 +332,60 @@ fn forward(
     let default = super::session::default_id(context);
     let protocol = object_of(context, default)?;
     native::invoke(&protocol.into(), METHODS[*index].0, args, context)
+}
+
+/// `registerSchemesAsPrivileged([{ scheme, privileges }])`.
+fn register_privileged(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let state = super::shared(context);
+    if state.app.is_ready() {
+        return Err(define::error(
+            "protocol.registerSchemesAsPrivileged should be called before app is ready",
+        ));
+    }
+    let list = native::list_of(&arg(args, 0), context)
+        .map_err(|_| Args::new(args).conversion_failure(0))?;
+    let mut granted = state.hub.privileged();
+    for item in list {
+        let object = item.as_object();
+        let fields = Fields::new(object.as_ref());
+        let Some(scheme) = fields.string("scheme", context)? else {
+            return Err(Args::new(args).conversion_failure(0));
+        };
+        let privileges = privileges_of(&fields, context)?;
+        granted.retain(|known| known.scheme != scheme);
+        granted.push(Privileged { scheme, privileges });
+    }
+    state.hub.set_privileged(granted);
+    Ok(JsValue::undefined())
+}
+
+fn privileges_of(scheme: &Fields, context: &mut Context) -> JsResult<Privileges> {
+    let object = scheme.object("privileges", context)?;
+    let fields = Fields::new(object.as_ref());
+    Ok(Privileges {
+        standard: fields.bool("standard", false, context)?,
+        secure: fields.bool("secure", false, context)?,
+        bypass_csp: fields.bool("bypassCSP", false, context)?,
+        allow_service_workers: fields.bool("allowServiceWorkers", false, context)?,
+        support_fetch_api: fields.bool("supportFetchAPI", false, context)?,
+        cors_enabled: fields.bool("corsEnabled", false, context)?,
+        stream: fields.bool("stream", false, context)?,
+        code_cache: fields.bool("codeCache", false, context)?,
+    })
+}
+
+/// `getStandardSchemes()`: the web's and the app's.
+fn standard_schemes(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let mut names: Vec<String> = ["http", "https", "file", "filesystem", "ftp", "ws", "wss"]
+        .map(String::from)
+        .into();
+    let granted = super::shared(context).hub.privileged();
+    names.extend(
+        granted
+            .into_iter()
+            .filter(|p| p.privileges.standard)
+            .map(|p| p.scheme),
+    );
+    let items = names.iter().map(|name| js_text(name)).collect();
+    Ok(native::array(context, items))
 }

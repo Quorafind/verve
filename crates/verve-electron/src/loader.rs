@@ -14,7 +14,7 @@ use verve::vfs::Overlay;
 use verve_dom::{Destination, LoadError, LoadRequest, LoadResult, Loader};
 
 use crate::api::mime;
-use crate::hub::Session;
+use crate::hub::{Privileged, Session};
 use crate::msg::{FromRenderer, ProtocolRequest, ProtocolResponse};
 
 type Done = Box<dyn FnOnce(LoadResult)>;
@@ -27,6 +27,8 @@ pub struct ElectronLoader {
     /// The session the page belongs to: the schemes its main process answers
     /// (`protocol.handle`) are the session's.
     session: Arc<Session>,
+    /// The schemes `registerSchemesAsPrivileged` named.
+    privileged: Rc<Vec<Privileged>>,
     /// Asks for the main process, until the guest sends them.
     outbox: Rc<RefCell<Vec<FromRenderer>>>,
     /// The asks not yet answered, by their number.
@@ -43,10 +45,12 @@ impl ElectronLoader {
         overlay: Option<Arc<dyn Overlay>>,
         calls: Arc<AtomicU64>,
         session: Arc<Session>,
+        privileged: Vec<Privileged>,
     ) -> Self {
         Self {
             overlay,
             session,
+            privileged: Rc::new(privileged),
             outbox: Rc::default(),
             calls: Rc::default(),
             next: calls,
@@ -180,6 +184,14 @@ impl Loader for ElectronLoader {
     fn handles(&self, scheme: &str) -> bool {
         matches!(scheme, "file" | "data") || self.session.handles(scheme)
     }
+
+    fn allows_fetch(&self, scheme: &str) -> bool {
+        let privileged = self.privileged.iter().find(|p| p.scheme == scheme);
+        privileged.map_or(
+            matches!(scheme, "http" | "https" | "file" | "data" | "blob"),
+            |p| p.privileges.support_fetch_api,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -192,7 +204,7 @@ mod tests {
         for scheme in schemes {
             session.set_handled(scheme, true);
         }
-        ElectronLoader::new(None, calls, session)
+        ElectronLoader::new(None, calls, session, Vec::new())
     }
 
     fn answer_of(loader: &ElectronLoader, url: &str) -> LoadResult {
@@ -274,6 +286,7 @@ mod tests {
         assert!(!loader.handles("app"));
         let loader = loader_for(&["app"], Arc::default());
         assert!(loader.handles("app"));
+        assert!(!loader.allows_fetch("app"));
         let slot = Rc::new(RefCell::new(None));
         let sink = Rc::clone(&slot);
         let request = LoadRequest {

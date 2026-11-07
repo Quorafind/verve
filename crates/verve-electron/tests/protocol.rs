@@ -1,7 +1,8 @@
 //! `protocol`: what a session says about itself, `protocol.handle` and the older calls with
-//! `net.fetch`, and a page loaded from a handler. The expected values are frozen from Electron
-//! 39.8.10 (probes in the P16 scratch folder; the source of each is named where it is not
-//! obvious).
+//! `net.fetch`, a page loaded from a handler, what `registerSchemesAsPrivileged` gives a scheme
+//! (an origin, a secure context) and the errors of the module. The expected values are frozen from
+//! Electron 39.8.10 (probes in the P16 scratch folder; the source of each is named where it is
+//! not obvious).
 
 #![allow(clippy::unwrap_used)]
 
@@ -23,11 +24,44 @@ fn site() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// An app whose script is `setup` then one hidden window at `app://bundle/index.html`, with the
+/// `app` scheme registered as `privileges` says.
+fn site_app(privileges: &str, setup: &str) -> App {
+    let main = format!(
+        "const {{ app, BrowserWindow, protocol, net }} = require('electron');
+         const {{ pathToFileURL }} = require('url'); const path = require('path');
+         protocol.registerSchemesAsPrivileged([{{ scheme: 'app', privileges: {privileges} }}]);
+         globalThis.served = (req) => net.fetch(pathToFileURL(path.join(__dirname, 'site', new URL(req.url).pathname)).toString());
+         app.whenReady().then(() => {{
+           {setup}
+           const win = new BrowserWindow({{ show: false }});
+           win.loadURL('app://bundle/index.html');
+         }});"
+    );
+    App::launch_script(&main, &site())
+}
+
 /// Waits for the page titled `Bundle`: its contents id.
 fn bundle(app: &App) -> u32 {
     app.window("Bundle")
         .unwrap_or_else(|| panic!("no window; console: {:?}", app.console()))
         .contents
+}
+
+fn page(app: &App, contents: u32, js: &str) -> Value {
+    serde_json::from_str(&app.eval_renderer(contents, js)).unwrap()
+}
+
+#[test]
+fn a_scheme_that_is_not_standard_has_an_opaque_origin() {
+    let app = site_app(
+        "{ secure: true, supportFetchAPI: true }",
+        "protocol.handle('app', globalThis.served);",
+    );
+    let contents = bundle(&app);
+    let done = |app: &App| app.eval_renderer(contents, "document.readyState") == r#""complete""#;
+    assert!(app.run_until(done, TIMEOUT), "console: {:?}", app.console());
+    assert_eq!(page(&app, contents, "location.origin"), json!("null"));
 }
 
 /// A script run in the main process after the app is ready; the answer is `globalThis.out`.
@@ -41,6 +75,35 @@ fn main_says(script: &str) -> Value {
            note('done', true); }}).catch((e) => note('threw', String(e && e.stack)));"
     );
     support::report_of(&main, &[])
+}
+
+#[test]
+fn the_module_throws_electrons_errors_and_answers_what_is_handled() {
+    let out = main_says(
+        "try { protocol.registerSchemesAsPrivileged([{ scheme: 'late' }]); } catch (e) { note('late', fail(e)); }
+         protocol.handle('std', () => new Response('x'));
+         note('handled', [protocol.isProtocolHandled('std'), protocol.isProtocolHandled('nothing'),
+                          protocol.isProtocolHandled('https'), protocol.isProtocolHandled('file')]);
+         try { protocol.handle('std', () => new Response('y')); } catch (e) { note('twice', fail(e)); }
+         protocol.handle('https', () => new Response('z'));
+         note('intercepted', protocol.isProtocolHandled('https'));
+         protocol.unhandle('std');
+         note('unhandled', protocol.isProtocolHandled('std'));
+         try { protocol.unhandle('std'); } catch (e) { note('unhandle-twice', fail(e)); }
+         protocol.handle('UPPER', () => new Response('up'));
+         note('case', protocol.isProtocolHandled('upper'));",
+    );
+    // Electron 39.8.10, probe1 and `lib/browser/api/protocol.ts`.
+    assert_eq!(
+        out["late"],
+        "protocol.registerSchemesAsPrivileged should be called before app is ready"
+    );
+    assert_eq!(out["handled"], json!([true, false, false, false]));
+    assert_eq!(out["twice"], "Failed to register protocol: std");
+    assert_eq!(out["intercepted"], true);
+    assert_eq!(out["unhandled"], false);
+    assert_eq!(out["unhandle-twice"], "Failed to unhandle protocol: std");
+    assert_eq!(out["case"], false);
 }
 
 #[test]

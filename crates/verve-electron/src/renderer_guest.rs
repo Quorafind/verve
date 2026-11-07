@@ -21,6 +21,7 @@ use crate::loader::ElectronLoader;
 use crate::msg::{
     FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
+use crate::renderer_net;
 use crate::{page_script, preload, probe};
 
 /// One page: the runtime its scripts run in, its document, and what it has yet to tell the main
@@ -66,7 +67,13 @@ impl RendererGuest {
         let outbox = api::ipc_renderer::outbox(runtime.context());
         set_up_process(&mut runtime, &outbox);
         let session = hub.session_for(prefs.partition.as_deref());
-        let loader = ElectronLoader::new(hub.overlay(), hub.protocol_calls(), session);
+        let privileged = hub.privileged();
+        let loader = ElectronLoader::new(
+            hub.overlay(),
+            hub.protocol_calls(),
+            session,
+            privileged.clone(),
+        );
         let document = verve_dom::install(
             &mut runtime,
             Options {
@@ -75,6 +82,8 @@ impl RendererGuest {
                 // `requestAnimationFrame` on a page nobody draws.
                 frames: FrameClock::Host,
                 dark,
+                standard_schemes: renderer_net::scheme_names(&privileged, |p| p.standard),
+                secure_schemes: renderer_net::scheme_names(&privileged, |p| p.secure),
                 ..Options::default()
             },
         )
