@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
-use verve_dom::Snapshot;
+use verve_dom::{ClipboardData, Snapshot};
 
 pub use menu::{HeadlessPopup, HeadlessTray};
 pub use window::HeadlessWindow;
@@ -23,8 +23,8 @@ use crate::accelerator::Accelerator;
 use crate::hub::{Hub, ShellPort};
 use crate::ids::{ContentsId, WindowId};
 use crate::msg::{
-    AppEvent, DialogReply, DialogResult, DialogSpec, Display, FromShell, InspectorEvent, MenuId,
-    MenuSpec, Rect, ToRendererInput, ToShell, TrayEvent, TrayId, WindowEvent, WindowOp,
+    AppEvent, DialogReply, DialogResult, DialogSpec, Display, DragInput, FromShell, InspectorEvent,
+    MenuId, MenuSpec, Rect, ToRendererInput, ToShell, TrayEvent, TrayId, WindowEvent, WindowOp,
 };
 use window::Window;
 
@@ -82,6 +82,9 @@ struct State {
     exit: Option<i32>,
     /// The pages whose inspector window is open, in the order they were opened.
     inspectors: Vec<ContentsId>,
+    /// What the clipboard of this machine holds: the headless shell keeps its own, in memory, so
+    /// that no test reaches the user's.
+    clipboard: ClipboardData,
 }
 
 /// What the shell has of a page: the last document it published.
@@ -158,6 +161,20 @@ impl State {
             | ToShell::Dialog { .. }
             | ToShell::SetThemeSource(_)
             | ToShell::InspectorReply { .. } => {}
+            ToShell::WriteClipboard { text, html, custom } => {
+                let image = custom.iter().find(|(kind, _)| kind == "image/png");
+                self.clipboard = ClipboardData {
+                    text: text.clone(),
+                    html: html.clone(),
+                    files: Vec::new(),
+                    image_png: image.map(|(_, bytes)| bytes.clone()),
+                };
+            }
+            ToShell::ReadClipboard { contents, call } => {
+                let data = self.clipboard.clone();
+                let input = ToRendererInput::ClipboardContents { call: *call, data };
+                out.inputs.push((*contents, input));
+            }
             ToShell::Inspector { contents, open } => {
                 self.inspectors.retain(|page| page != contents);
                 if *open {
@@ -324,6 +341,57 @@ impl HeadlessShell {
     pub fn compose(&self, window: WindowId, event: crate::msg::CompositionEvent) {
         self.on_page(window, move |page| {
             page.input(crate::msg::ToRendererInput::Composition(event))
+        });
+    }
+
+    /// What this shell's clipboard holds: what a page last copied, or [`HeadlessShell::set_clipboard`].
+    pub fn clipboard(&self) -> ClipboardData {
+        self.state().clipboard.clone()
+    }
+
+    /// Puts `data` on this shell's clipboard, as another program would.
+    pub fn set_clipboard(&self, data: ClipboardData) {
+        self.state().clipboard = data;
+    }
+
+    /// Something is dragged in from the system and is now at `pointer` over `window`'s page.
+    pub fn drag_enter(&self, window: WindowId, data: verve_dom::ExternalDrag, x: f32, y: f32) {
+        let pointer = verve_dom::Pointer {
+            x,
+            y,
+            ..Default::default()
+        };
+        self.drag(window, DragInput::Enter { data, pointer });
+    }
+
+    /// The drag moved to (`x`, `y`).
+    pub fn drag_over(&self, window: WindowId, x: f32, y: f32) {
+        let pointer = verve_dom::Pointer {
+            x,
+            y,
+            ..Default::default()
+        };
+        self.drag(window, DragInput::Over { pointer });
+    }
+
+    /// The drag left the window.
+    pub fn drag_leave(&self, window: WindowId) {
+        self.drag(window, DragInput::Leave);
+    }
+
+    /// The drag was let go at (`x`, `y`).
+    pub fn drop_at(&self, window: WindowId, x: f32, y: f32) {
+        let pointer = verve_dom::Pointer {
+            x,
+            y,
+            ..Default::default()
+        };
+        self.drag(window, DragInput::Drop { pointer });
+    }
+
+    fn drag(&self, window: WindowId, drag: DragInput) {
+        self.on_page(window, move |page| {
+            page.input(crate::msg::ToRendererInput::Drag(drag))
         });
     }
 
@@ -731,6 +799,13 @@ fn describe(msg: &ToShell) -> String {
         ToShell::Dialog { call, spec, .. } => format!("[dialog {call}] {spec:?}"),
         ToShell::SetThemeSource(source) => format!("[app] theme source {source:?}"),
         ToShell::Inspector { contents, open } => format!("[inspector {contents}] open {open}"),
+        ToShell::WriteClipboard { text, html, custom } => format!(
+            "[clipboard] write {text:?} {html:?} {} other formats",
+            custom.len()
+        ),
+        ToShell::ReadClipboard { contents, call } => {
+            format!("[clipboard] read #{call} for {contents}")
+        }
         ToShell::InspectorReply {
             contents,
             call,

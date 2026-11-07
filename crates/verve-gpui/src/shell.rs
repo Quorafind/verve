@@ -130,6 +130,9 @@ pub(crate) struct Shell {
     capture: Option<Capture>,
     /// The inspector windows (P43).
     inspectors: Inspectors,
+    /// The clipboard when the shell must not touch the desktop's (`VERVE_NO_SYSTEM_DIALOGS`):
+    /// what the pages copied, in memory, as the headless shell keeps it.
+    held: verve_dom::ClipboardData,
 }
 
 impl Shell {
@@ -145,6 +148,7 @@ impl Shell {
             dark: None,
             capture: None,
             inspectors: Inspectors::new(),
+            held: verve_dom::ClipboardData::default(),
         }
     }
 
@@ -261,6 +265,10 @@ impl Shell {
                 text,
                 is_error,
             } => self.inspectors.reply(contents, (call, text, is_error), cx),
+            ToShell::WriteClipboard { text, html, custom } => {
+                self.write_clipboard(text, html, &custom, cx);
+            }
+            ToShell::ReadClipboard { contents, call } => self.read_clipboard(contents, call, cx),
             ToShell::Quit { .. } => {
                 self.native.release();
                 cx.update(|cx| cx.quit());
@@ -269,6 +277,48 @@ impl Shell {
     }
 
     /// Opens a window; one that cannot open is a window that closed, to the app's script.
+    /// A page's copy or cut. The system clipboard only when the shell touches the desktop; in tests,
+    /// a clipboard of its own, as the headless shell keeps.
+    fn write_clipboard(
+        &mut self,
+        text: Option<String>,
+        html: Option<String>,
+        custom: &[(String, Vec<u8>)],
+        cx: &mut AsyncApp,
+    ) {
+        if native::touches_desktop() {
+            // GPUI's clipboard holds text; the other formats wait for P32.
+            if let Some(text) = text {
+                cx.update(|cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                });
+            }
+        } else {
+            let image = custom.iter().find(|(kind, _)| kind == "image/png");
+            self.held = verve_dom::ClipboardData {
+                text,
+                html,
+                files: Vec::new(),
+                image_png: image.map(|(_, bytes)| bytes.clone()),
+            };
+        }
+    }
+
+    /// Answers a page's clipboard read, from where [`Shell::write_clipboard`] writes.
+    fn read_clipboard(&self, contents: ContentsId, call: u64, cx: &mut AsyncApp) {
+        let data = if native::touches_desktop() {
+            let text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+            verve_dom::ClipboardData {
+                text,
+                ..verve_dom::ClipboardData::default()
+            }
+        } else {
+            self.held.clone()
+        };
+        let input = ToRendererInput::ClipboardContents { call, data };
+        self.hub.input(contents, input);
+    }
+
     fn create(
         &mut self,
         id: WindowId,

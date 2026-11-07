@@ -213,3 +213,125 @@ fn an_input_methods_composition_reaches_the_focused_field_as_chromes_events() {
     app.shell.compose(window.id, CompositionEvent::Cancel);
     assert!(app.run_until(|app| text(app) == "\"\"", TIMEOUT));
 }
+
+#[test]
+fn the_shell_holds_the_clipboard_a_page_copies_to_and_pastes_from() {
+    // The clipboard is the shell's. The headless shell keeps one in memory, so this test never
+    // reaches the user's. A page's copy arrives as `WriteClipboard`; a paste is the clipboard
+    // read first and sent in place of Ctrl+V, or asked for by the page's own renderer when
+    // `webContents.paste()` has no key to wait for.
+    let page = r#"<input id="i" value="ab"><div id="e" contenteditable>x</div>"#;
+    let main = format!(
+        "const {{ BrowserWindow }} = require('electron'); globalThis.win = new BrowserWindow({{ title: 'clip', show: false }}); win.loadURL('data:text/html,{page}');"
+    );
+    let app = App::launch_script(&main, &[]);
+    let window = app.window("clip").expect("the window was made");
+    let contents = window.contents;
+    assert!(app.run_until(
+        |app| app.eval_renderer(contents, "!!document.getElementById('i')") == "true",
+        TIMEOUT
+    ));
+    app.eval_renderer(
+        contents,
+        "navigator.clipboard.writeText('from the page'); 0",
+    );
+    assert!(app.run_until(
+        |app| app.shell.clipboard().text.as_deref() == Some("from the page"),
+        TIMEOUT
+    ));
+    // A person pastes into the field.
+    app.eval_renderer(
+        contents,
+        "const i = document.getElementById('i'); i.focus(); i.setSelectionRange(2, 2); 0",
+    );
+    app.shell.set_clipboard(verve_dom::ClipboardData {
+        text: Some("XY".into()),
+        html: Some("<b>XY</b>".into()),
+        ..Default::default()
+    });
+    // Ctrl+V reaches the page as any key does: it hears the keydown, and the paste is that key's
+    // default action, made when the shell has answered the page's read of the clipboard.
+    let mut ctrl_v = verve_dom::Key::char('v');
+    ctrl_v.modifiers.ctrl = true;
+    app.shell.press_key(window.id, ctrl_v);
+    let value = |app: &App| app.eval_renderer(contents, "document.getElementById('i').value");
+    assert!(app.run_until(|app| value(app) == "\"abXY\"", TIMEOUT));
+    // `webContents.paste()` goes through the renderer asking the shell, and keeps the markup.
+    app.eval_renderer(
+        contents,
+        "const e = document.getElementById('e'); e.focus(); getSelection().collapse(e.firstChild, 1); 0",
+    );
+    app.eval_main("win.webContents.paste(); 0");
+    let html = |app: &App| app.eval_renderer(contents, "document.getElementById('e').innerHTML");
+    assert!(app.run_until(|app| html(app) == "\"x<b>XY</b>\"", TIMEOUT));
+    // A page reads the clipboard through the same shell once it is allowed to.
+    app.eval_main(
+        "win.webContents.session.setPermissionRequestHandler((wc, permission, callback) => callback(true)); 0",
+    );
+    app.eval_renderer(
+        contents,
+        "globalThis.read = 'pending'; navigator.clipboard.readText().then((t) => { read = t; }); 0",
+    );
+    assert!(app.run_until(
+        |app| app.eval_renderer(contents, "read") == "\"XY\"",
+        TIMEOUT
+    ));
+}
+
+#[test]
+fn two_files_dragged_in_from_the_system_reach_the_page_with_their_paths() {
+    // Electron 39.8.10 (Input.dispatchDragEvent with two files): the page hears `dragenter` with
+    // no files yet, `dragover`, and at the drop `files.length` is 2; `file.path` does not exist,
+    // `webUtils.getPathForFile(file)` gives the path.
+    let dir = App::scratch_dir("drag-two-files");
+    std::fs::create_dir_all(&dir).expect("a folder");
+    let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+    std::fs::write(&a, "hello\n").expect("a file");
+    std::fs::write(&b, "world!\n").expect("a file");
+    let page =
+        r#"<style>html,body{margin:0}%23t{width:200px;height:100px}</style><div id="t">drop</div>"#;
+    let main = format!(
+        "const {{ BrowserWindow }} = require('electron'); new BrowserWindow({{ title: 'drop', show: false, webPreferences: {{ nodeIntegration: true, contextIsolation: false }} }}).loadURL('data:text/html,{page}');"
+    );
+    let app = App::launch_script(&main, &[]);
+    let window = app.window("drop").expect("the window was made");
+    let contents = window.contents;
+    assert!(app.run_until(
+        |app| app.eval_renderer(contents, "!!document.getElementById('t')") == "true",
+        TIMEOUT
+    ));
+    let listen = "globalThis.heard = []; const t = document.getElementById('t'); \
+        t.addEventListener('dragenter', (e) => { e.preventDefault(); heard.push('enter files=' + e.dataTransfer.files.length); }); \
+        t.addEventListener('dragover', (e) => { e.preventDefault(); heard.push('over'); }); \
+        t.addEventListener('drop', (e) => { e.preventDefault(); const { webUtils } = require('electron'); \
+            const files = Array.from(e.dataTransfer.files); \
+            heard.push('drop files=' + files.length + ' ' + files.map((f) => f.name + ':' + webUtils.getPathForFile(f) + ':' + ('path' in f)).join('|')); }); 0";
+    app.eval_renderer(contents, listen);
+    app.shell.drag_enter(
+        window.id,
+        verve_dom::ExternalDrag {
+            files: vec![a.clone(), b.clone()],
+            ..Default::default()
+        },
+        50.,
+        50.,
+    );
+    app.shell.drag_over(window.id, 52., 51.);
+    app.shell.drop_at(window.id, 52., 51.);
+    let heard = |app: &App| {
+        app.eval_renderer(contents, "heard.join(' ; ')")
+            .trim_matches('"')
+            .replace("\\\\", "/")
+    };
+    assert!(app.run_until(|app| heard(app).contains("drop files=2"), TIMEOUT));
+    let path = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        heard(&app),
+        format!(
+            "enter files=0 ; over ; over ; drop files=2 a.txt:{}:false|b.txt:{}:false",
+            path(&a),
+            path(&b)
+        )
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

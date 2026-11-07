@@ -27,9 +27,11 @@
 mod animation;
 mod bind;
 pub mod canvas;
+mod clipboard;
 mod cookies;
 pub mod css;
 pub mod dom;
+mod drag;
 mod editing;
 pub mod field;
 pub mod html;
@@ -62,10 +64,12 @@ use std::sync::Arc;
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
 
+pub use clipboard::ClipboardData;
 pub use cookies::CookieBackend;
 pub use css::{Computed, Environment, Style};
 pub use dom::{Direction, RangeData, RangeError};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
+pub use drag::{DropEffect, ExternalDrag};
 pub use field::{Draft, utf8_offset_to_utf16, utf16_offset_to_utf8};
 pub use input::{Key, Modifiers, Pointer};
 pub use load::{Destination, LoadError, LoadEvent, LoadRequest, LoadResult, Loader, Ready};
@@ -110,8 +114,18 @@ pub enum Request {
         name: String,
         features: String,
     },
-    /// `navigator.clipboard.writeText`, `document.execCommand('copy')`.
-    CopyText(String),
+    /// The clipboard is to hold this: `navigator.clipboard.writeText`/`write`, a copy or a cut.
+    /// `custom` is every other format, by MIME type (`image/png`, a page's own).
+    WriteClipboard {
+        text: Option<String>,
+        html: Option<String>,
+        custom: Vec<(String, Vec<u8>)>,
+    },
+    /// `navigator.clipboard.readText`/`read` (the permission was granted): answer with
+    /// [`Document::settle_clipboard`] for this `call`.
+    ReadClipboard {
+        call: u64,
+    },
     /// `alert`, `confirm` and `prompt`'s message (they answer as a browser that blocked them).
     Alert(String),
     /// `document.title` set.
@@ -284,6 +298,8 @@ pub(crate) struct View {
     pressed: Option<NodeId>,
     /// The element the pointer was last over.
     over: Option<NodeId>,
+    /// The drag and drop the document is in the middle of.
+    drag: drag::DragState,
 }
 
 impl Document {
@@ -722,11 +738,15 @@ impl Document {
     /// `mouseover` and `pointerenter`/`mouseenter`, a `:hover` rule follows, and the element
     /// under it hears `pointermove` and `mousemove`.
     pub fn pointer_move(&self, runtime: &mut verve::Runtime, pointer: &Pointer) {
+        if self.drag_moved(runtime, pointer) {
+            return;
+        }
         let target = self.pointer_target(pointer);
         self.hover_node(runtime, Some(target), pointer);
         let init = Self::pointer_init(pointer, 0);
         self.fire(runtime, target, "PointerEvent", "pointermove", &init);
         self.fire(runtime, target, "MouseEvent", "mousemove", &init);
+        self.drag_may_start(runtime, pointer);
         runtime.run_microtasks();
     }
 
@@ -821,6 +841,7 @@ impl Document {
     }
 
     fn press_down(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) -> bool {
+        self.activate();
         self.hover_node(runtime, Some(target), pointer);
         let buttons = match pointer.button {
             1 => 4,
@@ -868,6 +889,10 @@ impl Document {
                 }
             }
         }
+        // After the focus has moved: Chromium focuses before it selects.
+        if allowed {
+            self.drag_pressed(runtime, target, pointer);
+        }
         runtime.run_microtasks();
         allowed
     }
@@ -893,6 +918,10 @@ impl Document {
     }
 
     fn release(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) -> bool {
+        self.activate();
+        if let Some(dropped) = self.drag_released(runtime, pointer) {
+            return dropped;
+        }
         let init = Self::pointer_init(pointer, 0);
         self.fire(runtime, target, "PointerEvent", "pointerup", &init);
         self.fire(runtime, target, "MouseEvent", "mouseup", &init);
@@ -1026,8 +1055,12 @@ impl Document {
     /// `input`), Backspace and Delete, the caret's keys, Enter submitting a form or pressing a
     /// button, Tab moving the focus. Answers whether nothing prevented it.
     pub fn key_down(&self, runtime: &mut verve::Runtime, key: &Key) -> bool {
+        self.activate();
         if let Some(allowed) = self.composing_key(runtime, key, true) {
             return allowed;
+        }
+        if key.key == "Escape" && self.drag_cancel(runtime) {
+            return false;
         }
         let target = self.key_target();
         let allowed = self.fire(
@@ -1116,6 +1149,23 @@ impl Document {
             return;
         }
         let chord = key.modifiers.ctrl || key.modifiers.meta;
+        // Copy and cut are done here. A paste needs the clipboard, which is the shell's: it is
+        // asked for, and pasted when the answer comes ([`Document::request_paste`]). Either way
+        // the page has heard the `keydown` and could cancel it, as in Chromium.
+        if chord && !key.modifiers.alt {
+            let lower = key.key.to_ascii_lowercase();
+            let shift = key.modifiers.shift;
+            if (lower == "c" || lower == "x") && !shift {
+                self.clipboard_command(runtime, |cx| {
+                    clipboard::copy_or_cut(cx, lower == "x", true)
+                });
+                return;
+            }
+            if lower == "v" {
+                self.request_paste(runtime, shift);
+                return;
+            }
+        }
         let printable = key.key.chars().count() == 1 && !chord;
         if printable {
             let char_code = key.key.chars().next().map_or(0, |c| c as u32);

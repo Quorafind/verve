@@ -154,8 +154,10 @@ impl Document {
 
   `dataTransfer.files` 中的 `File` 由 P03 的"带路径 File"构造（`webUtils.getPathForFile(file)` 返回该路径，`file.path` **不存在**——
   Electron 32 起已移除）。文件内容惰性读取，读取经过渲染器的文件系统权限（Electron 渲染器中拖入的文件可读）。
-  若页面不处理 `drop`（未 `preventDefault` 的 `dragover`/`drop`），浏览器会导航到该文件——Electron 中同样会发 `will-navigate`；
-  按此实现（发 `Request::Navigate` 到 `file://…`）。
+  若页面不处理 `drop`（未 `preventDefault` 的 `dragover`/`drop`）：Electron 39.8.10 在默认的 `navigateOnDragDrop: false` 下
+  **不导航**、不发 `will-navigate`、不开窗口，放下就是一次 `dragleave`（第二阶段复审实测，`SCRATCH\p24-review3\out-navdrop.txt`）；
+  本包照此实现，不发 `Request::Navigate`。`navigateOnDragDrop: true` 时 Electron 对同一次放下调 `setWindowOpenHandler(文件地址,
+  'foreground-tab')`（仍没有 `will-navigate`），这一情形没有接（`WebPreferences.navigate_on_drag_drop` 已有，默认 false）。
 - P02 需追加 `ToRendererInput::Drag(DragInput)`（`Enter{data,pointer}/Over{pointer}/Leave/Drop{pointer}`），P34 从 GPUI 的
   文件拖放事件（`FileDropEvent`）产生它。
 - 拖出到系统（`webContents.startDrag(item)`，主进程 API）：v1 不支持，登记（P13 中抛 `ERR_NOT_SUPPORTED`）。
@@ -167,13 +169,20 @@ impl Document {
     未阻止时默认取当前选区（文本框取 Draft 选区）的 `text/plain` 与 `text/html`；cut 再删除选区（产生 `deleteByCut` 的 beforeinput/input）。
     结果写剪贴板：`Request::CopyText` 扩展为 `Request::WriteClipboard { text: Option<String>, html: Option<String>, custom: Vec<(String, Vec<u8>)> }`
     （修改 `crates/verve-dom/src/lib.rs` 的 `Request`，同步现有测试）。
-  - paste：渲染器需要剪贴板内容——**剪贴板由 Shell/主进程持有**。流程：Shell 在发出 paste 键之前读取剪贴板，随
-    `ToRendererInput::Paste(ClipboardData { text, html, files, image_png })`（需新增）一起送达；`Document::paste(runtime, data)`（需新增）
-    发 `paste` 事件，未阻止时按 `insertFromPaste` 插入（contenteditable 插 HTML 时做基本清理：去掉 `<script>`、事件属性；文本框插纯文本）。
+  - paste：渲染器需要剪贴板内容——**剪贴板由 Shell/主进程持有**。流程（第二轮修订，没有 `Paste` 消息）：Ctrl/Cmd+V 的 keydown
+    先送到页面，默认动作向 Shell 要剪贴板（`Request::ReadClipboard`），Shell 回 `ClipboardContents { call, data }`；
+    `Document::paste(runtime, data)` 发 `paste` 事件，未阻止时按 `insertFromPaste` 插入（contenteditable 插 HTML 时做基本清理：去掉 `<script>`、事件属性；文本框插纯文本）。
 - `navigator.clipboard.writeText/write` → `Request::WriteClipboard`，promise 立即 resolve；`readText/read`：发
   `Request::ReadClipboard { call }`（需新增），Shell 回 `ToRendererInput::ClipboardContents { call, data }`（需新增）后 resolve。
   Electron 中这些在有焦点的页面上默认允许（权限由 P16 的 `setPermissionRequestHandler` 决定，未设置时允许）。
 - 图片：`ClipboardItem` 支持 `image/png`（字节来自 Shell；P25 不需要介入）。
+- **第二阶段定下的消息（谁产生）**：
+  - 类型：`ClipboardData { text, html, files: Vec<PathBuf>, image_png }`、`ExternalDrag`、`DropEffect` 定义在 verve-dom（`clipboard.rs`、`drag.rs`），消息直接用它们，不再另定义。
+  - `verve_dom::Request`：`CopyText` 改为 `WriteClipboard { text, html, custom }`，新增 `ReadClipboard { call }`。主进程把页面的这两条原样转给 Shell：`ToShell::WriteClipboard { text, html, custom }`、`ToShell::ReadClipboard { contents, call }`。**剪贴板归 Shell**：无头壳在内存里保存一份（测试从不碰真实剪贴板），GPUI 壳读写系统剪贴板（P32 补全 HTML 与图片）。
+  - `ToRendererInput::ClipboardContents { call, data }`：**Shell 产生**，回答 `ToShell::ReadClipboard`；页面的 `navigator.clipboard.read*`、Ctrl/Cmd+V 与 `EditCommand::Paste` 的读取都由它结算（`Document::settle_clipboard`）。
+  - **没有 `Paste` 消息**（第二轮删去）：Chromium 里粘贴是 Ctrl/Cmd+V 的 keydown 默认动作，页面要先听到 keydown、能 `preventDefault`，`before-input-event` 也要看到它。所以 P32 把 Ctrl/Cmd+V 当普通按键发给页面，除此之外不需要为粘贴做任何事；`Document::key_down` 的默认动作是 `Document::request_paste`（发 `Request::ReadClipboard`，待 Shell 回 `ClipboardContents` 时粘贴）。Ctrl+Shift+V 与菜单角色 `pasteAndMatchStyle` 粘贴纯文本；Ctrl+C/X 是按键的默认动作（渲染器内处理）。
+  - `ToRendererInput::Drag(DragInput)`，`DragInput::{Enter { data: ExternalDrag, pointer }, Over { pointer }, Leave, Drop { pointer }}`：**P34/P32 产生**，由 GPUI 的 `FileDropEvent`（及 `ExternalPaths`）转换；渲染器侧调用 `Document::drag_enter/over/leave/drop`，并把答案写进 `RendererView.drop_effect`（`Option<DropEffect>`，供 Shell 画光标）。
+  - 页面内拖放不经过任何消息：它是 `Document::pointer_down/move/up` 上的状态机。
 
 ## 步骤
 
@@ -206,12 +215,12 @@ impl Document {
 
 ## 给其他包的备注
 
-- **P02**：`CompositionEvent` 按 §3 定义；追加 `ToRendererInput::{Drag(DragInput), Paste(ClipboardData), ClipboardContents{call,data}}`、
+- **P02**：`CompositionEvent` 按 §3 定义；追加 `ToRendererInput::{Drag(DragInput), ClipboardContents{call,data}}`、
   `ToRenderer::EditCommand(EditCommand)`；`verve_dom::Request` 的 `CopyText` 改为 `WriteClipboard{…}`，新增 `ReadClipboard{call}`。
 - **P03**：带路径的 `File` 构造（与 P21 的需求相同）。
 - **P31**：画 `SnapshotData.selection`/`caret`；回报文本片段与行盒（`Document::set_fragments`，P23 定义）供 `Range.getClientRects`、
   `Selection.modify(line)`、点击定位光标（`caretPositionFromPoint`/`caretRangeFromPoint` 需本包实现，依赖片段回报）。
-- **P32**：GPUI `InputHandler` ↔ `CompositionEvent`，`ime_rect` ↔ `bounds_for_range`；Ctrl+V 之前读取剪贴板并随 `Paste` 送达。
+- **P32**：GPUI `InputHandler` ↔ `CompositionEvent`，`ime_rect` ↔ `bounds_for_range`；Ctrl/Cmd+V 当普通按键发给页面，粘贴不需要别的消息；`ToShell::{WriteClipboard, ReadClipboard}` 见 §5 末尾。
 - **P34**：GPUI 文件拖放事件 → `ToRendererInput::Drag`。
 - **P15**：菜单 role → `ToRenderer::EditCommand`。
 
@@ -259,3 +268,83 @@ cargo test --locked -p verve-dom
 cargo test --locked -p verve-electron --test headless an_input_methods_composition
 cargo test --locked -p verve-electron --test web_contents
 ```
+
+### 第二阶段（步骤 4–6：剪贴板事件、拖放、真实编辑器）
+
+**做完了**
+
+- **契约**（单独的 `docs(electron)` 提交）：上文 §5 末尾的「第二阶段定下的消息」。`ClipboardData`、`ExternalDrag`、`DropEffect` 定义在 verve-dom；`Request::CopyText` 改为 `WriteClipboard { text, html, custom }`，新增 `ReadClipboard { call }`；`ToShell::{WriteClipboard, ReadClipboard}`；`ToRendererInput::{Paste, ClipboardContents, Drag}`；`RendererView.drop_effect`。谁产生：`ClipboardContents` 由 Shell 产生（回答 `ReadClipboard`），`Paste` 由 P32 产生（Ctrl/Cmd+V 之前读剪贴板），`Drag` 由 P34/P32 从 GPUI 的 `FileDropEvent` 转换。
+- **剪贴板**（`clipboard.rs`、`bind/clipboard.rs`、`bind/data_transfer.rs`、`editing.rs`）：
+  - `DataTransfer` 重写为 Rust 数据（`DataTransferItemList`、`DataTransferItem`、`files`、`effectAllowed`、`dropEffect`、`setDragImage` 只记录），按 HTML 标准的三种模式（可写 / 只读 / 受保护）。
+  - `copy`/`cut`/`paste` 事件（`ClipboardEvent`，可写的 `clipboardData`）；默认动作：文本框用 Draft 选区，其余用页面选区的 `text/plain` 与 `text/html`；监听器取消后写 `clipboardData` 里的内容（含自定义格式）；`cut` 之后是 `deleteByCut`（`beforeinput` 与 `input`）。Ctrl/Cmd+C、X 是按键的默认动作；`execCommand('copy'|'cut')` 走同一条路。
+  - `Document::{copy, cut, paste, paste_plain, settle_clipboard}`；粘贴到 contenteditable 是 `insertFromPaste`（`beforeinput` 带 `dataTransfer`），HTML 去掉 `script`/`style`/`iframe` 等元素、事件属性与 `javascript:` 地址；`plaintext-only` 与 `paste_plain` 只取文本；文本框只取纯文本（`data` 为文本）。文件和图片以 `File` 进入 `clipboardData.files`。
+  - `navigator.clipboard.writeText/write` 经 `WriteClipboard`（`write` 等所有 Blob 到齐；超过一个条目、不能写的类型、没有焦点都以 `NotAllowedError` 拒绝）；`readText/read` 先问权限（P16 的规则不变：没有权限后端就 `NotAllowedError`），再发 `ReadClipboard`，由 `settle_clipboard` 结算；`ClipboardItem`（`types`、`getType`、`supports`），支持 `image/png`。
+  - `EditCommand::{Copy, Cut, Delete, SelectAll, Undo, Redo}` 经 `exec_command`；`Paste`/`PasteAndMatchStyle` 由文档向 Shell 要剪贴板（`Document::request_paste`，第二轮修订：待决的粘贴记在 `bind/clipboard.rs` 的 `Pending` 里，Ctrl/Cmd+V 的默认动作用同一条路），回来后 `paste`/`paste_plain`。
+  - 无头壳在内存里保存剪贴板（`HeadlessShell::{clipboard, set_clipboard, paste}`），测试从不碰真实剪贴板；GPUI 壳读写系统剪贴板的文本。
+- **拖放**（`drag.rs`）：
+  - 页面内状态机挂在 `pointer_down/move/up` 上：`draggable="true"`、`<a href>`、`<img>` 按下后移动 4 px 开始；`dragstart`（可取消）→ `pointercancel` → 之后页面不再收到 `pointermove/mousemove`，每次移动是 `drag` + `dragenter/dragleave/dragover` → 松开 `drop` → `dragend`；`effectAllowed` 限制 `dropEffect`；Escape 取消（`Document::drag_cancel`，P34 也可调用）；`setDragImage` 只记录（`drag_image_hot_spot`）。
+  - 从系统：`Document::{drag_enter, drag_over, drag_leave, drop}`（返回 `DropEffect`）；`dragenter/dragover` 只列出 `types`/`items`，`files` 为空，`drop` 时才是带路径的 `File`（`webUtils.getPathForFile` 取路径，`file.path` 不存在）；没人接受的文件放下是 `dragleave`，不导航（第二轮修订，见上）。
+  - 鼠标拖选文本：不武装拖放的按下，在 `text_position_at` 处放插入点，移动时扩选，Shift 从旧锚点扩选（文本框的选区仍归文本框）。
+  - `ToRendererInput::Drag(DragInput)` → `RendererGuest::drag`；`HeadlessShell::{drag_enter, drag_over, drag_leave, drop_at}`。
+- **真实编辑器**（`tests/editors.rs`，全部 `#[ignore = "fetches packages from npm"]`，没有运行，没有取包）：ProseMirror（prosemirror-view + example-setup）、Lexical（含一次输入法组合）、CodeMirror 6（用固定行高、固定字宽的假布局 `fixed_layout`）。
+- 测试：`tests/clipboard.rs`、`tests/drag.rs`（verve-dom）；`tests/headless.rs` 里两个（剪贴板往返；两个文件拖入，`files.length === 2`，`webUtils.getPathForFile` 给出路径）。**我只让它们编译通过，没有运行。**
+
+**Electron 39.8.10 实测并冻结的**（探针 `SCRATCH\p24\probe4`，隐藏窗口、临时 profile，`webContents.debugger` 的 `Input.setInterceptDrags` + `Input.dispatchMouseEvent` + `Input.dispatchDragEvent`；冻结在 `tests/drag.rs` 与 `drag.rs` 的头注）：
+- 越过阈值的那次移动先是 `pointermove`/`mousemove`，再 `dragstart`（坐标是按下处、`buttons` 1、`effectAllowed` 为 `uninitialized`、`types` 为空），再 `pointercancel`（不可取消）；3 px 的移动不开始拖动，按下以 `click` 结束。
+- 拖动后页面不再收到 `pointermove`；目标变化时先 `dragenter`（新）再 `dragleave`（旧），互为 `relatedTarget`，没有 `dragover`；`drag` 在每次之前发给源；`dragend`、`dragleave` 不可取消；松开在接受的目标上是 `drop` 再 `dragend`；探针里 `drop` 之后还听到 `pointerup`/`mouseup`，只因为它的释放是在拦截的拖动之后另外发的（原生拖动循环会吞掉释放，来自源码，没有观察到），没有 `click`。
+- `dragenter`/`dragover` 里 `types`/`items` 可读、`files.length` 为 0；`dropEffect` 在除 `dragend` 外的所有事件里是 `none`（`dragend` 是拖动结束的效果；`drop` 里也是 `none`——这是不是 `Input.dispatchDragEvent` 路径特有的，没有办法区分）；没人接受的拖动是 `dragleave` 再 `dragend`（`none`）。
+- 从系统拖入（两个文件加一个字符串）：只有 `dragenter`，之后每次移动一个 `dragover`，放下时再多一个 `dragover` 然后 `drop`；`types` 为 `text/plain,Files`，`items` 先字符串后文件；`drop` 里 `files.length` 为 2，大小/类型/名字正确，`'path' in file` 为 false；没人接受时是 `dragover`、`dragleave`，没有 `drop`。
+- **没有观察到的**：剪贴板事件（copy/cut/paste）没有在 Electron 里探测（会写用户的剪贴板），序列取自规范与 Chromium 源码，各测试头注已写明。
+
+**没做、或与浏览器不同的地方**
+
+- 文件内容在 `drop` 或粘贴时读入（单个至多 256 MiB，一次放下或粘贴的总量至多 512 MiB，超出的文件和文件夹仍有名字、类型和路径，内容为空），不是惰性读取：内核的 `Blob` 没有惰性来源。`dragenter/dragover` 里列出的文件是空的占位 `File`（只有名字和类型）。类型从扩展名表猜。
+- 没有做：拖选中的文本；放下的文本插入文本框或 contenteditable（`insertFromDrop`）；拖动图像的绘制；触摸；`webContents.startDrag` 仍不支持（P13 抛错）；`execCommand('paste')` 恒为 `false`（剪贴板归 Shell，粘贴靠 `Document::paste`）；文本框里用鼠标拖选、双击选词（要字符位置，文本框的选区由绘制方移动）。
+- `DataTransfer` 每个事件一个新对象，事件结束后不失效（浏览器里 `dataTransfer` 在事件之后读不到数据）。
+- 页面内的 `dragenter` 之后的接受判定：`dragenter` 被取消就算接受，直到下一次 `dragover` 重新判定；`dropEffect` 保持 `none` 而监听器取消了事件时，取源允许的第一个效果（copy、move、link 的顺序）。
+- 不武装拖放的按下，在 `text_position_at` 处放插入点（有位置提供者时）；表单控件（按钮、输入框等）的按下不动选区；`user-select: none` 的文字 verve-layout 的 `position_at` 本来就跳过（复审指出，原来「没有做」的说法不对）。
+- GPUI 壳的剪贴板只有文本；HTML、图片、自定义格式、文件留给 P32。
+- 真实编辑器的包版本是照记忆写的（prosemirror-view 1.37.1、lexical 0.20.0、@codemirror/view 6.36.1 等），没有取过，版本号不对时要改 `tests/editors.rs` 里的依赖表；测试里对 ProseMirror/CodeMirror 的断言也没有对照真实行为验证过。
+
+**给其他包的备注**
+
+- P32：Ctrl/Cmd+V、Ctrl+Shift+V 和别的按键一样发给页面，粘贴不需要别的消息（第二轮修订：`Paste` 消息已删）；菜单 `pasteAndMatchStyle` 发 `ToRenderer::EditCommand(PasteAndMatchStyle)`。`ToShell::WriteClipboard` 的 `html` 与 `custom`（`image/png` 等）要写进系统剪贴板。`ToShell::ReadClipboard` 要回 `ToRendererInput::ClipboardContents { call, data }`。
+- P34/P32：GPUI 的文件拖放事件 → `DragInput::{Enter, Over, Leave, Drop}`；用 `RendererView.drop_effect` 画光标；系统取消拖动或按 Escape 时，页面内的拖动由 `Document::drag_cancel` 结束（Escape 已在 `key_down` 里处理）。
+- P31：现在每次主键按下（非文本框、非可拖动元素）都会经 `text_position_at` 移动选区；位置提供者要在行盒上给出正确的 UTF-16 偏移。
+
+**测试命令（请协调者运行）**
+
+```
+cargo test --locked -p verve-dom --test clipboard
+cargo test --locked -p verve-dom --test drag
+cargo test --locked -p verve-dom
+cargo test --locked -p verve-electron --test headless the_shell_holds_the_clipboard
+cargo test --locked -p verve-electron --test headless two_files_dragged_in
+cargo test --locked -p verve-electron --test web_contents
+cargo test --locked -p verve-electron --test headless
+```
+
+不跑（需要取包，由协调者决定）：`cargo test --locked -p verve-dom --test editors -- --ignored`。
+
+#### 第二阶段，第二轮（复审与中央测试之后）
+
+**改了什么**（观察依据：Electron 39.8.10，复审探针 `SCRATCH\p24-review3\probe\main.js`，输出 `out-*.txt`）
+
+- 中央四项：五个剪贴板测试里裸用的 `ed` 改成 `getElementById`（verve-dom 的 `window` 没有按 id 的具名访问）；`a_listener_chooses_the_drop_effect` 的期望错了（`dragenter` 之后只有默认的 `copy`，监听器在 `dragover` 里选 `link`），改成先 `drag_enter` 再 `drag_over`；无头测试的 data: URL 里 `#t` 开了片段，改为 `%23t`；clippy 的 `clipboard.rs` 多余的 `clone` 去掉。
+- **复审 MUST**：
+  1. 表单控件（button、input、select、textarea、option）的按下不动选区（`drag.rs` 的 `begin_selecting`）。
+  2. 鼠标按下选文本先发可取消的 `selectstart`（在文本节点上）；被取消则旧选区保留，也不随拖动扩选（`out-select.txt`）。
+  3. 没人接受的文件放下不导航：删 `navigate_to_dropped`，测试取反，头注改正（`out-navdrop.txt`、`out-navdrop_on.txt`）。
+  4. 瞬时激活：`State::activation`（`state.rs`），由 `Document::activate`（`clipboard.rs`）在受信任的按下、释放、keydown 时设置，`State::has_activation` 判断（5 秒）。脚本的 `execCommand('copy'|'cut')` 和 `queryCommandEnabled` 都要它；菜单与快捷键（`user = true`）不要（`out-activation.txt`）。P32 以后要给 `window.open`、全屏等用，就读 `has_activation`。
+  5. GPUI 壳在 `!native::touches_desktop()` 时把剪贴板放在内存里（`Shell.held`），与无头壳一样。
+  6. `clipboard.write` 超过一个条目以 `NotAllowedError`「Support for multiple ClipboardItems is not implemented.」拒绝（该字符串在 39.8.10 的二进制里）；更正了「只写第一个」的错误注释。
+  7. 无头测试的 `%23t`（同上）。
+  8. 「drop 之后没有 pointerup/mouseup」的说法更正（见上：探针里的释放是另外发的）。
+  9. 默认放下效果：`all`/`uninitialized` 为 copy，否则依次 move、copy、link（`out-effects.txt`）；`copyMove` → move 有测试；显式 `none` 或源不允许的效果不是放下。
+  10. **删 `ToRendererInput::Paste`**：Ctrl/Cmd+V 是普通 keydown，默认动作 `Document::request_paste`（`Request::ReadClipboard`，待决的粘贴在 `Pending.pastes` 里），Shell 回 `ClipboardContents` 时粘贴；`EditCommand::Paste` 用同一条路；`renderer_clipboard.rs` 和无头的 `paste()` 删去，测试改发 Ctrl+V 键。契约和 P32 的备注已重写。
+  11. P02 文档的表和枚举补上 `ToShell::{WriteClipboard, ReadClipboard}`、`DragInput`、`RendererView.drop_effect`、`ClipboardContents`。
+  12. 放下和粘贴的文件一律带路径：目录和超限的文件也出现在 `files` 里（内容为空）；读取用 `File::open().take(上限)`，不再先量后读；单个 256 MiB、一次总共 512 MiB。
+- **我加的一项**：设了 `VERVE_NO_SYSTEM_DIALOGS` 时，主进程的 `clipboard` 模块在 Windows 上也用内存后端（`os/clipboard.rs` 的 `in_memory`，注释写明原因）。
+- **SHOULD（做了的）**：按下先聚焦再选（`lib.rs`）；没有文本的按下把插入点放进元素；`press(node)` 没有位置时不选；不被接受的放下、取消之前先发 `drag`，接受的释放前再发 `drag` + `dragover`（内部和系统一致，来自复审探针）；`javascript:` 判断去掉制表符、换行与控制字符，`data:` 的 `href` 去掉，SVG 的 `animate`/`set` 去掉；文本框粘贴 HTML 时复用 `pasted_text`（去掉 script/style 的文字）；纯文本粘贴按段落分块（`split_block_at`），复用 DOM 的转义；`plaintext-only` 的 `beforeinput` 没有 `dataTransfer`，`input` 事件不带 `dataTransfer`；`navigator.clipboard` 没有焦点时以「Document is not focused.」拒绝、不支持的类型拒绝、`ClipboardItem` 的值不是 Blob 或 Promise 时构造抛 `TypeError`；剪贴板里用 realm 的 `Promise` 与注册的 `ClipboardItem`，不再读页面可改的全局 `File`/`ClipboardItem`/`Promise`（内核的 `file_with_path` 里还读全局 `File`，在内核里，没有改）；删去 `page_script` 里不可达的 `Paste` 分支和 `main_guest` 里的 `_ => {}`；编辑器测试：ProseMirror 的撤销检查不再依赖 500 ms 分组（撤销后文档变了、重做后文档回到原样），CodeMirror 的末行断言改为重做后文档回到撤销前（原来那行不会失败）。
+- **没做**：`drag` 在目标变化后的第一个 `dragover` 之前不发——复审的这一条我对照探针没能分辨出与现有实现的差别（探针里每次移动是 `drag`+一个事件），原样保留；`navigateOnDragDrop: true`（`Request::Open` 的 foreground-tab）没接；编辑器测试的锁文件没有（要访问 registry，不在这里取，包版本仍是照记忆写的，由协调者问过用户后运行时一并处理）。
+- **第三轮**：`an_explicit_none_is_no_drop` 偶发失败的原因：`dropEffect` 的「显式设为 `none`」和「没设」分不开，`resolve` 把二者都当成默认效果，于是监听器明确写了 `none` 也会放下；现在 `DataTransfer` 记下脚本是否设过 `dropEffect`（`drop_effect_set`），显式 `none` 或源不允许的效果就不放下（我没有运行测试，没能复现「四次里失败一次」的间歇，只确定了这条确定性的缺陷，间歇本身的机制未查明）。`html.rs` 的序列化：HTML 序列化对每个非 void 元素写开始与结束标签（SVG、MathML 的空元素不再写成 `<x/>`），只有 `XMLSerializer` 自闭合并在命名空间变化处写 `xmlns`（Electron 39.8.10，探针 `SCRATCH\probe-svg`）；写出的代码搬到 `html/write.rs`；`DOMParser` 的 `application/xml` 文档里的 `outerHTML` 仍按 HTML 写（verve-dom 没有 XML 文档标记），没做。

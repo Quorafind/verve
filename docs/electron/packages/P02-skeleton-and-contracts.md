@@ -106,6 +106,11 @@ pub enum ToShell {
     Inspector { contents: ContentsId, open: bool },
     /// Hub 把渲染器的 `InspectorEvalReply` 转给检查器：窗口按 `call` 找回它问的那一行；检查器已关则丢弃
     InspectorReply { contents: ContentsId, call: u64, text: String, is_error: bool },
+    // —— P24 追加（第二阶段）——
+    /// 页面复制了：剪贴板归 Shell，由它改持这些内容；`custom` 是其余格式（`image/png` 等，按 MIME 类型）
+    WriteClipboard { text: Option<String>, html: Option<String>, custom: Vec<(String, Vec<u8>)> },
+    /// `contents` 的页面读剪贴板：Shell 回 `ToRendererInput::ClipboardContents { call, data }`
+    ReadClipboard { contents: ContentsId, call: u64 },
 }
 
 /// P14：`DialogSpec::{Open, Save, MessageBox}`、`DialogReply::{Async, Sync(SyncSender<DialogResult>)}`、
@@ -285,6 +290,8 @@ pub enum ToRendererInput {
     Text(String),                                        // 输入法提交 / 粘贴
     Composition(CompositionEvent),                       // P24
     Focus(bool),                                         // 窗口获得/失去焦点
+    ClipboardContents { call: u64, data: verve_dom::ClipboardData }, // Shell 对 ToShell::ReadClipboard 的回答（P24）
+    Drag(DragInput),                                     // 从系统拖入的文件/文本（P24；P34 从 GPUI 转换）
 }
 
 /// 渲染器 isolate 的 View（`Guest::View`）：Shell 读这个来画。
@@ -297,6 +304,7 @@ pub struct RendererView {
     pub wants_frame: bool,
     pub cursor: Option<String>,                // 指针下元素的 CSS cursor
     pub ime_rect: Option<verve_dom::Rect>,     // 输入法候选框位置（P24/P32）
+    pub drop_effect: Option<verve_dom::DropEffect>, // 从系统拖入时，此刻放下会怎样（Shell 画光标；P24）
 }
 ```
 
@@ -337,7 +345,7 @@ P13 第二段另加两个类型（`msg/page.rs`）：`EditCommand`（`Undo` `Red
 | `RendererView.images`（`Arc<verve_layout::ImageTable>`，键是 `ImageKey`，值是 straight-alpha BGRA 的 `ImageFrames`）、`PaintItem::Image.frame`、`Fill::Picture`、`Snapshot.image_sources`/`base_url`（P35，细节见 P35 的「接口契约」）；`DisplayList.chunks`（P33） | P35 / P33 |
 | `FromRenderer::{Protocol, ProtocolPull, ProtocolCancel}`、`ToRenderer::{ProtocolHead, ProtocolChunk, ProtocolEnd}`（页面 `fetch` 自定义 scheme，逐块拉取；见 P16 契约修订） | P16 |
 | `FromRenderer::{ProtocolRequest, ZoomChanged, PreloadError}`、`ToRenderer::ProtocolResponse` | P20 / P21 |
-| `ToRendererInput::{Drag, Paste, ClipboardContents}` | P24 |
+| `ToRendererInput::{Drag(DragInput), ClipboardContents { call, data }}`、`DragInput::{Enter { data, pointer }, Over { pointer }, Leave, Drop { pointer }}`、`ToShell::{WriteClipboard { text, html, custom }, ReadClipboard { contents, call }}`、`RendererView.drop_effect`（`ExternalDrag`、`ClipboardData`、`DropEffect` 在 verve-dom）；Ctrl/Cmd+V 是普通按键（粘贴是它 keydown 的默认动作，经 `ReadClipboard`/`ClipboardContents`），没有 `Paste` 消息 | P24 |
 | `CompositionEvent` 具体化为 `Update { text, selection } \| Commit \| Cancel` | P24 |
 | `ToRenderer::Post { channel, message, ports }`、`FromRenderer::Post { channel, message, ports }`（`ipcRenderer.postMessage` / `webContents.postMessage`：带端口的消息；端口是 `verve::messaging::PortEnd`） | P12 |
 | `ToShell::Dialog { call, parent, spec, reply }`、`ToShell::SetThemeSource(ThemeSource)`、`FromShell::DialogResult { call, result }`，及 `DialogSpec`/`DialogReply`/`DialogResult`/`ThemeSource`（`msg/dialog.rs`，`ThemeSource` 在 `msg/shell.rs`，字段以它为准；`DialogReply::Sync` 带 `SyncSender<DialogResult>`）。`FromShell::Displays` 由 Hub 存下（`Hub::displays()`），主进程按需读取，所以启动时先于主进程发出的不会丢 | P14 |

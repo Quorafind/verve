@@ -1370,89 +1370,6 @@ pub fn empty_ranges(context: &mut Context) -> JsResult<JsValue> {
     Ok(ranges.into())
 }
 
-fn construct_data_transfer(
-    new_target: &JsValue,
-    _: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let transfer = handle_instance(new_target, Kind::Plain, 0, context)?;
-    let data = native::object(context);
-    hidden(&transfer, js_string!("__data"), data, context)?;
-    set(&transfer, "dropEffect", js_text("none"), context)?;
-    set(&transfer, "effectAllowed", js_text("all"), context)?;
-    let files = native::array(context, Vec::new());
-    set(&transfer, "files", files, context)?;
-    let items = native::array(context, Vec::new());
-    set(&transfer, "items", items, context)?;
-    Ok(transfer.into())
-}
-
-const DATA_TRANSFER_METHODS: &[Method] = &[
-    ("setData", 2, |this, args, cx| {
-        let data = get(this, "__data", cx)?;
-        let format = arg_text(args, 0, cx)?.to_ascii_lowercase();
-        let format = if format == "text" {
-            "text/plain".to_owned()
-        } else {
-            format
-        };
-        let value = arg_text(args, 1, cx)?;
-        if let Some(data) = data.as_object() {
-            set(&data, &format, js_text(&value), cx)?;
-        }
-        Ok(JsValue::undefined())
-    }),
-    ("getData", 1, |this, args, cx| {
-        let data = get(this, "__data", cx)?;
-        let format = arg_text(args, 0, cx)?.to_ascii_lowercase();
-        let format = if format == "text" {
-            "text/plain".to_owned()
-        } else {
-            format
-        };
-        let value = get(&data, &format, cx)?;
-        Ok(if value.is_undefined() {
-            js_text("")
-        } else {
-            value
-        })
-    }),
-    ("clearData", 1, |this, args, cx| {
-        let format = arg(args, 0);
-        if format.is_undefined() {
-            let data = native::object(cx);
-            if let Some(this) = this.as_object() {
-                hidden(&this, js_string!("__data"), data, cx)?;
-            }
-        } else {
-            let data = get(this, "__data", cx)?;
-            let format = text_of(&format, cx)?.to_ascii_lowercase();
-            if let Some(data) = data.as_object() {
-                data.delete_property_or_throw(JsString::from(format.as_str()), cx)?;
-            }
-        }
-        Ok(JsValue::undefined())
-    }),
-    ("setDragImage", 3, |_, _, _| Ok(JsValue::undefined())),
-];
-
-const DATA_TRANSFER_ACCESSORS: &[Accessor] = &[(
-    "types",
-    Some(|this, _, cx| {
-        let data = get(this, "__data", cx)?;
-        let keys = match data.as_object() {
-            Some(data) => data
-                .own_property_keys(cx)?
-                .into_iter()
-                .map(|k| js_text(&k.to_string()))
-                .collect(),
-            None => Vec::new(),
-        };
-        Ok(native::array(cx, keys))
-    }),
-    None,
-)];
-
 // ─── Element constructors ───────────────────────────────────────────────────────────────────
 
 /// A constructor that makes an element of `tag`, whose prototype is its class's: `Image` is
@@ -1612,15 +1529,8 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     context.register_global_property(js_string!("CSS"), css, Attribute::all())?;
     super::range::install(context)?;
     crate::canvas::install(context)?;
-    simple_class(
-        context,
-        "DataTransfer",
-        construct_data_transfer,
-        None,
-        DATA_TRANSFER_METHODS,
-        DATA_TRANSFER_ACCESSORS,
-        true,
-    )?;
+    super::data_transfer::install(context)?;
+    super::clipboard::install(context)?;
     install_geometry(context)?;
     element_constructor(context, "Image", "HTMLImageElement", construct_image)?;
     element_constructor(context, "Audio", "HTMLAudioElement", construct_audio)?;

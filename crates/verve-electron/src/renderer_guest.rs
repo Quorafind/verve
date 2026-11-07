@@ -22,7 +22,8 @@ use crate::loader::ElectronLoader;
 use crate::log::Log;
 use crate::media_host::{MediaBackend, Unsupported};
 use crate::msg::{
-    FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
+    DragInput, EditCommand, FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput,
+    WebPreferences,
 };
 use crate::page_images::PageImages;
 use crate::page_layout::PageLayout;
@@ -60,6 +61,8 @@ pub struct RendererGuest {
     url: String,
     /// Where the page writes what it dumps for DevTools.
     log: Arc<Log>,
+    /// What a drop from the system would do now, for the shell's cursor.
+    drop_effect: Option<verve_dom::DropEffect>,
 }
 
 impl RendererGuest {
@@ -126,6 +129,7 @@ impl RendererGuest {
             net: network.net,
             url: String::new(),
             log: Arc::clone(hub.log()),
+            drop_effect: None,
         }
     }
 
@@ -194,6 +198,13 @@ impl RendererGuest {
                 page_script::insert_css(&mut self.runtime, &key, &css, user);
             }
             ToRenderer::RemoveCss { key } => page_script::remove_css(&mut self.runtime, &key),
+            // The clipboard is the shell's: the document asks for it and pastes when it is sent.
+            ToRenderer::EditCommand(EditCommand::Paste) => {
+                self.document.request_paste(&mut self.runtime, false);
+            }
+            ToRenderer::EditCommand(EditCommand::PasteAndMatchStyle) => {
+                self.document.request_paste(&mut self.runtime, true);
+            }
             ToRenderer::EditCommand(command) => {
                 page_script::edit(&mut self.runtime, &self.document, command);
             }
@@ -293,6 +304,11 @@ impl RendererGuest {
             ToRendererInput::Frame { now } => {
                 self.document.frame(&mut self.runtime, now);
             }
+            ToRendererInput::Drag(drag) => self.drag(drag),
+            ToRendererInput::ClipboardContents { call, data } => {
+                self.document
+                    .settle_clipboard(&mut self.runtime, call, &data);
+            }
             other => {
                 let heard = page_script::person(&mut self.runtime, &self.document, other);
                 if let Some(message) = heard {
@@ -300,6 +316,25 @@ impl RendererGuest {
                 }
             }
         }
+    }
+
+    /// A drag from the system: the document is told, and the shell is told what a drop would do.
+    fn drag(&mut self, drag: DragInput) {
+        let (runtime, document) = (&mut self.runtime, &self.document);
+        self.drop_effect = match drag {
+            DragInput::Enter { data, pointer } => {
+                Some(document.drag_enter(runtime, data, &pointer))
+            }
+            DragInput::Over { pointer } => Some(document.drag_over(runtime, &pointer)),
+            DragInput::Leave => {
+                document.drag_leave(runtime);
+                None
+            }
+            DragInput::Drop { pointer } => {
+                document.drop(runtime, &pointer);
+                None
+            }
+        };
     }
 
     /// Loads `url` into the document: the page is fetched and read as it arrives, and each stage
@@ -482,6 +517,7 @@ impl Guest for RendererGuest {
             wants_frame: self.document.wants_frame(),
             cursor: None,
             ime_rect: self.document.caret_rect(),
+            drop_effect: self.drop_effect,
             display_list: Some(list),
             images,
         })

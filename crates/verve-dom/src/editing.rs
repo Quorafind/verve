@@ -98,6 +98,8 @@ struct Change<'a> {
     user: bool,
     /// The ranges `getTargetRanges()` answers.
     targets: Vec<RangeData>,
+    /// The `dataTransfer` the events carry (a paste), else `null`.
+    transfer: Option<boa_engine::JsObject>,
 }
 
 fn selection_of(cx: &Context) -> Option<(RangeData, Direction)> {
@@ -146,6 +148,10 @@ fn fire_before(cx: &mut Context, host: NodeId, change: &Change<'_>) -> JsResult<
     let init = [
         ("inputType", js_text(change.input_type)),
         ("data", change.data.map_or(JsValue::null(), js_text)),
+        (
+            "dataTransfer",
+            change.transfer.clone().map_or(JsValue::null(), Into::into),
+        ),
     ];
     let (allowed, event) = fire_with(
         cx,
@@ -163,6 +169,7 @@ fn fire_before(cx: &mut Context, host: NodeId, change: &Change<'_>) -> JsResult<
 
 fn fire_input(cx: &mut Context, host: NodeId, change: &Change<'_>) -> JsResult<()> {
     let target = wrap(cx, host);
+    // `input` carries no `dataTransfer` (Electron 39.8.10), only `beforeinput` does.
     let init = [
         ("inputType", js_text(change.input_type)),
         ("data", change.data.map_or(JsValue::null(), js_text)),
@@ -316,6 +323,7 @@ fn travel(cx: &mut Context, host: NodeId, redo: bool, user: bool) -> JsResult<bo
         data: None,
         user,
         targets,
+        transfer: None,
     };
     if user && !fire_before(cx, host, &change)? {
         return Ok(false);
@@ -385,6 +393,7 @@ fn insert_text(cx: &mut Context, host: NodeId, text: &str, user: bool) -> JsResu
             data: Some(text),
             user,
             targets,
+            transfer: None,
         },
         range,
         move |dom, range| {
@@ -418,6 +427,7 @@ fn insert_paragraph(cx: &mut Context, host: NodeId, user: bool) -> JsResult<bool
             data: None,
             user,
             targets: vec![range],
+            transfer: None,
         },
         range,
         move |dom, range| {
@@ -443,6 +453,7 @@ fn insert_line_break(cx: &mut Context, host: NodeId, user: bool) -> JsResult<boo
             data: None,
             user,
             targets,
+            transfer: None,
         },
         range,
         move |dom, range| {
@@ -507,6 +518,7 @@ fn delete(
             data: None,
             user,
             targets,
+            transfer: None,
         },
         range,
         &plan,
@@ -541,6 +553,7 @@ fn format(
             data: data.as_deref(),
             user,
             targets: vec![range],
+            transfer: None,
         },
         range,
         move |dom, range| {
@@ -640,7 +653,10 @@ pub(crate) fn exec_command(
             }
             return Ok(true);
         }
-        "copy" => return copy(cx),
+        // A script needs transient activation to copy or cut; a menu or a key does not.
+        "copy" | "cut" if !user && !activated(cx) => return Ok(false),
+        "copy" => return crate::clipboard::copy_or_cut(cx, false, user),
+        "cut" => return crate::clipboard::copy_or_cut(cx, true, user),
         _ => {}
     }
     let Some(host) = selected_host(cx).or_else(|| {
@@ -661,7 +677,6 @@ pub(crate) fn exec_command(
         "selectall" => select_all(cx, host),
         "undo" => travel(cx, host, false, user),
         "redo" => travel(cx, host, true, user),
-        "cut" => cut(cx, host, user),
         "createlink" => format(
             cx,
             host,
@@ -683,23 +698,11 @@ pub(crate) fn exec_command(
     }
 }
 
-fn copy(cx: &mut Context) -> JsResult<bool> {
-    let text = read_dom(cx, Dom::selection_text);
-    if text.is_empty() {
-        return Ok(false);
-    }
-    crate::state::shared(cx)
-        .borrow_mut()
-        .requests
-        .push(crate::Request::CopyText(text));
-    Ok(true)
-}
-
-fn cut(cx: &mut Context, host: NodeId, user: bool) -> JsResult<bool> {
+/// What a cut does to the selection of `host` once the clipboard has it: `deleteByCut`.
+pub(crate) fn cut_selection(cx: &mut Context, host: NodeId, user: bool) -> JsResult<bool> {
     let Some(range) = replaced(cx).filter(|r| r.start != r.end) else {
         return Ok(false);
     };
-    copy(cx)?;
     perform(
         cx,
         host,
@@ -708,6 +711,7 @@ fn cut(cx: &mut Context, host: NodeId, user: bool) -> JsResult<bool> {
             data: None,
             user,
             targets: vec![range],
+            transfer: None,
         },
         range,
         move |dom, range| {
@@ -735,6 +739,7 @@ fn unwrap_tags(
             data: None,
             user,
             targets: vec![range],
+            transfer: None,
         },
         range,
         move |dom, range| {
@@ -748,6 +753,82 @@ fn unwrap_tags(
             Some(((first, 0), (last, dom.node_length(last))))
         },
     )
+}
+
+/// Replaces `range` with the nodes `markup` makes, answering where the selection goes; `clean`
+/// takes out what could run script first (pasted markup is not the page's own).
+fn insert_markup(
+    dom: &mut Dom,
+    range: RangeData,
+    markup: &str,
+    clean: bool,
+) -> Option<(Boundary, Boundary)> {
+    let at = dom.delete_between(range);
+    let fragment = dom.create_fragment();
+    crate::html::parse_into(dom, fragment, markup);
+    if clean {
+        strip_active(dom, fragment);
+    }
+    let kids = dom.children(fragment).to_vec();
+    let last = *kids.last()?;
+    let (parent, before) = dom.insertion_point(at);
+    dom.insert_before(parent, fragment, before);
+    let end = dom.after_node(last)?;
+    Some((end, end))
+}
+
+/// Takes the elements that run or load code out of `root`, and the event attributes and
+/// `javascript:` addresses off the rest.
+fn strip_active(dom: &mut Dom, root: NodeId) {
+    const ACTIVE: &[&str] = &[
+        "script",
+        "style",
+        "iframe",
+        "frame",
+        "object",
+        "embed",
+        "applet",
+        "meta",
+        "link",
+        "base",
+        "title",
+        "noscript",
+        "template",
+        "animate",
+        "set",
+        "animatetransform",
+        "animatemotion",
+    ];
+    for id in dom.descendants(root) {
+        if !dom.exists(id) {
+            continue;
+        }
+        if dom
+            .get(id)
+            .and_then(|n| n.tag())
+            .is_some_and(|tag| ACTIVE.contains(&tag))
+        {
+            dom.detach(id);
+            continue;
+        }
+        for (name, value) in dom.attributes(id) {
+            let lower = name.to_ascii_lowercase();
+            // Browsers drop tabs, newlines and leading control characters before they read the
+            // scheme, so `java&#9;script:` is `javascript:`.
+            let scheme: String = value
+                .chars()
+                .filter(|c| !c.is_control() && !c.is_whitespace())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            let links = ["href", "xlink:href"].contains(&lower.as_str());
+            let loads = links || ["src", "action", "formaction"].contains(&lower.as_str());
+            let script_url = loads
+                && (scheme.starts_with("javascript:") || (links && scheme.starts_with("data:")));
+            if lower.starts_with("on") || script_url {
+                dom.remove_attr(id, &name);
+            }
+        }
+    }
 }
 
 fn insert_html(cx: &mut Context, host: NodeId, markup: &str, user: bool) -> JsResult<bool> {
@@ -764,18 +845,92 @@ fn insert_html(cx: &mut Context, host: NodeId, markup: &str, user: bool) -> JsRe
             data: None,
             user,
             targets: vec![range],
+            transfer: None,
         },
         range,
-        move |dom, range| {
-            let at = dom.delete_between(range);
-            let fragment = dom.create_fragment();
-            crate::html::parse_into(dom, fragment, &markup);
-            let kids = dom.children(fragment).to_vec();
-            let last = *kids.last()?;
-            let (parent, before) = dom.insertion_point(at);
-            dom.insert_before(parent, fragment, before);
-            let end = dom.after_node(last)?;
-            Some((end, end))
+        move |dom, range| insert_markup(dom, range, &markup, false),
+    )
+}
+
+/// The text a paste puts in: the plain text the transfer holds, else the text of its markup.
+pub(crate) fn pasted_text(cx: &mut Context, plain: Option<String>, html: Option<&str>) -> String {
+    if let Some(plain) = plain {
+        return plain;
+    }
+    let Some(html) = html else {
+        return String::new();
+    };
+    with_dom(cx, |dom| {
+        let fragment = dom.create_fragment();
+        crate::html::parse_into(dom, fragment, html);
+        strip_active(dom, fragment);
+        let text = dom.text_content(fragment);
+        dom.detach(fragment);
+        text
+    })
+}
+
+/// A paste into `host`: `insertFromPaste` with what the transfer holds. Markup goes in cleaned
+/// of script; `match_style`, and a `plaintext-only` host, take the text alone.
+pub(crate) fn paste(
+    cx: &mut Context,
+    host: NodeId,
+    transfer: &boa_engine::JsObject,
+    match_style: bool,
+) -> JsResult<bool> {
+    ensure_selection(cx, host);
+    let Some(range) = replaced(cx) else {
+        return Ok(false);
+    };
+    let entries = crate::bind::data_transfer::entries_of(transfer);
+    let find = |wanted: &str| {
+        entries.iter().find_map(|entry| match entry {
+            crate::bind::data_transfer::Entry::Text { kind, data } if kind == wanted => {
+                Some(data.clone())
+            }
+            _ => None,
+        })
+    };
+    let (html, text) = (find("text/html"), find("text/plain"));
+    let plain_host = read_dom(cx, |dom| dom.is_plaintext_only(host));
+    let markup = html.clone().filter(|_| !match_style && !plain_host);
+    let plain = pasted_text(cx, text, html.as_deref());
+    let data = plain_host.then_some(plain.as_str());
+    let targets = if plain_host { Vec::new() } else { vec![range] };
+    let owned = plain.clone();
+    let separator = separator(cx);
+    perform(
+        cx,
+        host,
+        Change {
+            input_type: "insertFromPaste",
+            data,
+            user: true,
+            targets,
+            // A `plaintext-only` host is told the text in `data` and no transfer (Electron 39.8.10).
+            transfer: (!plain_host).then(|| transfer.clone()),
+        },
+        range,
+        move |dom, range| match &markup {
+            _ if plain_host => {
+                let at = dom.delete_between(range);
+                let caret = dom.insert_plain_at(at, &owned);
+                Some((caret, caret))
+            }
+            Some(markup) => insert_markup(dom, range, markup, true),
+            // Plain text is paragraphs, as Chromium makes them: a line break splits the block.
+            None => {
+                let mut at = dom.delete_between(range);
+                for (line, text) in owned.replace("\r\n", "\n").split('\n').enumerate() {
+                    if line > 0 {
+                        at = dom.split_block_at(at, host, &separator);
+                    }
+                    if !text.is_empty() {
+                        at = dom.insert_text_at(at, text);
+                    }
+                }
+                Some((at, at))
+            }
         },
     )
 }
@@ -800,6 +955,7 @@ fn format_block(cx: &mut Context, host: NodeId, value: &str, user: bool) -> JsRe
             data: None,
             user,
             targets: vec![range],
+            transfer: None,
         },
         range,
         move |dom, range| {
@@ -831,6 +987,7 @@ fn make_list(
             data: None,
             user,
             targets: vec![range],
+            transfer: None,
         },
         range,
         move |dom, range| {
@@ -852,6 +1009,10 @@ pub(crate) fn supported(name: &str) -> bool {
 }
 
 /// `document.queryCommandEnabled(name)`.
+fn activated(cx: &Context) -> bool {
+    crate::state::shared(cx).borrow().has_activation()
+}
+
 pub(crate) fn enabled(cx: &Context, name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     if !supported(&name) {
@@ -860,9 +1021,13 @@ pub(crate) fn enabled(cx: &Context, name: &str) -> bool {
     let host = selected_host(cx);
     let state = crate::state::shared(cx);
     match name.as_str() {
-        "copy" | "selectall" | "stylewithcss" | "defaultparagraphseparator" => true,
+        "selectall" | "stylewithcss" | "defaultparagraphseparator" => true,
+        // Electron 39.8.10: `queryCommandEnabled('copy')` is false until a trusted press or key.
+        "copy" => activated(cx),
         "cut" => {
-            host.is_some() && read_dom(cx, |d| d.selection().is_some_and(|(r, _)| r.start != r.end))
+            activated(cx)
+                && host.is_some()
+                && read_dom(cx, |d| d.selection().is_some_and(|(r, _)| r.start != r.end))
         }
         "undo" => host.is_some_and(|h| {
             state

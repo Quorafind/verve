@@ -2,7 +2,6 @@
 //! functions in each. The windows that dialogs and displays belong to are the shell's.
 
 mod clipboard;
-#[cfg(not(windows))]
 mod clipboard_memory;
 #[cfg(windows)]
 mod clipboard_windows;

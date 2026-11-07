@@ -114,7 +114,7 @@ fn the_webs_pieces_libraries_test_for_are_there() {
             (
                 "(() => { const ns = 'http://www.w3.org/2000/svg'; const s = document.createElementNS(ns, 'svg'), p = document.createElementNS(ns, 'clipPath');
                    s.appendChild(p); return [s instanceof SVGSVGElement, p instanceof SVGElement, p.tagName, p.namespaceURI === ns, s.outerHTML].join(' ') })()",
-                "true true clipPath true <svg><clipPath/></svg>",
+                "true true clipPath true <svg><clipPath></clipPath></svg>",
             ),
             (
                 "(() => { const s = document.createElement('style'); s.textContent = '.a { color: red }'; document.head.appendChild(s);
@@ -226,5 +226,25 @@ fn xml_http_request_is_answered_through_fetch_on_the_hosts_beat() {
         let done = out.iter().position(|l| l == "state 4").unwrap();
         let end = out.iter().position(|l| l == "end").unwrap();
         assert!(first < done && done < end, "{out:?}");
+    });
+}
+
+/// Electron 39.8.10 (a hidden window; probe `p24` round 3, `probe-svg/out.txt`): HTML serialization
+/// writes start and end tags for every element that is not void, SVG and MathML ones too; only
+/// `XMLSerializer` self-closes an empty element, and it says the namespace where it changes.
+#[test]
+fn html_serialization_does_not_self_close_but_xml_serialization_does() {
+    common::on_page(|| {
+        let mut page = common::Page::new(verve_dom::Options::default());
+        assert_eq!(
+            page.eval(
+                "document.body.innerHTML = '<svg><circle></circle></svg><math><mi></mi></math>'; document.body.innerHTML"
+            ),
+            "<svg><circle></circle></svg><math><mi></mi></math>"
+        );
+        assert_eq!(
+            page.eval("new XMLSerializer().serializeToString(document.body.firstChild)"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle/></svg>"
+        );
     });
 }
