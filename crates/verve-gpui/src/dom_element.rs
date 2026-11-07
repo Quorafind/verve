@@ -14,7 +14,7 @@ use gpui::{
     Window, linear_color_stop, linear_gradient, point, px, size, transparent_black,
 };
 use verve_dom::Rect;
-use verve_layout::{DisplayList, ImageKey, Rgba};
+use verve_layout::{DisplayList, ImageKey, Rgba, VectorSpec};
 
 use crate::cursor;
 use crate::dom_view::DomState;
@@ -248,7 +248,7 @@ impl DomElement {
                 *bounds,
                 *visible,
                 *radii,
-                (*image, *frame as usize, *alpha),
+                (*image, *frame as usize, *alpha, &list.vectors),
                 origin,
                 window,
             ),
@@ -275,12 +275,7 @@ impl DomElement {
                     spread_radius: px(*spread),
                     inset: *inset,
                 };
-                let at = in_window(origin, *bounds);
-                if *inset {
-                    window.paint_inset_shadows(at, corners(*radii), &[shadow]);
-                } else {
-                    window.paint_drop_shadows(at, corners(*radii), &[shadow]);
-                }
+                paint_shadow(in_window(origin, *bounds), *radii, shadow, window);
             }
         });
     }
@@ -334,11 +329,19 @@ impl DomElement {
         bounds: Rect,
         visible: Rect,
         radii: [f32; 4],
-        (key, frame, alpha): (ImageKey, usize, f32),
+        (key, frame, alpha, vectors): (ImageKey, usize, f32, &[VectorSpec]),
         origin: gpui::Point<Pixels>,
         window: &mut Window,
     ) {
-        let Some(picture) = self.state.borrow_mut().pictures.image(key, alpha) else {
+        // An SVG is drawn at the size it is shown at, in the window pixels.
+        let scale = window.scale_factor();
+        let pixels = [bounds.width * scale, bounds.height * scale];
+        let Some(picture) = self
+            .state
+            .borrow_mut()
+            .pictures
+            .page(key, alpha, vectors, pixels)
+        else {
             return;
         };
         let frame = frame.min(picture.frame_count().saturating_sub(1));
@@ -365,6 +368,15 @@ impl DomElement {
         let spec = list.rasters.iter().find(|spec| spec.key == key)?;
         let scale = window.scale_factor().ceil().max(1.);
         self.state.borrow_mut().pictures.get(spec, scale, alpha)
+    }
+}
+
+/// Draws one box shadow, inside the box or behind it.
+fn paint_shadow(at: Bounds<Pixels>, radii: [f32; 4], shadow: gpui::BoxShadow, window: &mut Window) {
+    if shadow.inset {
+        window.paint_inset_shadows(at, corners(radii), &[shadow]);
+    } else {
+        window.paint_drop_shadows(at, corners(radii), &[shadow]);
     }
 }
 

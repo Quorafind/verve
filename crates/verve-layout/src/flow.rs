@@ -39,9 +39,12 @@ impl Builder<'_> {
     ) {
         let flex = self.boxes[owner].props.display.is_flex_or_grid();
         let mut steps = Vec::new();
-        self.generated(node, PseudoElement::Before, &mut steps);
-        self.flatten(node, flex, areas, &mut steps);
-        self.generated(node, PseudoElement::After, &mut steps);
+        // A drawing and a canvas have no boxes inside: what they show is a picture.
+        if !crate::replaced::has_no_inner_boxes(self.snapshot, node) {
+            self.generated(node, PseudoElement::Before, &mut steps);
+            self.flatten(node, flex, areas, &mut steps);
+            self.generated(node, PseudoElement::After, &mut steps);
+        }
         self.assemble(owner, node, steps, flex, out);
     }
 

@@ -273,3 +273,26 @@ fn the_selection_is_readable_by_the_host_as_two_boundaries() {
         );
     });
 }
+
+#[test]
+fn get_bbox_is_the_box_the_provider_measured_in_the_drawings_own_units() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        page.eval(
+            "document.body.innerHTML = '<svg width=\"200\" height=\"100\"><rect id=\"r\" width=\"30\" height=\"20\"/></svg>'; window.r = document.getElementById('r')",
+        );
+        let rect = page.find("rect");
+        page.document
+            .set_layout_provider(Some(Box::new(move |_| Layout {
+                // On the page the rectangle is at (30, 30), 60 by 40; in the drawing's units it
+                // is at (10, 5), 30 by 20.
+                rects: vec![(rect, Rect::new(30., 30., 60., 40.))],
+                svg_boxes: vec![(rect, Rect::new(10., 5., 30., 20.))],
+                ..Layout::default()
+            })));
+        let said = page.eval(
+            "(() => { const b = r.getBBox(), c = r.getBoundingClientRect(); return [b.x, b.y, b.width, b.height, c.x, c.y, c.width, c.height].join(' '); })()",
+        );
+        assert_eq!(said, "10 5 30 20 30 30 60 40");
+    });
+}

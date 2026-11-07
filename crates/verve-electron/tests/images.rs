@@ -278,3 +278,155 @@ fn a_video_with_a_poster_is_as_big_as_the_poster() {
         "\"40x20 100x50 100x50 200x100 300x150\""
     );
 }
+
+/// A GIF of two 1x1 frames, red and blue, each shown for 100 ms (delay 10), looping for ever.
+const GIF_LOOPS: &str = "data:image/gif;base64,R0lGODlhAQABAIAAAP8AAAAA/yH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAAQABAAACAkQBACH5BAAKAAAALAAAAAABAAEAAAICTAEAOw==";
+/// The same, but with the loop count 1: Chromium plays it twice.
+const GIF_TWICE: &str = "data:image/gif;base64,R0lGODlhAQABAIAAAP8AAAAA/yH/C05FVFNDQVBFMi4wAwEBAAAh+QQACgAAACwAAAAAAQABAAACAkQBACH5BAAKAAAALAAAAAABAAEAAAICTAEAOw==";
+
+/// Notes the frame the first picture of `list` shows, if it is not the one noted last.
+fn note_frame(seen: &mut Vec<u32>, list: &DisplayList) {
+    if let Some(frame) = frames_of(list).first()
+        && seen.last() != Some(frame)
+    {
+        seen.push(*frame);
+    }
+}
+
+fn frames_of(list: &DisplayList) -> Vec<u32> {
+    list.items
+        .iter()
+        .filter_map(|item| match item {
+            PaintItem::Image { frame, .. } => Some(*frame),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_animated_gif_moves_on_by_itself_while_it_is_in_the_list() {
+    let app = app_with(&format!(
+        r#"<img src="{GIF_LOOPS}" style="width:8px;height:8px">"#
+    ));
+    let key = key_for_url(GIF_LOOPS);
+    let seen = std::cell::RefCell::new(Vec::new());
+    list_with(&app, |list, table| {
+        if table.get(key).is_some() {
+            note_frame(&mut seen.borrow_mut(), list);
+        }
+        let seen = seen.borrow();
+        // Frame 0, then 1, then 0 again: it loops.
+        seen.windows(2).any(|w| w == [1, 0]) && seen.contains(&1)
+    });
+    let decoded = list_with(&app, |_, table| table.get(key).is_some()).1;
+    let frames = decoded.get(key).unwrap();
+    assert_eq!(frames.frames.len(), 2);
+    assert_eq!(frames.loops, 0);
+    // Red, then blue, each for the 100 ms the file asks.
+    assert_eq!(&frames.frames[0].0[..4], &[0, 0, 255, 255]);
+    assert_eq!(&frames.frames[1].0[..4], &[255, 0, 0, 255]);
+    assert_eq!(frames.frames[0].1, std::time::Duration::from_millis(100));
+}
+
+#[test]
+fn a_gif_with_a_loop_count_stops_on_its_last_frame() {
+    // Observed in Electron 39.8.10 (Chromium 142): a NETSCAPE2.0 loop count of 1 shows the two
+    // frames twice (red, blue, red, blue) and stays on blue; with no extension, once.
+    let app = app_with(&format!(
+        r#"<img src="{GIF_TWICE}" style="width:8px;height:8px">"#
+    ));
+    let key = key_for_url(GIF_TWICE);
+    let seen = std::cell::RefCell::new(Vec::new());
+    list_with(&app, |list, table| {
+        if table.get(key).is_some() {
+            note_frame(&mut seen.borrow_mut(), list);
+        }
+        seen.borrow().len() >= 4
+    });
+    // It is still, on the last frame, from then on: watched for 600 ms, it shows exactly the
+    // four frames and no more (an infinite loop would show 0 again).
+    let window = app.window("p").expect("the window");
+    app.run_until(
+        |app| {
+            if let Some((list, _)) = app.shell.display_list(window.id) {
+                note_frame(&mut seen.borrow_mut(), &list);
+            }
+            false
+        },
+        std::time::Duration::from_millis(600),
+    );
+    assert_eq!(*seen.borrow(), [0, 1, 0, 1]);
+}
+
+#[test]
+fn a_canvas_is_a_surface_under_a_key_whose_generation_moves_with_each_commit() {
+    let app = app_with(
+        r#"<canvas id="c" width="8" height="4" style="display:block"></canvas>
+           <script>
+             const x = document.getElementById('c').getContext('2d');
+             x.fillStyle = '#ff0000'; x.fillRect(0, 0, 8, 4);
+             setTimeout(() => { x.fillStyle = '#0000ff'; x.fillRect(0, 0, 8, 4); }, 400);
+           </script>"#,
+    );
+    let seen = std::cell::RefCell::new(Vec::new());
+    list_with(&app, |list, table| {
+        for (bounds, _, key) in images_of(list) {
+            let Some(surface) = table.get(key) else {
+                continue;
+            };
+            let first = surface.frames[0].0[..4].to_vec();
+            if verve_layout::canvas_slot(key).is_some()
+                && !seen.borrow().iter().any(|(seen, _, _)| *seen == key)
+            {
+                seen.borrow_mut().push((key, first, rounded(bounds)));
+            }
+        }
+        seen.borrow().len() >= 2
+    });
+    let seen = seen.into_inner();
+    // Red, then blue, as straight BGRA; one canvas, so one slot, and a key for each generation.
+    assert_eq!(seen[0].1, [0, 0, 255, 255]);
+    assert_eq!(seen[1].1, [255, 0, 0, 255]);
+    assert_ne!(seen[0].0, seen[1].0);
+    assert_eq!(
+        verve_layout::canvas_slot(seen[0].0),
+        verve_layout::canvas_slot(seen[1].0)
+    );
+    // The intrinsic size is the canvas's width and height.
+    assert_eq!(seen[0].2, [0, 0, 8, 4]);
+}
+
+#[test]
+fn an_inline_svg_is_drawn_from_its_text_and_measured_like_chromium() {
+    // Observed in Electron 39.8.10 (Chromium 142, `show: false`, DPR 1): `getBBox` is in the
+    // element's user space (the viewBox's units) and leaves out the stroke and the element's own
+    // transform; `getBoundingClientRect` is in the page, leaves out the stroke too, and has the
+    // viewBox scale and every transform in it. The <svg> itself answers the union of its content.
+    let app = app_with(
+        r##"<svg id="s" width="200" height="100" viewBox="0 0 100 50" style="position:absolute;left:10px;top:20px">
+              <rect id="r" x="10" y="5" width="30" height="20" fill="red" stroke="blue" stroke-width="4"/>
+              <g id="g" transform="translate(50,10)"><circle id="c" cx="10" cy="10" r="8"/></g>
+            </svg>"##,
+    );
+    let (list, _) = list_with(&app, |list, _| !list.vectors.is_empty());
+    let spec = &list.vectors[0];
+    let text = String::from_utf8_lossy(&spec.source);
+    assert!(text.contains("<rect") && text.contains("viewBox=\"0 0 100 50\""));
+    let pictures = images_of(&list);
+    assert_eq!(pictures[0].2, spec.key);
+    assert_eq!(rounded(pictures[0].0), [10, 20, 200, 100]);
+    let window = app.window("p").expect("the window");
+    let said = |js: &str| app.eval_renderer(window.contents, js);
+    let measure = |id: &str| {
+        said(&format!(
+            "(() => {{ const e = document.getElementById('{id}'); const b = e.getBBox(); const r = e.getBoundingClientRect(); return [b.x, b.y, b.width, b.height, r.x, r.y, r.width, r.height].join(' '); }})()"
+        ))
+    };
+    assert_eq!(measure("r"), "\"10 5 30 20 30 30 60 40\"");
+    assert_eq!(measure("g"), "\"2 2 16 16 114 44 32 32\"");
+    assert_eq!(measure("c"), "\"2 2 16 16 114 44 32 32\"");
+    let root = said(
+        "(() => { const b = document.getElementById('s').getBBox(); return [b.x, b.y, b.width, b.height].join(' '); })()",
+    );
+    assert_eq!(root, "\"10 5 58 23\"");
+}

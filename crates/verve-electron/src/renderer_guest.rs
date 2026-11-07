@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use verve::isolate::{Guest, InterruptHandle, Outbox as IsolateOutbox};
 use verve::{Level, Runtime};
@@ -326,6 +326,13 @@ impl RendererGuest {
                 self.layout.wheel(&mut self.runtime, &self.document, at, by);
             }
             ToRendererInput::Focus(on) => self.document.set_window_focus(&mut self.runtime, on),
+            ToRendererInput::Visibility(drawn) => {
+                // `backgroundThrottling: false` keeps a page that is not drawn running, as
+                // Electron's documentation has it ("also affects the Page Visibility API").
+                let hidden = !drawn && self.prefs.background_throttling;
+                self.document.set_visibility(&mut self.runtime, hidden);
+                self.images.set_hidden(hidden, Instant::now());
+            }
             ToRendererInput::Frame { now } => {
                 self.document.frame(&mut self.runtime, now);
             }
@@ -515,7 +522,14 @@ impl Guest for RendererGuest {
         let decoding = self.images.pending() > 0 && !self.images.wakes();
         let soon = ((self.document.is_loading() && unasked > 0) || decoding)
             .then_some(Duration::from_millis(5));
-        due.into_iter().chain(soon).min()
+        // An animated picture on show wakes the page at the end of its frame, by a timer.
+        let frame = self.images.next_frame(Instant::now());
+        let release = self.images.next_release();
+        due.into_iter()
+            .chain(soon)
+            .chain(frame)
+            .chain(release)
+            .min()
     }
 
     fn drain(&mut self, _out: &mut IsolateOutbox<FromRenderer>) {
@@ -527,16 +541,22 @@ impl Guest for RendererGuest {
     }
 
     fn publish(&mut self, applied: u64, ran: bool) -> Option<RendererView> {
+        // What a task drew in a canvas is a change the layout has to hear of.
+        self.document.commit_canvases();
         self.document.ensure_layout();
         self.layout
             .show_selection(&mut self.runtime, &self.document);
         let update = self.document.update();
         let changed = !update.changes.is_empty();
         let (list, new_list) = self.layout.list();
-        self.images
-            .sync(&update.snapshot.images, new_list.then_some(&*list));
+        self.images.sync(
+            &update.snapshot.images,
+            &update.snapshot.canvases,
+            (new_list.then_some(&*list), update.snapshot.viewport),
+        );
         let (images, new_images) = self.images.table();
-        (ran || changed || new_list || new_images).then(|| RendererView {
+        let (list, moved) = self.images.animate(&list, Instant::now());
+        (ran || changed || new_list || new_images || moved).then(|| RendererView {
             applied,
             update: Some(update),
             wants_frame: self.document.wants_frame(),

@@ -13,12 +13,18 @@ use crate::layout::{Laid, settle};
 use crate::measure::TextMeasurer;
 use crate::paint::{self, Text};
 use crate::place::{Placed, padding_box, place};
+use crate::svg::{self, Drawing};
 use crate::tree::{BoxTree, build};
 
 /// The number of the next list: lists are numbered across the process, so that a page that
 /// replaces another one (a navigation makes a new engine) never repeats the number of a list a
 /// window may still be showing.
 static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+
+/// A revision no list has had in this process.
+pub(crate) fn next_revision() -> u64 {
+    NEXT_REVISION.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Lays a document out and answers questions about the result.
 ///
@@ -29,6 +35,8 @@ pub struct LayoutEngine {
     fonts: FontRegistry,
     /// The document's selection, as the DOM says its ends.
     selection: Option<Selection>,
+    /// The boxes inside the inline SVGs of the last layout, by the text of the drawing.
+    svg_cache: svg::Cache,
     state: Option<State>,
 }
 
@@ -54,6 +62,8 @@ struct State {
     scroll: HashMap<NodeId, [f32; 2]>,
     placed: Placed,
     rects: HashMap<NodeId, Rect>,
+    /// The inline SVGs, by box.
+    drawings: HashMap<usize, Drawing>,
     list: Arc<DisplayList>,
 }
 
@@ -63,6 +73,7 @@ impl LayoutEngine {
             measurer,
             fonts: FontRegistry::default(),
             selection: None,
+            svg_cache: svg::Cache::new(),
             state: None,
         }
     }
@@ -109,12 +120,14 @@ impl LayoutEngine {
             measurer: &*self.measurer,
             selection: &selection,
         };
-        let list = self.adopt(list_for(&tree, &laid, &placed, &text));
+        let drawings = svg::drawings(snapshot, &tree, &laid, &placed, &mut self.svg_cache);
+        let list = self.adopt(list_for(&tree, &laid, &placed, &text, &drawings));
         let spans = query::span_rects(&blocks);
         self.state = Some(State {
             key,
             snapshot: snapshot.clone(),
-            rects: rects_of(&tree, &placed, &spans),
+            rects: rects_of(&tree, &laid, &placed, &spans, &drawings),
+            drawings,
             blocks,
             spans,
             ranks,
@@ -141,7 +154,7 @@ impl LayoutEngine {
             measurer: &*self.measurer,
             selection: &selection,
         };
-        let built = list_for(&state.tree, &state.laid, &placed, &text);
+        let built = list_for(&state.tree, &state.laid, &placed, &text, &state.drawings);
         let changed = built.items != state.list.items;
         let list = if changed {
             self.adopt(built)
@@ -150,7 +163,7 @@ impl LayoutEngine {
         };
         let spans = query::span_rects(&blocks);
         self.state = Some(State {
-            rects: rects_of(&state.tree, &placed, &spans),
+            rects: rects_of(&state.tree, &state.laid, &placed, &spans, &state.drawings),
             blocks,
             spans,
             placed,
@@ -198,7 +211,7 @@ impl LayoutEngine {
 
     /// Numbers a list that is not the one before it, which keeps its `Arc` when nothing changed.
     fn adopt(&mut self, mut list: DisplayList) -> Arc<DisplayList> {
-        list.revision = NEXT_REVISION.fetch_add(1, Ordering::Relaxed);
+        list.revision = next_revision();
         Arc::new(list)
     }
 
@@ -418,6 +431,15 @@ impl LayoutEngine {
         })
     }
 
+    /// The box of each element inside an inline SVG in the drawing's own pixels: what `getBBox`
+    /// answers.
+    pub fn svg_boxes(&self) -> impl Iterator<Item = (NodeId, Rect)> + '_ {
+        self.state
+            .iter()
+            .flat_map(|state| state.drawings.values())
+            .flat_map(|drawing| drawing.bboxes.iter().copied())
+    }
+
     /// The display list to paint.
     pub fn display_list(&self) -> Arc<DisplayList> {
         self.state
@@ -433,8 +455,18 @@ impl LayoutEngine {
     }
 }
 
-fn list_for(tree: &BoxTree, laid: &Laid, placed: &Placed, text: &Text) -> DisplayList {
-    let (items, rasters) = paint::build(tree, laid, placed, text);
+fn list_for(
+    tree: &BoxTree,
+    laid: &Laid,
+    placed: &Placed,
+    text: &Text,
+    drawings: &HashMap<usize, Drawing>,
+) -> DisplayList {
+    let paint::Painted {
+        items,
+        rasters,
+        vectors,
+    } = paint::build(tree, laid, placed, text, drawings);
     let root = tree
         .html
         .filter(|html| placed.frame[*html])
@@ -443,14 +475,17 @@ fn list_for(tree: &BoxTree, laid: &Laid, placed: &Placed, text: &Text) -> Displa
         revision: 0,
         items,
         rasters,
+        vectors,
         root,
     }
 }
 
 fn rects_of(
     tree: &BoxTree,
+    laid: &Laid,
     placed: &Placed,
     spans: &HashMap<NodeId, Vec<Rect>>,
+    drawings: &HashMap<usize, Drawing>,
 ) -> HashMap<NodeId, Rect> {
     let mut rects: HashMap<NodeId, Rect> = spans
         .iter()
@@ -466,6 +501,7 @@ fn rects_of(
             .filter(|(node, _)| !node.anonymous)
             .map(|(node, rect)| (node.node, *rect)),
     );
+    rects.extend(svg::client_rects(laid, placed, drawings));
     rects
 }
 

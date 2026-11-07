@@ -138,7 +138,7 @@ impl LayoutEngine {
     pub fn display_list(&self) -> Arc<DisplayList>;
 }
 
-pub struct DisplayList { pub revision: u64, pub items: Vec<PaintItem>, pub rasters: Vec<RasterSpec>, pub root: Option<NodeId> /* P33 追加 chunks */ }
+pub struct DisplayList { pub revision: u64, pub items: Vec<PaintItem>, pub rasters: Vec<RasterSpec>, pub root: Option<NodeId>, pub vectors: Vec<VectorSpec> /* P35 第二阶段：SVG 文本，Shell 栅格化 */ /* P33 追加 chunks */ }
 
 pub enum PaintItem {
     Box { node: NodeId, bounds: Rect, radii: [f32; 4], background: Vec<Fill>, border: Border, shadows: Vec<Shadow> },

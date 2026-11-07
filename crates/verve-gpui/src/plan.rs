@@ -574,6 +574,7 @@ mod tests {
             revision: 1,
             items,
             rasters: Vec::new(),
+            vectors: Vec::new(),
             root: None,
         }
     }

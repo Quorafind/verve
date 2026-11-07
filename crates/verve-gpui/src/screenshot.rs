@@ -50,6 +50,7 @@ pub fn render_with(
         list,
         images,
         pages: Vec::new(),
+        vectors: Vec::new(),
         rasters: Vec::new(),
         mask: None,
     };
@@ -97,6 +98,8 @@ struct Painter<'a> {
     images: &'a ImageTable,
     /// The page's pictures made into pixmaps so far, by key and frame.
     pages: Vec<((ImageKey, u32), Arc<Pixmap>)>,
+    /// The SVG pictures drawn so far, by key and size.
+    vectors: Vec<((ImageKey, u32, u32), Arc<Pixmap>)>,
     /// The gradients rasterised so far.
     rasters: Vec<(ImageKey, Pixmap)>,
     /// The mask of the clip the last shape was drawn under.
@@ -185,7 +188,10 @@ impl Painter<'_> {
         (key, frame, alpha): (ImageKey, u32, f32),
         mask: Option<&Mask>,
     ) {
-        let Some(pixmap) = self.page_pixmap(key, frame) else {
+        let Some(pixmap) = self
+            .page_pixmap(key, frame)
+            .or_else(|| self.vector_pixmap(key, bounds))
+        else {
             return;
         };
         // Only where the picture is: GPUI draws the part of `visible` inside `bounds`, and the
@@ -221,6 +227,36 @@ impl Painter<'_> {
             Transform::identity(),
             mask,
         );
+    }
+
+    /// The SVG under `key` rasterised to fill `bounds` (one pixel to a CSS pixel), made once.
+    fn vector_pixmap(&mut self, key: ImageKey, bounds: Rect) -> Option<Arc<Pixmap>> {
+        let width = bounds.width.round().clamp(1., 8192.) as u32;
+        let height = bounds.height.round().clamp(1., 8192.) as u32;
+        if let Some((_, pixmap)) = self
+            .vectors
+            .iter()
+            .find(|(seen, _)| *seen == (key, width, height))
+        {
+            return Some(Arc::clone(pixmap));
+        }
+        let source = self
+            .list
+            .vectors
+            .iter()
+            .find(|spec| spec.key == key)
+            .map(|spec| &spec.source)
+            .or_else(|| self.images.vector(key))?;
+        let mut rgba = verve_layout::rasterize_svg(source, width, height)?;
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        verve_dom::canvas::premultiply(&mut rgba);
+        let size = tiny_skia::IntSize::from_wh(width, height)?;
+        let pixmap = Arc::new(Pixmap::from_vec(rgba, size)?);
+        self.vectors
+            .push(((key, width, height), Arc::clone(&pixmap)));
+        Some(pixmap)
     }
 
     /// The frame of a page picture as a premultiplied pixmap, made once.
@@ -483,6 +519,7 @@ mod tests {
             revision: 1,
             items,
             rasters: Vec::new(),
+            vectors: Vec::new(),
             root: None,
         }
     }
@@ -501,6 +538,7 @@ mod tests {
             width: 2,
             height: 1,
             frames: vec![(bytes, std::time::Duration::ZERO)],
+            loops: 1,
         };
         let key = ImageKey(5);
         let table = ImageTable::new([(key, std::sync::Arc::new(frames))].into());
@@ -526,6 +564,7 @@ mod tests {
             width,
             height: (bgra.len() / 4) as u32 / width,
             frames: vec![(std::sync::Arc::from(bgra), std::time::Duration::ZERO)],
+            loops: 1,
         };
         ImageTable::new([(key, std::sync::Arc::new(frames))].into())
     }
@@ -642,5 +681,35 @@ mod tests {
         })
         .unwrap();
         assert_eq!(pixel(&picture, 5, 1), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn an_svg_is_drawn_at_the_size_it_is_shown_at() {
+        let key = ImageKey(8);
+        let source = br#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"><rect width="1" height="1" fill="red"/><rect x="1" width="1" height="1" fill="blue"/></svg>"#;
+        let mut page = list(vec![PaintItem::Image {
+            node: 1,
+            bounds: Rect::new(0., 0., 40., 20.),
+            clip: Rect::new(0., 0., 40., 20.),
+            image: key,
+            fit: verve_layout::ObjectFit::Fill,
+            frame: 0,
+        }]);
+        page.vectors.push(verve_layout::VectorSpec {
+            key,
+            source: std::sync::Arc::from(&source[..]),
+        });
+        let picture = render_with(
+            &page,
+            &ImageTable::default(),
+            (40, 20),
+            Some([1.; 4]),
+            &|_| None,
+        )
+        .unwrap();
+        // Two halves, with the edge between them where it falls at 40 pixels, not blurred from 2.
+        assert_eq!(pixel(&picture, 5, 5), [255, 0, 0, 255]);
+        assert_eq!(pixel(&picture, 19, 5), [255, 0, 0, 255]);
+        assert_eq!(pixel(&picture, 21, 5), [0, 0, 255, 255]);
     }
 }

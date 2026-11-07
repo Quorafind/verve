@@ -30,6 +30,7 @@ pub mod msg;
 mod net_watch;
 mod os;
 mod oscrypt;
+mod page_frames;
 mod page_images;
 mod page_layout;
 mod page_script;

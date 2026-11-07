@@ -15,6 +15,10 @@ verve-dom = { path = "../verve-dom", default-features = false }
 # nothing — block flow with floats, flexbox and grid.
 taffy = { version = "=0.13.0", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "float_layout", "content_size"] }
 
+# Inline SVG: parsed and drawn by the copy of resvg and usvg that GPUI links, with the same
+# features, so the graph holds one of each.
+resvg = { version = "0.46.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+
 # UAX #14, where a line may break. cosmic-text uses it too on Linux and macOS, so there is no second copy of the tables
 # there; on Windows (DirectWrite) it is new code in electron.exe, about 21 KB.
 unicode-linebreak = "0.1"

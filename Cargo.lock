@@ -6968,6 +6968,7 @@ dependencies = [
 name = "verve-layout"
 version = "0.1.0"
 dependencies = [
+ "resvg",
  "serde_json",
  "taffy",
  "unicode-linebreak",

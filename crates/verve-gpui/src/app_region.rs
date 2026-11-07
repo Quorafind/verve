@@ -171,6 +171,7 @@ mod tests {
                 hitbox(3, Some(AppRegionKind::NoDrag), 5.),
             ],
             rasters: Vec::new(),
+            vectors: Vec::new(),
             root: None,
         };
         assert_eq!(

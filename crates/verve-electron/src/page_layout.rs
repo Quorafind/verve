@@ -37,6 +37,7 @@ impl PageLayout {
                     .filter_map(|(node, _)| Some((node, engine.scroll_extent(node)?)))
                     .collect(),
                 fragments: engine.fragments().collect(),
+                svg_boxes: engine.svg_boxes().collect(),
             }
         })));
         // A range's boxes come from the same lines. The provider is asked after the layout is up

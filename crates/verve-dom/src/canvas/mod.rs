@@ -61,7 +61,7 @@ pub(crate) use element::{CANVAS_ACCESSORS, CANVAS_METHODS};
 #[cfg(feature = "canvas")]
 pub use fonts::{FontFaceRule, FontStack, generic_families};
 pub(crate) use image::ImageStore;
-pub use image::{DecodeError, DecodedImage, ImageBytes, decode, image_size};
+pub use image::{DecodeError, DecodedImage, ImageBytes, decode, image_size, is_svg};
 pub(crate) use img::{IMAGE_ACCESSORS, IMAGE_METHODS, IMAGE_REFLECTED, flush_events};
 #[cfg(feature = "canvas")]
 pub(crate) use install::install;

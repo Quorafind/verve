@@ -53,6 +53,27 @@ const INHERITED: &[&str] = &[
     "-moz-osx-font-smoothing",
     "user-select",
     "-webkit-user-select",
+    // SVG's painting properties are inherited, from an HTML ancestor too: Electron 39.8.10 paints
+    // a `<rect>` red under `.btn { fill: red }` on a `<div>`, and `getComputedStyle(rect).fill`
+    // is `rgb(255, 0, 0)`.
+    "fill",
+    "fill-opacity",
+    "fill-rule",
+    "stroke",
+    "stroke-width",
+    "stroke-opacity",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-miterlimit",
+    "stroke-dasharray",
+    "stroke-dashoffset",
+    "clip-rule",
+    "paint-order",
+    "shape-rendering",
+    "text-anchor",
+    "marker-start",
+    "marker-mid",
+    "marker-end",
 ];
 
 /// Whether `property` is inherited.

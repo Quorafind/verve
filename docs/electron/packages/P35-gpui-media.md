@@ -118,6 +118,28 @@ Fill::Picture { image: ImageKey, area: Rect, tile: Rect, step: [f32; 2], count: 
 - **画哪一帧**：Shell 只画 `frame`；第一阶段恒为 0，动图见第二阶段。
 - **第一阶段的偏差**：`<img>` 的 `border-radius` 不裁图（`PaintItem::Image` 没有 `radii`）；每层最多 4096 块瓦片，超出的部分不画（`space`/`round` 都实现了）。
 
+### 第二阶段的契约（SVG、canvas 表面、动图）
+
+- **canvas 的键**：最高两位 `01`；第 61–32 位是 canvas 节点编号的低 30 位（槽位）；第 31–0 位是 `CanvasFrame.generation` 的低 32 位。
+  `canvas_key(node, generation)`、`canvas_slot(key)`（在 `verve-layout/src/images.rs`）。布局从 `Snapshot.canvases` 读出当前 generation 写进
+  `PaintItem::Image.image`；渲染器只在表里放**当前**键的画面（`CanvasFrame` 的预乘 RGBA 转成 straight-alpha BGRA），旧 generation 的键随之离开表；
+  Shell 画到一个新 generation 时，立刻让同一槽位的旧 `RenderImage` 退役（不等 300 帧的宽限）。显示列表没点名的 canvas 不转换。
+- **矢量图**：`DisplayList.vectors: Vec<VectorSpec { key: ImageKey, source: Arc<[u8]> }>` 追加在末尾，与 `rasters` 对称：布局在显示列表里放 SVG 文本，
+  Shell 在 GPUI 线程上用 GPUI 已链接的 resvg 按设备像素尺寸栅格化。内联 `<svg>` 的键是序列化文本（含内容盒的 `width`/`height`）的 62 位散列，`00` 开头，
+  所以文本不变就是同一个键；`<img src=x.svg>` 和背景的键仍是 `key_for_url`，`source` 是文档持有的字节（`Arc` 克隆，不复制）。
+  Shell 的缓存键是 `(ImageKey, 设备像素宽, 设备像素高)`，尺寸变了就重新栅格化，不拉伸位图；一帧没画到的栅格 60 帧后还给图集。
+  `<img src=x.svg>` 和背景里的 SVG 文本由渲染器放进 `ImageTable::vector(key)`（`PageImages` 对 SVG 字节不解码，直接把文本交给表；`ImageTable::with_vectors`），
+  Shell 先找显示列表的 `vectors`，再找表。resvg/usvg 与 GPUI 同版本同特性（0.46.0，`text` `system-fonts` `memmap-fonts` `raster-images`），由 `verve-layout` 直接依赖，`cargo tree -d` 不出现第二份。
+- **动图**：`ImageFrames.frames` 每帧带时长，另有 `loops: u32`（0 = 无限；GIF 读 NETSCAPE2.0 扩展，没有这个扩展就播一遍；`ImageFrames` 追加字段）。
+  画哪一帧由渲染器定：`PageImages::animate` 为显示列表点名且多于一帧的图片各记一个起点，按已过的时间算出帧号，**改写显示列表里的 `frame`**（新 `revision`）再发布。
+  页面何时醒来：`RendererGuest::next_due` 返回到下一次换帧的剩余时间（一个定时器，不是 5 ms 轮询）。显示列表不再点名的图片停止计时，再次点名时从第 0 帧重新开始。
+  时长不超过 10 ms 的帧按 100 ms 算（Chromium 源码 `gif_image_decoder.cc` 的做法；本包的观察见「状态」）。
+- **SVG 的几何**：`verve_dom::Layout` 追加 `svg_boxes: Vec<(NodeId, Rect)>`，是 usvg 树里每个有 `id` 的元素在 `<svg>` 内容盒坐标里的包围盒（序列化时给没有 `id` 的元素补一个）。
+  文档的 `getBBox()` 读这张表；布局提供者还把这些盒子平移到页面坐标，放进 `rects`，`getBoundingClientRect()` 读到的就是它们。
+
+- **`DisplayList::same_but_frames`**（公开，在契约类型上）：除动图帧号外两张列表相同。`--screenshot` 用它判断"页面不再变了"，永不结束的动图因此不会让它等满 30 s。
+- **`Document::commit_canvases`**（verve-dom，现在是 `pub`）：把任务里画过的 canvas 提交为节点改动。自己做布局的渲染器要在布局前调用，否则任务里重画的 canvas 的新 generation 进不了显示列表。
+
 ## 步骤
 
 1. `ImageTable` 与 `RendererView.images`；GPUI 侧 `ImageKey → RenderImage` 缓存与释放。
@@ -185,7 +207,7 @@ Fill::Picture { image: ImageKey, area: Rect, tile: Rect, step: [f32; 2], count: 
   - `image_size` 不看 EXIF 方向而 `decode` 会转，带旋转的手机 JPEG 固有尺寸会宽高颠倒；
   - 布局每次读 `<img>` 仍要对地址做一次散列（`snapshot.images.get`），只在布局重做时发生，不在每帧；
   - 解码后的像素在 CPU 上有两份（`ImageTable` 与 `RenderImage`）；
-  - 页面图片在 GPUI 里不画之后保留 300 帧才还给图集，来回滚动不会重新拷贝和上传；列表不点名但文档还持有字节的图片，解码好的像素在 128 MiB 的预算内保留（最久没被点名的先丢），隐藏再显示不会空白；
+  - 页面图片在 GPUI 里不画之后按 64 MiB 的字节预算保留（最久没画的先丢；渲染器从表里放掉的立刻还给图集），来回滚动不会重新拷贝和上传；列表不点名但文档还持有字节的图片，解码好的像素在 128 MiB 的预算内保留（最久没被点名的先丢），隐藏再显示不会空白；
   - 历史：gpui 测试在 `feat(gpui): Draw pictures and background tiles…` 之后单独一个提交，video/audio 的 UA 规则在 `feat(layout)` 里（要重排提交）；两者都没改。
 - 顺序：测试 `tests/images.rs` 的 `srcset` 一条用 `data:` URL，只验证 `src` 与 `srcset` 的配合（见观察）。
 
@@ -211,3 +233,113 @@ cargo test --locked -p verve-gpui --features jit --lib
 cargo test --locked -p verve-gpui --features jit --test boxes
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
+
+### 第二阶段（步骤 4–6、夹具、内存）
+
+本阶段的代码只做了 `cargo check`（agent 不跑测试）；下面列的测试都还没有跑过，由协调者跑。
+
+**做了**：
+
+- **契约**（第一个提交，见「第二阶段的契约」）：canvas 的键、`DisplayList.vectors`、`ImageTable::vector`、`ImageFrames.loops`、`Layout.svg_boxes`。
+- **内联 `<svg>`（步骤 4）**：`verve-layout/src/svg.rs`。
+  - 布局阶段（`update()`，不是每次滚动）把 `<svg>` 子树连同计算样式写成 SVG 文本：属性照抄，`style` 里补 CSS 设出来的 `fill`/`stroke`/…（`PROPERTIES`），继承的 `color`/`font-*`/`visibility` 在根上和变化处写出（`currentColor` 因此按计算后的 `color` 解析），`display:none` 写出，`<style>`/`<script>`/`<foreignObject>` 不写；没有 `id` 的元素补 `__v<序号>`（按元素顺序编号，不按节点，所以两个相同图标的文本相同）；根的 `width`/`height` 换成内容盒的大小。
+  - 键是文本的 62 位散列；相同文本在 `DisplayList.vectors` 里只放一份。`<svg>` 里面没有盒子（`flow.rs` 不展开它的子节点；`<canvas>` 的后备内容同样不展开）。
+  - 栅格化在 Shell：`verve_layout::rasterize_svg`（resvg 0.46，与 GPUI 同版本同特性，`verve-layout` 直接依赖；`cargo tree -d` 不出现 image/resvg/usvg/tiny-skia/fontdb 的第二份）。GPUI 一侧 `Pictures::page` 按 `(键, 设备像素宽, 设备像素高)` 缓存（尺寸变了重画，不拉伸），60 帧没画到的还给图集；软件绘制（`screenshot.rs`）按 CSS 像素画。含 `<text` 的才载入系统字体（一次）。
+  - `<img src=x.svg>` 与 `background-image: url(x.svg)`：`PageImages` 对 SVG 字节不解码，把文本放进 `ImageTable::vector`，Shell 同样按显示尺寸栅格化（第一阶段留下的 `Unsupported` 补上了）。
+  - 几何：usvg 树里每个有 `id` 的节点的两个盒子——`getBBox`（元素自己的用户空间，不含描边，也不含元素自己的 `transform`）和 `getBoundingClientRect`（页面坐标，含 viewBox 缩放和所有 `transform`，也不含描边）。前者经 `Layout.svg_boxes` 进文档，后者并入布局的 `rects`。`<svg>` 根的 `getBBox` 是内容的并集，根自己的 client rect 仍是布局盒。盒子按文本缓存（同一文本只解析一次）。
+- **canvas 表面（步骤 5）**：布局读 `Snapshot.canvases`，`read_surface` 给出 `Replaced`（固有尺寸 = 画布的像素数，`object-fit`/`object-position` 照常），键是 `canvas_key(节点, generation)`。`PageImages::sync_surfaces` 只转换显示列表点名的那个 generation（预乘 RGBA → straight BGRA），旧 generation 的键随即离开表；Shell 画到新 generation 时 `Pictures::image` 立刻让同一槽位的旧 `RenderImage` 退役。P25 的 `commit_canvases` 本来就在帧边界发布 generation。
+- **动图（步骤 6）**：`page_frames.rs`：GIF、APNG、动画 WebP 逐帧读（`image::AnimationDecoder`，每帧已合成整图），读到 256 MiB 就停；GIF 的循环次数读 NETSCAPE2.0（没有扩展播一遍，计数 N 播 N+1 遍，0 无限）。`PageImages::animate` 为显示列表点名的多帧图各记起点，按时间算帧号并改写列表（`DisplayList::with_frames`，新 revision）；`next_due` 返回到下一次换帧的剩余时间（定时器，不是 5 ms 轮询）；不再点名的图停止计时，再点名从第 0 帧开始。
+- **夹具与对比**：`tests/electron/apps/images/`（`gen.js` 在真 Electron 里画出 PNG/JPEG/WebP 并内联，`main.js` 抓图，`expected-chromium.png` 是 Electron 39.8.10 的 `capturePage()`）；`crates/verve-gpui/tests/images.rs` 两条 `#[ignore]` 的测试（见下）。对比脚本 `SCRATCH\p35\images-compare.ps1`。
+- **内存**：`images.rs` 的 `two_hundred_megapixel_pictures_that_scroll_…`：写 200 张 1000×1000 的 PNG 和一个竖排、每 100 ms 滚 1500 px 的页面，每秒读一次进程工作集（PowerShell），二十秒；峰值要小于 400 MB，且最后一次读数小于峰值。显示列表只点名的图才解码、GPUI 对窗口外的 `Shape::Picture` 不上传（第一阶段评审留下的两项，第一阶段已做）。
+
+**Electron 39.8.10（Chromium 142）的观察**（`show: false`，DPR 1，scratch profile；脚本在草稿目录 `p35/obs2/`）：
+
+- `<svg width=200 height=100 viewBox="0 0 100 50" style="position:absolute;left:10px;top:20px">` 里：`<rect x=10 y=5 width=30 height=20 stroke-width=4>` 的 `getBBox()` 是 `10 5 30 20`（用户单位，不含描边），`getBoundingClientRect()` 是 `30 30 60 40`（不含描边，含 viewBox 的 2 倍）；`<g transform="translate(50,10)"><circle cx=10 cy=10 r=8>` 的 `<g>` 与圆都是 `getBBox` `2 2 16 16`（不含 `<g>` 自己的 `transform`）、client `114 44 32 32`；带 `transform="rotate(90)"` 的 path：`getBBox` `0 0 20 10`，client `-10 20 20 40`；`<svg>` 自己的 `getBBox` 是内容的并集 `-10 0 78 28`（含旋转后的 path）。
+- GIF：帧时长 0 或 10 ms 的显示约 100 ms；20 ms 以上按文件里的时长（50 ms 实测周期 47 ms，100 ms 约 95–100 ms，110 ms 约 110 ms）。NETSCAPE2.0 计数 0 无限循环；没有这个扩展播一遍后停在最后一帧；计数 1 播两遍（红蓝红蓝）、计数 2 播三遍，都停在最后一帧。
+- 夹具抓图时（`show: false`，加载后 2.5 s 的 `capturePage()`）GIF 还在第一帧（红）；评审的探针（`p35-review3\gif\out.json`）里被绘制的隐藏窗口里 GIF 是动的，所以不能说隐藏窗口不动画。夹具对比把 GIF 的 64×64 方块排除在外。（`capturePage()` 的采样间隔约 17 ms，上面的周期是这样量出来的。）
+
+**没做 / 偏差**：
+
+- 第一阶段留下的三项：`<img>` 的 `border-radius` 裁剪（`PaintItem::Image` 仍没有 `radii`）、破图盒与 `alt`、flex 里 `<img>` 的拉伸，**都没做**（预算花在 SVG/canvas/动图/夹具上）；观察到的数字仍在上面第一阶段的记录里。
+- canvas 没有记录脏矩形（只整张转换、整张上传；任务书说记录，但没有使用者，留给 P33）。每个 generation 都在页面线程上整张转 BGRA（1920×1080 约 8 MB）。
+- 动图改写显示列表是整张列表的拷贝（`with_frames`，每次换帧一次）：条目很多的页面换帧会有 O(条目) 的开销，P33 的块缓存之后应只改动有动图的块。动图只在显示列表点名时计时，没有"页面不可见就停"的判断（渲染器不知道窗口是否被遮住；窗口不被绘制时，渲染器按 `Visibility` 让 `document.hidden` 为真并冻结动图，`backgroundThrottling: false` 则不隐藏）。
+- 无限循环的动图会让 `--screenshot` 等不到"列表 600 ms 不变"（它每 100 ms 换一次 revision）；夹具的 GIF 只播两遍。`getBBox` 与 `getBoundingClientRect` 对嵌套带 `transform` 的元素取的是 usvg 的盒子（上面的观察对得上），但 `<use>` 引用的、`<text>`（字体用系统字体，度量与 Chromium 不同）、`<foreignObject>`（不支持）没有对照观察。
+- 动画 WebP 与 APNG 的解码走同一个函数，但没有测试数据；GIF 的 disposal 由 `image` 的 `GifDecoder` 处理，没有单独测。
+- 256 MB 的 LRU 仍然没有（第一阶段说过）。
+- 夹具：`expected-chromium.png` 是在这台机器上用 Electron 39.8.10 抓的；JPEG、WebP 的解码器（Chromium 的 libjpeg-turbo/libwebp，Verve 的 `image`）有差别，边缘按 3% 的预算放过。
+
+**任务书「修改」之外动过的文件**：`verve-dom` 的 `layout_provider.rs`、`state.rs`、`bind/svg.rs`、`canvas/image.rs`、`canvas/mod.rs`；`verve-electron` 的 `page_layout.rs`、`renderer_guest.rs`（只在 `next_due`/`publish` 里加几行）、`lib.rs`；`verve-gpui` 的 `plan.rs`、`app_region.rs`（测试里补 `vectors` 字段）；`Cargo.lock`（`verve-layout` 多了对 `resvg` 的依赖，图里没有新包）。
+
+**给其他包**：`DisplayList` 多了 `vectors`，`ImageFrames` 多了 `loops`，`verve_dom::Layout` 多了 `svg_boxes`（字面量构造的要补，`..Default::default()` 的不用）。P33：`DisplayList::with_frames` 是动图换帧的入口；`Pictures` 对 canvas 键按槽位（`canvas_slot`）退役。P32 二期：没有碰 `PaintItem::Control`。
+
+**要跑的测试**（一次一条）：
+
+```
+cargo test --locked -p verve-layout --lib svg
+cargo test --locked -p verve-layout --lib images
+cargo test --locked -p verve-layout --test images
+cargo test --locked -p verve-dom --test layout_provider
+cargo test --locked -p verve-electron --lib page_frames
+cargo test --locked -p verve-electron --lib page_images
+cargo test --locked -p verve-electron --test images
+cargo test --locked -p verve-electron --test headless
+cargo test --locked -p verve-gpui --features jit --lib
+cargo test --locked -p verve-gpui --features jit --test boxes
+cargo test --locked -p verve-gpui --features jit --test text_fixture
+cargo clippy --locked --workspace --all-targets -- -D warnings
+# 开真窗口：
+cargo test --locked -p verve-gpui --features jit --test images -- --ignored the_picture_the_electron_binary
+cargo test --locked -p verve-gpui --features jit --test images -- --ignored --nocapture two_hundred
+# 或者：SCRATCH\p35\images-compare.ps1 [-Regenerate] [-Memory]
+```
+
+### 第二阶段第二轮（评审与中心运行后的修补）
+
+同样只做了 `cargo check` 和一次 workspace clippy 以外的事都没有跑；测试由协调者跑。
+
+**改了**：
+
+- **MUST 1（安全）**：`svg.rs::parse` 把 `usvg::Options::image_href_resolver` 换成只认 `data:`（`resolve_string` 恒为 `None`），默认的字符串解析器会对任何存在的路径（含 UNC）`fs::read`。检查过：全仓库只有这一处构造 `usvg::Options`（GPUI 自己的 `SvgRenderer` 读素材，不是我们的路径）；嵌套 SVG 用同一份选项；`feImage` 走同一个 `image_href_resolver`；字体只来自系统字体库（`fontdb`），没有按路径读字体。测试 `an_image_that_names_a_file_draws_nothing` 写一个真的临时 PNG，旧代码会画出红点。内联 `<image>` 的非 `data:` 地址不取（Chromium：http 页面与 `<img>` 里的 SVG 也不取）。
+- **MUST 2**：`<use href="#id">` 指向图外（图标精灵）时，把目标连同它们的目标复制进尾部的 `<defs>`（有已访问集合，里面的元素不补 id）。`url(#…)` 的渐变没有复制（Chromium 也不用 `display:none` 的 `<svg>` 里的渐变；而渲染着的 `<svg>` 里的渐变没有处理，留着）。
+- **MUST 3**：只写合法的 XML 属性名（无冒号，或 `xlink:`/`xml:`），其余丢掉。**MUST 4**：根元素不再写 `opacity`/`mix-blend-mode`/`isolation`/`filter`/`clip-path`/`mask`（布局已把它们用在整张图上）。
+- **MUST 5（内存）**：我没有开窗口，所以**没有量到**各处的张数；按代码推算：页面线程的表里原来有 200 张（`names_in` 点名整张列表，约 800 MB），GPUI 的 `Pictures` 再按 300 帧的宽限留着画过的图。改成：`names_in` 只点名窗口上下各一屏之内的图（用列表自己的滚动位移）；`Pictures` 对没画的页面图改用 64 MiB 的字节预算（最久没画的先丢），没画的矢量栅格当帧就丢，同一个键只留一个尺寸；`PageImages` 的 128 MiB 闲置预算不变。测试让页面把 `loaded` 和 `scrolled` 写进 `result.json` 并断言（200 张都加载、滚过 90000 px），要求峰值大于 100 MB（真的解码了）、最后一次读数低于峰值的 90%。**需要协调者再跑一次并把各秒的数字贴回来。**
+- **MUST 7**：渲染器处理 `ToRendererInput::Visibility`：`document.set_visibility`，`PageImages::set_hidden`：隐藏时 `next_frame` 返回 `None`，`animate` 按隐藏那一刻算帧，重新显示时各起点后移隐藏的时长（有单元测试）。
+- **MUST 8**：`DisplayList::same_but_frames`；`Capture` 用它判断"没变"，无限循环的动图不再让 `--screenshot` 等满 30 s（`a_screenshot_is_taken_of_a_page_with_an_animation_that_never_ends`，`#[ignore]`）。由 `requestAnimationFrame` 重画的 canvas 仍然会让它等不到（记在下面）。
+- **MUST 6**：夹具对比按部分（17 块，按 `index.html` 里的矩形）：每块不同像素占自己面积 < 5%，且非白像素不少于期望的 80%，GIF 方块仍排除。
+- **MUST 9**：`paint_command` 的阴影分支移到 `paint_shadow`（P32 的 `Control` 分支可以直接加在那里）；矢量文本放进图片元组，`page_picture` 回到 7 个参数。**MUST 10**：同一个键只留一个尺寸，没画到的矢量栅格当帧就还回。**MUST 11**：`with_frames` 用 `reframe` 辅助函数，嵌套回到 3 层。
+- **中心的三项**：canvas 测试失败的原因：任务里画的 canvas 只在下一次 `take_update` 里提交（`commit_canvases`），而发布前的 `ensure_layout` 看不到它（它只在有"改动"时才重排），所以第二个 generation 永远不进显示列表；现在 `publish` 先调 `document.commit_canvases()`（现在是 `pub`）。`map_entry` 改用 `entry` API。内存见上。
+- **SHOULD（做了）**：SVG 固有尺寸（属性边界、`em`、被截断的 UTF-8 字符、只有 `viewBox` 时自然尺寸 300×150；**按比例铺满块宽没做**，布局里还是 300×150）；APNG 的 `num_plays` 与 WebP 的 `ANIM` 循环次数（Electron 39.8.10：N 播 N 遍，`p35-review3\gif\out.json`）；`fill`/`stroke` 等绘制属性继承（单独的 `feat(dom)` 提交；Electron 39.8.10 观察：`.btn{fill:red}` 在 `<div>` 上，`<rect>` 画红，`getComputedStyle(rect).fill` 为 `rgb(255, 0, 0)`）；GIF 循环测试改成确切的 `[0,1,0,1]`；契约里 `vectors` 在 `root` 之后；`page_frames` 里失效的链接；`rasterize` 用 `unpremultiply`；"隐藏窗口不动画"的说法改正；替换元素的判断有了名字 `replaced::has_no_inner_boxes`。
+
+**还没做 / 记下来**：
+
+- SVG 在 `<img>` 和背景里按另一个比例画时被拉伸（Chromium：有 `viewBox` 时保持比例，`[10,0,80,40]`，评审的 `p35-review3it\out.json`）；SVG 的 `getBBox` 对 `<use>` 实例、带 `transform` 的 `<use>`、嵌套 `<svg>`、空 `<g>` 的边角情况；CSS `transform` 作用在 SVG 元素上（Chromium 会移动 20px）；`<use>` 引用的 `url(#…)` 渐变（渲染着的另一个 `<svg>` 里）；cf02017ea 的历史没有拆出 `feat(dom)`；11ff5c30a 没拆。
+- canvas 重画会整页重排（P25 的 `commit_canvases` 把节点标为改动，`LayoutEngine::update` 整棵重建，每个内联 SVG 重新写一遍），每个 generation 在 CPU 上拷三次；应在只有 canvas 提交且尺寸不变时把键补进现有列表。`requestAnimationFrame` 重画的 canvas 让 `--screenshot` 等不到静止。
+- 现在有两份系统字体库（GPUI 的 `SYSTEM_FONT_DB` 和 Verve 的）；第一次遇到 `<text` 的 SVG 时页面线程会阻塞到系统字体载入；d3 里每个标签量一次 `getBBox` 的写法会让整页重排、整张图重新解析；SVG 里没有命中测试（没有盒子，`event.target` 是 `<svg>`）；脏矩形没有记录（任务书要求）。
+- 体积：本轮新增的是纯 Rust 代码（`reframe`/`same_but_frames`、预算淘汰、`<defs>` 复制、`set_hidden`），没有新 crate 和新解码路径。
+
+**本轮的测试命令**（在上面的清单之外加）：
+
+```
+cargo test --locked -p verve-layout --test images
+cargo test --locked -p verve-layout --lib
+cargo test --locked -p verve-dom --lib canvas::image
+cargo test --locked -p verve-electron --test images
+cargo test --locked -p verve-electron --lib
+cargo test --locked -p verve-gpui --features jit --lib
+cargo test --locked -p verve-gpui --features jit --test images -- --ignored the_picture_the_electron_binary
+cargo test --locked -p verve-gpui --features jit --test images -- --ignored a_screenshot_is_taken
+cargo test --locked -p verve-gpui --features jit --test images -- --ignored --nocapture two_hundred
+cargo clippy --locked --workspace --all-targets -- -D warnings
+```
+
+### 第二阶段第三轮
+
+只做了 `cargo check` 和一次 workspace clippy；测试由协调者跑。
+
+- **第二轮引入的四个与 Chromium 不符之处**：绘制属性（`fill`/`stroke`…）现在和 `color`、`font-*` 一样只写在根上和与父元素不同的地方，不再盖过后代自己的 `fill="…"`（Electron 39.8.10，`p35-review4\probe\out-svg.json` 的三种情形，布局测试冻结）；根上只跳过 `opacity`，`filter:invert(1)` 又画成青色；带未声明前缀的元素（`sodipodi:namedview`、`rdf:RDF`）连同子树一起跳过；只有 `viewBox` 的 SVG 的自然尺寸把 300×150 按比例收（24×24 → 150×150，90×30 → 300×100，40×20 → 300×150，`p35-review4atio\out.json`）。`getComputedStyle` 仍不看表现属性，没改。
+- **内存**：渲染器里，列表里有但不在窗口上下各一屏之内的图，在列表静止约 1 s 后放掉（`release_far`，`next_due` 带这个定时器）；128 MiB 的闲置预算只留给列表根本不画的图。`Pictures`：表里没有的图立刻退役（不再让 `by_page` 抱着渲染器的 `Arc`），预算里把 `faded` 算上。动图的时钟留到图离开列表为止（有限循环的动图滚走再滚回不会从头来），只有 `next_frame` 看"是否在窗口附近"。测试断言：峰值至少比第一个样本高 80 MB、低于 400 MB，滚动停止后 5 s 内工作集回落至少峰值与首样本之差的一半，200 张都加载并滚过 90000 px。中心第一次测到的曲线（第二轮代码）：`[131, 175, 221, 233, 234, 232, 232, 231, 233, 233, 233, 233, 232, 233, 236, 232, 233, 253, 249, 249]`（平在 233 MB，不回落）；本轮的曲线待协调者的运行填入。
+- **隐藏窗口**：`backgroundThrottling: false` 的页面不被隐藏（Electron 文档：它也影响 Page Visibility API）；隐藏时 rAF 不排下一帧（Electron 39.8.10：从未显示、`paintWhenInitiallyHidden: false` 的窗口 1.2 s 内 rAF 0 帧），显示时接着排。
+- **`<use>` 的细节**：`find_id` 取树序里第一个同 id 的元素（和 `getElementById` 一致），只跟 `use`/`feImage`/`textPath`/`mpath`/渐变/`pattern` 的 `href`，只复制 SVG 命名空间里的目标；精灵测试断言画出绿色。非 XML 的控制字符在 `escape` 里丢掉。
+- **测试**：canvas 测试的 `<canvas>` 加 `display:block`；`pictures` 的单元测试按字节预算和"表里没有就退役"重写；被截断字符的测试用奇数长度的前缀，并断言第 4096 字节确实落在字符中间；矢量只留一个尺寸的测试断言退役数和 `by_vector.len() == 1`。
+- **历史**：`has_no_inner_boxes` 并入布局提交，canvas 修复并入加它的测试的提交，提交说明里写了 MUST 1 查过的路径。
+- **没做**：SVG 在 `<img>`/背景里按另一比例画时的拉伸；`getBBox` 对 `<use>`/嵌套 `<svg>`/空 `<g>` 的边角；CSS `transform` 作用于 SVG 元素；canvas 重画整页重排；`<defs>` 里 `url(#…)` 渐变的复制；隐藏时 rAF 的单元测试。
