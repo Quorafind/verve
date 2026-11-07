@@ -414,6 +414,29 @@ HTTP 缓存（`clearCache` resolve、`getCacheSize` 返回 0）、Chromium Cooki
     `resolveHost`、`session-created`）、`api/net.rs`（`net.fetch`、`isOnline`/`online`、`resolveHost`）、`api/net_request.rs`（`ClientRequest`、`IncomingMessage`）。`webContents.session` 是真的会话对象。
 - 测试：`tests/protocol.rs`、`tests/net.rs`（见下面“要跑的命令”）。
 
+**第五轮（合并前的最后修正）**
+
+- **代理按请求走**：评审发现的真缺陷是主进程的 `net` 请求每次都给主 realm 设会话的代理，Node `http`/`https`、全局 `fetch` 因而跟着最近一次会话的代理，两个会话的请求还会因 `onBeforeRequest` 的异步决定而串。
+  现在内核的 `BrowserNet::proxy(url) -> Route`（默认 `Realm`）由 `fetch` 在每一跳问，答案放在请求选项上（`__verveVia`/`__verveDirect`）；`MainNet`/`RendererNet` 用 `Session::route`，`resolveProxy` 用同一个 `Proxy::server_for`。
+  删掉了 `apply_proxy`、`proxy_seen`、会话的代数、`ProxyEnv` 的转换；`verve::set_realm_proxy` 不再导出。新测试：(a) 代理用过之后主进程的 Node `http` 与全局 `fetch` 不到代理；(b) 两个会话、两个代理、延迟的 `onBeforeRequest`，各代理只见自己的请求；(c) 只有 `http=foo:80` 时 `https:` 不发 `CONNECT`。
+  `proxyBypassRules` 与 `resolveProxy` 同一个函数匹配（子域、通配、scheme 前缀、`<local>`）。文法修正：`socks=h` 是 SOCKS4:1080，无 scheme 条目只有排第一位才算全部，列表里的 `direct://`，scheme 大小写，链路本地地址的隐式绕过，`pacScript` 无 `mode` 即 `pac_script`；这些读自 Chromium 源码，未观察。`WARNED` 移进主进程的状态。
+  页面的 `WebSocket` 仍不走会话代理（缺口，登记给 P41）。
+- **会话的存根方法**（`api/session_stubs.rs`，全部无效果，只让应用调用不抛 `not a function`）：`clearCache`、`clearStorageData`、`clearData`、`clearAuthCache`、`clearHostResolverCache`、`closeAllConnections`、`forceReloadProxyConfig`（兑现 `undefined`）；`getCacheSize`（兑现 `0`）；`flushStorageData`（同步，`undefined`）；
+  `setDownloadPath`、`setSSLConfig`、`setCertificateVerifyProc`、`setSpellCheckerEnabled`/`isSpellCheckerEnabled`、`setSpellCheckerLanguages`/`getSpellCheckerLanguages`、`setSpellCheckerDictionaryDownloadURL`（只存值）；`listWordsInSpellCheckerDictionary`（空表）、`addWordToSpellCheckerDictionary`/`removeWordFromSpellCheckerDictionary`（`true`）；
+  `netLog`（`startLogging` 兑现、`stopLogging` 兑现 `''`、`currentlyLogging` 为 `false`，不记任何日志）。这些返回值与参数检查都没有对着真 Electron 观察过。`setPreloads`/`getPreloads` 是 P21 的，仍未加。
+- **下载**：两个失败的测试改对了（第一次 `updated` 时 `.crdownload` 已存在，Chromium 的临时名不同；在 `getReceivedBytes() > 0` 的 `updated` 上暂停，断言 `bytes=N-`，并加一个不认 `Range` 的路径测从头来过）。
+  页面的 `Content-Disposition: attachment` 现在在响应头处认出并取消 body（原来整份读进来才认）。`setSavePath` 在开始保存后被忽略（它的 "Path must be absolute" 未观察，是 Verve 的）。结束的下载只保留最近 256 个（更老的释放，之后问它们会像已销毁的对象一样抛错；Electron 的对象在持有期间一直能问）。
+- **权限**：查询处理器抛错时回复 `false`；`requestPermission` 的答案不再记入 `Notification.permission`；问题的编号带上 isolate 的代数，上一个文档的迟到答复不会结算下一个文档的问题。
+
+**第五轮后仍有的缺口**
+
+- **导航到 attachment 不会让页面留在原处**：`Load` 一发出就换掉 isolate，旧文档在响应头到达前就没了（Electron 里留在原处，`loadURL` 以 `ERR_FAILED (-2)` 拒绝）。测试已改名，不再声称这一点。要做需要在响应头显示是文档而非 attachment 之后才换 isolate。
+- `<a download>` 一个 `blob:` 地址会静默失败：主进程读不了页面的 blob，而 head 之前的失败什么都不发。
+- 页面一侧经 `protocol.handle`/`file:` 的 attachment 答复本来就是整份；经网络的在响应头处取消。
+- 页面的 `WebSocket` 不走会话代理；`socks4`/`socks5`/`https` 代理（`resolveProxy` 认，请求以 `ERR_PROXY_INVALID_CONFIG` 失败）。
+- **给 P23 的**：权限的 `PermissionBackend`（`verve-dom`；`ask(ask, permission, url, check_only)` 与 `known(permission)`）、`Options::permissions`、页面的全局 `Notification`（只有 `permission`/`requestPermission()`，构造只记标题）、`navigator.permissions.query`、
+  `clipboard.readText()` 在没有后端时现在一律拒绝（`NotAllowedError`）、`Request::Download { url, filename }`（`<a download>` 与 attachment 文档），以及主进程一侧的 attachment 处理（`will-download`）。做通知的人要接 `Notification` 的显示与点击；它的权限问题已经由这个后端回答。
+
 **没做 / 只做了一部分**
 
 - asar 内文件经 `protocol.handle` + `net.fetch`：`file:` 读取走 `Hub::overlay()`（P11），`tests/protocol.rs` 有测试（打包一个 asar）。
@@ -546,3 +569,48 @@ cargo test -p verve --test browser_net
 - **没做**：`cx` 改名 `context`（按派发留到阶段 2b 之后）；`tests/browser_net.rs` 的 `<= 4` 与 `tests/protocol.rs` 的 `1..=5` 改成精确值（要跑一次才知道确切的数）；
   把 protocol.rs 里几处断言挪到更早的提交；`Kind` 与 `define::Kind` 重名、`protocol_serve::report` 与 `define::report` 重名、六处 promise 的 ok/err 写法、三处头对循环、`RequestHead` → `ProtoRequest` 的两份、
   `64 * 1024` 与重定向状态码的命名、`native::exports` 化、`Schemes::new` 等公开项的文档、测试夹具的去重、`cancel_all` 的测试、未探针的三条（见阶段 1 的「未观察」）。
+
+### 阶段 2b（权限、代理、下载；评审遗留的清理；`cx` 改名）
+
+**做了什么**
+
+- **权限**（`api/permissions.rs`、`renderer_permissions.rs`、verve-dom 的 `PermissionBackend`）：`setPermissionRequestHandler`、`setPermissionCheckHandler`、`setDevicePermissionHandler`（只存，不用）。
+  页面一侧只在会话有对应处理器时才发 `FromRenderer::Permission`；没有处理器就当场 `granted`，不发消息。verve-dom 增加 `Options::permissions`、`Notification`（`permission`、`requestPermission()`）、
+  `navigator.permissions.query`，`clipboard.readText()` 问 `clipboard-read`。处理器的参数与 `details` 的字段取自 `probe7`（见契约）。
+- **代理**（`hub/proxy.rs`、`hub/system_proxy.rs`、`api/session_proxy.rs`）：`setProxy`/`resolveProxy`；`proxyRules`/`proxyBypassRules` 读成 `Proxy`，每个请求问它的 `route(url)`；回环与链路本地地址恒直连；`system` 读 WinHTTP（其他平台读环境变量），只读。
+  内核的 `BrowserNet::proxy(url) -> Route` 让每个请求自带路由（第五轮取代了原来「改 realm 代理」的做法，见下）。`mode: 'bogus'` 的错误文本取自 `probe7`。
+- **下载**（`api/download.rs`、`api/download_item.rs`、verve-dom 的 `Request::Download`）：`DownloadItem`、`will-download`、`session.downloadURL`、`webContents.downloadURL`（原来是抛错的占位）、`<a download>`、`Content-Disposition: attachment` 的文档。
+  写 `<path>.crdownload`，完成后改名；`updated` 至多每 100 ms 一次（在写每块之后判断，没有定时器）；`pause`/`resume` 用 `Range`；`cancel` 删掉部分文件。没有 `setSavePath` 时走 `dialog.showSaveDialog`（含 `setSaveDialogOptions`）。
+- **评审遗留**：
+  - 精确计数：`tests/browser_net.rs` 的拉取次数改为 `assert_eq!(pulls, 2)`；`tests/protocol.rs` 改为 `assert_eq!(paused, 3)`。推导：流在创建时拉一次，读者读走一块后又拉一次（high-water mark 1）；
+    页面一侧的流同理，每次拉取令主进程读处理器的流一次、处理器的流因此又拉一次，所以处理器共被拉 3 次。**这两个数没有跑过，请集中跑一次确认。**
+  - 命名：`BODY_CHUNK`、`is_redirect`、`ERR_FAILED`/`ERR_FILE_NOT_FOUND`/`ERR_UNEXPECTED`/`ERR_UNKNOWN_URL_SCHEME`（`msg/net.rs`）；`protocol.rs` 的 `Kind` 改名 `HandlerKind`（`define::Kind` 不再要别名）；`protocol_serve::report` 改名 `log_error`。
+  - 重复：`verve::native::then`（promise 的两个反应共用一份捕获；用在 `protocol_serve`、`protocol_legacy`、`net_request` 两处与 `download.rs` 三处）；`define::header_pairs`（原来三处的头对循环）；`ProtoRequest::of`（原来两处的 `RequestHead` → `ProtoRequest`）。
+  - 文档：`Session::id`、`set_user_agent`、`Schemes::new`。
+  - `cancel_all` 的测试：`a_page_that_loads_another_document_gives_up_what_its_handler_was_still_producing`（f0dc631f 那条修正带来的）就是它的测试：它走 `navigation::start` → `cancel_all`，断言处理器的 `cancel` 被调用一次。
+- **`cx` → `context`**：verve-electron 与 verve-dom 里 P16 加的函数形参 `cx` 都改成了 `context`（闭包的 `|this, args, cx|` 不动）。做法是对 `b1a27600..` 的每个提交的树套同一个确定性的改写（不是在末尾补一个提交），所以每个提交本身都是干净的，没有逐提交的冲突；
+  `BrowserNet` 的 trait 声明与 `InternalFetch::of_realm` 在内核里，仍用 `cx`（实现它的 `impl BrowserNet for …` 在 verve-electron，已改）。
+
+**没做 / 只做了一部分**
+
+- 下载的保存对话框路径由 `app.shell.queue_dialog_answer(DialogResult::Save{..})` 在测试里答复（第五轮补了测试：选了路径则下载完成，默认的取消给 `done('cancelled')`）。
+- 临时文件名是任务书的 `<path>.crdownload`，不是观察值（Chromium 的是另一个名字，`probe7` 里按 `<path>.crdownload` 找不到）。
+- `Notification.permission` 在有查询处理器时，问过之前是 `default`（Electron 是同步问处理器）；`new Notification()` 只记标题，不显示；`navigator.permissions.query` 只认名字的映射（`camera`/`microphone` → `media`）。登记给 P41。
+- `auto_detect`/`pac_script` 在本机上让真 Electron 崩溃，没有观察到它们的 `resolveProxy`。
+- `Content-Disposition: attachment` 的文档被取两次（页面那次丢弃，主进程再取一次）；`hasUserGesture()` 恒为 `false`；`getURLChain()` 只有原地址；文件名不做 URL 的百分号解码（`Content-Disposition` 的 `filename*` 做）。
+- 评审遗留里没做：`Kind::Handle` 的死分支（protocol_legacy）、`native::exports` 化模块、`let _ = cx.run_jobs()` 的理由、测试夹具去重、几处未探针的断言。
+- 没有跑任何测试（只跑了 `cargo check`）。
+
+**要跑的命令（逐个跑）**
+
+```
+cargo test -p verve --test browser_net
+cargo test -p verve-dom --test permissions
+cargo test -p verve-dom --test download_link
+cargo test -p verve-dom --lib
+cargo test -p verve-electron --lib
+cargo test -p verve-electron --test session
+cargo test -p verve-electron --test protocol
+cargo test -p verve-electron --test net
+cargo test -p verve-electron --test page_load
+```
