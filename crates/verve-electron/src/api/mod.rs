@@ -17,6 +17,7 @@ pub(crate) mod input_events;
 pub(crate) mod ipc_main;
 pub(crate) mod ipc_renderer;
 pub(crate) mod message_port_main;
+pub(crate) mod mime;
 pub(crate) mod native_image;
 pub(crate) mod native_theme;
 pub(crate) mod navigation;

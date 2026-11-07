@@ -4,8 +4,6 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::io::ErrorKind;
-use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +12,7 @@ use url::Url;
 use verve::vfs::Overlay;
 use verve_dom::{Destination, LoadError, LoadRequest, LoadResult, Loader};
 
+use crate::api::mime;
 use crate::msg::{FromRenderer, ProtocolRequest, ProtocolResponse};
 
 type Done = Box<dyn FnOnce(LoadResult)>;
@@ -102,30 +101,15 @@ impl ElectronLoader {
             // Windows) and finds nothing there.
             return LoadResult::failed(url, -6, "ERR_FILE_NOT_FOUND");
         };
-        let packed = self
-            .overlay
-            .as_ref()
-            .and_then(|overlay| overlay.read(&path));
-        let read = match packed {
-            Some(read) => read.map(|bytes| bytes.into_owned()),
-            None if path.is_dir() => return LoadResult::failed(url, -2, "ERR_FAILED"),
-            None => std::fs::read(&path),
-        };
-        match read {
+        match crate::files::read(self.overlay.as_ref(), &path) {
             Ok(bytes) => LoadResult {
                 status: 200,
-                mime: Some(mime_of(&path).to_owned()),
+                mime: Some(mime::of_path(&path).to_owned()),
                 url,
                 headers: Vec::new(),
                 body: Ok(bytes),
             },
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                LoadResult::failed(url, -6, "ERR_FILE_NOT_FOUND")
-            }
-            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
-                LoadResult::failed(url, -10, "ERR_ACCESS_DENIED")
-            }
-            Err(_) => LoadResult::failed(url, -2, "ERR_FAILED"),
+            Err(error) => LoadResult::failed(url, error.code, error.short_name()),
         }
     }
 
@@ -192,29 +176,6 @@ impl Loader for ElectronLoader {
 
     fn handles(&self, scheme: &str) -> bool {
         matches!(scheme, "file" | "data") || self.schemes.borrow().contains(scheme)
-    }
-}
-
-/// What a file of this name is, as a server would say.
-fn mime_of(path: &Path) -> &'static str {
-    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    match extension.to_ascii_lowercase().as_str() {
-        "html" | "htm" => "text/html",
-        "js" | "mjs" | "cjs" => "text/javascript",
-        "css" => "text/css",
-        "json" | "map" => "application/json",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "otf" => "font/otf",
-        "wasm" => "application/wasm",
-        _ => "application/octet-stream",
     }
 }
 

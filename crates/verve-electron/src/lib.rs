@@ -12,6 +12,7 @@
 
 pub mod api;
 mod beat;
+mod files;
 pub mod headless;
 pub mod hub;
 pub mod ids;
