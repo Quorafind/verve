@@ -23,8 +23,8 @@ use crate::accelerator::Accelerator;
 use crate::hub::{Hub, ShellPort};
 use crate::ids::{ContentsId, WindowId};
 use crate::msg::{
-    AppEvent, DialogReply, DialogResult, DialogSpec, Display, FromShell, InspectorEvent, MenuId,
-    MenuSpec, Rect, ToRendererInput, ToShell, TrayEvent, TrayId, WindowEvent, WindowOp,
+    AppEvent, DialogReply, DialogResult, DialogSpec, Display, DragInput, FromShell, InspectorEvent,
+    MenuId, MenuSpec, Rect, ToRendererInput, ToShell, TrayEvent, TrayId, WindowEvent, WindowOp,
 };
 use window::Window;
 
@@ -334,6 +334,47 @@ impl HeadlessShell {
     /// Puts `data` on this shell's clipboard, as another program would.
     pub fn set_clipboard(&self, data: ClipboardData) {
         self.state().clipboard = data;
+    }
+
+    /// Something is dragged in from the system and is now at `pointer` over `window`'s page.
+    pub fn drag_enter(&self, window: WindowId, data: verve_dom::ExternalDrag, x: f32, y: f32) {
+        let pointer = verve_dom::Pointer {
+            x,
+            y,
+            ..Default::default()
+        };
+        self.drag(window, DragInput::Enter { data, pointer });
+    }
+
+    /// The drag moved to (`x`, `y`).
+    pub fn drag_over(&self, window: WindowId, x: f32, y: f32) {
+        let pointer = verve_dom::Pointer {
+            x,
+            y,
+            ..Default::default()
+        };
+        self.drag(window, DragInput::Over { pointer });
+    }
+
+    /// The drag left the window.
+    pub fn drag_leave(&self, window: WindowId) {
+        self.drag(window, DragInput::Leave);
+    }
+
+    /// The drag was let go at (`x`, `y`).
+    pub fn drop_at(&self, window: WindowId, x: f32, y: f32) {
+        let pointer = verve_dom::Pointer {
+            x,
+            y,
+            ..Default::default()
+        };
+        self.drag(window, DragInput::Drop { pointer });
+    }
+
+    fn drag(&self, window: WindowId, drag: DragInput) {
+        self.on_page(window, move |page| {
+            page.input(crate::msg::ToRendererInput::Drag(drag))
+        });
     }
 
     /// A person chose menu item `item`.

@@ -47,6 +47,25 @@ pub enum ToRendererInput {
         call: u64,
         data: verve_dom::ClipboardData,
     },
+    /// Files, text or markup are dragged in from the system (P24; P34 makes it from GPUI's
+    /// file-drop events).
+    Drag(DragInput),
+}
+
+/// A drag from outside the window, as the shell sees it.
+#[derive(Clone, Debug)]
+pub enum DragInput {
+    /// It came into the window at `pointer`, carrying `data`.
+    Enter {
+        data: verve_dom::ExternalDrag,
+        pointer: verve_dom::Pointer,
+    },
+    /// It moved to `pointer`.
+    Over { pointer: verve_dom::Pointer },
+    /// It left the window.
+    Leave,
+    /// It was let go at `pointer`.
+    Drop { pointer: verve_dom::Pointer },
 }
 
 /// What an input method is doing with the field or editable region that has the keyboard.
@@ -84,6 +103,9 @@ pub struct RendererView {
     pub cursor: Option<String>,
     /// Where a candidate window goes: the caret's box (P24/P32).
     pub ime_rect: Option<verve_dom::Rect>,
+    /// What a drop from the system would do where the last [`ToRendererInput::Drag`] left it, for
+    /// the shell's cursor; `None` when no drag is under way.
+    pub drop_effect: Option<verve_dom::DropEffect>,
     /// The page laid out: what the shell draws. `None` for a page with no layout.
     pub display_list: Option<std::sync::Arc<verve_layout::DisplayList>>,
 }

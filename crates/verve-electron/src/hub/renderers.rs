@@ -426,6 +426,7 @@ mod tests {
             wants_frame: false,
             cursor: None,
             ime_rect: None,
+            drop_effect: None,
             display_list: None,
         }
     }

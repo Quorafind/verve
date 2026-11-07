@@ -277,3 +277,61 @@ fn the_shell_holds_the_clipboard_a_page_copies_to_and_pastes_from() {
         TIMEOUT
     ));
 }
+
+#[test]
+fn two_files_dragged_in_from_the_system_reach_the_page_with_their_paths() {
+    // Electron 39.8.10 (Input.dispatchDragEvent with two files): the page hears `dragenter` with
+    // no files yet, `dragover`, and at the drop `files.length` is 2; `file.path` does not exist,
+    // `webUtils.getPathForFile(file)` gives the path.
+    let dir = App::scratch_dir("drag-two-files");
+    std::fs::create_dir_all(&dir).expect("a folder");
+    let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+    std::fs::write(&a, "hello\n").expect("a file");
+    std::fs::write(&b, "world!\n").expect("a file");
+    let page =
+        r#"<style>html,body{margin:0}%23t{width:200px;height:100px}</style><div id="t">drop</div>"#;
+    let main = format!(
+        "const {{ BrowserWindow }} = require('electron'); new BrowserWindow({{ title: 'drop', show: false, webPreferences: {{ nodeIntegration: true, contextIsolation: false }} }}).loadURL('data:text/html,{page}');"
+    );
+    let app = App::launch_script(&main, &[]);
+    let window = app.window("drop").expect("the window was made");
+    let contents = window.contents;
+    assert!(app.run_until(
+        |app| app.eval_renderer(contents, "!!document.getElementById('t')") == "true",
+        TIMEOUT
+    ));
+    let listen = "globalThis.heard = []; const t = document.getElementById('t'); \
+        t.addEventListener('dragenter', (e) => { e.preventDefault(); heard.push('enter files=' + e.dataTransfer.files.length); }); \
+        t.addEventListener('dragover', (e) => { e.preventDefault(); heard.push('over'); }); \
+        t.addEventListener('drop', (e) => { e.preventDefault(); const { webUtils } = require('electron'); \
+            const files = Array.from(e.dataTransfer.files); \
+            heard.push('drop files=' + files.length + ' ' + files.map((f) => f.name + ':' + webUtils.getPathForFile(f) + ':' + ('path' in f)).join('|')); }); 0";
+    app.eval_renderer(contents, listen);
+    app.shell.drag_enter(
+        window.id,
+        verve_dom::ExternalDrag {
+            files: vec![a.clone(), b.clone()],
+            ..Default::default()
+        },
+        50.,
+        50.,
+    );
+    app.shell.drag_over(window.id, 52., 51.);
+    app.shell.drop_at(window.id, 52., 51.);
+    let heard = |app: &App| {
+        app.eval_renderer(contents, "heard.join(' ; ')")
+            .trim_matches('"')
+            .replace("\\\\", "/")
+    };
+    assert!(app.run_until(|app| heard(app).contains("drop files=2"), TIMEOUT));
+    let path = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        heard(&app),
+        format!(
+            "enter files=0 ; over ; over ; drop files=2 a.txt:{}:false|b.txt:{}:false",
+            path(&a),
+            path(&b)
+        )
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
