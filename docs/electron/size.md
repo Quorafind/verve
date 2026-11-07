@@ -446,3 +446,21 @@ The cost is P24's own code, with no new dependency:
 - the clipboard messages and dropped files, in verve-electron, and the shells' clipboards (in memory when the shell may not touch
   the desktop);
 - HTML serialization that writes end tags for empty foreign elements, with XML serialization kept apart.
+
+## P32: the input bridge (phase 1)
+
+`electron/p32-input` merged on `docs/electron-plan` after P24 phase 2 (merge 67ecbefe, then the integration with P24 and two review
+rounds on top): `cargo build --release -p verve-gpui --bin electron --features jit` is 37,714,432 bytes against 37,627,904 for
+P24's size note, +86,528 bytes, measured at 8650a0fa. Alone on `2cd509f2` round 1 measured +74,240. The budget is 200 KB for phase 1
+and 400 KB for both phases. The cap (41,943,040) leaves 4,228,608 bytes.
+
+The cost is P32's own code. `url` became a direct dependency of verve-gpui, but it was already linked through verve-dom and
+verve-electron:
+- the keymap from GPUI keystrokes to the page's `key`/`code`, the key route (`before-input-event`, the page, then the menu for an
+  unhandled key), the typed-character queue and dead keys, in verve-gpui;
+- the pointer, wheel and cursor bridge, the hit test against the display list's hitboxes, drag areas, and the input-method bridge,
+  in verve-gpui;
+- pointer fields, the focus ring's input origin, ending a composition on a focus change, and what a key's default action did, in
+  verve-dom;
+- the page events for the cursor, the link under the pointer and the zoom wheel, and the menu lookup shared by both shells, in
+  verve-electron.
