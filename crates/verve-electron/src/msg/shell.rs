@@ -56,6 +56,19 @@ pub enum ToShell {
         text: String,
         is_error: bool,
     },
+    /// A page copied: the shell, which owns the clipboard, holds this instead of what it held.
+    /// `custom` is every other format by MIME type (`image/png`, a page's own) (P24).
+    WriteClipboard {
+        text: Option<String>,
+        html: Option<String>,
+        custom: Vec<(String, Vec<u8>)>,
+    },
+    /// A page of `contents` reads the clipboard: the shell answers with
+    /// [`crate::msg::ToRendererInput::ClipboardContents`] `call` (P24).
+    ReadClipboard {
+        contents: ContentsId,
+        call: u64,
+    },
 }
 
 /// What `nativeTheme.themeSource` is set to.

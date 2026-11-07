@@ -42,6 +42,11 @@ pub enum ToRendererInput {
     Focus(bool),
     /// The page is drawn to a screen (`true`) or not: the window was hidden or minimized.
     Visibility(bool),
+    /// What the clipboard held, in answer to [`crate::msg::ToShell::ReadClipboard`] `call`.
+    ClipboardContents {
+        call: u64,
+        data: verve_dom::ClipboardData,
+    },
 }
 
 /// What an input method is doing with the field or editable region that has the keyboard.

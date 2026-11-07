@@ -24,7 +24,7 @@ use crate::beat;
 use crate::hub::{Hub, Program};
 use crate::ids::{ContentsId, WindowId};
 use crate::launcher::Target;
-use crate::msg::{AppEvent, FromRenderer, FromShell, PageEvent, WindowEvent};
+use crate::msg::{AppEvent, FromRenderer, FromShell, PageEvent, ToShell, WindowEvent};
 use crate::probe;
 
 /// The browser process: its runtime, the API the app's script calls, and what ends the app.
@@ -389,6 +389,12 @@ fn page_family(context: &mut boa_engine::Context, contents: ContentsId, event: F
         FromRenderer::Dom(verve_dom::Request::Download { url, filename }) => {
             api::download_item::from_page(context, contents, url, filename);
         }
+        FromRenderer::Dom(
+            request @ (verve_dom::Request::WriteClipboard { .. }
+            | verve_dom::Request::ReadClipboard { .. }),
+        ) => {
+            page_clipboard(context, contents, request);
+        }
         FromRenderer::Reload { url } => navigation::page_reloads(context, contents, url),
         FromRenderer::PreloadError {
             path,
@@ -420,6 +426,24 @@ fn page_family(context: &mut boa_engine::Context, contents: ContentsId, event: F
             page_events::render_process_gone(context, contents, &reason);
         }
         _ => {}
+    }
+}
+
+/// A page copied, or reads the clipboard: the shell owns it (P24).
+fn page_clipboard(
+    context: &mut boa_engine::Context,
+    contents: ContentsId,
+    request: verve_dom::Request,
+) {
+    let hub = &api::shared(context).hub;
+    match request {
+        verve_dom::Request::WriteClipboard { text, html, custom } => {
+            hub.to_shell(ToShell::WriteClipboard { text, html, custom });
+        }
+        verve_dom::Request::ReadClipboard { call } => {
+            hub.to_shell(ToShell::ReadClipboard { contents, call });
+        }
+        other => unreachable!("not a clipboard request: {other:?}"),
     }
 }
 

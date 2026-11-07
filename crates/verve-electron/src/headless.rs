@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
-use verve_dom::Snapshot;
+use verve_dom::{ClipboardData, Snapshot};
 
 pub use menu::{HeadlessPopup, HeadlessTray};
 pub use window::HeadlessWindow;
@@ -82,6 +82,9 @@ struct State {
     exit: Option<i32>,
     /// The pages whose inspector window is open, in the order they were opened.
     inspectors: Vec<ContentsId>,
+    /// What the clipboard of this machine holds: the headless shell keeps its own, in memory, so
+    /// that no test reaches the user's.
+    clipboard: ClipboardData,
 }
 
 /// What the shell has of a page: the last document it published.
@@ -155,6 +158,20 @@ impl State {
             | ToShell::Dialog { .. }
             | ToShell::SetThemeSource(_)
             | ToShell::InspectorReply { .. } => {}
+            ToShell::WriteClipboard { text, html, custom } => {
+                let image = custom.iter().find(|(kind, _)| kind == "image/png");
+                self.clipboard = ClipboardData {
+                    text: text.clone(),
+                    html: html.clone(),
+                    files: Vec::new(),
+                    image_png: image.map(|(_, bytes)| bytes.clone()),
+                };
+            }
+            ToShell::ReadClipboard { contents, call } => {
+                let data = self.clipboard.clone();
+                let input = ToRendererInput::ClipboardContents { call: *call, data };
+                out.inputs.push((*contents, input));
+            }
             ToShell::Inspector { contents, open } => {
                 self.inspectors.retain(|page| page != contents);
                 if *open {
@@ -307,6 +324,16 @@ impl HeadlessShell {
         self.on_page(window, move |page| {
             page.input(crate::msg::ToRendererInput::Composition(event))
         });
+    }
+
+    /// What this shell's clipboard holds: what a page last copied, or [`HeadlessShell::set_clipboard`].
+    pub fn clipboard(&self) -> ClipboardData {
+        self.state().clipboard.clone()
+    }
+
+    /// Puts `data` on this shell's clipboard, as another program would.
+    pub fn set_clipboard(&self, data: ClipboardData) {
+        self.state().clipboard = data;
     }
 
     /// A person chose menu item `item`.
@@ -707,6 +734,13 @@ fn describe(msg: &ToShell) -> String {
         ToShell::Dialog { call, spec, .. } => format!("[dialog {call}] {spec:?}"),
         ToShell::SetThemeSource(source) => format!("[app] theme source {source:?}"),
         ToShell::Inspector { contents, open } => format!("[inspector {contents}] open {open}"),
+        ToShell::WriteClipboard { text, html, custom } => format!(
+            "[clipboard] write {text:?} {html:?} {} other formats",
+            custom.len()
+        ),
+        ToShell::ReadClipboard { contents, call } => {
+            format!("[clipboard] read #{call} for {contents}")
+        }
         ToShell::InspectorReply {
             contents,
             call,

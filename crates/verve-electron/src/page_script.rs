@@ -111,7 +111,6 @@ fn command_name(command: &EditCommand) -> Option<&'static str> {
         EditCommand::Redo => "redo",
         EditCommand::Cut => "cut",
         EditCommand::Copy => "copy",
-        EditCommand::Paste | EditCommand::PasteAndMatchStyle => "paste",
         EditCommand::Delete => "delete",
         EditCommand::SelectAll => "selectAll",
         _ => return None,

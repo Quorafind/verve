@@ -21,7 +21,7 @@ use crate::inspector;
 use crate::loader::ElectronLoader;
 use crate::log::Log;
 use crate::msg::{
-    FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
+    EditCommand, FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
 use crate::page_layout::PageLayout;
 use crate::renderer_net::{self, RendererNet};
@@ -185,6 +185,13 @@ impl RendererGuest {
                 page_script::insert_css(&mut self.runtime, &key, &css, user);
             }
             ToRenderer::RemoveCss { key } => page_script::remove_css(&mut self.runtime, &key),
+            // The clipboard is the shell's: the document asks for it and pastes when it is sent.
+            ToRenderer::EditCommand(EditCommand::Paste) => {
+                self.document.request_paste(&mut self.runtime, false);
+            }
+            ToRenderer::EditCommand(EditCommand::PasteAndMatchStyle) => {
+                self.document.request_paste(&mut self.runtime, true);
+            }
             ToRenderer::EditCommand(command) => {
                 page_script::edit(&mut self.runtime, &self.document, command);
             }
@@ -265,6 +272,10 @@ impl RendererGuest {
             }
             ToRendererInput::Frame { now } => {
                 self.document.frame(&mut self.runtime, now);
+            }
+            ToRendererInput::ClipboardContents { call, data } => {
+                self.document
+                    .settle_clipboard(&mut self.runtime, call, &data);
             }
             other => {
                 let heard = page_script::person(&mut self.runtime, &self.document, other);
