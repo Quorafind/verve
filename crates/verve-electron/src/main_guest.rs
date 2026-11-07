@@ -48,6 +48,8 @@ impl MainGuest {
     /// [`run`]: MainGuest::run
     pub fn new(hub: Arc<Hub>) -> Self {
         let mut runtime = Runtime::new();
+        // The browser process may reach any network, as Electron's does.
+        runtime.set_permissions(verve::Permissions::all());
         set_up_process(&mut runtime, &hub);
         runtime.set_vfs(hub.overlay());
         let api = api::install_state(&mut runtime, Arc::clone(&hub));
