@@ -6,24 +6,55 @@ use std::sync::Arc;
 use crate::Document;
 use crate::canvas::image::{Keep, Status, image_size};
 use crate::canvas::img::{self, UNDECODABLE, UNFETCHABLE};
-use crate::dom::NodeId;
+use crate::canvas::sources;
 
 impl Document {
     /// Reads what the images this frame's changes name: an `<img>` whose `src` moved is a load,
     /// and images no element names any more are dropped.
     pub(crate) fn sync_images(&self) {
-        let changed: Vec<NodeId> = {
+        let (imgs, wanted) = {
             let state = self.state.borrow();
             let view = self.view.borrow();
-            let is_img = |id: &NodeId| state.dom.get(*id).is_some_and(|n| n.tag() == Some("img"));
-            view.changed.iter().copied().filter(is_img).collect()
+            let mut imgs = Vec::new();
+            let mut wanted = Vec::new();
+            let base = state.base_url().to_string();
+            for &id in view.changed.iter().chain(view.restyled.iter()) {
+                let Some(node) = state.dom.get(id) else {
+                    continue;
+                };
+                if node.tag() == Some("img") {
+                    imgs.push(id);
+                }
+                for property in ["background-image", "list-style-image"] {
+                    let value = view.computed.get(id, property).unwrap_or_default();
+                    wanted.extend(sources::css_urls(&base, value));
+                }
+                if node.tag() == Some("video")
+                    && let Some(poster) = node.attr("poster")
+                {
+                    wanted.extend(sources::resolve_against(&base, poster));
+                }
+            }
+            (imgs, wanted)
         };
-        if changed.is_empty() {
+        if imgs.is_empty() && wanted.is_empty() {
             return;
         }
         let mut state = self.state.borrow_mut();
-        for node in changed {
+        for node in imgs {
             img::sync(&mut state, node);
+        }
+        for url in wanted {
+            // Asked for by a style from now on, whoever else names the bytes.
+            let first = state.images.asked.insert(url.clone());
+            if state.images.has(&url) {
+                state.images.keep_always(&url);
+            } else if first && !state.images.failed.contains(&url) {
+                // A `data:` address is read here, the others are asked of the loader.
+                if img::start_load(&mut state, &url, Keep::Always) == Status::Loaded {
+                    state.touch();
+                }
+            }
         }
         state.images.retain_referenced();
     }
@@ -64,7 +95,8 @@ impl Document {
                     .nodes
                     .values()
                     .any(|img| img.url.as_deref() == Some(url));
-                let keep = if named {
+                // A `url()` or `poster` asked for these bytes too, and is never asked again.
+                let keep = if named && !state.images.asked.contains(url) {
                     Keep::WhileNamed
                 } else {
                     Keep::Always
@@ -79,6 +111,8 @@ impl Document {
                 (img::settle(&mut state, url, Status::Loaded), None)
             }
         };
+        // The pictures a layout was made without are here now.
+        self.state.borrow_mut().touch();
         img::deliver(runtime.context(), waiting, failure);
     }
 
@@ -90,6 +124,7 @@ impl Document {
             state.images.mark_failed(url);
             img::settle(&mut state, url, Status::Broken)
         };
+        self.state.borrow_mut().touch();
         img::deliver(runtime.context(), waiting, Some(UNFETCHABLE));
     }
 

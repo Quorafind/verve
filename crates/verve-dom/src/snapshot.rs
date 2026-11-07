@@ -29,6 +29,10 @@ pub struct SnapshotData {
     pub canvases: HashMap<NodeId, canvas::CanvasFrame>,
     /// Each image the page has bytes for, by resolved address, for the drawer to decode.
     pub images: HashMap<String, canvas::ImageBytes>,
+    /// The address each `<img>` shows now and the pixel density of that source (`srcset`).
+    pub image_sources: HashMap<NodeId, (String, f32)>,
+    /// The address relative URLs in styles are resolved against.
+    pub base_url: String,
     /// The generated boxes — an element's `::before`, `::after` — and the styles of the parts
     /// that are no boxes of their own: `::placeholder`, `::selection`, a scrollbar's thumb.
     /// They are not in the DOM, as in a browser.

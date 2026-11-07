@@ -594,3 +594,60 @@ fn a_context_knows_its_canvas_and_a_style_is_one_object() {
         assert_eq!(p.eval("g.fillStyle === l"), "true");
     });
 }
+
+const SHARED: &str = "https://cdn.test/shared.png";
+
+/// Whether the snapshot the drawer gets still holds the bytes of `SHARED`.
+fn holds_shared(p: &mut common::Page) -> bool {
+    p.document.update().snapshot.images.contains_key(SHARED)
+}
+
+fn answer(p: &mut common::Page) {
+    p.document.set_image_bytes(
+        &mut p.runtime,
+        SHARED,
+        Some("image/png"),
+        payload(PNG_1X1).into(),
+    );
+}
+
+#[test]
+fn a_background_keeps_its_bytes_when_the_img_sharing_the_address_goes_away() {
+    for style_first in [false, true] {
+        on_page(move || {
+            let mut p = page();
+            let style = format!("<div id=d style=\"background:url({SHARED})\"></div>");
+            let img = format!("<img id=i src=\"{SHARED}\">");
+            let (first, second) = if style_first {
+                (style, img)
+            } else {
+                (img, style)
+            };
+            p.eval(&format!(
+                "document.body.insertAdjacentHTML('beforeend', '{first}')"
+            ));
+            p.image_requests();
+            p.eval(&format!(
+                "document.body.insertAdjacentHTML('beforeend', '{second}')"
+            ));
+            p.image_requests();
+            answer(&mut p);
+            assert!(holds_shared(&mut p));
+            p.eval("document.getElementById('i').remove()");
+            assert!(holds_shared(&mut p), "style first: {style_first}");
+        });
+    }
+}
+
+#[test]
+fn an_empty_poster_asks_for_nothing() {
+    on_page(|| {
+        let mut p = page();
+        p.eval(
+            "document.body.innerHTML = '<video poster=\"\"></video><video poster=\"  \"></video>'",
+        );
+        assert!(p.image_requests().is_empty());
+        p.eval("document.body.innerHTML = '<video poster=\"https://cdn.test/p.png\"></video>'");
+        assert_eq!(p.image_requests(), ["https://cdn.test/p.png"]);
+    });
+}
