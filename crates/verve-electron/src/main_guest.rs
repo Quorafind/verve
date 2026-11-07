@@ -278,6 +278,18 @@ impl MainGuest {
                 stage,
                 details,
             } => api::web_request::from_page(context, contents, (call, session), stage, &details),
+            FromRenderer::Permission {
+                call,
+                session,
+                permission,
+                url,
+                check_only,
+            } => api::permissions::from_page(
+                context,
+                contents,
+                (call, session),
+                (&permission, &url, check_only),
+            ),
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
                 protocol_serve::cancel_all(context, contents);

@@ -574,3 +574,65 @@ fn the_main_processs_own_requests_pass_the_listeners_without_a_page() {
     );
     assert_eq!(headers_of(&seen, "/viamain")["x-main"], "1");
 }
+
+/// What the page sees of notifications: its permission, what asking for it answers, and what
+/// `permissions.query` says.
+const NOTIFICATIONS: &str =
+    "const q = await navigator.permissions.query({ name: 'notifications' });
+    return [Notification.permission, await Notification.requestPermission(), q.state];";
+
+#[test]
+fn denying_notifications_makes_the_pages_request_answer_denied() {
+    let (port, _) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let app = page_app("globalThis.asked = []; globalThis.checked = [];", &base);
+    done(&app);
+    let contents = contents_of(&app);
+    let ask = || app.run_page(contents, NOTIFICATIONS, TIMEOUT)["value"].clone();
+    // No handler allows everything, as Electron does (`probe7`).
+    assert_eq!(ask(), json!(["granted", "granted", "granted"]));
+    let session = app.hub.session_for(None);
+    assert!(!session.has_permission_handler(false));
+    // The request handler is asked by `requestPermission` alone, and its callback decides.
+    app.eval_main(
+        "session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
+           asked.push([permission, wc.id === win.webContents.id, details]); callback(false); }); 1",
+    );
+    assert!(session.has_permission_handler(false));
+    assert_eq!(ask(), json!(["granted", "denied", "granted"]));
+    let details = json!({ "isMainFrame": true, "requestingUrl": format!("{base}/page") });
+    assert_eq!(
+        serde_json::from_str::<Value>(&app.eval_main("globalThis.asked")).unwrap(),
+        json!([["notifications", true, details]])
+    );
+    // The check handler is asked by `permissions.query`, which answers what it returns, and what
+    // it answered is what `Notification.permission` reads afterwards (Verve does not ask the
+    // handler for that property itself); a request has no handler of its own to ask.
+    app.eval_main(
+        "session.defaultSession.setPermissionRequestHandler(null);
+         session.defaultSession.setPermissionCheckHandler((wc, permission, origin, details) => {
+           checked.push([permission, origin, Object.keys(details)]); return false; }); 1",
+    );
+    assert!(!session.has_permission_handler(false) && session.has_permission_handler(true));
+    let answers = ask();
+    assert_eq!(answers[1], json!("granted"));
+    assert_eq!(answers[2], json!("denied"));
+    let checked: Value = serde_json::from_str(&app.eval_main("globalThis.checked")).unwrap();
+    let keys = json!(["embeddingOrigin", "isMainFrame", "requestingUrl"]);
+    assert_eq!(
+        checked[0],
+        json!(["notifications", format!("{base}/"), keys])
+    );
+    // A check handler that throws denies, and the page's query is answered all the same.
+    app.eval_main(
+        "session.defaultSession.setPermissionCheckHandler(() => { throw new Error('boom'); }); 1",
+    );
+    assert_eq!(ask()[2], json!("denied"));
+    // Taking the handlers away allows everything again.
+    app.eval_main("session.defaultSession.setPermissionCheckHandler(null); 1");
+    assert_eq!(ask(), json!(["granted", "granted", "granted"]));
+    let refused = app.eval_main(
+        "try { session.defaultSession.setPermissionRequestHandler(5); 'ok' } catch (e) { e.message }",
+    );
+    assert!(refused.contains("Must pass null or function"), "{refused}");
+}

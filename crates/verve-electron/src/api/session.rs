@@ -16,6 +16,7 @@ use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
 use verve::native::{self, ClassSpec, NewOnly, arg, js_text};
 
 use super::define::{self, Args, Kind};
+use super::permissions::{self, Which};
 use super::{app, cookies, net, protocol, web_request};
 use crate::hub::Session;
 use crate::msg::SessionId;
@@ -78,6 +79,15 @@ fn session_class(context: &mut Context) -> JsResult<JsObject> {
                 ("isPersistent", 0, is_persistent),
                 ("fetch", 1, fetch),
                 ("resolveHost", 1, resolve_host),
+                ("setPermissionRequestHandler", 1, |this, args, cx| {
+                    permissions::set_handler(cx, this, args, Which::Request)
+                }),
+                ("setPermissionCheckHandler", 1, |this, args, cx| {
+                    permissions::set_handler(cx, this, args, Which::Check)
+                }),
+                ("setDevicePermissionHandler", 1, |this, args, cx| {
+                    permissions::set_handler(cx, this, args, Which::Device)
+                }),
             ],
             accessors: &[
                 ("protocol", get_protocol, None),
@@ -93,7 +103,7 @@ fn session_class(context: &mut Context) -> JsResult<JsObject> {
 }
 
 /// The session `this` stands for.
-fn session_of(this: &JsValue, context: &mut Context) -> JsResult<Arc<Session>> {
+pub(crate) fn session_of(this: &JsValue, context: &mut Context) -> JsResult<Arc<Session>> {
     let hub = Arc::clone(&super::shared(context).hub);
     let (_, found) = define::live(this, SESSION, context, |id| hub.session_by_id(id))?;
     Ok(found)

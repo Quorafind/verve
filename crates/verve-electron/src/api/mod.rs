@@ -30,6 +30,7 @@ pub(crate) mod notification;
 pub(crate) mod page_calls;
 pub(crate) mod page_events;
 pub(crate) mod page_state;
+pub(crate) mod permissions;
 pub(crate) mod power;
 pub(crate) mod process;
 pub(crate) mod protocol;
@@ -100,6 +101,8 @@ pub(crate) struct NetState {
     pub(crate) cookies: cookies::Objects,
     /// The objects and listeners of the sessions' `webRequest`.
     pub(crate) web: web_request::Objects,
+    /// The permission handlers of the sessions.
+    pub(crate) permissions: permissions::Objects,
 }
 
 impl MainState {

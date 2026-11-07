@@ -22,6 +22,7 @@ use crate::msg::{
     FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
 use crate::renderer_net::{self, RendererNet};
+use crate::renderer_permissions::PagePermissions;
 use crate::{page_script, preload, probe};
 
 /// One page: the runtime its scripts run in, its document, and what it has yet to tell the main
@@ -33,6 +34,9 @@ pub struct RendererGuest {
     /// lifecycle, requests and IPC. It leaves as one job after each job the page runs.
     outbox: Outbox,
     contents: ContentsId,
+    /// Which isolate this is among the page's: a reply meant for an earlier document's question
+    /// carries another one and is dropped.
+    generation: u64,
     /// What the page was made with; the Hub makes the isolate of the next document anew with
     /// the same ones.
     prefs: WebPreferences,
@@ -70,6 +74,7 @@ impl RendererGuest {
         let outbox = api::ipc_renderer::outbox(runtime.context());
         set_up_process(&mut runtime, &outbox);
         let network = renderer_net::install(&mut runtime, hub, &prefs, &outbox);
+        let permissions = PagePermissions::new(Arc::clone(&network.session), &outbox, generation);
         let loader = ElectronLoader::new(
             hub.overlay(),
             hub.protocol_calls(),
@@ -87,6 +92,7 @@ impl RendererGuest {
                 standard_schemes: renderer_net::scheme_names(&network.privileged, |p| p.standard),
                 secure_schemes: renderer_net::scheme_names(&network.privileged, |p| p.secure),
                 cookies: Some(network.cookies),
+                permissions: Some(Box::new(permissions)),
                 ..Options::default()
             },
         )
@@ -97,6 +103,7 @@ impl RendererGuest {
             document,
             outbox,
             contents,
+            generation,
             prefs,
             loader,
             net: network.net,
@@ -142,6 +149,12 @@ impl RendererGuest {
             ToRenderer::ProtocolEnd { call, error } => self.net.end(call, error),
             ToRenderer::WebRequestReply { call, reply } => {
                 self.net.web_reply(call, reply, self.runtime.context());
+            }
+            ToRenderer::PermissionReply { call, granted } => {
+                if let Some(ask) = PagePermissions::ask_of(call, self.generation) {
+                    self.document
+                        .settle_permission(&mut self.runtime, ask, granted);
+                }
             }
             ToRenderer::ExecuteJavaScript {
                 call, code, world, ..

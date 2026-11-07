@@ -103,6 +103,11 @@ pub enum ToRenderer {
         call: u64,
         reply: WebRequestReply,
     },
+    /// What the app's permission handler answered to a [`FromRenderer::Permission`] `call`.
+    PermissionReply {
+        call: u64,
+        granted: bool,
+    },
 }
 
 /// What `webContents` does to the text a page has selected or focused.
@@ -289,6 +294,17 @@ pub enum FromRenderer {
         session: SessionId,
         stage: WebRequestStage,
         details: Box<WebRequestDetails>,
+    },
+    /// The page wants to use `permission` (Electron's name for it) at `url`, and the app has a
+    /// handler for it in its session: `check_only` asks what is allowed (`permissions.query`),
+    /// otherwise it is a request. The answer is [`ToRenderer::PermissionReply`] `call`. A session
+    /// with no such handler allows it, and the page does not ask.
+    Permission {
+        call: u64,
+        session: SessionId,
+        permission: String,
+        url: String,
+        check_only: bool,
     },
 }
 

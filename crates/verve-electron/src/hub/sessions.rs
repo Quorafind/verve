@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::cookies::CookieStore;
@@ -50,6 +50,8 @@ pub struct Session {
     web_request: Mutex<[Option<Patterns>; 8]>,
     /// How many requests of this session's pages were sent to the main process for a listener.
     web_request_asks: AtomicU64,
+    /// Which permission handlers the app set ([`Session::set_permission_handler`]).
+    permission_handlers: AtomicU8,
 }
 
 #[derive(Default)]
@@ -71,6 +73,7 @@ impl Session {
             cookies: OnceLock::new(),
             web_request: Mutex::default(),
             web_request_asks: AtomicU64::new(0),
+            permission_handlers: AtomicU8::new(0),
         }
     }
 
@@ -147,6 +150,27 @@ impl Session {
     /// Puts a listener's filter in place of the stage's last, or takes it away with `None`.
     pub fn set_web_request(&self, stage: WebRequestStage, filter: Option<Patterns>) {
         lock(&self.web_request)[stage.index()] = filter;
+    }
+
+    /// Whether the app set the handler for permission requests (`check` false) or for
+    /// permission checks (`check` true): what a page reads to know that asking the main process
+    /// has any point.
+    pub fn has_permission_handler(&self, check: bool) -> bool {
+        self.permission_handlers.load(Ordering::Relaxed) & Self::handler_bit(check) != 0
+    }
+
+    /// Records that the app set (`on`) or took away the handler of requests or of checks.
+    pub fn set_permission_handler(&self, check: bool, on: bool) {
+        let bit = Self::handler_bit(check);
+        if on {
+            self.permission_handlers.fetch_or(bit, Ordering::Relaxed);
+        } else {
+            self.permission_handlers.fetch_and(!bit, Ordering::Relaxed);
+        }
+    }
+
+    fn handler_bit(check: bool) -> u8 {
+        if check { 2 } else { 1 }
     }
 
     /// The user agent `setUserAgent` gave, if any.
