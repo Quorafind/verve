@@ -8,6 +8,10 @@
 //! go fires `drop` at an element that accepted the drag (a canceled `dragover`), then `dragend` at
 //! the source.
 //!
+//! A press on text that cannot be dragged selects it instead: the selection follows the pointer
+//! through [`Document::text_position_at`] (so it needs a position provider, as the drawer's), from
+//! the press, or from the old anchor with Shift held.
+//!
 //! A drag from the system has no source and no `drag` or `dragend`: the shell calls
 //! [`Document::drag_enter`], [`Document::drag_over`], [`Document::drag_leave`] and
 //! [`Document::drop`].
@@ -50,6 +54,7 @@ use boa_engine::{Context, JsObject, JsValue};
 use crate::bind::data_transfer::{self, Entry, Mode};
 use crate::bind::node::wrap;
 use crate::dom::NodeId;
+use crate::layout_provider::Boundary;
 use crate::{Document, Pointer};
 
 /// How far the pointer moves, along either axis, before a press is a drag.
@@ -100,6 +105,8 @@ pub struct ExternalDrag {
 #[derive(Default)]
 pub(crate) struct DragState {
     phase: Phase,
+    /// Where a press that selects text began: the selection follows the pointer from here.
+    anchor: Option<Boundary>,
 }
 
 #[derive(Default)]
@@ -220,8 +227,110 @@ impl Document {
         }
     }
 
-    /// The primary button went down on `target`: a draggable element arms the machine.
-    pub(crate) fn drag_pressed(&self, target: NodeId, pointer: &Pointer) {
+    /// The primary button went down on `target`: a draggable element arms the machine, and
+    /// anything else starts a selection of text.
+    pub(crate) fn drag_pressed(
+        &self,
+        runtime: &mut verve::Runtime,
+        target: NodeId,
+        pointer: &Pointer,
+    ) {
+        self.arm(target, pointer);
+        let armed = matches!(*self.phase(), Phase::Pressed(_));
+        self.view.borrow_mut().drag.anchor = None;
+        if !armed && pointer.button == 0 {
+            self.begin_selecting(runtime, target, pointer);
+        }
+    }
+
+    /// A press on text selects: a caret at the press, or from the selection's anchor to it with
+    /// Shift held, after a cancelable `selectstart` at the text. A press on a form control, which
+    /// keeps its own selection (a field's is moved by the drawer that edits it), leaves the
+    /// selection alone; so does a press that is not at `pointer` (`press(node)` has no place). One
+    /// where there is no text collapses the selection into the element. Electron 39.8.10: a press
+    /// on a button, a link or a draggable element leaves the selection, a press on text is
+    /// `selectstart` then a caret, and a canceled `selectstart` keeps the old selection
+    /// (`p24-review3/out-select.txt`).
+    fn begin_selecting(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) {
+        let in_control = {
+            let state = self.state.borrow();
+            let mut at = Some(target);
+            let mut found = false;
+            while let Some(node) = at {
+                if matches!(
+                    state.dom.get(node).and_then(|n| n.tag()),
+                    Some("input" | "textarea" | "select" | "button" | "option")
+                ) {
+                    found = true;
+                    break;
+                }
+                at = state.dom.parent(node);
+            }
+            found
+        };
+        if in_control || self.pointer_target(pointer) != target {
+            return;
+        }
+        let Some(position) = self.text_position_at(pointer.x, pointer.y) else {
+            self.collapse_into(runtime, target);
+            return;
+        };
+        let before = self.state.borrow().dom.selection_anchor();
+        let anchor = match before {
+            Some(anchor) if pointer.modifiers.shift => anchor,
+            _ => {
+                let cx = runtime.context();
+                let started = crate::bind::events::fire_at(
+                    cx,
+                    position.0,
+                    "Event",
+                    "selectstart",
+                    &[("composed", false.into())],
+                    true,
+                );
+                if !started.unwrap_or(true) {
+                    return;
+                }
+                position
+            }
+        };
+        crate::bind::node::with_dom(runtime.context(), |dom| {
+            dom.select_between(anchor, position)
+        });
+        self.view.borrow_mut().drag.anchor = Some(anchor);
+    }
+
+    /// A press where there is no text puts the caret in the element pressed.
+    fn collapse_into(&self, runtime: &mut verve::Runtime, target: NodeId) {
+        let at = {
+            let state = self.state.borrow();
+            let element = state.dom.get(target).is_some_and(|n| n.is_element());
+            if element {
+                Some(target)
+            } else {
+                state.dom.parent_element(target)
+            }
+        };
+        if let Some(node) = at {
+            crate::bind::node::with_dom(runtime.context(), |dom| {
+                dom.select_between((node, 0), (node, 0));
+            });
+        }
+    }
+
+    /// The pointer moved with a selecting press down: the selection reaches to it.
+    fn extend_selecting(&self, runtime: &mut verve::Runtime, pointer: &Pointer) {
+        let Some(anchor) = self.view.borrow().drag.anchor else {
+            return;
+        };
+        if let Some(position) = self.text_position_at(pointer.x, pointer.y) {
+            crate::bind::node::with_dom(runtime.context(), |dom| {
+                dom.select_between(anchor, position);
+            });
+        }
+    }
+
+    fn arm(&self, target: NodeId, pointer: &Pointer) {
         let source = {
             let state = self.state.borrow();
             let dom = &state.dom;
@@ -283,6 +392,7 @@ impl Document {
     /// The pointer moved after a press on something draggable: a drag begins once it has gone far
     /// enough.
     pub(crate) fn drag_may_start(&self, runtime: &mut verve::Runtime, pointer: &Pointer) {
+        self.extend_selecting(runtime, pointer);
         let (source, x, y) = match &*self.phase() {
             Phase::Pressed(p) => (p.source, p.x, p.y),
             _ => return,
@@ -357,6 +467,7 @@ impl Document {
         pointer: &Pointer,
     ) -> Option<bool> {
         let Some(mut active) = self.take_active() else {
+            self.view.borrow_mut().drag.anchor = None;
             let mut phase = self.phase();
             if matches!(*phase, Phase::Pressed(_)) {
                 *phase = Phase::Idle;

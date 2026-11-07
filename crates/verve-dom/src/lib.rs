@@ -858,9 +858,6 @@ impl Document {
             state.dom.mark(target);
         }
         self.view.borrow_mut().pressed = Some(target);
-        if allowed {
-            self.drag_pressed(target, pointer);
-        }
         if allowed && pointer.button == 0 {
             let context = runtime.context();
             let focus = {
@@ -891,6 +888,10 @@ impl Document {
                     });
                 }
             }
+        }
+        // After the focus has moved: Chromium focuses before it selects.
+        if allowed {
+            self.drag_pressed(runtime, target, pointer);
         }
         runtime.run_microtasks();
         allowed

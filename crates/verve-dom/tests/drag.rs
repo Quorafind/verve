@@ -9,10 +9,16 @@
 //!   `dragstart` (target the box, `clientX/Y` 20/20, `buttons` 1, `effectAllowed` `uninitialized`,
 //!   `types` empty, cancelable, bubbling) then `pointercancel` (not cancelable). Three 1-pixel moves
 //!   from the press are no drag: `pointermove`/`mousemove` each, `pointerup`, `mouseup`, `click`.
+//!   Presses on a button, a link, a draggable element or `user-select: none` text leave an existing
+//!   selection alone; a press on text is `selectstart` (at the text, cancelable: the old selection
+//!   is then kept) and a caret (the review's probe, `p24-review3/out-select.txt`).
 //! - After that the page hears no `pointermove`. A move to the target is `drag` (at the box),
 //!   `dragenter`, `dragover` (at the target); a second move there is `drag`, `dragover`.
-//! - Letting go over an element whose `dragover` was canceled is `drop` then `dragend` (at the box,
-//!   `dropEffect` the effect it ended with, `copy` there); no `pointerup`, `mouseup` or `click`.
+//! - Letting go over an element whose `dragover` was canceled is `drag`, `dragover`, `drop`, then
+//!   `dragend` (at the box, `dropEffect` the effect it ended with, `copy` there). The probe also
+//!   heard `pointerup` and `mouseup` after the drop, but only because its release was dispatched
+//!   by hand after the intercepted drag; a native drag's loop swallows the release (from source,
+//!   not observed), so none is sent, and there is no `click` (none was heard).
 //! - `dragenter` and `dragover` list `types` (`text/plain,text/x-custom`) and `items`
 //!   (`string:text/plain`…); `dropEffect` is `none` in every event but `dragend`; `dragend` and
 //!   `dragleave` are not cancelable.
@@ -468,5 +474,150 @@ fn an_explicit_none_is_no_drop() {
         doc.pointer_up(&mut page.runtime, &at(350., 30.));
         assert!(!page.eval("log.join(' ')").contains("drop:dst"));
         assert_eq!(page.eval("ended.join()"), "none");
+    });
+}
+
+#[test]
+fn a_press_on_text_selects_as_the_pointer_moves() {
+    on_page(|| {
+        let mut page = page("");
+        page.eval("document.body.insertAdjacentHTML('beforeend', '<p id=\"p\">hello world</p>');");
+        let (p, text) = {
+            let dom = page.document.dom();
+            let p = dom.query(dom.document, "#p").unwrap();
+            (p, dom.children(p)[0])
+        };
+        page.document
+            .set_layout(&mut page.runtime, [(p, Rect::new(0., 100., 200., 20.))]);
+        // Ten pixels to a character.
+        page.document
+            .set_position_provider(Some(Box::new(move |x, _| Some((text, (x / 10.) as usize)))));
+        let doc = page.document.clone();
+        doc.pointer_down(&mut page.runtime, &at(15., 105.));
+        assert_eq!(
+            page.eval("getSelection().isCollapsed + ' ' + getSelection().anchorOffset"),
+            "true 1"
+        );
+        doc.pointer_move(&mut page.runtime, &at(55., 105.));
+        assert_eq!(page.eval("getSelection().toString()"), "ello");
+        doc.pointer_move(&mut page.runtime, &at(25., 105.));
+        assert_eq!(page.eval("getSelection().toString()"), "e");
+        doc.pointer_move(&mut page.runtime, &at(5., 105.));
+        assert_eq!(page.eval("getSelection().toString()"), "h");
+        doc.pointer_move(&mut page.runtime, &at(55., 105.));
+        doc.pointer_up(&mut page.runtime, &at(55., 105.));
+        // Let go: it stays where it was.
+        doc.pointer_move(&mut page.runtime, &at(95., 105.));
+        assert_eq!(page.eval("getSelection().toString()"), "ello");
+        // Shift reaches from the old anchor.
+        let mut shifted = at(85., 105.);
+        shifted.modifiers.shift = true;
+        doc.pointer_down(&mut page.runtime, &shifted);
+        doc.pointer_up(&mut page.runtime, &shifted);
+        assert_eq!(page.eval("getSelection().toString()"), "ello wo");
+    });
+}
+
+#[test]
+fn a_press_that_drags_an_element_does_not_select() {
+    on_page(|| {
+        let mut page = page("");
+        page.document
+            .set_position_provider(Some(Box::new(|_, _| None)));
+        let doc = page.document.clone();
+        page.eval("getSelection().selectAllChildren(document.getElementById('dst'))");
+        doc.pointer_down(&mut page.runtime, &at(20., 20.));
+        doc.pointer_move(&mut page.runtime, &at(22., 30.));
+        assert!(doc.dragging());
+        assert_eq!(page.eval("getSelection().toString()"), "drop here");
+    });
+}
+
+/// A page with a paragraph of ten-pixel characters and a button, and a selection to keep.
+fn selecting_page() -> Page {
+    let mut page = page("");
+    page.eval(
+        "document.body.insertAdjacentHTML('beforeend', '<p id=\"p\">hello world</p><button id=\"b\">go</button><div id=\"empty\"></div>');
+         globalThis.heard = [];
+         document.addEventListener('selectstart', (e) => heard.push('selectstart:' + e.target.nodeName + ':' + e.cancelable));
+         document.addEventListener('selectionchange', () => heard.push('selectionchange'));",
+    );
+    let (p, text, b, empty) = {
+        let dom = page.document.dom();
+        let p = dom.query(dom.document, "#p").unwrap();
+        let (b, empty) = (
+            dom.query(dom.document, "#b").unwrap(),
+            dom.query(dom.document, "#empty").unwrap(),
+        );
+        (p, dom.children(p)[0], b, empty)
+    };
+    page.document.set_layout(
+        &mut page.runtime,
+        [
+            (p, Rect::new(0., 100., 200., 20.)),
+            (b, Rect::new(0., 200., 50., 20.)),
+            (empty, Rect::new(0., 300., 50., 20.)),
+        ],
+    );
+    page.document
+        .set_position_provider(Some(Box::new(move |x, y| {
+            (y < 150.).then(|| (text, (x / 10.) as usize))
+        })));
+    page
+}
+
+#[test]
+fn a_press_on_a_button_leaves_the_selection() {
+    on_page(|| {
+        let mut page = selecting_page();
+        page.eval("getSelection().selectAllChildren(document.getElementById('p'))");
+        let doc = page.document.clone();
+        doc.pointer_down(&mut page.runtime, &at(10., 205.));
+        doc.pointer_up(&mut page.runtime, &at(10., 205.));
+        assert_eq!(page.eval("getSelection().toString()"), "hello world");
+    });
+}
+
+#[test]
+fn a_press_on_text_fires_a_cancelable_selectstart_first() {
+    on_page(|| {
+        let mut page = selecting_page();
+        let doc = page.document.clone();
+        doc.pointer_down(&mut page.runtime, &at(15., 105.));
+        page.settle();
+        assert_eq!(
+            page.eval("heard.join(' ')"),
+            "selectstart:#text:true selectionchange"
+        );
+    });
+}
+
+#[test]
+fn a_canceled_selectstart_keeps_the_old_selection_through_the_drag() {
+    on_page(|| {
+        let mut page = selecting_page();
+        page.eval(
+            "getSelection().selectAllChildren(document.getElementById('b'));
+             document.addEventListener('selectstart', (e) => e.preventDefault());",
+        );
+        let doc = page.document.clone();
+        doc.pointer_down(&mut page.runtime, &at(15., 105.));
+        doc.pointer_move(&mut page.runtime, &at(55., 105.));
+        doc.pointer_up(&mut page.runtime, &at(55., 105.));
+        assert_eq!(page.eval("getSelection().toString()"), "go");
+    });
+}
+
+#[test]
+fn a_press_where_there_is_no_text_puts_the_caret_in_the_element() {
+    on_page(|| {
+        let mut page = selecting_page();
+        page.eval("getSelection().selectAllChildren(document.getElementById('p'))");
+        let doc = page.document.clone();
+        doc.pointer_down(&mut page.runtime, &at(10., 305.));
+        assert_eq!(
+            page.eval("getSelection().isCollapsed + ' ' + getSelection().anchorNode.id"),
+            "true empty"
+        );
     });
 }
