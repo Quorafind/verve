@@ -248,6 +248,10 @@ impl MainGuest {
                 input_events::key_for(self.runtime.context(), contents, down, key);
                 self.runtime.run_microtasks();
             }
+            FromShell::Page { contents, event } => {
+                page_events::page_event(self.runtime.context(), contents, event);
+                self.runtime.run_microtasks();
+            }
             FromShell::Inspector { contents, event } => {
                 let heard = api::devtools::window_event(self.runtime.context(), contents, event);
                 api::define::report(self.runtime.context(), heard);

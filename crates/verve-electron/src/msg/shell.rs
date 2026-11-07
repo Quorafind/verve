@@ -101,6 +101,12 @@ pub enum FromShell {
         down: bool,
         key: verve_dom::Key,
     },
+    /// Something the shell saw of page `contents` that its renderer cannot: where the pointer is
+    /// (a cursor, a link under it).
+    Page {
+        contents: ContentsId,
+        event: crate::msg::PageEvent,
+    },
     /// A menu is about to open: `'menu-will-show'`.
     MenuWillShow {
         menu: MenuId,

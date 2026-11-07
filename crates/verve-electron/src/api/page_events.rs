@@ -61,6 +61,12 @@ pub(crate) fn page_event(context: &mut Context, contents: ContentsId, event: Pag
             let icons = native::array(context, icons);
             page.say(context, "page-favicon-updated", &[icons]);
         }
+        PageEvent::CursorChanged(name) => page.say(context, "cursor-changed", &[js_text(&name)]),
+        PageEvent::UpdateTargetUrl(url) => page.say(context, "update-target-url", &[js_text(&url)]),
+        PageEvent::ZoomChanged { zoom_in } => {
+            let direction = if zoom_in { "in" } else { "out" };
+            page.say(context, "zoom-changed", &[js_text(direction)]);
+        }
         PageEvent::FirstPaintable => {
             window_events::update_ready(&record, |ready| ready.paintable = true)
         }
