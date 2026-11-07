@@ -490,6 +490,22 @@ fn a_held_accelerator_is_heard_by_the_page_each_repeat_and_its_key_up_is_not_swa
             app.eval_renderer(window.contents, "window.keys"),
             r#"["o","o","o","o"]"#
         );
+        // Every unhandled raw keydown, a repeat too, goes to the accelerator (from Electron's
+        // source: its accelerator manager has no repeat filter; auto-repeat is not observable
+        // with injected input), so the item is clicked once for each of the four.
+        assert!(
+            app.run_until(
+                |app| app
+                    .console()
+                    .iter()
+                    .filter(|line| *line == "opened true true")
+                    .count()
+                    == 4,
+                TIMEOUT
+            ),
+            "{listener:?}: {:?}",
+            app.console()
+        );
     }
 }
 

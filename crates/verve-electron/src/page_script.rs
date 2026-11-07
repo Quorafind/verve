@@ -162,7 +162,7 @@ pub(crate) fn person(
             pointer,
             target,
         } => {
-            match target {
+            match live(document, target) {
                 Some(node) => document.pointer_down_on(runtime, node, &pointer),
                 None => document.pointer_down(runtime, &pointer),
             };
@@ -172,7 +172,7 @@ pub(crate) fn person(
             pointer,
             target,
         } => {
-            let allowed = match target {
+            let allowed = match live(document, target) {
                 Some(node) => document.pointer_up_on(runtime, node, &pointer),
                 None => document.pointer_up(runtime, &pointer),
             };
@@ -185,11 +185,9 @@ pub(crate) fn person(
             kind: PointerKind::Move,
             pointer,
             target,
-        } => match target {
-            Some(node) if document.dom().exists(node) => {
-                document.pointer_move_on(runtime, node, &pointer)
-            }
-            _ => document.pointer_move(runtime, &pointer),
+        } => match live(document, target) {
+            Some(node) => document.pointer_move_on(runtime, node, &pointer),
+            None => document.pointer_move(runtime, &pointer),
         },
         ToRendererInput::Pointer {
             kind: PointerKind::Leave,
@@ -294,4 +292,11 @@ fn is_editable_field(node: &verve_dom::Node) -> bool {
     matches!(node.tag(), Some("input" | "textarea"))
         && node.attr("readonly").is_none()
         && node.attr("disabled").is_none()
+}
+
+/// The node the shell found under the pointer, if it is still in the document: a node a
+/// re-render just took out must not take a click, so the page's own hit test answers instead.
+pub(crate) fn live(document: &Document, target: Option<NodeId>) -> Option<NodeId> {
+    let dom = document.dom();
+    target.filter(|node| dom.is_connected(*node))
 }

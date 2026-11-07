@@ -306,6 +306,22 @@ impl Hub {
             }
             other => other,
         };
+        // A key for a page that cannot answer (never loaded, crashed) is left alone, so the
+        // window's accelerators still work: Ctrl+R reloads a page that crashed. Expected from
+        // Electron's views, whose focus manager fires them when no page takes the key; hidden
+        // windows fire none, so this was not observed.
+        if let ToRendererInput::Key {
+            down: true, key, ..
+        } = &msg
+            && !self.has_renderer(contents)
+        {
+            let generation = self.page_generation(contents);
+            self.from_renderer(
+                contents,
+                generation,
+                FromRenderer::KeyUnhandled(key.clone()),
+            );
+        }
         // Only what a person does is waited for: frames and layouts queued behind a hang are no sign
         // the page is being asked anything.
         let by_person = matches!(

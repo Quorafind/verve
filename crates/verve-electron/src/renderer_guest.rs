@@ -301,7 +301,7 @@ impl RendererGuest {
                 dy,
                 target,
             } => {
-                let node = target.filter(|node| self.document.dom().exists(*node));
+                let node = page_script::live(&self.document, target);
                 let allowed = match node {
                     Some(node) => {
                         self.document

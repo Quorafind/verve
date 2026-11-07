@@ -74,8 +74,8 @@ struct Inner {
     hidden_bars: std::collections::BTreeSet<WindowId>,
     /// The menus as the shell has them, which the main process's own key lookup reads.
     book: MenuBook,
-    /// The `code`s of keys a menu took on each page and that are still down: their key-up is the
-    /// menu's too.
+    /// The `code`s of keys that `before-input-event` prevented on each page and that are still down: their key-up goes
+    /// nowhere.
     swallowed: Vec<(ContentsId, String)>,
 }
 
@@ -187,7 +187,7 @@ impl MenuState {
         self.inner().book.item_for(window, key)
     }
 
-    /// A menu took the key `code` pressed on `contents`. A key held down repeats its press, and
+    /// A `before-input-event` listener prevented the key down `code` of `contents`. A key held down repeats its press, and
     /// the one release that ends it must find a single entry, so a second press adds none.
     pub(crate) fn swallow(&self, contents: ContentsId, code: &str) {
         let mut inner = self.inner();
@@ -200,13 +200,13 @@ impl MenuState {
         }
     }
 
-    /// No menu took the key `code` pressed on `contents`: a release that an earlier press left
+    /// The key down `code` of `contents` reached the page: a release that an earlier prevented press left
     /// waiting (its menu item opened a dialog, say) is not this key's, and it goes to the page.
     pub(crate) fn pass(&self, contents: ContentsId, code: &str) {
         (self.inner().swallowed).retain(|(page, held)| *page != contents || held != code);
     }
 
-    /// Whether the key `code` coming up on `contents` is one a menu took going down.
+    /// Whether the key `code` coming up on `contents` is one whose key down a listener prevented.
     pub(crate) fn release(&self, contents: ContentsId, code: &str) -> bool {
         let mut inner = self.inner();
         let held = inner
