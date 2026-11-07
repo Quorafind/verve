@@ -228,6 +228,7 @@ impl Hub {
             if let FromRenderer::Lifecycle(page_event) = event {
                 self.log_page_event(contents, page_event);
             }
+            self.log_from_renderer(contents, event);
         }
         // At most `PER_JOB` to a job, so what the shell or another page says in the meantime is
         // heard between them.
@@ -251,6 +252,7 @@ impl Hub {
     /// Answers whether the page's isolate was replaced by this (a `Load` of a page that has loaded):
     /// what the old one was asked will never be answered.
     pub fn to_renderer(self: &Arc<Self>, contents: ContentsId, msg: ToRenderer) -> bool {
+        self.log_to_renderer(contents, &msg);
         let replaced =
             matches!(msg, ToRenderer::Load { .. }) && self.renew_for_navigation(contents);
         self.on_renderer(contents, move |guest| guest.apply(msg));
@@ -285,6 +287,7 @@ impl Hub {
         if let Some(slot) = &slot {
             lock(&slot.input).push_back(std::time::Instant::now());
         }
+        self.log_input(contents, &msg);
         self.on_renderer(contents, move |guest| {
             guest.input(msg);
             if let Some(slot) = slot {

@@ -178,3 +178,40 @@ fn the_console_category_of_verve_electron_log_writes_the_consoles_too() {
             .starts_with("[renderer:1 page.html:2] first\n")
     );
 }
+
+/// An app whose page sends `ping` to the main process, which sends `hello` back.
+const IPC_APP: &str = r"const { app, BrowserWindow, ipcMain } = require('electron');
+app.on('window-all-closed', () => {});
+ipcMain.on('ping', () => {});
+app.whenReady().then(async () => {
+  const win = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
+  await win.loadURL('data:text/html,<p>x</p>');
+  await win.webContents.executeJavaScript(`require('electron').ipcRenderer.send('ping', 1)`);
+  win.webContents.send('hello', 1, 2);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  console.log('DONE');
+});";
+
+/// What an app that sends one message each way wrote on the terminal under `filter`.
+fn ipc_diagnostics(filter: &str) -> String {
+    let log = Arc::new(Log::to_memory(Filter::parse(filter)));
+    let app = App::launch_script_logged(IPC_APP, &[], Arc::clone(&log));
+    assert!(app.run_until(|app| app.console().iter().any(|l| l == "DONE"), TIMEOUT));
+    log.written()
+}
+
+#[test]
+fn the_ipc_category_writes_a_line_for_each_message_and_nothing_when_it_is_off() {
+    assert_eq!(
+        ipc_diagnostics("ipc"),
+        "[verve:ipc] renderer 1 -> main send \"ping\" (1 args)\n\
+         [verve:ipc] main -> renderer 1 send \"hello\" (2 args)\n"
+    );
+    assert_eq!(ipc_diagnostics(""), "");
+    let loads = ipc_diagnostics("load");
+    assert!(
+        loads.starts_with("[verve:load] renderer 1 loads data:text/html"),
+        "{loads}"
+    );
+    assert!(!loads.contains("[verve:ipc]"), "{loads}");
+}

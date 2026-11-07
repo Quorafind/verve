@@ -415,6 +415,15 @@ pub fn boot(mut start: Start) -> Result<(Arc<Hub>, Program), String> {
     });
     hub.set_overlay(overlay);
     start_logging(&hub, &start.switches);
+    if packed {
+        crate::log::diag!(
+            hub.log(),
+            Asar,
+            Info,
+            "reading the packed app {}",
+            hub.options().app_path.display()
+        );
+    }
     let program = match &start.target {
         Target::App { entry, .. } => Program::Script(entry.clone()),
         Target::Packaged { app_path } => {

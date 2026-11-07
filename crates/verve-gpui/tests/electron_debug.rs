@@ -1,5 +1,5 @@
 //! What the `electron` binary says on the terminal for a developer (P43): the unsupported
-//! debugging switches, a page's console and the errors nobody caught.
+//! debugging switches, a page's console, Verve's own diagnostics and the errors nobody caught.
 //! It runs `--headless`, so no window opens and no box is shown.
 
 use std::process::Output;
@@ -80,6 +80,19 @@ fn a_forced_colour_wraps_a_warning_in_yellow() {
         ["\x1b[33m[renderer:1 page.html:2] careful\x1b[0m"],
         "{lines:?}"
     );
+}
+
+#[test]
+fn verve_electron_log_names_the_categories_it_writes() {
+    let lines = stderr_of(&run("ipc", APP, &[], &[("VERVE_ELECTRON_LOG", "ipc")]));
+    let ipc = starting(&lines, "[verve:ipc]");
+    assert_eq!(
+        ipc,
+        ["[verve:ipc] renderer 1 -> main send \"ping\" (0 args)"],
+        "{lines:?}"
+    );
+    let off = stderr_of(&run("unset", APP, &[], &[]));
+    assert!(starting(&off, "[verve:").is_empty(), "{off:?}");
 }
 
 #[test]

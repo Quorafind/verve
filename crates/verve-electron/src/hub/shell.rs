@@ -50,6 +50,7 @@ pub(super) type ShellObserver = Arc<dyn Fn(&FromShell) + Send + Sync>;
 impl Hub {
     /// Asks the shell for something: a window, a menu, the end of the app.
     pub fn to_shell(&self, msg: ToShell) {
+        self.log_to_shell(&msg);
         let shell = lock(&self.shell).clone();
         if let Some(shell) = shell {
             shell.send(msg);
@@ -59,6 +60,7 @@ impl Hub {
 
     /// What the shell saw: a window shown, closed or resized, the displays changed.
     pub fn from_shell(&self, msg: FromShell) {
+        self.log_from_shell(&msg);
         if let FromShell::Displays(displays) = &msg {
             self.set_displays(displays.clone());
         }
