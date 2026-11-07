@@ -285,6 +285,9 @@ fn set_flag(
     if let (Some(name), true) = (spec.changed, was != on) {
         flag_changed(context, &record, name, on);
     }
+    if matches!(spec.flag, Flag::MenuBarAutoHide | Flag::MenuBarVisible) {
+        super::menu_window::menu_bar_changed(context, &record, (spec.flag, on));
+    }
     Ok(JsValue::undefined())
 }
 
@@ -307,6 +310,8 @@ fn ask(this: &JsValue, _: &[JsValue], index: &usize, context: &mut Context) -> J
 
 /// Methods that are worth a window of their own state, or a message with something in it.
 const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
+    ("setMenu", 1, super::menu_window::set_menu),
+    ("removeMenu", 0, super::menu_window::remove_menu),
     ("destroy", 0, |this, _, cx| {
         if let Some(window) = define::id_of(this, WINDOW, cx) {
             destroy(cx, window);
@@ -461,9 +466,6 @@ const NOTHING: &[(&str, usize, NativeFunctionPointer)] = &[
     ("setThumbnailToolTip", 1, nothing),
     ("setAppDetails", 1, nothing),
     ("unhookAllWindowMessages", 0, nothing),
-    // P15 gives the window a menu bar; until then there is none to set or remove.
-    ("setMenu", 1, nothing),
-    ("removeMenu", 0, nothing),
 ];
 
 fn nothing(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

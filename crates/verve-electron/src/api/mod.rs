@@ -13,9 +13,15 @@ pub(crate) mod contents_stubs;
 pub(crate) mod context_bridge;
 pub mod define;
 pub(crate) mod dialog;
+pub(crate) mod global_shortcut;
 pub(crate) mod input_events;
 pub(crate) mod ipc_main;
 pub(crate) mod ipc_renderer;
+pub(crate) mod menu;
+pub(crate) mod menu_item;
+pub(crate) mod menu_roles;
+pub(crate) mod menu_state;
+pub(crate) mod menu_window;
 pub(crate) mod message_port_main;
 pub(crate) mod native_image;
 pub(crate) mod native_theme;
@@ -30,6 +36,7 @@ pub(crate) mod safe_storage;
 pub(crate) mod screen;
 pub(crate) mod shell;
 pub(crate) mod system_preferences;
+pub(crate) mod tray;
 pub(crate) mod web_contents;
 pub(crate) mod web_frame;
 pub(crate) mod web_frame_main;
@@ -159,6 +166,7 @@ fn main_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     exports.set(js_string!("BrowserWindow"), window, false, context)?;
     exports.set(js_string!("app"), app::make(context)?, false, context)?;
     ipc_main::add_exports(context, &exports)?;
+    menu::add_exports(context, &exports)?;
     let modules: [(&str, ModuleMaker); 13] = [
         ("webContents", web_contents::make_module),
         ("webFrameMain", web_frame_main::make_module),

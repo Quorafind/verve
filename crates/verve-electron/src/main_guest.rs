@@ -17,8 +17,8 @@ use verve::native;
 use verve::{Level, ProcessInfo, Runtime, UncaughtBehavior};
 
 use crate::api::{
-    self, MainState, app, define, input_events, navigation, page_events, web_contents,
-    window_events, window_lifecycle, window_open,
+    self, MainState, app, define, global_shortcut, input_events, menu_state, navigation,
+    page_events, tray, web_contents, window_events, window_lifecycle, window_open,
 };
 use crate::beat;
 use crate::hub::{Hub, Program};
@@ -188,6 +188,48 @@ impl MainGuest {
                 api::dialog::answered(self.runtime.context(), call, &result);
                 self.runtime.run_microtasks();
             }
+            FromShell::MenuClicked {
+                menu_item,
+                window,
+                triggered_by_accelerator,
+                modifiers,
+            } => {
+                let context = self.runtime.context();
+                menu_state::clicked(
+                    context,
+                    menu_item,
+                    window,
+                    triggered_by_accelerator,
+                    modifiers,
+                );
+                self.runtime.run_microtasks();
+            }
+            FromShell::MenuWillShow { menu } => {
+                menu_state::will_show(self.runtime.context(), menu);
+                self.runtime.run_microtasks();
+            }
+            FromShell::MenuWillClose { menu, call } => {
+                menu_state::will_close(self.runtime.context(), menu, call);
+                self.runtime.run_microtasks();
+            }
+            FromShell::Tray {
+                tray,
+                event,
+                bounds,
+                position,
+                modifiers,
+            } => {
+                let context = self.runtime.context();
+                tray::happened(context, tray, event, (bounds, position), modifiers);
+                self.runtime.run_microtasks();
+            }
+            FromShell::TrayBounds { tray, bounds } => {
+                tray::bounds_changed(self.runtime.context(), tray, bounds);
+            }
+            FromShell::Shortcut { id } => {
+                global_shortcut::pressed(self.runtime.context(), id);
+                self.runtime.run_microtasks();
+            }
             FromShell::KeyForContents {
                 contents,
                 down,
@@ -196,7 +238,6 @@ impl MainGuest {
                 input_events::key_for(self.runtime.context(), contents, down, key);
                 self.runtime.run_microtasks();
             }
-            _ => {}
         }
     }
 
@@ -358,6 +399,8 @@ impl Guest for MainGuest {
         if beat || closed || pumped {
             self.runtime.run_microtasks();
         }
+        // Last, so that what timers and their microtasks changed goes out in this turn.
+        menu_state::sync(self.runtime.context());
         if let Some(code) = self.failed {
             self.hub.shutdown(code);
         }

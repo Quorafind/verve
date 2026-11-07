@@ -16,6 +16,7 @@ use verve_electron::msg::{AppEvent, FromShell, ToRendererInput, ToShell, WindowO
 
 use crate::app_region::AppRegion;
 use crate::dialog;
+use crate::native::{self, Native};
 use crate::platform;
 use crate::window::{self, Opening, Window};
 
@@ -31,6 +32,9 @@ pub(crate) enum Item {
     Gone(WindowId),
     /// P30 laid out a page that has `-webkit-app-region` boxes.
     Regions(WindowId, Vec<AppRegion>),
+    /// A menu item was chosen, a tray icon touched or a global hotkey pressed.
+    #[cfg(any(windows, target_os = "macos"))]
+    Native(native::Event),
 }
 
 /// The queue, shared by the Hub's threads that fill it and the OS thread that empties it.
@@ -58,6 +62,8 @@ impl Messages {
 pub(crate) struct Inbox {
     messages: Messages,
     wake: async_channel::Sender<()>,
+    /// The menus the main process sent, which a key is looked up in.
+    book: native::Book,
 }
 
 impl Inbox {
@@ -65,7 +71,13 @@ impl Inbox {
         Self {
             messages: Messages::default(),
             wake,
+            book: native::Book::default(),
         }
+    }
+
+    /// The menus the main process sent.
+    pub fn book(&self) -> native::Book {
+        native::Book::clone(&self.book)
     }
 
     /// Queues `msg` without waking the shell: the Hub wakes it after a send.
@@ -100,6 +112,8 @@ pub(crate) struct Shell {
     windows: BTreeMap<WindowId, Window>,
     /// Whether the system theme is dark, as the pages were last told.
     dark: Option<bool>,
+    /// Menus, tray icons and global hotkeys.
+    native: Native,
 }
 
 impl Shell {
@@ -108,6 +122,7 @@ impl Shell {
         let messages = inbox.messages.clone();
         Self {
             hub,
+            native: Native::new(&inbox),
             inbox,
             messages,
             windows: BTreeMap::new(),
@@ -123,6 +138,7 @@ impl Shell {
         }
         self.draw(cx);
         if self.hub.exit_code().is_some() {
+            self.native.release();
             cx.update(|cx| cx.quit());
         }
     }
@@ -142,6 +158,8 @@ impl Shell {
                     window.set_app_regions(regions, cx);
                 }
             }
+            #[cfg(any(windows, target_os = "macos"))]
+            Item::Native(event) => self.native.heard(event, &self.hub),
         }
     }
 
@@ -153,8 +171,7 @@ impl Shell {
                 options,
             } => self.create(window, contents, &options, cx),
             ToShell::Window { window, op } => self.window_op(window, op, cx),
-            // Menus, trays and global shortcuts are P15's.
-            ToShell::Menu(_) => {}
+            ToShell::Menu(op) => self.native.op(&op, &self.windows, &self.hub),
             ToShell::ErrorBox { title, content } => {
                 dialog::error_box(&title, &content, self.windows.values().next(), cx);
             }
@@ -176,7 +193,10 @@ impl Shell {
             }
             // The frames follow the system's theme until P34 draws them by the source.
             ToShell::SetThemeSource(_) => {}
-            ToShell::Quit { .. } => cx.update(|cx| cx.quit()),
+            ToShell::Quit { .. } => {
+                self.native.release();
+                cx.update(|cx| cx.quit());
+            }
         }
     }
 

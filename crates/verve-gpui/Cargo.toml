@@ -38,6 +38,15 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 
+# Native menu bars and popup menus, tray icons, and global hotkeys (`menu.rs`, `tray.rs`,
+# `shortcut.rs`). Linux has none of them: `muda` and `tray-icon` need GTK there (Linux builds
+# would link it), so those arms are no-ops answered the way Electron answers a missing feature.
+# `global-hotkey` pulls in `windows-sys` 0.59, a third copy beside the two already in the graph.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+muda = { version = "0.21", default-features = false }
+tray-icon = { version = "0.26", default-features = false }
+global-hotkey = "0.9"
+
 # What macOS has of a window that GPUI does not give: `NSWindow`, as `gpui_macos` has it, so
 # cargo resolves one copy of each.
 [target.'cfg(target_os = "macos")'.dependencies]

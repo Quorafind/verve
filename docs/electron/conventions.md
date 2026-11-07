@@ -77,6 +77,8 @@
 - 每个对外 API 至少一个测试；行为以**真实 Electron 39** 为准。拿不准时在 PR 里附上用真实
   Electron 跑出的结果（脚本 + 输出），测试里把期望值冻结下来（参考 `tests/network.rs` 冻结
   Node 观测值的做法）。
+- 环境变量 `VERVE_NO_SYSTEM_DIALOGS` 的意思是“Shell 不碰桌面”：不弹系统对话框，不建原生菜单、托盘图标和全局快捷键。
+  跑真实 Shell 的测试（`verve-gpui` 的二进制测试）都要设它；碰桌面的测试标 `#[ignore = "touches the desktop"]`。
 - 需要联网或 npm 的测试标 `#[ignore]`，并在包文档里写如何准备夹具。
 - 完成前必须自查通过：`cargo fmt --all --check`、`bash scripts/style-check.sh`、`cargo clippy -p <你的 crate> --all-targets -- -D warnings`，
   以及你的包列出的验收命令；全量 `cargo test --workspace` 由总控在合并前跑。

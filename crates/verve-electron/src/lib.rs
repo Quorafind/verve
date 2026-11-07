@@ -10,15 +10,18 @@
 //! Every API a script calls is a native Rust function on Boa: nothing in this crate is
 //! JavaScript standing in for Electron.
 
+pub mod accelerator;
 pub mod api;
 mod beat;
 pub mod headless;
 pub mod hub;
 pub mod ids;
 mod ipc;
+pub mod keyed;
 pub mod launcher;
 mod loader;
 pub mod main_guest;
+pub mod menu;
 pub mod msg;
 mod os;
 mod oscrypt;
@@ -35,6 +38,7 @@ use std::path::PathBuf;
 pub use headless::{FakeLayout, HeadlessOptions, HeadlessShell, HeadlessWindow};
 pub use hub::{ConsoleLine, Hub, RendererHandle, ShellPort};
 pub use main_guest::MainGuest;
+pub use pixels::{NativeImage, Representation};
 pub use renderer_guest::RendererGuest;
 pub use verve::{ELECTRON_VERSION, MODULES_VERSION};
 

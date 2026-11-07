@@ -135,11 +135,15 @@ fn a_site_is_served_from_a_custom_scheme() {
     replays("protocol");
 }
 
+// Not recorded: a tray icon and a global shortcut are things to see and to press. The headless shell
+// keeps them as records, so this puts nothing on a desktop.
 #[test]
-#[ignore = "P15: Menu and Tray; not recorded, a tray icon being a thing to see"]
-fn menus_and_a_tray_are_built() {
+fn menus_a_tray_and_a_shortcut_are_built() {
     let app = App::launch(&fixture("menu-tray"));
-    assert_eq!(app.wait_exit(ENDS_WITHIN), 0);
+    let code = app.exit_code(ENDS_WITHIN);
+    let lines = written_by(&console_of(&app), "main");
+    assert_eq!(lines, ["menu items 2", "shortcut registered true"]);
+    assert_eq!(code, Some(0));
 }
 
 // Not recorded: real Electron waits for a person at every dialog. The headless shell answers

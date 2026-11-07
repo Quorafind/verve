@@ -107,6 +107,9 @@ fn init(this: &JsObject, args: &[JsValue], context: &mut Context) -> JsResult<()
         contents,
         options,
     });
+    // A window shows the application menu, as `BaseWindow._init` gives it.
+    let given = super::menu_window::window_created(context, window);
+    define::report(context, given);
     if read.opacity != 1. {
         let op = WindowOp::SetOpacity(read.opacity);
         hub.to_window(window, op);
