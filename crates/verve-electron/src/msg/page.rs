@@ -113,6 +113,13 @@ pub enum ToRenderer {
         call: u64,
         granted: bool,
     },
+    /// The inspector window's REPL (P43): the page runs `code` as a script in its own world, the
+    /// main one, and answers with [`FromRenderer::InspectorEvalReply`] `call`. Nothing is written
+    /// to the page's console for it.
+    InspectorEval {
+        call: u64,
+        code: String,
+    },
 }
 
 /// What `webContents` does to the text a page has selected or focused.
@@ -310,6 +317,14 @@ pub enum FromRenderer {
         permission: String,
         url: String,
         check_only: bool,
+    },
+    /// The answer to [`ToRenderer::InspectorEval`] `call`: the value as `util.inspect` shows it,
+    /// or the error that was thrown shown the same way (`is_error`). Text only, never an object.
+    /// The Hub passes it to the shell's inspector and not to the main process.
+    InspectorEvalReply {
+        call: u64,
+        text: String,
+        is_error: bool,
     },
 }
 

@@ -52,7 +52,7 @@ Verve 没有 Chromium DevTools，也不实现 Chrome DevTools 协议。本包提
 | 情形 | Electron 的行为（实现前核实） | Verve |
 |---|---|---|
 | 主进程未捕获异常，没有 `process.on('uncaughtException')` | 弹出错误对话框 "A JavaScript error occurred in the main process" 附堆栈，进程继续 | 同样：stderr 打印 + `dialog.showErrorBox`（P14）；无头模式只打印 |
-| 主进程未处理拒绝 | 按 Node 22 默认（打印警告或作为未捕获异常，以观测为准） | 与观测一致 |
+| 主进程未处理拒绝 | Electron 39.8.10 观测：不是 throw 模式。stderr 两条 `UnhandledPromiseRejectionWarning`（原因的栈、Node 的建议文字带 `rejection id`），第一条后附 ``(Use `electron --trace-warnings ...` to show where the warning was created)``；不发 `uncaughtException`，不弹错误框，进程继续（`expected/rejection-*.txt`） | 同样（`fix(kernel)`，第二阶段） |
 | 渲染器未捕获异常 / 未处理拒绝 | 作为 `Uncaught …` 错误进入 console（因此触发 `console-message`），页面继续 | 同样 |
 | 渲染器 isolate panic 或被中断 | `render-process-gone` | P02 的 `FromRenderer::Gone`；本包负责 stderr 上打印一行原因 |
 
@@ -91,19 +91,30 @@ Verve 没有 Chromium DevTools，也不实现 Chrome DevTools 协议。本包提
 - 页面窗口上高亮悬停/选中的节点（Shell 自己画覆盖层，不经过渲染器）；元素拾取模式（点页面选节点）；
 - 底部：console 列表 + REPL 输入框。
 
-为 REPL 在 `msg/page.rs` **追加**：
+为 REPL 与检查器窗口在 `msg/` **追加**（P02 同步记录）：
 
 ```rust
-// 主进程/Shell → 渲染器
+// Shell（检查器窗口）→ 渲染器，经 Hub::to_renderer
 ToRenderer::InspectorEval { call: u64, code: String }
-// 渲染器 → Hub（转给检查器所在的 Shell）
+// 渲染器 → Hub；Hub 不交给主进程，转给检查器所在的 Shell
 FromRenderer::InspectorEvalReply { call: u64, text: String, is_error: bool }  // text 为 util.inspect 的结果
-// 主进程 → Shell
+// 主进程 → Shell：开/关某页的检查器窗口
 ToShell::Inspector { contents: ContentsId, open: bool }
+// Hub → Shell：上面那条答复，窗口按 call 找回它问的一行
+ToShell::InspectorReply { contents: ContentsId, call: u64, text: String, is_error: bool }
+// Shell → 主进程：窗口自己的事
+FromShell::Inspector { contents: ContentsId, event: InspectorEvent }   // Closed | Focused | Blurred
 ```
 
 REPL 在页面的主世界执行（`contextIsolation` 下不进入 preload 的隔离世界），结果用 Verve 的 `util.inspect` 格式化成文本后再跨线程，
-不传活对象。
+不传活对象；求值本身不写页面的 console（不触发 `'console-message'`）。
+
+- 无头 Shell 不画窗口：`ToShell::Inspector` 只被记下（`HeadlessShell::open_inspectors()`），第一阶段的文本转储照旧由页面写；
+  `ToShell::InspectorReply` 也被记下（`inspector_replies()`），供测试读。无头 Shell 可以模拟用户关窗和聚焦（`close_inspector`、`focus_inspector`）。
+- 检查器窗口读的数据：页面每次发布的 `RendererView.update`（Hub 在 Shell 来不及读时把 `Changes` 合并而不是丢弃）和
+  `display_list`，以及 Hub 为每页留的最近 500 条 console（`Hub::console_since`）。
+- 窗口开着时 `isDevToolsOpened()` 为 `true`（第一阶段的语义）；`'devtools-closed'` 在用户关窗口或 `closeDevTools()` 时发，
+  `'devtools-focused'` 在窗口得到焦点时发，`isDevToolsFocused()` 随焦点；`devToolsWebContents` 仍为 `null`。
 
 ## 步骤
 
@@ -154,7 +165,7 @@ Chrome DevTools 协议、断点调试、性能面板、网络面板、源码映�
 - `console-message` 的弃用警告现在走新加的 `define::deprecate_once`（一次、`process.noDeprecation` 时不写）；`contents_history` 的旧导航方法警告也改走它（原来是 `eprintln!`，现在写主进程 console）。
 - 内核 `Cloned::array_len`：IPC 诊断行的参数个数。
 
-没做：主进程的未处理拒绝（合同 2 第 2 行）：`src/hooks.rs` 里它仍只是一行 console，没有错误框、也不发 `uncaughtException`；Node 22 的 throw 模式加上 `init.ts` 装的监听器本会弹框。第二阶段（GPUI 检查器窗口、REPL 的 `InspectorEval` 消息，等 P30 合并）；`'devtools-focused'`（DevTools 从不聚焦）；`perf` 类别的接线；
+没做（第二阶段已补上前三项，见下）：主进程的未处理拒绝（合同 2 第 2 行）；GPUI 检查器窗口与 REPL 的 `InspectorEval` 消息；`'devtools-focused'`；`perf` 类别的接线；
 P40 的 fuse `EnableNodeCliInspectArguments` 关闭时的行为。
 
 和 Electron 的已知差异：
@@ -187,3 +198,72 @@ P40 的 fuse `EnableNodeCliInspectArguments` 关闭时的行为。
     (1,1) 在 body 的外边距里，命中 `html`。数字的由来写在测试的注释里。
   - `tests/preload.rs` 的 `KNOWN_DIFFERENCES` 删去了「未处理拒绝的行带栈」一条：内核现在在有 sink 时不再附栈，渲染器的行与录制的 `Uncaught (in promise) Error: nope` 相同。未跑测试确认，请中央跑 `bridge_matrix`。
   - 第二阶段的 `InspectorEval` 在这里没有加。
+
+### 第二阶段（已完成，窗口只在代码层面验证过，见「手动检查」）
+
+做了：
+- **契约**（P02 同步）：`ToRenderer::InspectorEval { call, code }`、`FromRenderer::InspectorEvalReply { call, text, is_error }`、`ToShell::Inspector { contents, open }`，
+  外加把答复从 Hub 送到窗口的 `ToShell::InspectorReply { contents, call, text, is_error }`，和窗口自己的事 `FromShell::Inspector { contents, event }`（`InspectorEvent::{Closed, Focused, Blurred}`）。
+  Hub 收到 `InspectorEvalReply` 后只转给 Shell，主进程听不到（`hub/inspector.rs`）。
+- **REPL 路径**（`inspector.rs::eval`）：页面在主世界（`MAIN_WORLD`，不是 preload 的隔离世界）把代码当脚本求值，结果经内核新公开的 `verve::inspect_value`（`util.inspect(value)` 的文本，字符串带引号，`document.title` 得 `'Hello'`；不是 `console.log` 用的 `util.format`，那个会把单个字符串原样给出）变成字符串；
+  抛出的错误同样 inspect，`is_error` 为真；求值不写页面 console，也不触发 `'console-message'`。返回 Promise 时显示求值那一刻的状态（`Promise { 3 }`、`Promise { <pending> }`），微任务在答复生成之后才跑。
+  `var` 声明留在页面里，下一行能用。无头测试 `tests/inspector.rs` 走 Hub，不开窗口。
+- **Hub 给检查器的数据**：`Hub::console_since(contents, after)`（每页最近 500 条 console，带递增序号，导航时清空、序号不回头）、`Hub::set_devtools_focused`/`is_devtools_focused`；
+  页面发布的 `RendererView` 在 Shell 没来得及读时被新的取代，现在取代前把旧的更新并进新的（`carry_changes`：新的没有更新就拿旧的，两者都有就合并 `Changes` 并给 `removed` 去重），所以检查器的增量更新不丢改动。
+  REPL 的 `call` 由 Hub 一个计数器编号（`Hub::next_inspector_call`），同一个页面的窗口先后开关也不会重号，旧窗口的迟到答复不会落进新窗口。页面的窗口被销毁时 Hub 同时丢掉它的 console 环、焦点标志和 `devtools` 集合；每条保存的 console 文本最多 4000 个字符。
+  `Hub::page_generation(contents)` 是页面当前文档的代数（每次导航，同地址重载也算），检查器靠它发现新文档：重置选中/悬停/折叠选择、清空 console 和等待中的提问。
+- **模型**（`crates/verve-gpui/src/inspector/`，纯 Rust，各有单元测试）：`tree.rs`（可折叠的元素树，行来自 `Snapshot`，按 `Changes` 只重做改动节点的行；换了地址或改动过半才整棵重建；
+  折叠状态由用户的选择记住，`head`/`script`/`style`/`svg`/`template` 起初折叠；一个改动的节点若没有行（纯空白文本、文档的子节点），就让它父节点的行重做，父节点是文档时整棵重建，所以文本在空白与非空白之间变、`<html>` 被替换、节点在两个父节点间移动，都与整棵重建的结果相同）、`styles.rs`（选中节点的计算样式，按名字排序）、`boxmodel.rs`（边框盒来自 `DisplayList` 里画出的 `Box`，否则取 `Hitbox`，按 Shell 已滚动的偏移放进窗口；
+  margin/padding 来自计算样式，border 优先取画出的边框宽度；百分比与 `auto` 那一边没有宽度（`Option<f32>`），图里显示样式原文 `auto`/`10%`，高亮里不画那一圈，padding 有这样的边时 content 的大小未知，既不画也显示 `?`）、`console.rs`（页面行、REPL 的输入与输出，多行的值每行一行；行编辑器和最多 200 行的历史）、`model.rs`（一个窗口对页面的全部了解）。
+- **窗口**（`view.rs`、`windows.rs`，GPUI 自带元素，无新依赖）：左边元素树（`uniform_list`，点箭头折叠，点行选中，方向键移动/折叠），右上盒模型图，右下计算样式，底部 console 与 REPL 输入（Enter 发送，上下键翻历史，不碰剪贴板，所以没有粘贴）。
+  `openDevTools()` → `ToShell::Inspector { open: true }` → 开窗口并带上页面最近发布的快照；`closeDevTools()`、`toggleDevTools()`、用户关窗口、页面窗口被销毁都关它。
+  窗口得到焦点 → `FromShell::Inspector { Focused }` → `'devtools-focused'`，`isDevToolsFocused()` 随焦点；失去焦点只清掉标志。`devToolsWebContents` 仍为 `null`。真 Shell（`run_with`）对 Hub 说 `show_inspector_in_window()`：此后 `openDevTools()` 不再让页面把元素树文本写到终端，DevTools 打开时页面的 console 也不再转到终端（Electron 什么也不写）；无头 Shell 不说，保持第一阶段的文本转储，另外记下 `ToShell::Inspector`/`InspectorReply`
+  （`open_inspectors()`、`inspector_replies()`；页面窗口销毁时也丢掉它的检查器），并能模拟用户关窗口和聚焦（`close_inspector`、`focus_inspector`）。
+  窗口的开与关各写一行 `VERVE_ELECTRON_LOG=shell` 的日志（`inspector window of page N opened`/`closed`），打不开窗口写 error 级一行 `no inspector window for page N: …`；真窗口测试读它。
+  Shell 给每个检查器窗口一个序号：用户关窗口时只有序号仍是当前那个才通知主进程，所以已被 `closeDevTools()` 关掉的旧窗口迟到的关闭不会把重新打开的窗口标成已关（没有改 `FromShell::Inspector` 的形状，序号只在 Shell 里）。
+  窗口一建好就读一次 `is_window_active()`，不漏掉第一次激活；回复到达时先取页面新写的 console 行再显示答案，所以代码写的行在答案之前。
+- **高亮与拾取**（`overlay.rs`，在 `dom_view.rs` 里作为页面元素之上的独立元素，没碰 `dom_element.rs`/`plan.rs`）：悬停或选中的节点在页面窗口上画 content/padding/border/margin（DevTools 的颜色），
+  盒子每帧从 Shell 自己的 `DisplayList`（含滚轮预测的偏移）查，不问渲染器。拾取模式：页面窗口上盖一层十字光标的元素，移动时用 `DisplayList::hit_test` 找节点并高亮，点击选中并退出拾取模式。P32 合并后，输入桥若也处理页面窗口的鼠标，需要让拾取层优先。
+- **主进程未处理拒绝**（内核，`fix(kernel)`）：见下面的观测——Electron 39.8.10 不是 throw 模式。`src/uncaught.rs::warn_unhandled_rejection`：无 `unhandledRejection` 监听者时，宿主上报未捕获错误的 realm（Electron 主进程）
+  写两条 `process.emitWarning`：`UnhandledPromiseRejectionWarning: <栈或原因>` 和 Node 22 的那段建议文字，第一条警告后附一行 ``(Use `<argv0 去掉 .exe> --trace-warnings ...` to show where the warning was created)``
+  （第一条警告是 `DeprecationWarning` 时旗标是 `--trace-deprecation`；只在这类宿主里附，`verve run` 不变）。`rejection id` 在 `hooks.rs` 记下拒绝时就编号（Node 给每个拒绝时没有处理器的 promise 编号，同一回合里随后被处理的也占一个号：`Promise.reject(e1).catch(() => {}); Promise.reject(e2)` 的第二条是 `id: 2`），号跟着 promise 走。
+  已警告的拒绝之后才被处理、又没有 `rejectionHandled` 监听者时，再写一条 `PromiseRejectionHandledWarning: Promise rejection was handled asynchronously (rejection id: N)`。原因按 V8 的 `noSideEffectsToString` 写（逐个在 Electron 39.8.10 里观测）：自己带字符串 `stack` 的取 `stack`；函数写源码，BigInt 写数字（无 `n`）；`toString` 是 `Object.prototype.toString` 的写 `#<构造器名>`（`Map` 得 `#<Map>`，有 `@@toStringTag` 也是 `#<Object>`），是 `Error.prototype.toString` 的写 `Name: message`，其余写 `[object 标签]`（`Date`、`RegExp`、数组、无原型对象的 `[object Object]`）；只读数据属性，不跑 getter（构造器是 getter 时得 `[object Object]`）。Electron 的模式是 `warn-with-error-code`（不是 `warn`：`warn` 在有 `unhandledRejection` 监听者时也写警告，Electron 不写，见 `rejection-handled.txt`）：没人听的拒绝让 `process.exitCode` 变成 1，有监听者时仍是 `undefined`。同一回合里先告知晚处理的（`rejectionHandled`/警告），再处理新的拒绝。不发 `uncaughtException`，不弹错误框，进程继续。`'warning'` 事件照常发。
+
+Electron 39.8.10（Windows）观测，冻结在 `tests/electron/devtools/expected/` 和对应测试里：
+- 以下对象原因、`rejection id` 编号、`PromiseRejectionHandledWarning` 的文字与 DeprecationWarning 的旗标是复核时在同一个 Electron 39.8.10 里观测到的（`tests/embedder_hooks.rs` 里各有一条测试，冻结了文字）。
+- `rejection-*.txt`（`tests/electron/devtools/rejection`）：主进程 `Promise.reject(new Error('main reject'))` 无监听者时，stderr 是两条 `(node:<pid>) UnhandledPromiseRejectionWarning`（栈；`Unhandled promise rejection. This error originated … (rejection id: 1)`），
+  中间一行 ``(Use `electron --trace-warnings ...` to show where the warning was created)``；`showErrorBox` 没被调用，`uncaughtException` 监听者没被触发（启动时 `listenerCount('uncaughtException')` 为 1，是 `init.ts` 装的）。
+  拒绝原因是字符串时第一条是 `UnhandledPromiseRejectionWarning: plain reason`。有 `unhandledRejection` 监听者时它收到 `(reason, promise)`，stderr 无输出。**所以任务书说的「Node 22 throw 模式 + init.ts 弹框」在 Electron 39.8.10 不成立**，已按观测实现。
+- `events-right.txt`（`openDevTools({ mode: 'right' })`，`show: false` 窗口里停靠，屏幕上什么也没出现）：`openDevTools()` 返回时 `isDevToolsOpened()` 仍为 `false`，之后 `'devtools-opened'` 里为 `true` 且 `devToolsWebContents` 是对象；
+  `closeDevTools()` 在调用里同步发 `'devtools-closed'`，返回后 `isDevToolsOpened()` 为 `false`、`devToolsWebContents` 回到 `null`；`toggleDevTools()` 同理；停靠模式没有 `'devtools-focused'`。
+- `events-detach.txt`（`mode: 'detach'`，只为看焦点，探针自己关掉窗口）：第一次打开时 `'devtools-focused'`（此时 `isDevToolsFocused()` 为 `true`）**先于** `'devtools-opened'`；约 3 秒后焦点移走，`isDevToolsFocused()` 为 `false`；第二次打开没有聚焦事件（取决于桌面前台规则）。
+- 和 Electron 的已知差异（`tests/inspector.rs` 里各有注释）：`isDevToolsOpened()` 在 Verve 里调用返回就是 `true`（第一阶段语义，任务书要求保持）；`'devtools-closed'` 在调用的下一轮发，Electron 在调用里发；`devToolsWebContents` 恒为 `null`；
+  `'devtools-focused'` 在窗口显示、得到焦点之后发，晚于 `'devtools-opened'`，Electron 的分离窗口里在它之前。
+
+测试（我没有跑，只做了 `cargo check`）：
+- 内核：`tests/embedder_hooks.rs`（两条警告、不发 `uncaughtException`、不通知宿主；非 Error 原因；有监听者时无警告；拒绝按拒绝时编号；晚处理的那条警告；对象原因），`src/uncaught.rs`（建议文字、两种旗标的提示文字）。
+- verve-electron：`tests/inspector.rs`（REPL 全部路径、主世界与隔离世界、抛错、不写 console、Promise；DevTools 事件与状态；`devTools: false`；主进程拒绝），`hub/inspector.rs`（console 环、序号、截断、计数器、焦点），`hub/renderers.rs`（`carry_changes`）。
+- verve-gpui：`inspector::{tree,styles,boxmodel,console,model,overlay}` 的单元测试；忽略的真窗口测试 `tests/inspector_window.rs`（把 `electron` 二进制当子进程跑，读它的退出码、stdout 和 `VERVE_ELECTRON_LOG=shell` 的日志；原先在测试进程里 `run_with` 的写法在测试体之后偶发 `0xc0000005`，已弃用）。
+
+手动检查（真窗口，`cargo run -p verve-gpui --features jit --bin electron -- <有 openDevTools() 的应用>`；或跑 `tests/inspector_window.rs`）：
+1. 打开：`webContents.openDevTools()` 开出标题为 `DevTools - <页面地址>` 的窗口，左边有 `<html>`、`<head>…</head>`（折叠）、`<body>`…。
+2. 折叠：点 `v`/`>` 箭头折叠与展开；选中行后按左/右键折叠/展开，上/下键换行。
+3. 选中：点一行，右上出现盒模型图（margin/border/padding/content 的数字和内容尺寸），右下是按名字排序的计算样式。
+4. 高亮：鼠标移过树里的行，页面窗口上出现该节点的四层盒子（橙 margin、黄 border、绿 padding、蓝 content）；选中后鼠标移开仍保留选中节点的高亮；页面滚动时高亮跟着走。
+5. 拾取：点工具栏的 `Pick element`，在页面窗口上移动（十字光标），节点被高亮；点击后树里选中并滚到那一行，拾取模式结束。
+6. 求值：在底部输入框点一下，输入 `document.title` 回车，下一行出现带引号的 `'<标题>'`（字符串带引号）；输入 `({a: 1, b: [1, 2]})` 得到一行 `{ a: 1, b: [ 1, 2 ] }`，值很长换行时每行一行；输入 `throw new Error('x')` 得到红色的 `Error: x…`；输入 `console.log('hi')` 后 console 里出现页面的那一行；上/下键翻历史。
+7. 页面变化：让页面改 DOM（如 `appendChild`），树里只出现对应的行，已折叠的节点保持折叠。
+8. 关闭：关窗口（或页面里 `closeDevTools()`）后 `isDevToolsOpened()` 为 `false`，页面窗口上的高亮消失；关页面窗口时检查器跟着关；页面重载后树、选中和 console 回到新文档的状态，终端上没有元素树文本。
+
+没做 / 已知问题：
+- 关窗口的竞态，窗口序号盖不住：Shell 已经发出的 `Closed`，在主进程重新打开 DevTools 之前到达时，仍会把新窗口标成已关。要解决需要主进程给窗口一个身份（`FromShell::Inspector` 带它），这一轮没改契约。
+- `verve run`（Node 默认模式）在监听者听到拒绝、之后才处理它时也会写 `PromiseRejectionHandledWarning`；`hooks.rs` 只在宿主上报未捕获错误的 realm 里写，`verve run` 没有。
+- 新文档的判定：页面调用和 `Latest` 都带 `Hub::page_generation`（在取 `renderer_view()` 之前读），比窗口模型旧的丢掉，比它新的先重置再建；console 的泵与回复读 Hub 当前的代数。
+- 拆除路径看过：检查器只加了一个 `detach()` 的激活订阅（属于窗口实体）、`on_window_should_close` 的闭包（只拿 `Inbox`）、覆盖层里的 `Rc` 状态，日志文件句柄在进程级 `OnceLock` 里；没有找到能活过 GPUI 应用的东西，没有猜着改。
+- REPL 输入框没有 IME、选区、粘贴（不碰剪贴板）；输入框只处理按键事件，能输入 ASCII 与键盘直接产生的字符。
+- 计算样式没有「来源规则」「继承」之分，也不能过滤；盒模型的 margin/padding 的百分比与 `auto` 不解析（Shell 没有包含块宽度），显示原文。
+- 树里的文本节点只显示去空白后的前 60 个字符；`<template>`、Shadow DOM、`<iframe>` 的内容不展开。
+- 拾取层盖在页面之上，P32 的输入桥合并后若也在页面窗口上接鼠标，需要在拾取时让位。
+- 窗口标题不随页面导航更新；检查器窗口没有记住位置和大小。
+- 体积预算（≤ 300 KB）没有测，请中央量；新增的是 `inspector/` 的几个文件与内核的两个小函数，无新依赖。
+- 越界的改动：内核（`src/embed.rs`、`src/lib.rs` 导出 `inspect_value`；`src/uncaught.rs`、`src/process.rs`、`src/hooks.rs` 的拒绝警告），各在自己的提交里；`msg/` 只在末尾追加；`renderer_guest.rs` 只加了一个分支。

@@ -41,6 +41,21 @@ pub enum ToShell {
     },
     /// `nativeTheme.themeSource`, for the shell to draw its windows' frames by (P14).
     SetThemeSource(ThemeSource),
+    /// `openDevTools()` (`open`) or `closeDevTools()` of page `contents` (P43): the shell opens or
+    /// closes the inspector window. Opening one that is open, or closing one that is not, does
+    /// nothing.
+    Inspector {
+        contents: ContentsId,
+        open: bool,
+    },
+    /// The answer to the inspector's `call` of page `contents`, from the page by way of the Hub;
+    /// an inspector that is closed drops it.
+    InspectorReply {
+        contents: ContentsId,
+        call: u64,
+        text: String,
+        is_error: bool,
+    },
 }
 
 /// What `nativeTheme.themeSource` is set to.
@@ -113,6 +128,22 @@ pub enum FromShell {
     Shortcut {
         id: u32,
     },
+    /// Something happened to the inspector window of page `contents` (P43).
+    Inspector {
+        contents: ContentsId,
+        event: InspectorEvent,
+    },
+}
+
+/// What happens to an inspector window by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InspectorEvent {
+    /// A person closed it: the DevTools are closed.
+    Closed,
+    /// It has the focus (`'devtools-focused'`).
+    Focused,
+    /// It lost the focus.
+    Blurred,
 }
 
 /// What happened to the app as a whole.

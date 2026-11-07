@@ -461,6 +461,204 @@ fn an_uncaught_error_goes_to_the_host_that_asked() {
     assert_eq!(verve::print(&rt.eval("1 + 1").unwrap()), "2");
 }
 
+/// What a main-process-shaped realm kept: the realm, the errors its host heard and the console
+/// lines written.
+type Reporting = (Runtime, Arc<Mutex<Vec<String>>>, Rc<RefCell<Vec<String>>>);
+
+/// A main-process-shaped realm: it reports its uncaught errors to a host, and its console lines
+/// are kept.
+fn reporting_realm() -> Reporting {
+    let mut rt = Runtime::new();
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let told = heard.clone();
+    rt.set_process_info(ProcessInfo {
+        on_uncaught: UncaughtBehavior::Report(Arc::new(move |line| {
+            told.lock().unwrap().push(line.to_owned())
+        })),
+        ..ProcessInfo::default()
+    })
+    .unwrap();
+    let lines = Rc::new(RefCell::new(Vec::new()));
+    let written = lines.clone();
+    rt.set_console_sink(Some(Box::new(move |level, text, _| {
+        written.borrow_mut().push(format!("{level:?}:{text}"));
+    })));
+    (rt, heard, lines)
+}
+
+// Electron 39.8.10 (tests/electron/devtools/expected/rejection-*.txt): the main process warns about
+// a rejection nobody handled, twice, and neither throws nor shows the error box. The first warning
+// of the process also says how to trace warnings, which only one test of this binary sees.
+#[test]
+fn a_host_that_reports_warns_of_an_unhandled_rejection_and_goes_on() {
+    let (mut rt, heard, lines) = reporting_realm();
+    rt.eval(
+        "process.on('uncaughtException', () => { globalThis.threw = true; });
+         Promise.reject(new Error('main reject'))",
+    )
+    .unwrap();
+    rt.run_microtasks();
+    let lines = lines.borrow();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let pid = std::process::id();
+    let reason = format!("Warn:(node:{pid}) UnhandledPromiseRejectionWarning: Error: main reject");
+    assert!(lines[0].starts_with(&reason), "{lines:?}");
+    let advice = format!(
+        "Warn:(node:{pid}) UnhandledPromiseRejectionWarning: Unhandled promise rejection. This error originated either by throwing inside of an async function without a catch block"
+    );
+    assert!(lines[1].starts_with(&advice), "{lines:?}");
+    assert!(lines[1].contains("`--unhandled-rejections=strict` (see https://nodejs.org/api/cli.html#cli_unhandled_rejections_mode). (rejection id: "), "{lines:?}");
+    assert!(
+        heard.lock().unwrap().is_empty(),
+        "the host is told of no error"
+    );
+    let threw = rt.eval("globalThis.threw").unwrap();
+    assert_eq!(verve::print(&threw), "undefined");
+}
+
+#[test]
+fn a_rejection_reason_that_is_not_an_error_is_warned_of_as_it_is() {
+    let (mut rt, _, lines) = reporting_realm();
+    rt.eval("Promise.reject('plain reason')").unwrap();
+    rt.run_microtasks();
+    let lines = lines.borrow();
+    assert!(
+        lines[0].contains("UnhandledPromiseRejectionWarning: plain reason"),
+        "{lines:?}"
+    );
+}
+
+// Electron 39.8.10: a rejection is numbered when it rejects with no handler, so one that gets its
+// handler in the same turn still takes a number.
+#[test]
+fn a_rejection_is_numbered_when_it_has_no_handler_as_it_rejects() {
+    let (mut rt, _, lines) = reporting_realm();
+    rt.eval("Promise.reject(new Error('e1')).catch(() => {}); Promise.reject(new Error('e2'))")
+        .unwrap();
+    rt.run_microtasks();
+    let lines = lines.borrow();
+    assert!(lines[0].contains("Error: e2"), "{lines:?}");
+    assert!(lines[1].ends_with("(rejection id: 2)"), "{lines:?}");
+}
+
+// Electron 39.8.10: a rejection that was warned of and is handled later is one more warning.
+#[test]
+fn a_rejection_handled_after_its_warning_is_one_more_warning() {
+    let (mut rt, _, lines) = reporting_realm();
+    rt.eval("globalThis.late = Promise.reject(new Error('late'))")
+        .unwrap();
+    rt.run_microtasks();
+    assert_eq!(lines.borrow().len(), 2, "{:?}", lines.borrow());
+    rt.eval("late.catch(() => {})").unwrap();
+    rt.run_microtasks();
+    let lines = lines.borrow();
+    let pid = std::process::id();
+    let handled = format!(
+        "Warn:(node:{pid}) PromiseRejectionHandledWarning: Promise rejection was handled asynchronously (rejection id: 1)"
+    );
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(lines[2].starts_with(&handled), "{lines:?}");
+}
+
+// Electron 39.8.10 writes a reason the way V8's NoSideEffectsToString does (observed, one
+// rejection at a time), not as util.inspect shows it, and runs no getter of the reason's.
+#[test]
+fn an_object_reason_is_named_as_v8_names_it() {
+    let cases = [
+        ("({ a: 1 })", "#<Object>"),
+        ("[1, 2]", "[object Array]"),
+        ("Object.create(null)", "[object Object]"),
+        ("new Date(0)", "[object Date]"),
+        ("/x/g", "[object RegExp]"),
+        ("({ toString() { return 'x'; } })", "[object Object]"),
+        ("function f() { return 1; }", "function f() { return 1; }"),
+        ("10n", "10"),
+        ("new Map()", "#<Map>"),
+        ("new (class Foo {})()", "#<Foo>"),
+        ("({ [Symbol.toStringTag]: 'T' })", "#<Object>"),
+        ("({ stack: 5 })", "#<Object>"),
+        ("({ stack: 's' })", "s"),
+        ("Object.create(new Error('proto'))", "Error: proto"),
+        (
+            "({ get constructor() { globalThis.ran = true; return class Foo {}; } })",
+            "[object Object]",
+        ),
+    ];
+    for (reason, shown) in cases {
+        let (mut rt, _, lines) = reporting_realm();
+        rt.eval(&format!("Promise.reject({reason})")).unwrap();
+        rt.run_microtasks();
+        let lines = lines.borrow();
+        let first = lines[0].lines().next().unwrap();
+        let said = first
+            .split_once("UnhandledPromiseRejectionWarning: ")
+            .unwrap()
+            .1;
+        assert_eq!(said, shown, "{reason}");
+        assert_eq!(
+            verve::print(&rt.eval("globalThis.ran").unwrap()),
+            "undefined"
+        );
+    }
+}
+
+// Electron 39.8.10 runs Node in `warn-with-error-code` mode: an unhandled rejection sets
+// `process.exitCode` to 1, and one a listener heard leaves it alone.
+#[test]
+fn an_unhandled_rejection_sets_the_exit_code_and_a_heard_one_does_not() {
+    let (mut rt, _, _) = reporting_realm();
+    rt.eval("globalThis.before = String(process.exitCode); Promise.reject(new Error('x'))")
+        .unwrap();
+    rt.run_microtasks();
+    let after = rt.eval("before + ' ' + process.exitCode").unwrap();
+    assert_eq!(verve::print(&after), "undefined 1");
+    let (mut rt, _, _) = reporting_realm();
+    rt.eval("process.on('unhandledRejection', () => {}); Promise.reject(new Error('x'))")
+        .unwrap();
+    rt.run_microtasks();
+    assert_eq!(
+        verve::print(&rt.eval("process.exitCode").unwrap()),
+        "undefined"
+    );
+}
+
+// Electron 39.8.10 (observed): a turn that handles a warned rejection and rejects a new promise
+// tells of the handled one first, as Node does.
+#[test]
+fn a_rejection_handled_late_is_told_before_a_new_one() {
+    let (mut rt, _, lines) = reporting_realm();
+    rt.eval("globalThis.first = Promise.reject(new Error('first'))")
+        .unwrap();
+    rt.run_microtasks();
+    let before = lines.borrow().len();
+    rt.eval("first.catch(() => {}); Promise.reject(new Error('second'))")
+        .unwrap();
+    rt.run_microtasks();
+    let lines = lines.borrow();
+    let new: Vec<&String> = lines.iter().skip(before).collect();
+    assert_eq!(new.len(), 3, "{new:?}");
+    assert!(new[0].contains("PromiseRejectionHandledWarning"), "{new:?}");
+    assert!(new[0].ends_with("(rejection id: 1)"), "{new:?}");
+    assert!(new[1].contains("Error: second"), "{new:?}");
+    assert!(new[2].ends_with("(rejection id: 2)"), "{new:?}");
+}
+
+#[test]
+fn a_rejection_with_a_listener_is_that_listeners_and_not_a_warning() {
+    let (mut rt, heard, lines) = reporting_realm();
+    rt.eval(
+        "globalThis.reasons = [];
+         process.on('unhandledRejection', (reason) => reasons.push(reason.message));
+         Promise.reject(new Error('main reject'))",
+    )
+    .unwrap();
+    rt.run_microtasks();
+    assert!(lines.borrow().is_empty(), "{:?}", lines.borrow());
+    assert!(heard.lock().unwrap().is_empty());
+    let reasons = rt.eval("reasons.join()").unwrap();
+    assert_eq!(verve::print(&reasons), "main reject");
+}
+
 #[test]
 fn verve_run_still_ends_the_process_itself() {
     let dir = Dir::new("exit");

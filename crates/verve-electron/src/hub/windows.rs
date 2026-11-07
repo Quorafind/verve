@@ -50,5 +50,7 @@ impl Hub {
         if let Some(page) = page {
             stop(&page);
         }
+        self.forget_inspector(contents);
+        self.set_devtools_open(contents, false);
     }
 }

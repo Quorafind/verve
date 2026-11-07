@@ -24,6 +24,7 @@ use crate::{ElectronOptions, MainGuest};
 
 pub mod cookies;
 mod diagnostics;
+mod inspector;
 mod proxy;
 mod records;
 mod renderers;
@@ -33,6 +34,7 @@ pub mod system_proxy;
 mod text;
 mod windows;
 
+pub use inspector::ConsoleEntry;
 pub use proxy::{Config as ProxyConfig, Proxy};
 pub use records::ConsoleLine;
 pub use renderers::RendererHandle;
@@ -118,6 +120,16 @@ pub struct Hub {
     measurer_taken: AtomicBool,
     /// The app's sessions and the schemes it made privileged.
     sessions: Mutex<sessions::Registry>,
+    /// The newest console lines of each page, for the inspector window.
+    kept_console: Mutex<BTreeMap<ContentsId, inspector::Kept>>,
+    /// The pages whose inspector window has the focus.
+    devtools_focused: Mutex<BTreeSet<ContentsId>>,
+    /// Whether the shell shows the inspector in a window of its own: the terminal then gets
+    /// neither the element tree nor the console of a page whose DevTools are open, as in Electron.
+    inspector_window: AtomicBool,
+    /// The last number given to a call of the inspector's REPL: never repeated for a page, so an
+    /// answer that comes after its window is gone is not taken for the next window's.
+    inspector_calls: AtomicU64,
 }
 
 impl Hub {
@@ -149,6 +161,10 @@ impl Hub {
             measurer: Mutex::new(None),
             measurer_taken: AtomicBool::new(false),
             sessions: Mutex::default(),
+            kept_console: Mutex::new(BTreeMap::new()),
+            devtools_focused: Mutex::new(BTreeSet::new()),
+            inspector_window: AtomicBool::new(false),
+            inspector_calls: AtomicU64::new(0),
         })
     }
 
@@ -156,6 +172,17 @@ impl Hub {
     /// says so; a headless one never does, so a test cannot put a box on the desktop.
     pub fn allow_system_boxes(&self) {
         self.system_boxes.store(true, Ordering::Relaxed);
+    }
+
+    /// Says that the shell shows the inspector in a window: opening the DevTools then writes
+    /// nothing to the terminal. A headless shell never says so, and keeps the text dump.
+    pub fn show_inspector_in_window(&self) {
+        self.inspector_window.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the shell shows the inspector in a window ([`Hub::show_inspector_in_window`]).
+    pub(crate) fn has_inspector_window(&self) -> bool {
+        self.inspector_window.load(Ordering::Relaxed)
     }
 
     /// An error box: the shell's over a window; with none, the system's own on this thread, the

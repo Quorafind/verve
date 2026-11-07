@@ -11,12 +11,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use gpui::AsyncApp;
 use verve_electron::Hub;
-use verve_electron::ids::WindowId;
+use verve_electron::ids::{ContentsId, WindowId};
 use verve_electron::msg::{AppEvent, FromShell, ToRendererInput, ToShell, WindowOp};
 
 use crate::app_region::AppRegion;
 use crate::capture::Capture;
 use crate::dialog;
+use crate::inspector::model::Highlight;
+use crate::inspector::overlay::PickEvent;
+use crate::inspector::windows::{self as inspector_windows, Inspectors};
 use crate::native::{self, Native};
 use crate::platform;
 use crate::window::{self, Opening, Window};
@@ -33,6 +36,14 @@ pub(crate) enum Item {
     Gone(WindowId),
     /// P30 laid out a page that has `-webkit-app-region` boxes.
     Regions(WindowId, Vec<AppRegion>),
+    /// The inspector of this page points at a node: its window draws the box over the page.
+    Highlight(ContentsId, Option<Highlight>),
+    /// The inspector of this page starts or stops picking a node with the pointer.
+    Picking(ContentsId, bool),
+    /// The pointer did something over the page that is being picked from.
+    Picked(ContentsId, PickEvent),
+    /// A person closed this inspector window (its number) of this page.
+    InspectorGone(ContentsId, u64),
     /// A menu item was chosen, a tray icon touched or a global hotkey pressed.
     #[cfg(any(windows, target_os = "macos"))]
     Native(native::Event),
@@ -117,6 +128,8 @@ pub(crate) struct Shell {
     native: Native,
     /// The screenshot `--screenshot` asked for, until it is taken.
     capture: Option<Capture>,
+    /// The inspector windows (P43).
+    inspectors: Inspectors,
 }
 
 impl Shell {
@@ -131,6 +144,7 @@ impl Shell {
             windows: BTreeMap::new(),
             dark: None,
             capture: None,
+            inspectors: Inspectors::new(),
         }
     }
 
@@ -146,6 +160,7 @@ impl Shell {
             self.apply(item, cx);
         }
         self.draw(cx);
+        self.inspectors.pump(cx);
         if let Some(capture) = &mut self.capture
             && capture.poll(self.windows.values().next(), cx)
         {
@@ -171,6 +186,25 @@ impl Shell {
             Item::Regions(id, regions) => {
                 if let Some(window) = self.windows.get(&id) {
                     window.set_app_regions(regions, cx);
+                }
+            }
+            Item::Highlight(contents, highlight) => {
+                let windows = &self.windows;
+                inspector_windows::on_page_window(windows, contents, cx, move |view| {
+                    view.set_highlight(highlight);
+                });
+            }
+            Item::Picking(contents, on) => {
+                let picker = on.then(|| inspector_windows::picker(&self.inbox, contents));
+                let windows = &self.windows;
+                inspector_windows::on_page_window(windows, contents, cx, move |view| {
+                    view.set_picker(picker);
+                });
+            }
+            Item::Picked(contents, event) => self.inspectors.picked(contents, event, cx),
+            Item::InspectorGone(contents, serial) => {
+                if self.inspectors.gone(contents, serial, &self.hub) {
+                    inspector_windows::clear_overlay(&self.windows, contents, cx);
                 }
             }
             #[cfg(any(windows, target_os = "macos"))]
@@ -208,6 +242,25 @@ impl Shell {
             }
             // The frames follow the system's theme until P34 draws them by the source.
             ToShell::SetThemeSource(_) => {}
+            ToShell::Inspector {
+                contents,
+                open: true,
+            } => {
+                self.inspectors.open(contents, &self.hub, &self.inbox, cx);
+            }
+            ToShell::Inspector {
+                contents,
+                open: false,
+            } => {
+                self.inspectors.close(contents, &self.hub, cx);
+                inspector_windows::clear_overlay(&self.windows, contents, cx);
+            }
+            ToShell::InspectorReply {
+                contents,
+                call,
+                text,
+                is_error,
+            } => self.inspectors.reply(contents, (call, text, is_error), cx),
             ToShell::Quit { .. } => {
                 self.native.release();
                 cx.update(|cx| cx.quit());
@@ -273,7 +326,9 @@ impl Shell {
             self.destroy(child, cx);
         }
         if let Some(window) = self.windows.remove(&id) {
+            let contents = window.contents;
             window.destroy(cx);
+            self.inspectors.close_with_page(contents, &self.hub, cx);
         }
     }
 
@@ -293,14 +348,18 @@ impl Shell {
     /// Hands each window what its page published since the last turn.
     fn draw(&mut self, cx: &mut AsyncApp) {
         for window in self.windows.values() {
-            let Some(list) = self
-                .hub
-                .renderer_view(window.contents)
-                .and_then(|view| view.display_list)
-            else {
+            // The document the view is of: read before the view is taken, so a view of the old
+            // document is never tagged with the new one's number.
+            let generation = self.hub.page_generation(window.contents);
+            let Some(view) = self.hub.renderer_view(window.contents) else {
                 continue;
             };
-            window.show_list(list, cx);
+            let list = view.display_list;
+            self.inspectors
+                .page(window.contents, generation, view.update, list.clone(), cx);
+            if let Some(list) = list {
+                window.show_list(list, cx);
+            }
         }
     }
 }
