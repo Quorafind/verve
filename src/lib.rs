@@ -1122,7 +1122,7 @@ pub fn report(context: &mut Context, error: &JsError) {
         process::uncaught(context, error);
         return;
     }
-    if process::heard_by_listeners(context, error) {
+    if process::heard_by_listeners(context, error) || process::report_to_host(context, error) {
         return;
     }
     let line = uncaught::console_uncaught(context, "Uncaught", error);

@@ -1,5 +1,5 @@
 //! What the `electron` binary says on the terminal for a developer (P43): the unsupported
-//! debugging switches and a page's console.
+//! debugging switches, a page's console and the errors nobody caught.
 //! It runs `--headless`, so no window opens and no box is shown.
 
 use std::process::Output;
@@ -80,4 +80,19 @@ fn a_forced_colour_wraps_a_warning_in_yellow() {
         ["\x1b[33m[renderer:1 page.html:2] careful\x1b[0m"],
         "{lines:?}"
     );
+}
+
+#[test]
+fn an_error_nobody_caught_in_the_main_process_prints_its_stack_and_the_app_goes_on() {
+    // Electron 39.8.10's own `lib/browser/init.ts`: with no other `uncaughtException` listener it
+    // shows "A JavaScript error occurred in the main process" with "Uncaught Exception:\n" and
+    // the error's stack. Headless, the box is a line of the trace, and the app keeps running.
+    let script = "setTimeout(() => { throw new Error('main boom'); }, 20);
+                  setTimeout(() => process.exit(3), 300);";
+    let output = run("uncaught", script, &[], &[]);
+    assert_eq!(output.status.code(), Some(3));
+    let text = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(text.contains("Error: main boom\n    at "), "{text}");
+    let boxed = "[app] error box \"A JavaScript error occurred in the main process\" \"Uncaught Exception:\\nError: main boom";
+    assert!(text.contains(boxed), "{text}");
 }
