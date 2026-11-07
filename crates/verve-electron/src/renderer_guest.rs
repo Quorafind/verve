@@ -56,6 +56,7 @@ impl RendererGuest {
     ) -> Self {
         let dark = hub.dark();
         let mut runtime = Runtime::new();
+        runtime.set_permissions(preload::permissions_for(&prefs));
         runtime.set_vfs(hub.overlay());
         // A page without Node resolves its modules as a browser does.
         runtime.set_web_modules(!preload::page_has_node(&prefs));

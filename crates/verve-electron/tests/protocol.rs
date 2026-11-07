@@ -350,6 +350,61 @@ fn a_file_handler_reads_files_by_passing_over_the_handlers_and_a_stream_protocol
 }
 
 #[test]
+fn a_page_without_node_cannot_fetch_a_file() {
+    let app = site_app(
+        FULL,
+        "protocol.handle('app', globalThis.served);
+         globalThis.target = require('url').pathToFileURL(path.join(__dirname, 'site', 'data.json')).toString();",
+    );
+    let contents = bundle(&app);
+    let target: Value = serde_json::from_str(&app.eval_main("globalThis.target")).unwrap();
+    let target = target.as_str().unwrap();
+    let asked =
+        format!("try {{ await fetch({target:?}); return 'read'; }} catch (e) {{ return e.name; }}");
+    assert_eq!(
+        app.run_page(contents, &asked, TIMEOUT)["value"],
+        json!("TypeError"),
+        "a page may not read a file by itself; console: {:?}",
+        app.console()
+    );
+}
+
+/// A page without `nodeIntegration` has no Node globals, and still reaches any host: Chromium's
+/// renderer does, and a page's `fetch` of an http address is the network's, not Node's. The
+/// server is the main process's own, on a port the system picked.
+#[test]
+fn a_page_without_node_reaches_a_server_on_this_machine() {
+    let app = site_app(
+        FULL,
+        "protocol.handle('app', globalThis.served);
+         const server = require('http').createServer((request, response) => {
+           response.setHeader('access-control-allow-origin', '*');
+           response.end('reached');
+         });
+         server.listen(0, '127.0.0.1', () => { globalThis.port = server.address().port; });",
+    );
+    let contents = bundle(&app);
+    assert!(
+        app.run_until(
+            |app| app.eval_main("globalThis.port") != "undefined",
+            TIMEOUT
+        ),
+        "console: {:?}",
+        app.console()
+    );
+    let port = app.eval_main("globalThis.port");
+    let asked = format!(
+        "const reply = await fetch('http://127.0.0.1:{port}/');          return [typeof process, typeof Buffer, await reply.text()];"
+    );
+    assert_eq!(
+        app.run_page(contents, &asked, TIMEOUT)["value"],
+        json!(["undefined", "undefined", "reached"]),
+        "console: {:?}",
+        app.console()
+    );
+}
+
+#[test]
 fn a_file_handler_answers_for_the_page_load_file_makes() {
     let main = "const { app, BrowserWindow, protocol, net } = require('electron');
         globalThis.seen = [];

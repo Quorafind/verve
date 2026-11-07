@@ -85,6 +85,23 @@ pub(crate) fn page_has_node(prefs: &WebPreferences) -> bool {
     prefs.node_integration && !prefs.context_isolation
 }
 
+/// What a page's realm may do beyond the page itself: every network, as Chromium's renderer
+/// reaches any, and more only where Node runs in it: with `nodeIntegration` or a preload, and no
+/// sandbox (which `page_has_node` does not look at: it only decides what the page's own scripts
+/// see). A page without Node gets no listening sockets and no raw DNS.
+pub(crate) fn permissions_for(prefs: &WebPreferences) -> verve::Permissions {
+    if !prefs.sandbox && (prefs.node_integration || prefs.preload.is_some()) {
+        return verve::Permissions::all();
+    }
+    verve::Permissions {
+        outbound: vec![verve::NetworkRule {
+            host: None,
+            port: None,
+        }],
+        ..verve::Permissions::default()
+    }
+}
+
 /// The world Electron's `number` stands for, made when first asked for.
 ///
 /// # Errors
