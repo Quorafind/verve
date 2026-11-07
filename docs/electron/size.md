@@ -372,3 +372,24 @@ The cost is P31's own code:
 - the text items, selection and caret of the display list.
 
 Candidates for P42: the monomorphised paint and measurer paths, and the font-table parsing.
+
+## P16: protocol, sessions, net, cookies, webRequest, permissions, proxies and downloads
+
+`electron/p16-protocol-session` at its tested tip (7bb3b89b; merged as `c00a983a` after P31): `cargo build --release -p verve-gpui
+--bin electron --features jit` is 35,335,168 bytes against 34,617,856 for `b1a27600`, +717,312 bytes (+2.07 %). The budget was 200
+KB, re-set to 500 KB after the first measure (+713,728). The round meant to cut it split `MainGuest::from_renderer` and moved the
+proxy to a per-request route, but it took nothing off. The 217 KB over the budget was accepted so that P16 could merge, and the cut is
+left to P42. `docs/electron-plan` with P16 merged is 36,822,016 bytes, +704,000 on P31's 36,118,016; the cap (37,748,736) leaves
+926,720 bytes.
+
+Where it goes (`cargo bloat --release`, unstripped, before that round): P16's named functions come to about 340 KiB.
+- **verve-electron's API modules**: about 205 KiB for protocol, net, session, cookies, webRequest, permissions and downloads.
+- **The kernel**: about 70 KiB for the `browser_net` hook and the changes to `network::fetch`.
+- **The Hub**: about 38 KiB for sessions, cookies and proxies.
+- **verve-dom**: about 22 KiB for cookies, permissions and downloads.
+- **The rest** is generic copies, closures and data.
+
+The largest functions were `MainGuest::from_renderer` (50.5 KiB, one match, since split by message family), `net_request::init_request`
+(13.0 KiB), `web_request::run` (11.3 KiB), `net_request::incoming_message` (8.7 KiB) and `protocol_serve::start` (8.0 KiB).
+
+Candidates for P42: net_request's closure per method, and the near-copies between the request and download paths.
