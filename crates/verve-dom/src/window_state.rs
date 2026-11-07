@@ -82,6 +82,16 @@ impl Document {
         runtime.run_microtasks();
     }
 
+    /// The embedder answered a permission question ([`crate::PermissionBackend::ask`] said it
+    /// would later): whatever the page asked is settled.
+    pub fn settle_permission(&self, runtime: &mut verve::Runtime, ask: u64, granted: bool) {
+        let context = runtime.context();
+        if let Err(error) = bind::permissions::settle(context, ask, granted) {
+            verve::report(context, &error);
+        }
+        runtime.run_microtasks();
+    }
+
     /// Whether the window is out of sight: `document.hidden` and `visibilityState`, and
     /// `visibilitychange` when that moves.
     pub fn set_visibility(&self, runtime: &mut verve::Runtime, hidden: bool) {

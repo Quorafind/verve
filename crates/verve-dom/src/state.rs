@@ -169,6 +169,10 @@ pub struct State {
     pub storage: Option<Box<dyn StorageBackend>>,
     /// The embedder's cookie jar, which `document.cookie` goes to when there is one.
     pub cookies: Option<Rc<dyn crate::CookieBackend>>,
+    /// The embedder's answers to the permissions a page uses, and the questions it has yet to
+    /// answer.
+    pub permissions: Option<Rc<dyn crate::PermissionBackend>>,
+    pub permissions_pending: crate::bind::permissions::Pending,
     pub observers: Vec<ObserverRecord>,
     /// A microtask is queued to deliver mutation records.
     pub mutation_queued: bool,
@@ -245,6 +249,8 @@ impl State {
             session: BTreeMap::new(),
             storage: None,
             cookies: None,
+            permissions: None,
+            permissions_pending: crate::bind::permissions::Pending::default(),
             observers: Vec::new(),
             mutation_queued: false,
             frame_clock: FrameClock::Timer,

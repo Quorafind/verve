@@ -1,6 +1,6 @@
 //! What a window is made with: the address, the viewport, who loads its resources.
 
-use crate::{CookieBackend, FrameClock, Loader, StorageBackend};
+use crate::{CookieBackend, FrameClock, Loader, PermissionBackend, StorageBackend};
 
 /// What the window is.
 pub struct Options {
@@ -37,6 +37,9 @@ pub struct Options {
     pub secure_schemes: Vec<String>,
     /// The jar `document.cookie` reads and writes; `None` keeps the page's cookies in the window.
     pub cookies: Option<Box<dyn CookieBackend>>,
+    /// Who says whether the page may use a permission (`Notification`, `navigator.permissions`,
+    /// `clipboard.readText`); `None` refuses them all.
+    pub permissions: Option<Box<dyn PermissionBackend>>,
 }
 
 impl Default for Options {
@@ -57,6 +60,7 @@ impl Default for Options {
             standard_schemes: Vec::new(),
             secure_schemes: Vec::new(),
             cookies: None,
+            permissions: None,
         }
     }
 }

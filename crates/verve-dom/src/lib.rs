@@ -37,6 +37,7 @@ mod input;
 mod load;
 mod media;
 mod options;
+mod permissions;
 mod rect;
 mod schemes;
 mod snapshot;
@@ -64,6 +65,7 @@ pub use media::{
     MediaCommand, MediaCommandKind, MediaError, MediaSettings, MediaState, MediaUpdate,
 };
 pub use options::Options;
+pub use permissions::PermissionBackend;
 pub use rect::Rect;
 pub use snapshot::{Snapshot, SnapshotData};
 pub use state::FrameClock;
@@ -147,6 +149,7 @@ pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Doc
         s.schemes = schemes::Schemes::new(&options.standard_schemes, &options.secure_schemes);
         s.load.loader = options.loader.take().map(Rc::from);
         s.cookies = options.cookies.take().map(Rc::from);
+        s.permissions = options.permissions.take().map(Rc::from);
         s.load.active = s.load.loader.is_some();
         let document = s.dom.document;
         if options.user_agent_sheet {
@@ -188,6 +191,7 @@ pub(crate) fn install_classes(context: &mut Context, options: &Options) -> JsRes
     bind::fetch::install(context)?;
     load::install(context)?;
     bind::platform::install(context)?;
+    bind::permissions::install(context)?;
     bind::observers::install(context)?;
     bind::xhr::install(context)?;
     bind::animation::install(context)?;

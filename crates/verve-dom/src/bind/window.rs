@@ -1011,7 +1011,7 @@ fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResul
             native::settled(Ok(JsValue::undefined()), cx)
         }),
         ("readText", 0, |_, _, cx| {
-            native::settled(Ok(js_text("")), cx)
+            super::permissions::ask_to_read(cx)
         }),
         ("write", 1, |_, _, cx| {
             native::settled(Ok(JsValue::undefined()), cx)
