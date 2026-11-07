@@ -108,24 +108,8 @@ fn begin(
     }
     let url = url::Url::parse(&outgoing.url)
         .map_err(|_| crate::native::type_error(format!("Invalid URL: {}", outgoing.url)))?;
-    match url.scheme() {
-        "http" | "https" => {}
-        "data" => return answer(crate::encoding::data_url(&url), &url, resolvers, cx),
-        "blob" => {
-            let found = (outgoing.method == "GET")
-                .then(|| crate::shared(cx).blobs.borrow().get(url.as_str()).cloned())
-                .flatten();
-            let local = found
-                .map(|bytes| (String::new(), bytes))
-                .ok_or_else(|| "invalid method or blob URL not found".to_owned());
-            return answer(local, &url, resolvers, cx);
-        }
-        scheme => {
-            let cause = plain_error(cx, &format!("unknown scheme '{scheme}:'"), None);
-            let reason = fetch_failed(cx, cause);
-            reject(resolvers, reason, cx);
-            return Ok(());
-        }
+    if answered_without_network(&outgoing.method, &url, resolvers, cx)? {
+        return Ok(());
     }
     let redirect = match outgoing.redirect.as_str() {
         "manual" => Redirect::Manual,
@@ -194,6 +178,35 @@ fn begin(
     Ok(())
 }
 
+/// Answers a `data:` or `blob:` address, and rejects any scheme but `http(s)`, without a network;
+/// `false` when the address is for the network.
+fn answered_without_network(
+    method: &str,
+    url: &url::Url,
+    resolvers: &ResolvingFunctions,
+    cx: &mut Context,
+) -> JsResult<bool> {
+    match url.scheme() {
+        "http" | "https" => return Ok(false),
+        "data" => answer(crate::encoding::data_url(url), url, resolvers, cx)?,
+        "blob" => {
+            let found = (method == "GET")
+                .then(|| crate::shared(cx).blobs.borrow().get(url.as_str()).cloned())
+                .flatten();
+            let local = found
+                .map(|bytes| (String::new(), bytes))
+                .ok_or_else(|| "invalid method or blob URL not found".to_owned());
+            answer(local, url, resolvers, cx)?;
+        }
+        scheme => {
+            let cause = plain_error(cx, &format!("unknown scheme '{scheme}:'"), None);
+            let reason = fetch_failed(cx, cause);
+            reject(resolvers, reason, cx);
+        }
+    }
+    Ok(true)
+}
+
 /// A `data:` or `blob:` address answered: its type and bytes, or why it cannot be.
 fn answer(
     local: Result<(String, Vec<u8>), String>,
@@ -238,13 +251,12 @@ fn send(fetch: &JsObject, cx: &mut Context) {
 }
 
 fn start(fetch: &JsObject, cx: &mut Context) -> JsResult<()> {
-    let (url, method, headers, body, hop) = with(fetch, |f| {
+    let (url, method, headers, body) = with(fetch, |f| {
         (
             f.hop.url.clone(),
             f.hop.method.clone(),
             f.hop.headers.clone(),
             f.hop.body.clone(),
-            f.hop.redirects,
         )
     });
     let https = url.scheme() == "https";
@@ -270,11 +282,34 @@ fn start(fetch: &JsObject, cx: &mut Context) -> JsResult<()> {
         super::tcp::put(&refusal, "resource", js_text(&resource), cx)?;
         return Err(JsError::from_opaque(refusal));
     }
+    let wire = wire_list(&headers, &method, body.as_deref());
+    dispatch(fetch, wire, cx)
+}
+
+/// Puts the request on the wire with these headers.
+fn dispatch(fetch: &JsObject, wire: Vec<(String, String)>, cx: &mut Context) -> JsResult<()> {
+    let (url, method, body, hop) = with(fetch, |f| {
+        (
+            f.hop.url.clone(),
+            f.hop.method.clone(),
+            f.hop.body.clone(),
+            f.hop.redirects,
+        )
+    });
+    let https = url.scheme() == "https";
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_matches(['[', ']'])
+        .to_owned();
+    let port = url
+        .port_or_known_default()
+        .unwrap_or(if https { 443 } else { 80 });
     let module = crate::modules::node_module(cx, if https { "https" } else { "http" })?;
     let agent = agent(&module, cx)?;
     let options = object(cx);
     let path = &url[url::Position::BeforePath..url::Position::AfterQuery];
-    let headers = wire_headers(&headers, &method, body.as_deref(), cx)?;
+    let headers = header_object(&wire, cx)?;
     for (key, value) in [
         ("protocol", js_text(&format!("{}:", url.scheme()))),
         ("hostname", js_text(&host)),
@@ -316,13 +351,12 @@ type BodyListener = fn(&JsValue, &[JsValue], &JsObject, &mut Context) -> JsResul
 
 /// The request's headers as `http.request` takes them, with what undici adds when they are not
 /// there: `accept`, `accept-language`, `accept-encoding` (what this module decodes),
-/// `user-agent`, and the body's `content-length`.
-fn wire_headers(
+/// `user-agent`, and the body's `content-length`. A name sent twice is joined.
+fn wire_list(
     list: &[(String, String)],
     method: &str,
     body: Option<&[u8]>,
-    cx: &mut Context,
-) -> JsResult<JsObject> {
+) -> Vec<(String, String)> {
     let mut joined: Vec<(String, String)> = Vec::new();
     for (name, value) in list {
         match joined.iter_mut().find(|(n, _)| n == name) {
@@ -353,9 +387,14 @@ fn wire_headers(
             joined.push((name.to_owned(), value));
         }
     }
+    joined
+}
+
+/// The headers as the plain object `http.request` takes.
+fn header_object(list: &[(String, String)], cx: &mut Context) -> JsResult<JsObject> {
     let headers = object(cx);
-    for (name, value) in joined {
-        headers.set(JsString::from(name), js_text(&value), false, cx)?;
+    for (name, value) in list {
+        headers.set(JsString::from(name.as_str()), js_text(value), false, cx)?;
     }
     Ok(headers)
 }
@@ -443,6 +482,20 @@ fn on_response(
             text_of(&pair[1], cx)?.trim().to_owned(),
         ));
     }
+    proceed(fetch, &message, status, status_text, headers, cx)?;
+    Ok(JsValue::undefined())
+}
+
+/// The response head is settled: a redirect is followed, returned or refused, anything else is
+/// the response.
+fn proceed(
+    fetch: &JsObject,
+    message: &JsValue,
+    status: u16,
+    status_text: String,
+    headers: Vec<(String, String)>,
+    cx: &mut Context,
+) -> JsResult<()> {
     let location = headers
         .iter()
         .find(|(n, _)| n == "location")
@@ -452,13 +505,13 @@ fn on_response(
         match mode {
             Redirect::Manual => {}
             Redirect::Error => {
-                drain(&message, cx)?;
+                drain(message, cx)?;
                 let cause = plain_error(cx, "unexpected redirect", None);
                 fail(fetch, cause, cx);
-                return Ok(JsValue::undefined());
+                return Ok(());
             }
             Redirect::Follow => {
-                drain(&message, cx)?;
+                drain(message, cx)?;
                 match follow(fetch, status, &location) {
                     Ok(()) => send(fetch, cx),
                     Err(message) => {
@@ -466,12 +519,11 @@ fn on_response(
                         fail(fetch, cause, cx);
                     }
                 }
-                return Ok(JsValue::undefined());
+                return Ok(());
             }
         }
     }
-    respond(fetch, &message, status, status_text, headers, cx)?;
-    Ok(JsValue::undefined())
+    respond(fetch, message, status, status_text, headers, cx)
 }
 
 /// Reads and drops a message the fetch has no use for, so its connection can go back to the
