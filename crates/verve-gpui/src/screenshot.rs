@@ -493,6 +493,97 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_is_stretched_over_its_rectangle_and_cut_to_its_clip() {
+        // Two pixels side by side, straight-alpha BGRA: red, then blue.
+        let bytes: std::sync::Arc<[u8]> =
+            std::sync::Arc::from(vec![0, 0, 255, 255, 255, 0, 0, 255]);
+        let frames = verve_layout::ImageFrames {
+            width: 2,
+            height: 1,
+            frames: vec![(bytes, std::time::Duration::ZERO)],
+        };
+        let key = ImageKey(5);
+        let table = ImageTable::new([(key, std::sync::Arc::new(frames))].into());
+        let page = list(vec![PaintItem::Image {
+            node: 1,
+            bounds: Rect::new(0., 0., 40., 10.),
+            clip: Rect::new(0., 0., 35., 10.),
+            image: key,
+            fit: verve_layout::ObjectFit::Fill,
+            frame: 0,
+        }]);
+        let picture = render_with(&page, &table, (40, 10), Some([1.; 4]), &|_| None).unwrap();
+        // The texels' centers are at 10 and 30: the sampling blends between them, and is the
+        // texel's color on either side.
+        assert_eq!(pixel(&picture, 5, 5), [255, 0, 0, 255]);
+        assert_eq!(pixel(&picture, 33, 5), [0, 0, 255, 255]);
+        // Past the clip the page shows through.
+        assert_eq!(pixel(&picture, 37, 5), [255, 255, 255, 255]);
+    }
+
+    fn table_of(key: ImageKey, width: u32, bgra: &[u8]) -> ImageTable {
+        let frames = verve_layout::ImageFrames {
+            width,
+            height: (bgra.len() / 4) as u32 / width,
+            frames: vec![(std::sync::Arc::from(bgra), std::time::Duration::ZERO)],
+        };
+        ImageTable::new([(key, std::sync::Arc::new(frames))].into())
+    }
+
+    #[test]
+    fn a_picture_smaller_than_its_clip_leaves_the_rest_to_the_page() {
+        // `object-fit: contain` of a 2:1 picture in a 40x10 box: it fills the middle only.
+        let key = ImageKey(6);
+        let table = table_of(key, 2, &[0, 0, 255, 255, 255, 0, 0, 255]);
+        let page = list(vec![PaintItem::Image {
+            node: 1,
+            bounds: Rect::new(10., 0., 20., 10.),
+            clip: Rect::new(0., 0., 40., 10.),
+            image: key,
+            fit: verve_layout::ObjectFit::Contain,
+            frame: 0,
+        }]);
+        let picture = render_with(&page, &table, (40, 10), Some([1.; 4]), &|_| None).unwrap();
+        assert_eq!(pixel(&picture, 5, 5), [255, 255, 255, 255]);
+        assert_eq!(pixel(&picture, 12, 5), [255, 0, 0, 255]);
+        assert_eq!(pixel(&picture, 28, 5), [0, 0, 255, 255]);
+        assert_eq!(pixel(&picture, 35, 5), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn background_tiles_are_painted_where_they_are_and_not_over_the_gaps() {
+        // A 1x1 green picture as 5x5 tiles every 10px, 2x2 of them, in a 20x20 area.
+        let key = ImageKey(7);
+        let table = table_of(key, 1, &[0, 255, 0, 255]);
+        let page = list(vec![PaintItem::Box {
+            node: 1,
+            bounds: Rect::new(0., 0., 20., 20.),
+            radii: [0.; 4],
+            background: vec![ListFill::Picture {
+                image: key,
+                area: Rect::new(0., 0., 20., 20.),
+                tile: Rect::new(0., 0., 5., 5.),
+                step: [10., 10.],
+                count: [2, 2],
+                frame: 0,
+            }],
+            border: Border::NONE,
+            shadows: Vec::new(),
+        }]);
+        let picture = render_with(&page, &table, (20, 20), Some([1.; 4]), &|_| None).unwrap();
+        for (x, y) in [(2, 2), (12, 2), (2, 12), (12, 12)] {
+            assert_eq!(pixel(&picture, x, y), [0, 255, 0, 255], "tile at {x},{y}");
+        }
+        for (x, y) in [(7, 7), (17, 7), (7, 17), (17, 17), (7, 2)] {
+            assert_eq!(
+                pixel(&picture, x, y),
+                [255, 255, 255, 255],
+                "gap at {x},{y}"
+            );
+        }
+    }
+
+    #[test]
     fn a_box_with_a_border_is_drawn_where_the_list_says() {
         let mut border = Border::NONE;
         border.widths = [2.; 4];

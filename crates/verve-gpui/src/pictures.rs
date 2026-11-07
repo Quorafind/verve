@@ -248,6 +248,45 @@ mod tests {
         );
     }
 
+    fn table_of(color: u8) -> Arc<ImageTable> {
+        let bytes: Arc<[u8]> = Arc::from(vec![color, 0, 0, 255]);
+        let frames = ImageFrames {
+            width: 1,
+            height: 1,
+            frames: vec![(bytes, std::time::Duration::ZERO)],
+        };
+        Arc::new(ImageTable::new([(ImageKey(3), Arc::new(frames))].into()))
+    }
+
+    #[test]
+    fn a_page_picture_is_made_once_remade_when_replaced_and_given_up_when_not_drawn() {
+        let mut pictures = Pictures::default();
+        assert!(pictures.image(ImageKey(3), 1.).is_none());
+        pictures.set_table(table_of(1));
+        let first = pictures.image(ImageKey(3), 1.).expect("a picture");
+        let again = pictures.image(ImageKey(3), 1.).expect("a picture");
+        assert!(Arc::ptr_eq(&first, &again));
+        assert_eq!(first.frame_count(), 1);
+        // The table replaced the picture: the old one is given up, the new one is made.
+        pictures.set_table(table_of(2));
+        let next = pictures.image(ImageKey(3), 1.).expect("a picture");
+        assert!(!Arc::ptr_eq(&first, &next));
+        assert_eq!(pictures.take_retired().len(), 1);
+        pictures.end_frame();
+        // Drawn once more within the grace period it is the same picture.
+        assert!(Arc::ptr_eq(
+            &next,
+            &pictures.image(ImageKey(3), 1.).unwrap()
+        ));
+        for _ in 0..=GRACE {
+            pictures.end_frame();
+        }
+        assert!(pictures.take_retired().is_empty());
+        pictures.end_frame();
+        assert_eq!(pictures.take_retired().len(), 1);
+        assert!(pictures.by_page.is_empty());
+    }
+
     #[test]
     fn a_faded_copy_is_kept_for_one_opacity_and_a_picture_not_drawn_is_given_up() {
         let mut pictures = Pictures::default();
