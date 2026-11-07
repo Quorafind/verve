@@ -180,8 +180,10 @@ observed in Chromium 142 (Electron 39): `tests/load.rs` and `tests/fixtures/load
 
 - No layout: where things are is the drawer's to work out and report. Until it does, boxes
   are empty (the viewport for `<html>` and `<body>`).
-- No composition events (an input method's text arrives committed, through `insert_text`), no
-  typing into `contenteditable` regions, no drag and drop or touch input from the interface.
+- No touch input from the interface. Drag images are not drawn (`setDragImage` is recorded), a
+  text selection cannot be dragged, and a drop on a field or an editable region does not insert
+  the dragged text. `execCommand('paste')` does nothing, since the clipboard is the shell's and a
+  paste is handed to [`Document::paste`].
 - Custom elements: no `is="…"` built-ins, no `ElementInternals` beyond an empty object, and the
   page's own markup is upgraded once parsed, not constructed while it is parsed. A class or
   style change through `classList` or `style` does not reach `attributeChangedCallback`.
