@@ -13,7 +13,9 @@
 //! Lifted from su-editor's Obsidian host.
 
 mod markup;
+mod write;
 use markup::{Tag, cdata, comment, declaration};
+pub use write::{inner, inner_xml, outer, outer_xml};
 
 use crate::dom::{Dom, Namespace, NodeId, NodeKind, ShadowMode, SlotAssignment};
 
@@ -1267,81 +1269,6 @@ fn svg_case<'a>(table: &[&'static str], name: &'a str) -> std::borrow::Cow<'a, s
     }
 }
 
-/// The node's children as markup.
-pub fn inner(dom: &Dom, id: NodeId) -> String {
-    let mut out = String::new();
-    let raw = dom
-        .get(id)
-        .and_then(|n| n.tag())
-        .is_some_and(|t| raw_text(t) == Some(false));
-    for child in dom.children(id) {
-        write(dom, *child, &mut out, raw);
-    }
-    out
-}
-
-/// The node itself as markup.
-pub fn outer(dom: &Dom, id: NodeId) -> String {
-    let mut out = String::new();
-    write(dom, id, &mut out, false);
-    out
-}
-
-fn write(dom: &Dom, id: NodeId, out: &mut String, raw: bool) {
-    // 结束标签也放入显式栈，树的深度不再占用原生调用栈。
-    let mut stack = vec![(id, raw, false)];
-    while let Some((id, raw, closing)) = stack.pop() {
-        let Some(node) = dom.get(id) else { continue };
-        if closing {
-            out.push_str("</");
-            out.push_str(&qualified_name(dom, id, false));
-            out.push('>');
-            continue;
-        }
-        match &node.kind {
-            NodeKind::Text(text) if raw => out.push_str(text),
-            NodeKind::Text(text) => out.push_str(&escape(text, false)),
-            NodeKind::Comment(data) => {
-                out.push_str("<!--");
-                out.push_str(data);
-                out.push_str("-->");
-            }
-            NodeKind::Doctype(name) => {
-                out.push_str("<!DOCTYPE ");
-                out.push_str(name);
-                out.push('>');
-            }
-            NodeKind::Element(tag) => {
-                let name = qualified_name(dom, id, false);
-                out.push('<');
-                out.push_str(&name);
-                for (key, value) in dom.attributes(id) {
-                    out.push(' ');
-                    out.push_str(&key);
-                    out.push_str("=\"");
-                    out.push_str(&escape(&value, true));
-                    out.push('"');
-                }
-                let html = node.namespace == Namespace::Html;
-                if !html && node.children.is_empty() {
-                    out.push_str("/>");
-                    continue;
-                }
-                out.push('>');
-                if html && VOID.contains(&tag.as_str()) {
-                    continue;
-                }
-                stack.push((id, false, true));
-                let raw = html && raw_text(tag) == Some(false);
-                stack.extend(node.children.iter().rev().map(|child| (*child, raw, false)));
-            }
-            NodeKind::Document | NodeKind::Fragment => {
-                stack.extend(node.children.iter().rev().map(|child| (*child, raw, false)));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1379,7 +1306,7 @@ mod tests {
             "<p>one</p><p>two</p><ul><li>a</li><li>b</li></ul>\
              <table><tbody><tr><td>1</td><td>2</td></tr></tbody></table>\
              <script>if (a < b && c) {}</script><textarea>&lt;x&gt;</textarea>\
-             <svg viewBox=\"0 0 1 1\"><clipPath id=\"c\"><rect/></clipPath></svg>"
+             <svg viewBox=\"0 0 1 1\"><clipPath id=\"c\"><rect></rect></clipPath></svg>"
         );
         let textarea = dom.query(div, "textarea").unwrap();
         assert_eq!(dom.value(textarea), "<x>");

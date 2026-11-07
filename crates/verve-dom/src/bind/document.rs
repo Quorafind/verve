@@ -737,8 +737,8 @@ const SERIALIZER_METHODS: &[Method] = &[("serializeToString", 1, |_, args, cx| {
     let id = node_of(&arg(args, 0))?;
     Ok(js_text(&read_dom(cx, |dom| {
         match dom.get(id).map(|n| &n.kind) {
-            Some(NodeKind::Document | NodeKind::Fragment) => crate::html::inner(dom, id),
-            Some(_) => crate::html::outer(dom, id),
+            Some(NodeKind::Document | NodeKind::Fragment) => crate::html::inner_xml(dom, id),
+            Some(_) => crate::html::outer_xml(dom, id),
             None => String::new(),
         }
     })))
