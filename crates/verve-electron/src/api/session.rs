@@ -4,8 +4,9 @@
 //! A [`Session`] is the part of a partition every thread reads (the schemes its main process
 //! answers, its user agent); the object a script holds is made here, the first time the session
 //! is asked for, and is the same one thereafter. This file has what a session answers by itself —
-//! its user agent, where it keeps its files, its `fetch` — the rest of Electron's session
-//! (cookies, `webRequest`, permissions, proxy, downloads) is added by the packages that carry it.
+//! its user agent, where it keeps its files, its `protocol`, its `fetch` — the rest of Electron's
+//! session (cookies, `webRequest`, permissions, proxy, downloads) is added by the packages that
+//! carry it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
 use verve::native::{self, ClassSpec, NewOnly, arg, js_text};
 
 use super::define::{self, Args, Kind};
-use super::{app, net};
+use super::{app, net, protocol};
 use crate::hub::Session;
 use crate::msg::SessionId;
 
@@ -27,6 +28,13 @@ pub(crate) const SESSION: Kind = Kind("Session");
 pub(crate) struct Objects {
     class: RefCell<Option<JsObject>>,
     sessions: RefCell<HashMap<SessionId, JsObject>>,
+    pub(crate) protocols: RefCell<HashMap<SessionId, JsObject>>,
+    pub(crate) protocol_class: RefCell<Option<JsObject>>,
+}
+
+/// The default session's number.
+pub(crate) fn default_id(context: &Context) -> SessionId {
+    super::shared(context).hub.session_for(None).id()
 }
 
 /// The object of `session`, made the first time, with `'session-created'` told to the app.
@@ -71,6 +79,7 @@ fn session_class(context: &mut Context) -> JsResult<JsObject> {
                 ("fetch", 1, fetch),
                 ("resolveHost", 1, resolve_host),
             ],
+            accessors: &[("protocol", get_protocol, None)],
             new_only: Some(NewOnly::Native),
             ..ClassSpec::default()
         },
@@ -124,6 +133,11 @@ fn resolve_host(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     session_of(this, context)?;
     let host = Args::new(args).string(0, "host", context)?;
     net::resolve_host(context, &host)
+}
+
+fn get_protocol(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let session = session_of(this, context)?;
+    Ok(protocol::object_of(context, session.id())?.into())
 }
 
 // ─── The module ─────────────────────────────────────────────────────────────────────────────

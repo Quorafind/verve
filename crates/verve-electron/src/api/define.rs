@@ -274,6 +274,22 @@ pub fn rejected(context: &mut Context, api: &str) -> JsResult<JsValue> {
     native::settled(Err(error), context)
 }
 
+/// The `(name, value)` pairs of a `Headers`, in the order its iterator gives them.
+pub fn header_pairs(headers: &JsValue, context: &mut Context) -> JsResult<Vec<(String, String)>> {
+    let mut list = Vec::new();
+    for entry in native::list_from(headers, context)? {
+        let pair = native::list_of(&entry, context)?;
+        if let [name, value] = &pair[..] {
+            let (name, value) = (
+                native::text_of(name, context)?,
+                native::text_of(value, context)?,
+            );
+            list.push((name, value));
+        }
+    }
+    Ok(list)
+}
+
 /// A plain object with `fields` set in order, as the objects Electron's methods answer are.
 pub fn record(context: &mut Context, fields: &[(&str, JsValue)]) -> JsResult<JsObject> {
     let object = native::object(context);

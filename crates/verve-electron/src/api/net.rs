@@ -50,8 +50,12 @@ pub(crate) fn fetch(
 ) -> JsResult<JsValue> {
     let init_object = init.as_object();
     let fields = Fields::new(init_object.as_ref());
+    let bypass = fields.bool("bypassCustomProtocolHandlers", false, context)?;
     let how = InternalFetch {
-        net: Some(Rc::new(MainNet::for_request(context, session)) as Rc<dyn BrowserNet>),
+        net: Some(
+            Rc::new(MainNet::for_request(context, Arc::clone(session), bypass))
+                as Rc<dyn BrowserNet>,
+        ),
         resource_type: ResourceType::Other,
         initiator: None,
     };

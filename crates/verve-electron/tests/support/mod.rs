@@ -50,7 +50,7 @@ impl App {
             panic!("launch_with runs an app from a folder or a script");
         };
         let (app_path, entry) = (app_path.clone(), entry.clone());
-        Self::start(&app_path, entry, scratch, false, Some(start))
+        Self::start(&app_path, entry, scratch, false, Some(start), false)
     }
 
     /// A directory of its own for a test to use, made.
@@ -86,7 +86,35 @@ impl App {
                 .expect("the app's directory is made");
             std::fs::write(path, text).expect("the app's file is written");
         }
-        Self::start(&dir, dir.join("main.js"), Some(dir.clone()), dark, None)
+        Self::start(
+            &dir,
+            dir.join("main.js"),
+            Some(dir.clone()),
+            dark,
+            None,
+            false,
+        )
+    }
+
+    /// [`App::launch_script`] with `packed` files in an `app.asar` beside the script, which the
+    /// app reads through the archive overlay (`path.join(__dirname, 'app.asar', name)`).
+    pub fn launch_script_with_asar(main_js: &str, packed: &[(&str, &str)]) -> App {
+        let dir = std::env::temp_dir().join(format!(
+            "verve-electron-asar-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("the app's directory is made");
+        std::fs::write(dir.join("main.js"), main_js).expect("the app's script is written");
+        std::fs::write(dir.join("app.asar"), asar_of(packed)).expect("the archive is written");
+        Self::start(
+            &dir,
+            dir.join("main.js"),
+            Some(dir.clone()),
+            false,
+            None,
+            true,
+        )
     }
 
     fn start(
@@ -95,6 +123,7 @@ impl App {
         scratch: Option<PathBuf>,
         dark: bool,
         launch: Option<Start>,
+        packed: bool,
     ) -> App {
         let hub = Hub::new(ElectronOptions {
             app_path: app_dir.to_path_buf(),
@@ -116,6 +145,15 @@ impl App {
             "{} is not in the temporary directory: a test must not use a real profile",
             profile.display()
         );
+        if packed {
+            hub.set_overlay(Arc::new(verve_asar::AsarOverlay::new(
+                verve_asar::AsarOptions {
+                    validate_integrity: false,
+                    on_integrity_failure: None,
+                    disabled: false,
+                },
+            )));
+        }
         hub.set_launch(launch);
         let options = HeadlessOptions {
             dark,
@@ -370,4 +408,38 @@ pub fn run(body: &str) -> Vec<String> {
 pub fn run_main(body: &str) -> Vec<String> {
     let lines = run_sourced(body, &[], TIMEOUT);
     written_by(&lines, "main")
+}
+
+/// An archive holding `files` (names with `/`), in the format of `@electron/asar`: two Pickles,
+/// a JSON header whose `offset`s are decimal strings, then the contents.
+fn asar_of(files: &[(&str, &str)]) -> Vec<u8> {
+    let mut root = serde_json::Map::new();
+    let mut contents = Vec::<u8>::new();
+    for (name, text) in files {
+        let mut folder = &mut root;
+        let mut names: Vec<&str> = name.split('/').collect();
+        let last = names.pop().expect("a name");
+        for part in names {
+            let entry = folder
+                .entry(part)
+                .or_insert_with(|| serde_json::json!({ "files": {} }));
+            folder = entry["files"].as_object_mut().expect("a folder");
+        }
+        folder.insert(
+            last.to_owned(),
+            serde_json::json!({ "size": text.len(), "offset": contents.len().to_string() }),
+        );
+        contents.extend(text.as_bytes());
+    }
+    let json = serde_json::to_vec(&serde_json::json!({ "files": root })).expect("a header");
+    let padded = json.len().div_ceil(4) * 4;
+    let header_size = 8 + padded as u32;
+    let mut bytes = Vec::new();
+    for word in [4, header_size, header_size - 4, json.len() as u32] {
+        bytes.extend(word.to_le_bytes());
+    }
+    bytes.extend(&json);
+    bytes.resize(16 + padded, 0);
+    bytes.extend(contents);
+    bytes
 }
