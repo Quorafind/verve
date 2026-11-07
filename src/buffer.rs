@@ -289,18 +289,8 @@ pub(crate) fn fast_bytes(value: &JsValue, context: &mut Context) -> JsResult<Opt
 
 // ─── Making Buffers ──────────────────────────────────────────────────────────────────────────
 
-fn buffer_class(context: &mut Context) -> JsResult<JsObject> {
-    crate::native::global(context, "Buffer")?
-        .as_object()
-        .ok_or_else(|| {
-            JsNativeError::typ()
-                .with_message("Buffer is not installed")
-                .into()
-        })
-}
-
 fn buffer_prototype(context: &mut Context) -> JsResult<JsObject> {
-    buffer_class(context)?
+    crate::native::buffer_class(context)?
         .get(js_string!("prototype"), context)?
         .as_object()
         .ok_or_else(|| {

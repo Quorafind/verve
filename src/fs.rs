@@ -268,7 +268,7 @@ fn bytes_in(data: &JsValue, encoding: Option<&str>, context: &mut Context) -> Js
     match encoding {
         None | Some("utf8" | "utf-8" | "UTF-8" | "UTF8") => Ok(text.into_bytes()),
         Some(encoding) => {
-            let buffer = crate::native::global(context, "Buffer")?;
+            let buffer = JsValue::from(crate::native::buffer_class(context)?);
             let made = invoke(
                 &buffer,
                 "from",

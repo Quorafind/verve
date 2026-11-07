@@ -124,7 +124,7 @@ fn is_bytes(value: &JsValue) -> bool {
 }
 
 fn buffer_class(context: &mut Context) -> JsResult<JsValue> {
-    crate::native::global(context, "Buffer")
+    crate::native::buffer_class(context).map(Into::into)
 }
 
 fn is_buffer(value: &JsValue, context: &mut Context) -> JsResult<bool> {

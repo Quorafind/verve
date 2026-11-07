@@ -279,6 +279,9 @@ struct Shared {
     /// `verve run`'s default folder before the cache has proved worth keeping: all it holds is what
     /// this run has loaded.
     code_cache_deferred: RefCell<Option<code_cache_mark::Deferred>>,
+    /// The `Buffer` class the runtime made, which its own streams, files and network make
+    /// buffers with whatever the global `Buffer` is later: see [`native::buffer_class`].
+    buffer_class: RefCell<Option<JsObject>>,
 }
 
 /// The microtask queue: promise reactions, `queueMicrotask`, `process.nextTick`.
@@ -571,6 +574,7 @@ impl Runtime {
             code_cache: RefCell::new(code_cache),
             code_cache_protection: RefCell::new(code_cache_protection),
             code_cache_deferred: RefCell::default(),
+            buffer_class: RefCell::default(),
         }));
         globals::install(&mut context).expect("the globals install");
         Self { context }

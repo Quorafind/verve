@@ -345,6 +345,26 @@ pub fn global(context: &mut Context, name: &str) -> JsResult<JsValue> {
     context.global_object().get(JsString::from(name), context)
 }
 
+/// Remembers the global `Buffer` as the class the runtime makes its buffers with.
+pub(crate) fn keep_buffer_class(context: &mut Context) -> JsResult<()> {
+    let class = global(context, "Buffer")?.as_object();
+    *crate::shared(context).buffer_class.borrow_mut() = class;
+    Ok(())
+}
+
+/// The `Buffer` class the runtime made, whatever the global `Buffer` is now. An embedder that
+/// takes Node's globals off a page's global object (Electron's renderer without Node) leaves
+/// the runtime's own streams, files and network able to make buffers.
+pub(crate) fn buffer_class(context: &mut Context) -> JsResult<JsObject> {
+    let kept = crate::shared(context).buffer_class.borrow().clone();
+    match kept {
+        Some(class) => Ok(class),
+        None => global(context, "Buffer")?
+            .as_object()
+            .ok_or_else(|| type_error("Buffer is not installed")),
+    }
+}
+
 /// `new Name(...args)`, for the global class `Name`.
 pub fn construct_global(context: &mut Context, name: &str, args: &[JsValue]) -> JsResult<JsObject> {
     let class = global(context, name)?;

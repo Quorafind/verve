@@ -455,7 +455,7 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
     )?;
 
     crate::buffer::install(context)?;
-    Ok(())
+    crate::native::keep_buffer_class(context)
 }
 
 #[cfg(test)]
