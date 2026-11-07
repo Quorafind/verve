@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use boa_engine::{Context, JsResult};
+use boa_engine::{Context, JsResult, JsValue};
 
 use crate::ImportMap;
 use crate::vfs;
@@ -47,6 +47,17 @@ pub(crate) fn call_site(context: &Context) -> Option<SourcePos> {
         line: position.line_number(),
         column: position.column_number(),
     })
+}
+
+/// `value` as `util.inspect(value)` shows it, with the realm's own `util.inspect.defaultOptions`
+/// (a string keeps its quotes, as in a REPL) — for a host that shows a value to a person without
+/// handing it over (an inspector's console). A value whose own inspect function throws is shown
+/// plainly rather than lost.
+pub fn inspect_value(context: &mut Context, value: &JsValue) -> String {
+    // Unlike `util.format`, which `console.log` uses, `inspect` keeps a string's quotes.
+    let shown = crate::util::default_options(context)
+        .and_then(|options| crate::util::inspect(value, &options, context));
+    shown.unwrap_or_else(|_| crate::print(value))
 }
 
 impl Runtime {

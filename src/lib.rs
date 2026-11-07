@@ -107,7 +107,7 @@ pub use code_cache::CodeCacheStats;
 pub fn code_cache_user_secret() -> std::io::Result<[u8; 32]> {
     code_cache::user_secret().map(|(secret, _)| secret)
 }
-pub use embed::{ConsoleSink, ModuleSource, SourcePos};
+pub use embed::{ConsoleSink, ModuleSource, SourcePos, inspect_value};
 pub use esm::is_parse_failure;
 pub use import_map::{ImportMap, is_relative, url_like};
 pub use navigator::electron_user_agent;
