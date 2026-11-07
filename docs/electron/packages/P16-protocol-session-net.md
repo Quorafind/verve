@@ -352,6 +352,46 @@ HTTP 缓存（`clearCache` resolve、`getCacheSize` 返回 0）、Chromium Cooki
   - 取消的请求在页面里是 `TypeError: Failed to fetch`；`redirectURL` 的跳转被 `fetch` 当作重定向（`response.redirected === true`，`response.url` 是新地址）；
     `onBeforeSendHeaders` 里改的头到达服务器；`onHeadersReceived` 改的响应头页面读得到。
 
+### 阶段 2b 契约（权限、代理、下载；与上文冲突处以本节为准）
+
+- **权限**（观察自 Electron 39.8.10，`probe7`）：
+  - 没有任何处理器时，`Notification.permission`、`Notification.requestPermission()`、`navigator.permissions.query({name:'notifications'})` 都是 `granted`。
+  - `setPermissionRequestHandler((webContents, permission, callback, details) => …)` 只管「请求」：`Notification.requestPermission()` 走它，`callback(false)` 得 `'denied'`；`details` 是 `{ isMainFrame, requestingUrl }`。
+  - `setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => boolean)` 管「查询」：`Notification.permission` 与 `permissions.query` 各调它一次；`requestingOrigin` 形如 `http://127.0.0.1:52602/`（带结尾斜杠），`details` 是 `{ embeddingOrigin, isMainFrame, requestingUrl }`。
+    只设查询处理器时，`requestPermission()` 仍是 `granted`（请求没有处理器，默认允许）。
+  - `setPermissionRequestHandler(5)` 抛 `Must pass null or function`；传 `null` 取消处理器。
+  - 页面一侧的消息是类型化的：`FromRenderer::Permission { call, session, permission, url, check_only }` 与 `ToRenderer::PermissionReply { call, granted }`。会话原子地记着两种处理器是否存在，
+    没有处理器时页面当场得到 `granted`，不发任何消息（与 webRequest 一样，没人听就没有代价）。
+  - verve-dom 加 `PermissionBackend`（`ask(ask, permission, url, check_only) -> Option<bool>`：`Some` 是当场的答案，`None` 表示稍后由 `Document::settle_permission` 给；`known(permission)` 给 `Notification.permission` 的同步读）、
+    `Options::permissions`，以及页面里的 `Notification`（只有 `permission`、`requestPermission()`，构造函数只记标题，不显示）、`navigator.permissions.query` 与 `clipboard.readText()` 的 `clipboard-read` 询问（拒绝时 `NotAllowedError`）。没有后端的页面一律被拒。
+    **同步读的缺口**：Electron 的 `Notification.permission` 直接问查询处理器；页面线程不能等主进程，所以有查询处理器时它在问过一次之前是 `default`，问过之后是上一次**查询**的答案（`requestPermission()` 的答案不记，评审所述的差异；未另行探针）。登记给 P41。
+- **代理**：
+  - `setProxy(config)`：`mode` 是 `direct`、`auto_detect`、`pac_script`、`fixed_servers`、`system` 之一，否则拒绝 `Invalid mode, must be one of direct, auto_detect, pac_script, fixed_servers or system`（观察）。
+    `proxyRules` 按 Chromium 的格式读：`host:port`、`http://host:port`、`socks5://host:port`、`https://host:port`，以及 `http=foo:80;https=bar:81` 这样的逐 scheme 写法（逗号分隔的候选取第一个）。
+    细处按 Chromium 的 `proxy_config.cc`/`proxy_string_util.cc` 读（读源码，不是观察）：`socks=h` 是 SOCKS4、端口 1080；无 scheme 的条目只有排在第一位时才算「全部 scheme」；列表里的 `direct://` 是一个候选（选中即直连）；scheme 不分大小写。
+    解析结果是 `hub/proxy.rs` 的 `Proxy`，**每个请求**问它 `route(url)`：`http:` 代理给内核 `Route::Via { host, port }`，直连（含被绕过的、该 scheme 没有规则的）给 `Route::Direct`，`socks4`/`socks5`/`https` 代理给 `Route::Unsupported`，请求以 `ERR_PROXY_INVALID_CONFIG` 失败（P41 缺口）。
+    只写了 `http=foo:80` 时，`https:` 请求直连，不向 foo 发 `CONNECT`。
+  - 回环与链路本地地址（`localhost`、`127.0.0.0/8`、`::1`、`169.254.0.0/16`、`fe80::/10`）恒不走代理，有没有 `proxyBypassRules` 都一样（观察：`proxyRules: 'foo:80'` 时 `resolveProxy('http://127.0.0.1:5/')` 是 `DIRECT`）。
+    `proxyBypassRules` 逗号或分号分隔，含子域、`*x`/`x.*.y` 通配、scheme 前缀、`<local>`、`a.b.c.d/n`；`resolveProxy` 与请求的路由用同一个函数匹配，二者不会不一致。`pacScript` 而无 `mode` 就是 `pac_script`。
+  - `resolveProxy(url)`：`DIRECT`、`PROXY host:port`、`SOCKS5 host:port`、`HTTPS host:port`（观察）；没有 `url` 参数时兑现 `DIRECT`（观察）。`fixed_servers` 没有 `proxyRules`、`direct`、以及未给 `mode` 的空配置都是直连。
+  - `auto_detect` 与 `pac_script` 按直连处理并警告一次。真 Electron 在本机上做 `auto_detect`/`pac_script` 后会崩溃（`probe7` 里两次），所以没有观察到它们的 `resolveProxy`；行为取自任务书。
+  - `system` 只读系统代理：Windows 用 `WinHttpGetIEProxyConfigForCurrentUser`，其余平台读 `http_proxy`/`https_proxy`/`no_proxy` 环境变量；任何测试都不依赖其值，也从不改系统设置。
+  - **生效的方式**：内核的 `BrowserNet` 有一个有默认实现的 `proxy(&self, url) -> Route`（`Realm`、`Direct`、`Via { host, port }`、`Unsupported(message)`）。`fetch` 在每一跳（含重定向）发请求前问它，把答案放在请求选项的 `__verveVia`（或 `__verveDirect`）上，
+    代理 agent 的 `route()` 本来就先看它，连接池的键本来就含路由。`MainNet` 与 `RendererNet` 都用会话的 `Session::route(url)` 回答。所以：不同会话的请求永远各走各的代理，`webRequest` 监听者延迟决定也不会串；
+    主进程的 Node `http`/`https` 与全局 `fetch` 不经会话，也就不走代理（与 Electron 一致）。没有「会话代理的代数」，也没有改 realm 代理的调用。
+  - **WebSocket 缺口**：页面的 `WebSocket` 不经 `BrowserNet`，仍按 realm 自己的代理配置（页面 realm 里没有设置），即不走会话代理：登记给 P41。
+- **下载**（观察自 Electron 39.8.10，`probe7`）：
+  - 触发：`session.downloadURL(url[, { headers }])`、`webContents.downloadURL(url[, { headers }])`、导航到 `Content-Disposition: attachment` 的响应、`<a download>` 被点击。`downloadURL()` 无参数抛 `Insufficient number of arguments.`，坏地址不抛。
+    导航到 attachment 时 `loadURL` 以 `ERR_FAILED (-2)` 拒绝，页面留在原处（Electron），同时发 `will-download`。Verve 的 `Load` 一发出就换掉 isolate，所以旧文档在响应到达前就没了：缺口，见「状态」。
+  - `will-download(event, item, webContents)`：`event` 是空 `Event`；`session.downloadURL` 触发时 `webContents` 不是任何窗口的（`null`），其余是发起的页面。
+    此时 `item` 已有：`getURL()`、`getURLChain()`、`getFilename()`（`Content-Disposition` 的 `filename`，否则地址路径的末段；`<a download="x.bin">` 的值优先；无扩展名且 `text/plain` 时补 `.txt`，`application/octet-stream` 不补）、
+    `getMimeType()`、`getTotalBytes()`（没有 `Content-Length` 时为 `0`）、`getState()`（`progressing`）、`getSavePath()`（`''`）、`getReceivedBytes()`（`0`）、`isPaused()`、`canResume()`（`false`）、`getContentDisposition()`（没有则 `''`）、`hasUserGesture()`、`getLastModifiedTime()`、`getETag()`、`getStartTime()`。
+  - 监听者同步 `item.setSavePath(path)` 则直接下载；`event.preventDefault()` 取消（不发任何 `updated`/`done`）；两者都没有则走保存对话框（`dialog.showSaveDialog`，含 `setSaveDialogOptions`），取消对话框即取消下载。
+  - 下载中写 `<path>.crdownload`，完成后改名为 `<path>`（Chromium 的临时名是另一个，本版取任务书的名字，不是观察值）。`setSavePath` 之后立刻发一次 `updated`（`progressing`），之后至多每 100 ms 一次；`done(event, state)` 的 `state` 是 `completed`、`cancelled`、`interrupted`。
+    `cancel()` 后 `done('cancelled')`，既没有 `<path>` 也没有 `.crdownload`（观察：目录里无残留）。`pause()` 后 `isPaused()` 为 `true`、`canResume()` 为 `true`、`getState()` 仍是 `progressing`，并发一次 `updated`；`resume()` 用 `Range: bytes=<已收>-` 续传，
+    服务器回 `200`（不认 `Range`）则从头来过，回 `206` 则接着写。
+  - 下载在主进程里经会话的 `net`（带会话 cookie 与 webRequest）取，写文件在主进程线程里同步进行。页面的 `Content-Disposition` 导航由 verve-dom 报 `Request::Download { url, filename }`（`<a download>` 同），主进程重新取一次地址（页面那次响应被丢弃）；缺口：该地址被取两次。
+
 ## 状态
 
 ### 阶段 1（钩子、protocol、net；会话只做值类方法）
