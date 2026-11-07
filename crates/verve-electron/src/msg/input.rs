@@ -70,4 +70,7 @@ pub struct RendererView {
     pub ime_rect: Option<verve_dom::Rect>,
     /// The page laid out: what the shell draws. `None` for a page with no layout.
     pub display_list: Option<std::sync::Arc<verve_layout::DisplayList>>,
+    /// The pictures the page has decoded, which the display list names by key (P35). The same
+    /// `Arc` until a picture arrives or leaves.
+    pub images: std::sync::Arc<verve_layout::ImageTable>,
 }
