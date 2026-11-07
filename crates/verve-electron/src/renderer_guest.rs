@@ -86,6 +86,7 @@ impl RendererGuest {
                 dark,
                 standard_schemes: renderer_net::scheme_names(&network.privileged, |p| p.standard),
                 secure_schemes: renderer_net::scheme_names(&network.privileged, |p| p.secure),
+                cookies: Some(network.cookies),
                 ..Options::default()
             },
         )
@@ -139,6 +140,9 @@ impl RendererGuest {
             } => self.net.head(call, status, status_text, headers),
             ToRenderer::ProtocolChunk { call, bytes } => self.net.chunk(call, bytes),
             ToRenderer::ProtocolEnd { call, error } => self.net.end(call, error),
+            ToRenderer::WebRequestReply { call, reply } => {
+                self.net.web_reply(call, reply, self.runtime.context());
+            }
             ToRenderer::ExecuteJavaScript {
                 call, code, world, ..
             } => {
@@ -235,6 +239,8 @@ impl RendererGuest {
     /// Loads `url` into the document: the page is fetched and read as it arrives, and each stage
     /// is told to the main process as the loader reports it.
     fn load(&mut self, url: &str) {
+        // Whatever the last document was waiting for is of no use to this one.
+        self.net.abandon(self.runtime.context());
         self.require_from(url);
         self.document
             .navigate_initial_with(&mut self.runtime, url, preload::run);
@@ -290,6 +296,7 @@ impl RendererGuest {
             return;
         }
         self.url.clone_from(&now);
+        self.net.set_page(&now);
         let moved = PageEvent::DidNavigateInPage { url: now };
         self.outbox
             .borrow_mut()
@@ -304,6 +311,7 @@ impl RendererGuest {
                 LoadEvent::Started => PageEvent::DidStartLoading,
                 LoadEvent::Committed(url) => {
                     self.url.clone_from(&url);
+                    self.net.set_page(&url);
                     PageEvent::DidNavigate { url }
                 }
                 LoadEvent::DomContentLoaded => PageEvent::DomReady,

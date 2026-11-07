@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::cookies::CookieStore;
@@ -47,6 +48,8 @@ pub struct Session {
     cookies: OnceLock<Arc<CookieStore>>,
     /// The filter of the listener each `webRequest` stage has, if it has one.
     web_request: Mutex<[Option<Patterns>; 8]>,
+    /// How many requests of this session's pages were sent to the main process for a listener.
+    web_request_asks: AtomicU64,
 }
 
 #[derive(Default)]
@@ -67,6 +70,7 @@ impl Session {
             state: Mutex::default(),
             cookies: OnceLock::new(),
             web_request: Mutex::default(),
+            web_request_asks: AtomicU64::new(0),
         }
     }
 
@@ -127,6 +131,17 @@ impl Session {
         filters[stage.index()]
             .as_ref()
             .is_some_and(|filter| filter.wants(url, kind))
+    }
+
+    /// A page's request was sent to the main process for a `webRequest` listener.
+    pub fn note_web_request(&self) {
+        self.web_request_asks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many `FromRenderer::WebRequest` messages the pages of this session have sent: what
+    /// a test counts to see that a request nobody wants costs none.
+    pub fn web_request_messages(&self) -> u64 {
+        self.web_request_asks.load(Ordering::Relaxed)
     }
 
     /// Puts a listener's filter in place of the stage's last, or takes it away with `None`.

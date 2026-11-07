@@ -185,6 +185,95 @@ fn what_the_api_refuses_with() -> Value {
 }
 
 #[test]
+fn a_cookie_a_server_sets_comes_back_with_the_next_request_and_document_cookie_hides_httponly() {
+    let (port, seen) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = "globalThis.changes = [];
+        session.defaultSession.cookies.on('changed', (e, c, cause, removed) => changes.push([c.name, cause, removed]));";
+    let app = page_app(setup, &base);
+    done(&app);
+    let contents = contents_of(&app);
+    let page = app.run_page(
+        contents,
+        "await fetch('/set'); const mine = document.cookie; await fetch('/echo'); return mine;",
+        TIMEOUT,
+    );
+    // `document.cookie` sees the one a script may see; the request carried both, in the order
+    // they were made (probe5: the `Cookie` header joins by path length, then age).
+    assert_eq!(page["value"], "s=1");
+    assert_eq!(headers_of(&seen, "/echo")["cookie"], "s=1; h=2");
+    let listed = app.run_page(
+        contents,
+        "document.cookie = 'w=3; path=/'; await fetch('/echo2'); return document.cookie;",
+        TIMEOUT,
+    );
+    assert_eq!(listed["value"], "s=1; w=3");
+    assert_eq!(headers_of(&seen, "/echo2")["cookie"], "s=1; h=2; w=3");
+    // The main process sees them all, `HttpOnly` too, in `get` and in `changed`.
+    app.eval_main(
+        "globalThis.got = null; session.defaultSession.cookies.get({}).then((c) => { globalThis.got = c.map((x) => [x.name, x.httpOnly, x.hostOnly, x.domain, x.session, x.sameSite]); }); 1",
+    );
+    assert!(app.run_until(|app| app.eval_main("globalThis.got") != "null", TIMEOUT));
+    assert_eq!(
+        serde_json::from_str::<Value>(&app.eval_main("globalThis.got")).unwrap(),
+        json!([
+            ["s", false, true, "127.0.0.1", true, "unspecified"],
+            ["h", true, true, "127.0.0.1", true, "unspecified"],
+            ["w", false, true, "127.0.0.1", true, "unspecified"],
+        ])
+    );
+    let told = |app: &App| app.eval_main("changes.length") == "3";
+    assert!(
+        app.run_until(told, TIMEOUT),
+        "{}",
+        app.eval_main("globalThis.changes")
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&app.eval_main("globalThis.changes")).unwrap(),
+        json!([
+            ["s", "explicit", false],
+            ["h", "explicit", false],
+            ["w", "explicit", false]
+        ])
+    );
+}
+
+#[test]
+fn the_main_process_uses_the_jar_when_it_asks_to_and_net_fetch_asks_by_default() {
+    let (port, seen) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = "const jar = session.defaultSession.cookies;
+        await jar.set({ url: base + '/', name: 'k', value: 'v' });
+        const request = (options) => new Promise((resolve) => {
+          const r = net.request(options);
+          r.on('response', (m) => { m.on('data', () => {}); m.on('end', resolve); });
+          r.end();
+        });
+        await request(base + '/plain');
+        await request({ url: base + '/use', useSessionCookies: true });
+        await request({ url: base + '/omit', credentials: 'omit' });
+        await request({ url: base + '/include', credentials: 'include' });
+        await net.fetch(base + '/fetch');
+        await net.fetch(base + '/fetch-omit', { credentials: 'omit' });
+        await request({ url: base + '/redir', useSessionCookies: true });
+        out.after = (await jar.get({ name: 'r' })).map((c) => c.value);";
+    let app = page_app(setup, &base);
+    let out = done(&app);
+    let sent = |path: &str| headers_of(&seen, path).get("cookie").cloned();
+    // Observed in Electron 39.8.10: a plain `net.request` sends no cookie, `useSessionCookies`
+    // and `credentials: 'include'` do, `omit` does not, and `net.fetch` does unless it omits.
+    assert_eq!(sent("/plain"), None);
+    assert_eq!(sent("/use").as_deref(), Some("k=v"));
+    assert_eq!(sent("/omit"), None);
+    assert_eq!(sent("/include").as_deref(), Some("k=v"));
+    assert_eq!(sent("/fetch").as_deref(), Some("k=v"));
+    assert_eq!(sent("/fetch-omit"), None);
+    // The cookie a redirect sets is kept and goes with the next hop.
+    assert_eq!(sent("/echo").as_deref(), Some("k=v; r=1"));
+    assert_eq!(out["after"], json!(["1"]));
+}
+
+#[test]
 fn the_cookies_api_sets_gets_and_removes_and_says_what_changed() {
     let setup = "const jar = session.defaultSession.cookies;
         const changes = [];
@@ -304,4 +393,184 @@ fn a_persistent_partitions_cookies_survive_a_new_hub_and_a_memory_partitions_do_
     assert_eq!(out["keep"], json!(["keep"]));
     assert_eq!(out["mem"], json!([]));
     assert_eq!(out["def"], json!(["def"]));
+}
+
+#[test]
+fn a_cancelling_listener_blocks_only_the_requests_it_matches() {
+    let (port, seen) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = "globalThis.heard = [];
+        session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/blocked*'] }, (d, cb) => {
+          heard.push(d.url.split('/').pop()); cb({ cancel: true });
+        });";
+    let app = page_app(setup, &base);
+    done(&app);
+    let contents = contents_of(&app);
+    let page = app.run_page(
+        contents,
+        "const status = (path) => fetch(path).then((r) => r.status, (e) => String(e));
+         return [await status('/blocked1'), await status('/fine')];",
+        TIMEOUT,
+    );
+    assert_eq!(page["value"], json!(["TypeError: Failed to fetch", 200]));
+    assert_eq!(app.eval_main("globalThis.heard"), r#"["blocked1"]"#);
+    let reached = paths(&seen);
+    assert!(reached.contains(&"/fine".to_owned()));
+    assert!(!reached.contains(&"/blocked1".to_owned()), "{reached:?}");
+}
+
+#[test]
+fn a_listener_changes_the_headers_the_server_gets_and_the_ones_the_page_reads() {
+    let (port, seen) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = "const wr = session.defaultSession.webRequest;
+        wr.onBeforeSendHeaders((d, cb) => cb({ requestHeaders: Object.assign({}, d.requestHeaders, { 'X-Added': 'yes' }) }));
+        wr.onHeadersReceived((d, cb) => cb({ responseHeaders: Object.assign({}, d.responseHeaders, { 'x-changed': ['1'] }) }));
+        wr.onBeforeRequest({ urls: ['*://*/zzz*'] }, (d, cb) => cb({ redirectURL: base + '/api?redirected' }));";
+    let app = page_app(setup, &base);
+    done(&app);
+    let contents = contents_of(&app);
+    let page = app.run_page(
+        contents,
+        "const a = await fetch('/api'); const r = await fetch('/zzz');
+         return [a.headers.get('x-changed'), r.status, r.url, r.redirected];",
+        TIMEOUT,
+    );
+    assert_eq!(headers_of(&seen, "/api")["x-added"], "yes");
+    assert_eq!(
+        page["value"],
+        json!(["1", 200, format!("{base}/api?redirected"), true])
+    );
+    // The redirect went where the listener said, and `/zzz` itself was never asked.
+    assert!(!paths(&seen).contains(&"/zzz".to_owned()));
+}
+
+#[test]
+fn what_a_listener_is_told_has_the_fields_electron_gives_in_its_order() {
+    let (port, _) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = "globalThis.keys = {}; globalThis.facts = {};
+        const wr = session.defaultSession.webRequest;
+        for (const name of ['onBeforeRequest', 'onBeforeSendHeaders', 'onSendHeaders', 'onHeadersReceived',
+                            'onResponseStarted', 'onBeforeRedirect', 'onCompleted', 'onErrorOccurred']) {
+          wr[name]({ urls: ['*://*/seen*', '*://*/redir*', '*://127.0.0.1:1/*'] }, (d, cb) => {
+            if (!keys[name]) { keys[name] = Object.keys(d); facts[name] = [typeof cb, d.resourceType, d.method, d.webContentsId === win.webContents.id, d.referrer, d.statusLine, d.statusCode, d.error]; }
+            if (cb) cb({});
+          });
+        }";
+    let app = page_app(setup, &base);
+    done(&app);
+    let contents = contents_of(&app);
+    app.run_page(
+        contents,
+        "await fetch('/seen-a', { method: 'POST', body: 'abc' }); await fetch('/redir');
+         await fetch('http://127.0.0.1:1/refused').catch(() => 0); return 1;",
+        TIMEOUT,
+    );
+    let wait = |app: &App| app.eval_main("Object.keys(keys).length") == "8";
+    assert!(
+        app.run_until(wait, TIMEOUT),
+        "{}",
+        app.eval_main("JSON.stringify(keys)")
+    );
+    let keys: Value = serde_json::from_str(&app.eval_main("globalThis.keys")).unwrap();
+    let list = |names: &[&str]| json!(names);
+    let head = ["id", "url", "method", "timestamp", "resourceType"];
+    let page_tail = ["frame", "webContents", "webContentsId", "referrer"];
+    let with = |a: &[&str], b: &[&str], c: &[&str]| -> Value { list(&[a, b, c].concat()) };
+    let response = [
+        "ip",
+        "fromCache",
+        "statusLine",
+        "statusCode",
+        "responseHeaders",
+    ];
+    // Observed with a page's `fetch` in Electron 39.8.10 (probe5, `wr_log`).
+    assert_eq!(
+        keys["onBeforeRequest"],
+        with(&head, &page_tail, &["uploadData", "redirectURL"])
+    );
+    assert_eq!(
+        keys["onBeforeSendHeaders"],
+        with(&head, &page_tail, &["uploadData", "requestHeaders"])
+    );
+    assert_eq!(
+        keys["onSendHeaders"],
+        with(&head, &page_tail, &["uploadData", "requestHeaders"])
+    );
+    let after_response = |tail: &[&str]| -> Value {
+        list(&[&head[..], &response[..], &page_tail[..], tail].concat())
+    };
+    assert_eq!(keys["onHeadersReceived"], after_response(&["uploadData"]));
+    assert_eq!(keys["onResponseStarted"], after_response(&["uploadData"]));
+    assert_eq!(
+        keys["onCompleted"],
+        after_response(&["uploadData", "error"])
+    );
+    // The redirect is of a `GET`, which has no body, and tells where it goes.
+    assert_eq!(keys["onBeforeRedirect"], after_response(&["redirectURL"]));
+    assert_eq!(keys["onErrorOccurred"], with(&head, &page_tail, &["error"]));
+    let facts: Value = serde_json::from_str(&app.eval_main("globalThis.facts")).unwrap();
+    assert_eq!(
+        facts["onBeforeRequest"],
+        json!([
+            "function",
+            "xhr",
+            "POST",
+            true,
+            format!("{base}/page"),
+            null,
+            null,
+            null
+        ])
+    );
+    assert_eq!(facts["onSendHeaders"][0], "undefined");
+    assert_eq!(facts["onCompleted"][5], "HTTP/1.1 200 OK");
+    assert_eq!(facts["onCompleted"][7], "net::OK");
+}
+
+#[test]
+fn nobody_listening_costs_no_message_and_a_filter_that_does_not_match_costs_none_either() {
+    let (port, _) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let app = page_app("globalThis.wr = session.defaultSession.webRequest;", &base);
+    done(&app);
+    let contents = contents_of(&app);
+    let session = app.hub.session_for(None);
+    let get = "await fetch('/a'); await fetch('/b'); return 1;";
+    app.run_page(contents, get, TIMEOUT);
+    assert_eq!(session.web_request_messages(), 0);
+    // A listener for other addresses is nobody for these.
+    app.eval_main("wr.onBeforeRequest({ urls: ['*://*/other*'] }, (d, cb) => cb({})); 1");
+    app.run_page(contents, get, TIMEOUT);
+    assert_eq!(session.web_request_messages(), 0);
+    // One for these costs a message each.
+    app.eval_main("wr.onBeforeRequest({ urls: ['*://*/a*'] }, (d, cb) => cb({})); 1");
+    app.run_page(contents, get, TIMEOUT);
+    assert_eq!(session.web_request_messages(), 1);
+    // And taking it away costs nothing again.
+    app.eval_main("wr.onBeforeRequest(null); 1");
+    app.run_page(contents, get, TIMEOUT);
+    assert_eq!(session.web_request_messages(), 1);
+}
+
+#[test]
+fn the_main_processs_own_requests_pass_the_listeners_without_a_page() {
+    let (port, seen) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = "globalThis.heard = [];
+        const wr = session.defaultSession.webRequest;
+        wr.onBeforeSendHeaders((d, cb) => { heard.push(['send', 'webContentsId' in d, d.resourceType]); cb({ requestHeaders: { 'X-Main': '1' } }); });
+        wr.onCompleted((d) => { heard.push(['completed', d.statusCode, d.error]); });
+        await (await net.fetch(base + '/viamain')).text();";
+    let app = page_app(setup, &base);
+    done(&app);
+    // `onCompleted` is told when the body has been read, which the `text()` above waited for.
+    let heard = |app: &App| app.eval_main("globalThis.heard").contains("completed");
+    assert!(app.run_until(heard, TIMEOUT));
+    assert_eq!(
+        serde_json::from_str::<Value>(&app.eval_main("globalThis.heard")).unwrap(),
+        json!([["send", false, "other"], ["completed", 200, "net::OK"]])
+    );
+    assert_eq!(headers_of(&seen, "/viamain")["x-main"], "1");
 }

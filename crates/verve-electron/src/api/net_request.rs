@@ -44,6 +44,9 @@ struct Req {
     /// Lowercased name, and the name and value as the script gave them.
     headers: Vec<(String, String, String)>,
     bypass: bool,
+    /// Whether the session's cookies go with the request: `credentials: 'include'`, or
+    /// `useSessionCookies` when `credentials` is not given.
+    cookies: bool,
     started: bool,
     first_write: bool,
     aborted: bool,
@@ -138,6 +141,22 @@ fn init_request(this: &JsObject, args: &[JsValue], context: &mut Context) -> JsR
     Ok(())
 }
 
+/// Whether the request sends the session's cookies. `credentials` decides when it is given
+/// (`same-origin` needs the request's `origin` to be the address's own); without it, only
+/// `useSessionCookies` does (observed in Electron 39.8.10: a plain `net.request` sends none).
+fn sends_cookies(fields: &Fields, url: &str, context: &mut Context) -> JsResult<bool> {
+    let origin_of = |text: &str| url::Url::parse(text).map(|u| u.origin().ascii_serialization());
+    Ok(match fields.string("credentials", context)?.as_deref() {
+        Some("include") => true,
+        Some("same-origin") => match fields.string("origin", context)? {
+            Some(origin) => origin_of(&origin).ok() == origin_of(url).ok(),
+            None => false,
+        },
+        Some(_) => false,
+        None => fields.bool("useSessionCookies", false, context)?,
+    })
+}
+
 /// What `parseOptions` of `net-client-request.ts` makes of the constructor's argument.
 fn parse_options(given: &JsValue, context: &mut Context) -> JsResult<Req> {
     let object_given = given.as_object();
@@ -192,6 +211,7 @@ fn parse_options(given: &JsValue, context: &mut Context) -> JsResult<Req> {
     let method = fields
         .string("method", context)?
         .unwrap_or_else(|| "GET".into());
+    let cookies = sends_cookies(&fields, &url, context)?;
     Ok(Req {
         session,
         method: method.to_ascii_uppercase(),
@@ -199,6 +219,7 @@ fn parse_options(given: &JsValue, context: &mut Context) -> JsResult<Req> {
         policy,
         headers,
         bypass: fields.bool("bypassCustomProtocolHandlers", false, context)?,
+        cookies,
         started: false,
         first_write: false,
         aborted: false,
@@ -444,7 +465,7 @@ fn die(context: &mut Context, this: &JsValue, error: Option<JsValue>) -> JsResul
 
 /// Sends the request, or its next hop.
 fn start(context: &mut Context, this: &JsValue) -> JsResult<()> {
-    let (session, url, method, headers, body, bypass) = with_req(this, context, |req| {
+    let (session, url, method, headers, body, flags) = with_req(this, context, |req| {
         req.started = true;
         let body = (!req.body.is_empty() && !matches!(req.method.as_str(), "GET" | "HEAD"))
             .then(|| req.body.clone());
@@ -454,7 +475,7 @@ fn start(context: &mut Context, this: &JsValue) -> JsResult<()> {
             req.method.clone(),
             req.headers.clone(),
             body,
-            req.bypass,
+            (req.bypass, req.cookies),
         )
     })?;
     let init = object(context);
@@ -487,7 +508,7 @@ fn start(context: &mut Context, this: &JsValue) -> JsResult<()> {
     )?;
     with_req(this, context, |req| req.controller = Some(controller))?;
     let how = InternalFetch {
-        net: Some(Rc::new(MainNet::for_request(context, session, bypass)) as Rc<dyn BrowserNet>),
+        net: Some(Rc::new(MainNet::for_request(context, session, flags)) as Rc<dyn BrowserNet>),
         resource_type: ResourceType::Other,
         initiator: None,
     };

@@ -44,6 +44,7 @@ pub(crate) mod web_contents;
 pub(crate) mod web_frame;
 pub(crate) mod web_frame_main;
 pub(crate) mod web_preferences;
+pub(crate) mod web_request;
 pub(crate) mod web_utils;
 pub(crate) mod window_events;
 pub(crate) mod window_geometry;
@@ -97,6 +98,8 @@ pub(crate) struct NetState {
     pub(crate) requests: net_request::Requests,
     /// The objects of the sessions' `cookies`.
     pub(crate) cookies: cookies::Objects,
+    /// The objects and listeners of the sessions' `webRequest`.
+    pub(crate) web: web_request::Objects,
 }
 
 impl MainState {

@@ -21,6 +21,7 @@ pub mod launcher;
 mod loader;
 pub mod main_guest;
 pub mod msg;
+mod net_watch;
 mod os;
 mod oscrypt;
 mod page_script;

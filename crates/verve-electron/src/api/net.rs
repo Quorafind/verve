@@ -64,11 +64,20 @@ pub(crate) fn fetch(
     let init_object = init.as_object();
     let fields = Fields::new(init_object.as_ref());
     let bypass = fields.bool("bypassCustomProtocolHandlers", false, context)?;
+    // `net.fetch` sends the session's cookies unless the request says `credentials: 'omit'`
+    // (`net-fetch.ts` of Electron 39.8.10 turns the default `same-origin` into `include`).
+    let credentials = match fields.string("credentials", context)? {
+        Some(credentials) => Some(credentials),
+        None if input.is_object() => {
+            let found = get(input, "credentials", context)?;
+            found.as_string().map(|text| text.to_std_string_escaped())
+        }
+        None => None,
+    };
+    let cookies = credentials.as_deref() != Some("omit");
+    let main = MainNet::for_request(context, Arc::clone(session), (bypass, cookies));
     let how = InternalFetch {
-        net: Some(
-            Rc::new(MainNet::for_request(context, Arc::clone(session), bypass))
-                as Rc<dyn BrowserNet>,
-        ),
+        net: Some(Rc::new(main) as Rc<dyn BrowserNet>),
         resource_type: ResourceType::Other,
         initiator: None,
     };

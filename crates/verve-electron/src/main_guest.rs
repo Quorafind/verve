@@ -271,6 +271,12 @@ impl MainGuest {
             FromRenderer::Cookies { session, changes } => {
                 api::cookies::emit_changes(context, session, changes);
             }
+            FromRenderer::WebRequest {
+                call,
+                session,
+                stage,
+                details,
+            } => api::web_request::from_page(context, contents, (call, session), stage, &details),
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
                 protocol_serve::cancel_all(context, contents);
