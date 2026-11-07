@@ -328,6 +328,7 @@ P13 第二段另加两个类型（`msg/page.rs`）：`EditCommand`（`Undo` `Red
 | `ToRenderer::{BeforeUnload, Unload}`（各带 `call`）、`FromRenderer::{BeforeUnloadReply { call, proceed }, UnloadReply { call }}`；`WindowOp::{SetClosable, SetMovable, SetMinimizable, SetMaximizable, SetFocusable, SetEnabled, SetParent, MoveTop}` | P13（第一阶段） |
 | `ToRenderer::WindowMessage`、`FromRenderer::WindowProxyOp`（`window.open` 返回的代理）——**P13 第二段没做**：渲染器侧的代理是 P20 的，没有它主进程这一侧无从验证 | P13 |
 | `ToRenderer::{InsertCss, RemoveCss, EditCommand, ConsoleError}`、`ExecuteJavaScript.world`、`FromRenderer::ContextMenu`、`FromShell::KeyForContents`，及 `EditCommand`、`ContextMenuParams` | P13（第二段） |
+| `FromShell::Page { contents, event: PageEvent }`（Shell 看到而渲染器看不到的：光标、指针下的链接）、`PageEvent::{CursorChanged(String), UpdateTargetUrl(String), ZoomChanged { zoom_in }}`、`PointerKind::Leave`、`verve_dom::Pointer.buttons`、`FromRenderer::KeyUnhandled(Key)`（页面没处理的 key down，主进程据此查菜单加速键）；`RendererView.cursor` 不再使用（光标由 Shell 从 `Hitbox.cursor` 取得） | P32 |
 | `ToRenderer::InspectTree { at }`（`openDevTools` 的文本转储与 `inspectElement`；第二阶段的 `InspectorEval` 不在其中） | P43 |
 | `FromShell::KeyForContents`（`before-input-event`，Shell 不等 JS：`Hub::intercepts_keys(contents)` 为真时先投递给主进程，主进程决定后再转渲染器；上一行也列了它） | P13 / P32 |
 | `ToRendererInput::Visibility(bool)`（`document.visibilityState`） | P13 / P34 |

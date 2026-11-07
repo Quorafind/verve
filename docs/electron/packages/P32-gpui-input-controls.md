@@ -105,6 +105,43 @@ GPUI 的动作/快捷键系统不要拦截按键：DomElement 不注册 action�
 GPUI 的 `CursorStyle` 没有"隐藏"，`cursor: none` 暂按 `Arrow`（记录；需要时在 fork 加 `Hidden`）；`url(...)` 自定义光标不支持。
 在 `prepaint` 里对每个 hitbox 调 `window.set_cursor_style(style, &hitbox)`。
 
+### 第一阶段契约变更（输入桥；数值取自 Electron 39.8.10 的实测）
+
+下面几条改动或补充上文，以这里为准。实测在隐藏窗口、临时 profile 下用 `webContents.sendInputEvent` 注入，不碰桌面。
+
+- **事件字段**：`pointer*` 事件的 `detail` 恒为 0，`mouse*`/`click`/`dblclick`/`auxclick` 的 `detail` 是点击数（1、2、3；`dblclick` 是 2）；
+  `contextmenu` 的 `detail` 为 0。按下时 `buttons` 是位掩码（左 1、右 2、中 4），抬起后为 0；移动时带着仍按住的按键。
+  右键抬起的顺序是 `pointerup, mouseup, auxclick, contextmenu`；中键是 `pointerup, mouseup, auxclick`。
+  第一次进入元素：`pointerover, mouseover, pointermove, mousemove`；换元素时先 `pointerout, pointerover, mouseout, mouseover`。
+- **不做隐式指针捕获**：Chromium 的鼠标事件没有隐式捕获，`mouseup` 落在抬起时指针下的元素，`click` 落在按下与抬起共同的祖先上
+  （verve-dom 的 `release` 已是这样）。所以 Shell 不固定目标：每个 `Pointer` 都带着它此刻命中的节点。GPUI/系统层的捕获
+  （按住时指针移出窗口仍收到事件，Windows 的 `SetCapture`）照旧。`setPointerCapture` 是页面里的事，不经过 Shell。
+- **`verve_dom::Pointer` 追加 `buttons: u16`**（按住的键的位掩码；`Default` 为 0）。移动事件用它填 `buttons`。
+- **滚轮**：页面看到的 `deltaY` 是注入值的相反数（注入 `deltaY: 120` 向上滚，页面得到 `deltaY: -120`、`wheelDelta: 120`），
+  `deltaMode` 恒为 0，所以 `ScrollDelta::Pixels(p)` → `deltaX = -p.x`、`deltaY = -p.y`，`Lines` 按 `LINE`（Windows 100/3、macOS 40）换成像素。
+  Shift+竖直滚轮：页面收到的仍是 `deltaY`，`shiftKey: true`，默认动作是横向滚动；GPUI 在 Windows 上已把它换成 `x`，Shell 换回 `dy` 再发。
+  Ctrl+滚轮：页面先收到 `wheel`（`ctrlKey: true`，可取消），没被阻止才发 `zoom-changed`（页面 `deltaY < 0` 即向上滚为 `'in'`，否则 `'out'`），
+  不滚动，也不改变缩放系数；要不要缩放是应用自己的事。注入的一次滚轮事件让 `zoom-changed` 触发了两次，Verve 每个滚轮事件只发一次。
+  物理滚轮每一格滚多少无法用注入测得，仍按 P30 的 `LINE`。
+- **消息**：Shell → 主进程新增 `FromShell::Page { contents, event: PageEvent }`，`PageEvent` 追加 `CursorChanged(String)`、
+  `UpdateTargetUrl(String)`、`ZoomChanged { zoom_in: bool }`；它们变成 `webContents` 的 `cursor-changed`、`update-target-url`、`zoom-changed`
+  （参数都是 `(event, 值)`）。`zoom-changed` 由渲染器在 `wheel` 没被阻止时经 `FromRenderer::Lifecycle` 发出，另两个由 Shell 命中后发。
+  `RendererView.cursor` 不再使用：光标由 Shell 从 `Hitbox.cursor` 取得，渲染器并不知道指针在哪里。
+- **光标名**（`cursor-changed` 的 `type`）：`auto`/`default` → `pointer`（箭头叫 `pointer`）；`pointer` → `hand`；`text`、`crosshair`、`grab`、`grabbing`、
+  `ew-resize`、`ns-resize`、`col-resize`、`row-resize`、`nwse-resize`、`nesw-resize`、`e-resize`、`n-resize`、`not-allowed`、`alias`、`copy`、`context-menu`、
+  `vertical-text`、`none`、`move`、`wait`、`progress`、`help`、`zoom-in`、`zoom-out`、`cell` 同名；`no-drop` → `nodrop`；`all-scroll` → `move`。
+  只在名字变化时发。`update-target-url`：指针进入 `a[href]` 时是解析后的地址，离开时是空串。
+- **按键**：`before-input-event` 先于页面的 `keydown`，`keyUp` 也发；`key`/`code` 见 `keymap.rs` 的表（测得：`Enter/Enter`、`Tab/Tab`、`" "/Space`、
+  `ArrowLeft/ArrowLeft`、`F1…F24`、`1/Digit1`、`=/Equal`、`-/Minus`、`,/Comma`、`./Period`、`//Slash`、`;/Semicolon`、`[/BracketLeft`、`]/BracketRight`、
+  `\\/Backslash`、`` ` ``/`Backquote`、`'/Quote`；`shift+a` 是 `A/KeyA`，`shift+1` 是 `!/Digit1`；单独的修饰键是 `Control/ControlLeft`、`Shift/ShiftLeft`、`Alt/AltLeft`、`Meta/MetaLeft`）。
+  可打印键之后依次是 `keypress, beforeinput, textInput, input`；`ctrl+a` 没有 `keypress`。
+- **Windows 上的字符只来一次**：GPUI 在 Windows 上先给 `KeyDown`，随后 `WM_CHAR` 又经输入处理器的 `replace_text_in_range(None, 字符)` 送来同一个字符。
+  Shell 把可打印键作为 `Key` 发给页面（verve-dom 在 `keydown` 之后自己输入字符），并记下这个字符，输入处理器收到同一个字符时丢掉；
+  输入法提交的文字不是刚发出的按键字符，照常作为 `Composition(Commit)`/`Text` 发。
+- **`:focus-visible`**（实测）：点击按钮不匹配，点击文本框匹配；Tab 到的元素匹配；脚本 `focus()` 在最近一次是键盘操作后匹配，
+  在鼠标点了按钮之后聚焦文本框匹配、聚焦按钮不匹配；鼠标聚焦的按钮上按一个键后匹配。verve-dom 记一个“焦点是否可见”的标志，按这些规则维护。
+- **缩放**：Shell 里还没有页面缩放（`setZoomFactor` 只记在主进程），坐标按系数 1 换算，`DomState.zoom` 留给缩放接入时用。
+
 ### 表单控件
 
 控件在 `verve-layout` 里是原子盒，固有尺寸按 Chromium 默认（`input` 文本 ≈ 153×21 CSS px 含边框、checkbox 13×13、
