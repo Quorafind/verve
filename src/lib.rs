@@ -115,6 +115,7 @@ pub use process::{
     CHROME_VERSION, ELECTRON_VERSION, ExitBehavior, MODULES_VERSION, NODE_VERSION, ProcessInfo,
     UncaughtBehavior,
 };
+pub use sockets::status_text;
 pub use world::{
     MAIN_WORLD, WorldId, current_world, in_realm, in_world, make_world, world_global,
     world_of_global, world_realm,

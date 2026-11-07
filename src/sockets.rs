@@ -739,7 +739,8 @@ pub(crate) fn dns_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
 pub(crate) fn denied_http(cx: &mut Context) -> JsResult<JsValue> {
     request(&JsValue::undefined(), &[], cx)
 }
-pub(crate) fn status_text(code: u16) -> &'static str {
+/// The reason phrase of an HTTP status, as Node's `http.STATUS_CODES` has it; `unknown` for the rest.
+pub fn status_text(code: u16) -> &'static str {
     STATUS_CODES
         .iter()
         .find(|(c, _)| *c == code)
