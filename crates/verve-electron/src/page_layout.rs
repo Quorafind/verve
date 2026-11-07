@@ -70,6 +70,31 @@ impl PageLayout {
         }
     }
 
+    /// The wheel turned by `(dx, dy)` at `(x, y)`: the nearest container under the point that can
+    /// move that way scrolls, and the next one out when it cannot.
+    pub(crate) fn wheel(
+        &self,
+        runtime: &mut Runtime,
+        document: &Document,
+        at: [f32; 2],
+        by: [f32; 2],
+    ) {
+        document.ensure_layout();
+        let target = self
+            .engine
+            .borrow()
+            .display_list()
+            .wheel(at[0], at[1], by, &|_| None);
+        if let Some((node, _)) = target {
+            let request = ScrollRequest::By {
+                node,
+                left: by[0],
+                top: by[1],
+            };
+            self.scroll(runtime, document, &request);
+        }
+    }
+
     fn scroll(&self, runtime: &mut Runtime, document: &Document, request: &ScrollRequest) {
         document.ensure_layout();
         let (moved, rects) = {

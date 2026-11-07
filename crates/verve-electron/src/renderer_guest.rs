@@ -212,6 +212,15 @@ impl RendererGuest {
             ToRendererInput::ColorScheme { dark } => {
                 self.document.set_color_scheme(&mut self.runtime, dark)
             }
+            // The page hears `wheel`; unless a listener prevents it, the wheel scrolls.
+            ToRendererInput::Wheel {
+                pointer, dx, dy, ..
+            } => {
+                if self.document.wheel(&mut self.runtime, &pointer, dx, dy) {
+                    let (at, by) = ([pointer.x, pointer.y], [dx, dy]);
+                    self.layout.wheel(&mut self.runtime, &self.document, at, by);
+                }
+            }
             ToRendererInput::Frame { now } => {
                 self.document.frame(&mut self.runtime, now);
             }
