@@ -349,3 +349,10 @@ Where it goes (`cargo bloat --release --crates`, unstripped, before the rework):
 - **verve-gpui grew by about 35 KiB**: the element, plan, rasters, wheel and screenshot.
 - **png's encoder came in through tiny-skia's `png-format`.** The rework encodes with `image`'s `PngEncoder` instead, and reuses
   verve-dom's blur, which took about 22 KB off.
+
+## P43: logs, uncaught errors and the DevTools text dump (phase 1)
+
+`electron/p43-devtools` rebased on P30 (784fb499; merged after two small fixes to the dump and its test): `cargo build --release
+-p verve-gpui --bin electron --features jit` is 35,659,264 bytes against 35,588,096 for `df018328` (P15 and P30 merged), +71,168
+bytes, within the 100 KB budget. The filter table, the colours and the parent-console attach are hand-written, with no `tracing`
+or `env_logger`.
