@@ -378,3 +378,44 @@ pub enum ControlKind {
 7d. 微软拼音输入“jia”后不选词，直接用鼠标点另一个输入框、按钮或空白处：已输入的拼音留在原来的框里、不再变化，之后键盘照常（Tab、空格、字母都有效）。7e. “´”再按空格：得到一个“´”（不是“ ´”）；“´”再按“x”：得到“´x”。7f. 候选框：`<textarea>` 里它在文本框左侧的垂直中间，空的 contenteditable 行里在整个编辑区的位置（不在插入符处，已知）。7g. 密码框里微软拼音不弹候选框（输入法被关掉）。10. 无边框窗口（`-webkit-app-region: drag` 的标题栏）：拖动窗口，松开后在文字上移动鼠标，什么也不会被选中；标题栏上的 `no-drag` 按钮仍可点击。
 8. 窗口失焦再回来：`document.hasFocus()` 先假后真，`window` 的 `blur`/`focus` 事件各一次。
 9. 打开检查器的元素拾取：拾取期间页面收不到鼠标事件，退出后恢复。
+
+### 阶段 2：控件、字段里的撤销、候选框（做了一半；第二部分接着做）
+
+**做了什么**
+
+- **契约**（见上“第二阶段契约变更”）：`ControlKind`/`SelectOption`/`DateKind`/`ControlLook`、`ToRendererInput::Choose`、回显与文件拖入的映射。
+  与草案不同处：文字不进 `ControlKind`（布局把字段的值当盒子里的生成文字排版），几何由布局给出；`PaintItem::Control` 另带 `look: ControlLook { accent, color, disabled }`
+  （契约文字里写的是“`disabled` 不进 `ControlKind`”，实现把它放进 `look`，因为壳画勾、滑块时要降低对比）。
+- **尺寸**：Electron 39.8.10 的实测在 `SCRATCH\p32b\size-1.json`/`size-1.25.json`（探针 `p32b\size`），固定尺寸进 `USER_AGENT_SHEET`，随字体和属性变的在 `verve-layout/src/controls.rs`
+  （`size`、`cols`、`rows`、`<select>` 最宽的选项）。文字字段的字符宽 7px、加 29px、行高 15px 都是 13.3333px Arial 下的测得值，按字号等比。
+  DPR 1.25 下文字相关的尺寸会差一点（Chromium 对物理像素取整），没有复现。
+- **绘制**：`verve-gpui/src/controls.rs` 把 `Control` 降为 `Fill`/`Border`/新的 `Shape::Caret`，窗口和软件绘制器（`screenshot.rs`）用同一份：勾、箭头、滑块、进度条、仪表（颜色按 HTML 标准）、
+  色块、选区（`::selection` 同色）、组字下划线（1px，字段文字色，`<input>` 和 `<textarea>` 都有）、光标（530 ms 闪烁，移动后先常亮；失焦时布局不给光标，所以停止）。
+- **候选框**：`RendererView.ime_rect` 现在是焦点字段的光标矩形（`DisplayList::caret_of`，经滚动帧换算），`bounds_for_range` 把候选窗放在光标正下方
+  （单行输入框和 `<textarea>` 一样，水平跟着光标）。
+- **字段撤销**：`field_undo.rs`：每个字段一份历史（上限 1000），连续输入合成一步（在上一个字符停下的地方继续打），删除和选区替换单独成步；Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y，
+  发 `beforeinput`/`input`（`historyUndo`/`historyRedo`）；有可撤销的才算“已处理”（没有则仍交给菜单，与 `keys2` 的观察一致）。
+- **`Choose`**：渲染器收到后调 `Document::choose`（`input` 然后 `change`；值没变什么都不发）。
+- 测试：`cargo test -p verve-electron --test forms`（复选框点击、`<select>` 选择、字段撤销、`forms` 夹具的几何）；`field_undo`、`controls`（两处）的单测。
+- 夹具 `tests/electron/apps/forms/`：`expected-geometry.json` 和 `expected-chromium.png` 取自 Electron 39.8.10（隐藏窗口，临时 profile，480×270，DPR 1）。几何逐项比较：
+  固定尺寸的控件精确（0.01px），随文字变的（按钮、`<select>`、日期、文件、`<textarea>`）容差 0.75px。
+
+**没做（留给第二部分）**
+
+- 步骤 4 的交互：`<select>` 弹层（`deferred`，方向键/Enter/Esc，夹在窗口内；`Choose` 的发送端）、`range` 拖动、`type=file` 经 P14 的打开对话框（`VERVE_NO_SYSTEM_DIALOGS` 下的答复）、
+  `color`/`date` 的窗口内弹层。复选框/单选框在 verve-dom 里已经会切换（测试覆盖）。
+- 步骤 5 的 `character_index_for_point`（仍是 `None`）；
+- 步骤 6 文件拖入（GPUI `FileDropEvent` → `DragInput`；映射已写进契约）；
+- 步骤 7 乐观回显（`Isolate::send` 的任务号要从 `Hub::input` 返回，壳里的 `Echo`；契约已写）；
+- 步骤 8：文字上的 I-beam（先观察 Chromium）、三份“能输入文字”判断合并、GPUI `test-support` 测试文件；
+- 步骤 9 的像素比较（夹具和 `expected-chromium.png` 在，比较没写）；
+- 文字字段的横向/纵向滚动（光标出界时不会滚进来：`<input>` 是 `overflow:hidden`，长文字的光标矩形在盒外）；
+- `type=file` 和 `date` 的内部文字（“Choose File / No file chosen”、日历图标）：布局没有为它们生成文字；
+- `<select multiple>`/`size>1` 的列表框不画选项（只画一个空盒子）；`<button>`/`submit` 用 UA 的 `2px outset` 边框，不是 Chromium 的圆角平面外观；
+- “作者给了背景或边框就按普通盒子画”：只实现了 `appearance: none`；
+- 组字时的回显、提交 `Draft` 的撤销（`edit_field` 和输入法提交不进字段历史，只有按键输入、粘贴经 `insert_into` 的进了）；
+- 暗色：UA 样式表有 `prefers-color-scheme: dark` 的字段/按钮颜色，复选框等画法没有分深浅。
+
+**手测清单（第二部分做完后一起）**：复选框切换；`<select>` 鼠标和键盘；`range` 拖动；Tab 在控件间移动并出现焦点环；文件输入打开系统对话框；
+微软拼音在 `<input>` 和 `<textarea>` 里带下划线、候选框在光标下；字段里 Ctrl+Z；页面忙时输入。
+目前已可手测：光标闪烁、选区、组字下划线与候选框位置、Ctrl+Z/Ctrl+Y、复选框/单选框/滑块/进度条/仪表/色块的外观。
