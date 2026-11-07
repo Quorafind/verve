@@ -59,6 +59,9 @@ struct Store {
     mode: Mode,
     #[unsafe_ignore_trace]
     drop_effect: String,
+    /// Whether a script has set `dropEffect`: an explicit `none` is not the same as leaving it.
+    #[unsafe_ignore_trace]
+    drop_effect_set: bool,
     #[unsafe_ignore_trace]
     effect_allowed: String,
     /// Where `setDragImage` said the image's hot spot is: recorded, never drawn.
@@ -106,6 +109,7 @@ fn new_store(mode: Mode, entries: Vec<Entry>, effect_allowed: &str) -> Store {
         entries,
         mode,
         drop_effect: "none".to_owned(),
+        drop_effect_set: false,
         effect_allowed: effect_allowed.to_owned(),
         image: None,
         items: None,
@@ -137,6 +141,33 @@ fn with<R>(this: &JsValue, f: impl FnOnce(&mut Store) -> R) -> JsResult<R> {
 /// What the transfer holds now.
 pub fn entries_of(transfer: &JsObject) -> Vec<Entry> {
     with(&transfer.clone().into(), |s| s.entries.clone()).unwrap_or_default()
+}
+
+/// The transfer's `effectAllowed`.
+pub fn effect_allowed(transfer: &JsObject) -> String {
+    with(&transfer.clone().into(), |s| s.effect_allowed.clone()).unwrap_or_default()
+}
+
+/// The `dropEffect` a script gave the transfer; `None` when it left it alone (a handler that
+/// cancels `dragover` and sets nothing gets the default effect, one that sets `none` gets no drop).
+pub fn drop_effect(transfer: &JsObject) -> Option<String> {
+    with(&transfer.clone().into(), |s| {
+        s.drop_effect_set.then(|| s.drop_effect.clone())
+    })
+    .ok()
+    .flatten()
+}
+
+/// Sets `dropEffect` as the page's handler would have.
+pub fn put_drop_effect(transfer: &JsObject, effect: &str) {
+    let _ = with(&transfer.clone().into(), |s| {
+        s.drop_effect = effect.to_owned();
+    });
+}
+
+/// Where `setDragImage` put the image's hot spot, if it was called.
+pub fn image_hot_spot(transfer: &JsObject) -> Option<(i32, i32)> {
+    with(&transfer.clone().into(), |s| s.image).ok().flatten()
 }
 
 fn construct(new_target: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -331,7 +362,10 @@ fn drop_effect_get(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<J
 fn drop_effect_set(this: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
     let value = arg_text(args, 0, cx)?;
     if ["none", "copy", "link", "move"].contains(&value.as_str()) {
-        with(this, |s| s.drop_effect = value)?;
+        with(this, |s| {
+            s.drop_effect = value;
+            s.drop_effect_set = true;
+        })?;
     }
     Ok(JsValue::undefined())
 }

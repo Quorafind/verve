@@ -498,9 +498,8 @@ fn defaults(kind: &str) -> (bool, bool) {
         | "load" | "unload" | "scroll" | "scrollend" | "resize" | "toggle" | "close" | "play"
         | "pause" | "invalid" => (false, false),
         "input" | "change" | "focusin" | "focusout" | "select" | "selectionchange"
-        | "compositionend" | "pointercancel" | "gotpointercapture" | "lostpointercapture" => {
-            (true, false)
-        }
+        | "compositionend" | "pointercancel" | "gotpointercapture" | "lostpointercapture"
+        | "dragend" | "dragleave" => (true, false),
         _ => (true, true),
     }
 }

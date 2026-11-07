@@ -9,9 +9,10 @@
 //! in `clipboardData` is what gets written. These were taken from the specification and the
 //! source, not observed: copying in a real Electron would write the user's clipboard.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
+use boa_engine::{Context, JsObject, JsResult, JsValue};
 use verve::native::{self, js_text};
 
 use crate::bind::data_transfer::{self, Entry, Mode};
@@ -31,8 +32,10 @@ pub struct ClipboardData {
     pub image_png: Option<Vec<u8>>,
 }
 
-/// The most a dropped or pasted file is read whole: a larger file is left out.
-const FILE_LIMIT: u64 = 256 * 1024 * 1024;
+/// The most of one dropped or pasted file that is read, and of all the files of one drop or paste
+/// together. A file past either keeps its name, type and path and has no contents.
+pub(crate) const FILE_LIMIT: u64 = 256 * 1024 * 1024;
+pub(crate) const TOTAL_LIMIT: u64 = 512 * 1024 * 1024;
 
 /// A guess at a file's MIME type from its name, as the platform's table would answer.
 fn mime_of(path: &Path) -> &'static str {
@@ -62,34 +65,52 @@ fn mime_of(path: &Path) -> &'static str {
     }
 }
 
-/// A `File` for the file at `path`, which `webUtils.getPathForFile` can name again. `None` when
-/// it cannot be read or is too large.
-pub(crate) fn file_object(context: &mut Context, path: &Path) -> Option<JsObject> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > FILE_LIMIT {
-        return None;
+/// A `File` for the file or folder at `path`, which `webUtils.getPathForFile` can name again. The
+/// path is always there: the contents are read only for a file of at most [`FILE_LIMIT`] bytes that
+/// still fits the `budget` of the drop or paste it belongs to, and are empty otherwise. At most
+/// that many bytes are read, whatever the file has grown to since it was measured.
+pub(crate) fn file_object(
+    context: &mut Context,
+    path: &Path,
+    budget: &mut u64,
+) -> Option<JsObject> {
+    let name = path
+        .file_name()
+        .map_or_else(|| path.to_string_lossy(), |n| n.to_string_lossy())
+        .into_owned();
+    let limit = FILE_LIMIT.min(*budget);
+    let fits = std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= limit);
+    let mut bytes = Vec::new();
+    if fits {
+        let read = std::fs::File::open(path).and_then(|f| f.take(limit).read_to_end(&mut bytes));
+        if read.is_err() {
+            bytes.clear();
+        }
     }
-    let bytes = std::fs::read(path).ok()?;
-    let name = path.file_name()?.to_string_lossy().into_owned();
+    *budget -= bytes.len() as u64;
     let file = verve::blob::file_with_path(context, bytes, &name, mime_of(path), path).ok()?;
-    file.as_object().map(|o| o.clone())
+    file.as_object()
 }
 
-/// A `File` for a picture the clipboard held.
+/// A `File` of no content, named and typed as the file at `path` is: what a drag lists of a file
+/// before it is dropped.
+pub(crate) fn stand_in(context: &mut Context, path: &Path) -> Option<JsObject> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let file = verve::blob::file_with_path(context, Vec::new(), &name, mime_of(path), path).ok()?;
+    file.as_object()
+}
+
+/// A `File` for a picture the clipboard held; it has no path.
 fn image_object(context: &mut Context, png: &[u8]) -> JsResult<JsObject> {
-    let class = native::global(context, "File")?;
-    let part = boa_engine::object::builtins::JsUint8Array::from_iter(png.iter().copied(), context)?;
-    let parts = native::array(context, vec![part.into()]);
-    let options = native::object(context);
-    options.set(js_string!("type"), js_text("image/png"), false, context)?;
-    class
-        .as_object()
-        .ok_or_else(|| native::type_error("no File"))?
-        .construct(
-            &[parts, js_text("image.png"), options.into()],
-            None,
-            context,
-        )
+    let file = verve::blob::file_with_path(
+        context,
+        png.to_vec(),
+        "image.png",
+        "image/png",
+        Path::new(""),
+    )?;
+    file.as_object()
+        .ok_or_else(|| native::type_error("no File"))
 }
 
 /// The element a clipboard event goes to: the one with the focus, else the one the selection
@@ -287,8 +308,9 @@ fn fire_paste(cx: &mut Context, data: &ClipboardData) -> JsResult<Pasted> {
     if let Some(html) = &data.html {
         entries.push(Entry::text("text/html", html));
     }
+    let mut budget = TOTAL_LIMIT;
     for path in &data.files {
-        if let Some(file) = file_object(cx, path) {
+        if let Some(file) = file_object(cx, path, &mut budget) {
             entries.push(Entry::File(file));
         }
     }

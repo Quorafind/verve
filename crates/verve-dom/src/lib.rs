@@ -31,6 +31,7 @@ mod clipboard;
 mod cookies;
 pub mod css;
 pub mod dom;
+mod drag;
 mod editing;
 pub mod field;
 pub mod html;
@@ -68,6 +69,7 @@ pub use cookies::CookieBackend;
 pub use css::{Computed, Environment, Style};
 pub use dom::{Direction, RangeData, RangeError};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
+pub use drag::{DropEffect, ExternalDrag};
 pub use field::{Draft, utf8_offset_to_utf16, utf16_offset_to_utf8};
 pub use input::{Key, Modifiers, Pointer};
 pub use load::{Destination, LoadError, LoadEvent, LoadRequest, LoadResult, Loader, Ready};
@@ -296,6 +298,8 @@ pub(crate) struct View {
     pressed: Option<NodeId>,
     /// The element the pointer was last over.
     over: Option<NodeId>,
+    /// The drag and drop the document is in the middle of.
+    drag: drag::DragState,
 }
 
 impl Document {
@@ -734,11 +738,15 @@ impl Document {
     /// `mouseover` and `pointerenter`/`mouseenter`, a `:hover` rule follows, and the element
     /// under it hears `pointermove` and `mousemove`.
     pub fn pointer_move(&self, runtime: &mut verve::Runtime, pointer: &Pointer) {
+        if self.drag_moved(runtime, pointer) {
+            return;
+        }
         let target = self.pointer_target(pointer);
         self.hover_node(runtime, Some(target), pointer);
         let init = Self::pointer_init(pointer, 0);
         self.fire(runtime, target, "PointerEvent", "pointermove", &init);
         self.fire(runtime, target, "MouseEvent", "mousemove", &init);
+        self.drag_may_start(runtime, pointer);
         runtime.run_microtasks();
     }
 
@@ -850,6 +858,9 @@ impl Document {
             state.dom.mark(target);
         }
         self.view.borrow_mut().pressed = Some(target);
+        if allowed {
+            self.drag_pressed(target, pointer);
+        }
         if allowed && pointer.button == 0 {
             let context = runtime.context();
             let focus = {
@@ -907,6 +918,9 @@ impl Document {
 
     fn release(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) -> bool {
         self.activate();
+        if let Some(dropped) = self.drag_released(runtime, pointer) {
+            return dropped;
+        }
         let init = Self::pointer_init(pointer, 0);
         self.fire(runtime, target, "PointerEvent", "pointerup", &init);
         self.fire(runtime, target, "MouseEvent", "mouseup", &init);
@@ -1043,6 +1057,9 @@ impl Document {
         self.activate();
         if let Some(allowed) = self.composing_key(runtime, key, true) {
             return allowed;
+        }
+        if key.key == "Escape" && self.drag_cancel(runtime) {
+            return false;
         }
         let target = self.key_target();
         let allowed = self.fire(
