@@ -334,3 +334,18 @@ model from builds that never run `--headless`.
 
 The GPUI fork's `image` features compile nine decoders Verve never uses. exr and tiff alone are 174 KiB of `.text`, and the user's fork
 patch (2026-11-07) removes them. That is not counted here, because it is in the base too.
+
+## P30: box layout and drawing (verve-layout)
+
+`electron/p30-boxes` at its tested tip (72a4a473; merged as `e0ec4398` after P15): `cargo build --release -p verve-gpui --bin
+electron --features jit` is 35,085,312 bytes against 34,617,856 for `b1a27600`, +467,456 bytes (+1.35 %). The budget was 250 KB,
+re-set to 450 KB once the cost below was known, and the 17 KB over it was accepted. `docs/electron-plan` with P15 and P30 merged is
+35,588,096 bytes; the cap (37,748,736) leaves 2.16 MB.
+
+Where it goes (`cargo bloat --release --crates`, unstripped, before the rework):
+- **taffy grows from about 196 KiB to 372 KiB.** verve-layout's `TaffyTree<()>` compiles block, flex, grid and float a second time
+  beside GPUI's `TaffyTree<NodeContext>`. That can't be shared without verve-layout depending on GPUI, which the architecture forbids.
+- **verve-layout itself is 88.7 KiB**: the CSS readers, the tree, placement and painting.
+- **verve-gpui grew by about 35 KiB**: the element, plan, rasters, wheel and screenshot.
+- **png's encoder came in through tiny-skia's `png-format`.** The rework encodes with `image`'s `PngEncoder` instead, and reuses
+  verve-dom's blur, which took about 22 KB off.
