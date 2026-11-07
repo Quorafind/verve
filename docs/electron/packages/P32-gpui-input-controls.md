@@ -160,16 +160,72 @@ pub enum ControlKind {
 }
 ```
 
-- 页面写了 `appearance: none` 或给控件设置了背景/边框时，按普通盒子画（P30），只保留文字、光标、选区。
-- 外观：v1 用一套与 Windows 11 Chromium 默认相近的平面风格（不追求平台原生），配色随 `prefers-color-scheme` 和 `accent-color`。
-- 文本字段：文字按 P31 规则单行/多行排版，光标闪烁（530 ms，失焦停止），选区用 `::selection` 颜色，水平/垂直滚动保持光标可见，
+- 页面写了 `appearance: none` 或给控件设置了背景/边框时，按普通盒子画（P30），只保留文字、光标、选区（文本字段仍出 `TextField`；只有勾、三角、滑块等不画）。
+- 外观：v1 用一套与 Windows 11 Chromium 默认相近的平面风格（不追求平台原生），配色随 `color-scheme` 和 `accent-color`（`color-scheme` 还没有支持，见阶段 2 的 「状态」；控件不跟系统暗色，这是 Electron 39.8.10 观察到的）。
+- 文本字段：文字按 P31 规则单行/多行排版，光标闪烁（530 ms，窗口不活动时停止），选区用固定的高亮色（`::selection` 还没有支持），水平/垂直滚动保持光标可见，
   `password` 显示 `•`。
 - `<select>` 下拉：Shell 用 GPUI `deferred(...).with_priority(..)` 在窗口内画弹层（选项列表来自快照），选择后发
-  `ToRendererInput` 的新变体 `Choose { select: NodeId, value: String }`（**追加到 P02 契约**）→ `Document::choose`。
+  `ToRendererInput` 的新变体 `Choose { select: NodeId, index: usize }`（**追加到 P02 契约**；`index` 是选项在 `SelectOption` 里的序号，不是值）→ `Document::choose_option`。
   超出窗口时 v1 夹在窗口内（不开新系统窗口）。
 - `type=date/time/color/file`：点击时分别交给 P14 的系统对话框（`file` 用打开对话框；`color`/`date` v1 用窗口内简单弹层）。
 - `range`：拖动滑块直接 `edit_field` 写 `value` 并发 `input`，松开发 `change`。
 - 焦点环：`:focus-visible` 匹配（键盘导航后）时画 2px `outline`（颜色 `accent-color` 或系统强调色），由 P22 的 UA 样式表给出，本包只保证 Tab 导航能触发 `:focus-visible`。
+
+### 第二阶段契约变更（控件；数值取自 Electron 39.8.10 的实测）
+
+下面几条改动上文“表单控件”一节的 `ControlKind`，以这里为准。
+
+- **`PaintItem::Control { node, bounds, kind }`**（`display_list.rs` 里已有这个变体和空的 `ControlKind`，这里给它变体）。
+  与任务书的草案相比有三处改动，理由相同：文字已经由 P31 排好了，壳不该再排一次。
+  1. **文字字段的文字不在 `ControlKind` 里**。`<input>`/`<textarea>` 的内容（密码框是 `•`，空时是 placeholder，`<select>` 是选中项的标签）由
+     verve-layout 当作盒子里的生成文字排版（`Plan::Generated`），出普通的 `PaintItem::Glyphs`；`Control` 只带它旁边的东西。所以没有 `draft`、`placeholder`、`label`。
+  2. **几何由布局给出**：`TextField { caret, marked, .. }` 的矩形在**字段文字所在的框架里**（盒子自己的裁剪和滚动之内，不是窗口坐标；光标是零宽矩形），
+     壳只管画和闪烁，不需要字体。选区不在 `TextField` 里：布局把它当作和页面选区同色的 `Box`，画在字段文字之下（`Painter::selection`），没有焦点的字段不画选区。
+     候选框位置用 `caret`（`RendererView.ime_rect` 取 `DisplayList::caret_of`，经滚动帧换算）。有选区时不给光标。
+  3. **`Select` 带选项**，因为弹层在壳里画：`options: Arc<[SelectOption]>`；弹层是否展开是壳的本地状态，不在显示列表里。
+  ```rust
+  pub enum ControlKind {
+      TextField { caret: Option<Rect>, marked: Vec<Rect>, multiline: bool, focused: bool },
+      Checkbox { checked: bool, indeterminate: bool }, Radio { checked: bool },
+      Select { options: Arc<[SelectOption]>, multiple: bool },
+      Range { min: f64, max: f64, value: f64 },
+      Progress { value: Option<f64> }, Meter { value: f64, min: f64, max: f64, low: f64, high: f64, optimum: f64 },
+      Color { value: Rgba }, Date { kind: DateKind }, File { multiple: bool },
+  }
+  pub struct SelectOption { pub value: String, pub label: String, pub selected: bool, pub disabled: bool, pub group: Option<String> }
+  ```
+  `SelectOption` 不含 `hidden` 的选项；`<optgroup disabled>` 里的选项算 `disabled`。`PaintItem::Control` 另带 `look: ControlLook { accent, color, disabled }`（`accent-color`、文字色、是否禁用；矩形都在盒子的框架里）。
+  `<button>` 和 `<input type=button|submit|reset>` 不是 `Control`：它们是带 UA 边框和背景的普通盒子，内容是普通行内文字（`value` 当作生成文字）。
+  `disabled`、`:hover`、`:active` 由壳按 `Hitbox` 和 `Control` 的节点画；`disabled` 在 `look` 里，不进 `ControlKind`（壳画勾、滑块时要降低对比；文字和边框的颜色取自 UA 样式表的 `:disabled`）。
+  `appearance: none` 的控件只出普通的 `Box` 和 `Glyphs`，不出勾、三角、滑块的 `Control`；**文本字段照样出 `TextField`**，所以文字、光标、组字下划线和选区都在。
+- **固有尺寸**（隐藏窗口，`getBoundingClientRect`，DPR 1 和 1.25；探针 `SCRATCH\p32b\size`）：border-box 尺寸，默认字体。DPR 1.25 只改变文字相关的尺寸（Chromium 按物理像素取整字体度量），
+  表中不随 DPR 变的用常量，文字相关的用公式：
+
+  | 控件 | 宽 × 高 | 备注 |
+  |---|---|---|
+  | 文本类 `<input>`（text/password/email/url/tel/number，search 是 border-box） | `size × 7 + 29 + 8` × 21 | 13.3333px Arial，padding 1/2，边框 2 inset；`size` 默认 20，所以 177 × 21 |
+  | `<textarea>` | `round(cols × "0" 的宽) + 15 + 6` × `rows × 行高 + 6` | 13.3333px monospace，边框 1，padding 2，默认 20 × 2；en-US 下 168 × 36（Consolas，"0" 宽 7.33）；15 是滚动条宽 |
+  | checkbox / radio | 13 × 13 | 外边距 3px 3px 3px 4px / 5px |
+  | range | 129 × 16 | 外边距 2px |
+  | color | 50 × 27 | 边框 1，padding 1/2 |
+  | date / time / datetime-local | en-US：116.33 × 21.33 / 98 × 24 / 188.33 × 21.33（13.3333px）；date 在 20px 下是 167 × 29 | monospace 的字段，内容宽随字号变：按两个实测点拟合成 `15 + 7.6·字号`（date）等，**不是固定像素** |
+  | file | 253 × 21（13.3333px），379 × 29（20px） | 按钮加 “No file chosen”，同样按字号拟合 `1 + 18.9·字号` |
+  | button / submit | 文字宽 + 12 + 4 × 文字高 + 2 + 4 | padding 1/6，边框 2 outset；空按钮 16 × 6 |
+  | `<select>` | `ceil(最宽选项文字) + 20 + 边框` × 19 | 边框 1 solid，border-box（观察：48、204；20px 下 60 × 26）；`<optgroup>` 里的选项缩进 4 个空格宽 |
+  | `<select multiple>`/`size=n` | `最宽选项文字 + 19 + 边框`（不取整）× `n × (行高 + 2) + 2` | `size` 默认 4（55.83 × 70；20px 下 73.25 × 102） |
+  | progress / meter | `10em × 1em` / `5em × 1em`（16px 字体下 160 × 16 / 80 × 16；13.3333px 下 133.33 × 13.33 / 66.66 × 13.33） | |
+
+  `font: 13.3333px Arial`（`textarea` 为 monospace）、上面的 padding 和边框进 UA 样式表，作者的 CSS 照常覆盖。
+- **`ToRendererInput::Choose { select: NodeId, index: usize }`**，追加在枚举末尾（P02 汇总表那一行早已写了它，这次才有变体）。渲染器收到后调
+  `Document::choose_option`（`index` 按 `SelectOption` 的顺序、不含隐藏选项；选项禁用、序号越界或本来就是选中的则什么都不发，否则 `input` + `change`）；节点已不在文档里则丢掉。
+- **乐观回显**：Shell 给每个发往渲染器的输入记下 `Isolate::send` 返回的任务号（`Hub::input` 改为返回它）。焦点字段的编辑键、文字和组字会在 Shell
+  的本地副本 `Echo { node, text, caret, anchor, marked, from }` 上同样应用，`from` 是最后一个未被看到的输入号；每个快照到达时：`RendererView.applied >= from`
+  则丢掉副本，用快照里的字段；否则重画时把副本叠在快照上（只改这个字段的文字和光标矩形，用 `Draft` 的编辑方法），并且仍在忙。
+  不追的情况：焦点变了、页面取消了 `keydown`（在追上后被纠正，可接受）、`maxlength`/`input` 事件改写值（追上后被纠正）、密码框以外的组字：
+  忙的时候组字只更新 `Echo.marked`，提交时把文字写进副本；渲染器追上后以快照为准。一次只回显一个字段；不回显的键（方向键以外的导航键、`Tab`）立刻丢掉副本以免失真。
+- **文件拖入**：GPUI 的 `FileDropEvent::Entered { position, paths }` → `DragInput::Enter { data: ExternalDrag { files: paths, .. }, pointer }`；`Pending { position }`
+  → `DragInput::Over`；`Submit { position }` → `DragInput::Drop`；`Exited` → `DragInput::Leave`。`pointer` 的 `x,y` 经与指针相同的 `input::local`
+  换算，不带按键；目标节点由渲染器命中。`RendererView.drop_effect` 决定壳显示的拖放光标。`File` 对象的路径由 P24 的 `ExternalDrag` 给出。
 
 ### 文件拖入
 
