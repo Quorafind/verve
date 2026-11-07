@@ -6836,6 +6836,7 @@ dependencies = [
  "verve",
  "verve-asar",
  "verve-dom",
+ "verve-layout",
  "windows-sys 0.61.2",
 ]
 

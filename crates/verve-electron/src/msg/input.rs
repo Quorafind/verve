@@ -12,8 +12,8 @@ pub enum ToRendererInput {
     ColorScheme {
         dark: bool,
     },
-    /// Deprecated: layout runs on the page's own thread in `verve-layout` (P30) and the GPUI shell
-    /// no longer reports it. The headless shell still does, from its fake layout, until P30.
+    /// Deprecated and ignored: a page lays itself out on its own thread (`verve-layout`, P30), so
+    /// no shell reports boxes. The variant is kept so that nothing that matches on it breaks.
     Layout(Vec<(verve_dom::NodeId, verve_dom::Rect)>),
     ScrollOffsets(Vec<(verve_dom::NodeId, [f32; 2])>),
     Frame {
@@ -68,4 +68,6 @@ pub struct RendererView {
     pub cursor: Option<String>,
     /// Where a candidate window goes: the caret's box (P24/P32).
     pub ime_rect: Option<verve_dom::Rect>,
+    /// The page laid out: what the shell draws. `None` for a page with no layout.
+    pub display_list: Option<std::sync::Arc<verve_layout::DisplayList>>,
 }

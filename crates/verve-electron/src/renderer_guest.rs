@@ -21,6 +21,7 @@ use crate::loader::ElectronLoader;
 use crate::msg::{
     FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
+use crate::page_layout::PageLayout;
 use crate::{page_script, preload, probe};
 
 /// One page: the runtime its scripts run in, its document, and what it has yet to tell the main
@@ -28,6 +29,8 @@ use crate::{page_script, preload, probe};
 pub struct RendererGuest {
     runtime: Runtime,
     document: Document,
+    /// Where the page's boxes are, and what the shell draws of them.
+    layout: PageLayout,
     /// Everything the page has to tell the main process, in the order it happened: console lines,
     /// lifecycle, requests and IPC. It leaves as one job after each job the page runs.
     outbox: Outbox,
@@ -79,9 +82,11 @@ impl RendererGuest {
         )
         .expect("a page's document installs");
         preload::prepare(&mut runtime, &document, &prefs, &outbox, hub.overlay());
+        let layout = PageLayout::install(&document);
         Self {
             runtime,
             document,
+            layout,
             outbox,
             contents,
             prefs,
@@ -195,11 +200,12 @@ impl RendererGuest {
     }
 
     /// What a person did to the window, to the page under it: the pointer, the wheel, keys and text
-    /// act on the document ([`page_script::person`]). The boxes a shell measured, the viewport, the
-    /// colour scheme and the frames are the page's own to take; composition and focus are P24/P32's.
+    /// act on the document ([`page_script::person`]). The page lays itself out, so the boxes a
+    /// shell measured ([`ToRendererInput::Layout`]) are not taken; the viewport, the colour scheme
+    /// and the frames are; composition and focus are P24/P32's.
     pub fn input(&mut self, msg: ToRendererInput) {
         match msg {
-            ToRendererInput::Layout(boxes) => self.document.set_layout(&mut self.runtime, boxes),
+            ToRendererInput::Layout(_) => {}
             ToRendererInput::Viewport { width, height, .. } => {
                 self.document.set_viewport(&mut self.runtime, width, height)
             }
@@ -257,15 +263,21 @@ impl RendererGuest {
     }
 
     fn queue(&mut self, requests: Vec<verve_dom::Request>) {
-        let mut outbox = self.outbox.borrow_mut();
-        for request in requests {
-            outbox.push(match request {
-                verve_dom::Request::Reload => FromRenderer::Reload {
-                    url: self.document.url(),
-                },
-                other => FromRenderer::Dom(other),
-            });
+        let (scrolls, requests) = crate::page_layout::split_scrolls(requests);
+        {
+            let mut outbox = self.outbox.borrow_mut();
+            for request in requests {
+                outbox.push(match request {
+                    verve_dom::Request::Reload => FromRenderer::Reload {
+                        url: self.document.url(),
+                    },
+                    other => FromRenderer::Dom(other),
+                });
+            }
         }
+        // After the rest: what the scroll listeners write comes after what was asked before.
+        self.layout
+            .reveal(&mut self.runtime, &self.document, scrolls);
     }
 
     /// A page that is now at another address without a load (`location.hash = …`, `pushState`) has
@@ -340,6 +352,11 @@ impl Guest for RendererGuest {
     fn tick(&mut self) {
         beat::run(&mut self.runtime);
         self.pump();
+        // The page lays itself out and nobody reports the boxes: the observers hear once per
+        // turn, after the timers, the frames and what the loader ran, and what their callbacks
+        // ask for is drained next. The layout itself is made when something reads it, not after
+        // each message.
+        self.document.deliver_layout(&mut self.runtime);
     }
 
     fn next_due(&self) -> Option<Duration> {
@@ -363,14 +380,17 @@ impl Guest for RendererGuest {
     }
 
     fn publish(&mut self, applied: u64, ran: bool) -> Option<RendererView> {
+        self.document.ensure_layout();
         let update = self.document.update();
         let changed = !update.changes.is_empty();
-        (ran || changed).then(|| RendererView {
+        let (list, new_list) = self.layout.list();
+        (ran || changed || new_list).then(|| RendererView {
             applied,
             update: Some(update),
             wants_frame: self.document.wants_frame(),
             cursor: None,
             ime_rect: None,
+            display_list: Some(list),
         })
     }
 
