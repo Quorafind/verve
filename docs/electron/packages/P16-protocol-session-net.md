@@ -490,3 +490,19 @@ cargo test -p verve-electron --test net
 cargo test -p verve-electron --test page_load
 cargo test -p verve --test browser_net
 ```
+
+### 第四轮（评审与阶段 2a 的集中测试后的修正）
+
+- **安全**：装了 `file` 处理器后，P20 的 `file:` 来源规则被跳过，任何页面都能读本地文件。现在 `ElectronLoader::fetch` 在问处理器之前先过 `file_allowed`，不满足以 `ERR_ACCESS_DENIED` 拒绝；
+  `forwards("file")` 恒为假，页面对 `file:` 的 `fetch`/XHR 因而走加载器。探针 5（Electron 39.8.10，装了 `file` 处理器并传 `bypassCustomProtocolHandlers`）：`app://` 页面的 `fetch`、XHR、`<img>`、`<script>`
+  都失败（`TypeError: Failed to fetch`、XHR `error`），`loadFile` 页面的 `fetch`、XHR、`<script>` 成功（`<img>` 因内容不是图片而 `error`）。
+- **页面载入 http 地址失败的原因（阶段 2a 的六个 `--test session`）**：不带 Node 的页面从全局对象上拿掉了 `Buffer`，而内核的流、文件与网络用全局 `Buffer` 造 `Buffer`，页面的 http 响应就读不出来。
+  现在内核记着自己造出的 `Buffer` 类（`native::buffer_class`），不再读全局。这是静态读代码得出的结论，没有跑过。
+- 页面载入别的文档时，Hub 换新的 isolate，旧 isolate 的 `Navigating` 说不出口；取消仍在服务的处理器应答改由主进程在 `navigation::start` 里做。
+- `cookies.rs` 的路径测试期望错了（无路径的 cookie 的默认路径是 `/a`，也匹配 `/a`）；`session.rs` 的 JSON 数字比较与过长的测试已修；`support::report_of` 不再 `unwrap`。
+- 其他：`preload::permissions_for` 按 `!sandbox && (nodeIntegration || preload)`；`fromPartition('path:/x')` 与 `fromPath` 不再撞键；空 body 的应答（HEAD、204）也通知宿主放手；
+  `net.request` 的上传体在应答后释放（`Requests.table` 里每个请求的小记录仍留到应用结束：`with_req` 之后的访问要求它在）；`webPreferences.session` 与 `webContents.session` 有了测试；
+  `net.fetch` 的 `file:` 应答断言 200、`OK`、处理器只被问一次。
+- **没做**：`cx` 改名 `context`（按派发留到阶段 2b 之后）；`tests/browser_net.rs` 的 `<= 4` 与 `tests/protocol.rs` 的 `1..=5` 改成精确值（要跑一次才知道确切的数）；
+  把 protocol.rs 里几处断言挪到更早的提交；`Kind` 与 `define::Kind` 重名、`protocol_serve::report` 与 `define::report` 重名、六处 promise 的 ok/err 写法、三处头对循环、`RequestHead` → `ProtoRequest` 的两份、
+  `64 * 1024` 与重定向状态码的命名、`native::exports` 化、`Schemes::new` 等公开项的文档、测试夹具的去重、`cancel_all` 的测试、未探针的三条（见阶段 1 的「未观察」）。
