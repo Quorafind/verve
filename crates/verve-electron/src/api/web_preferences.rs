@@ -105,6 +105,14 @@ fn read_text(fields: &Fields, prefs: &mut WebPreferences, context: &mut Context)
         .string("preload", context)?
         .map(std::path::PathBuf::from);
     prefs.partition = fields.string("partition", context)?;
+    // A session object names its partition.
+    if let Some(given) = fields.object("session", context)? {
+        let session = super::session::SESSION;
+        if let Some(id) = super::define::id_of(&given.into(), session, context) {
+            let hub = std::sync::Arc::clone(&super::shared(context).hub);
+            prefs.partition = hub.session_by_id(id).map(|s| s.partition().to_owned());
+        }
+    }
     prefs.safe_dialogs_message = fields.string("safeDialogsMessage", context)?;
     prefs.accessible_title = fields.string("accessibleTitle", context)?;
     Ok(())

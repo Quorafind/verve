@@ -122,12 +122,21 @@ impl Session {
     }
 }
 
-/// The sessions made so far, by partition.
+/// The sessions made so far, by partition, and `fromPath`'s by their folder (a partition may be
+/// named like a path without being the session of it).
 #[derive(Default)]
 pub(super) struct Registry {
     by_partition: HashMap<String, Arc<Session>>,
+    by_path: HashMap<PathBuf, Arc<Session>>,
     next: SessionId,
     privileged: Vec<Privileged>,
+}
+
+impl Registry {
+    /// Every session made.
+    fn all(&self) -> impl Iterator<Item = &Arc<Session>> {
+        self.by_partition.values().chain(self.by_path.values())
+    }
 }
 
 impl Hub {
@@ -148,21 +157,22 @@ impl Hub {
 
     /// The session that keeps its files in `path` (`session.fromPath`), made the first time.
     pub fn session_at(&self, path: &Path) -> Arc<Session> {
-        let name = format!("path:{}", path.display());
         let mut registry = lock(&self.sessions);
-        if let Some(found) = registry.by_partition.get(&name) {
+        if let Some(found) = registry.by_path.get(path) {
             return Arc::clone(found);
         }
         registry.next += 1;
         let made = Arc::new(Session::at(registry.next, path));
-        registry.by_partition.insert(name, Arc::clone(&made));
+        registry
+            .by_path
+            .insert(path.to_path_buf(), Arc::clone(&made));
         made
     }
 
     /// The session numbered `id`, if one was made.
     pub fn session_by_id(&self, id: SessionId) -> Option<Arc<Session>> {
         let registry = lock(&self.sessions);
-        registry.by_partition.values().find(|s| s.id == id).cloned()
+        registry.all().find(|s| s.id == id).cloned()
     }
 
     /// The session page `contents` belongs to: its `webPreferences.partition`.

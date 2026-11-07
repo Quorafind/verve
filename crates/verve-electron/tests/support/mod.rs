@@ -241,6 +241,28 @@ impl Drop for App {
     }
 }
 
+/// Runs the app `main_js`, which fills `globalThis.out` and sets `out.done` (or `out.threw`, a
+/// message) when it is finished; answers `out`. A script that threw fails the test.
+pub fn report_of(main_js: &str, files: &[(&str, &str)]) -> Value {
+    let app = App::launch_script(main_js, files);
+    let finished = |app: &App| {
+        app.eval_main("globalThis.out.done || globalThis.out.threw || false") != "false"
+    };
+    assert!(
+        app.run_until(finished, TIMEOUT),
+        "console: {:?}",
+        app.console()
+    );
+    // `eval_main` answers JSON: the object itself, not a string holding its JSON.
+    let out: Value = serde_json::from_str(&app.eval_main("globalThis.out")).expect("out is JSON");
+    assert!(
+        out.get("threw").is_none(),
+        "{out}; console: {:?}",
+        app.console()
+    );
+    out
+}
+
 // ---------- The fixture apps, and what real Electron printed for them ----------
 
 pub fn fixture(name: &str) -> PathBuf {

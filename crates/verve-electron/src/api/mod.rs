@@ -29,6 +29,7 @@ pub(crate) mod power;
 pub(crate) mod process;
 pub(crate) mod safe_storage;
 pub(crate) mod screen;
+pub(crate) mod session;
 pub(crate) mod shell;
 pub(crate) mod system_preferences;
 pub(crate) mod web_contents;
@@ -71,6 +72,15 @@ pub(crate) struct MainState {
     pub(crate) deprecated: std::cell::RefCell<Vec<String>>,
     /// The `BrowserWindow` class, for the windows `window.open` makes.
     pub(crate) window_class: std::cell::RefCell<Option<boa_engine::JsObject>>,
+    /// What `session` keeps.
+    pub(crate) net: NetState,
+}
+
+/// What the main process keeps for sessions.
+#[derive(Default)]
+pub(crate) struct NetState {
+    /// The objects scripts hold for the sessions.
+    pub(crate) objects: session::Objects,
 }
 
 impl MainState {
@@ -83,6 +93,7 @@ impl MainState {
             calls: page_calls::Calls::default(),
             deprecated: std::cell::RefCell::new(Vec::new()),
             window_class: std::cell::RefCell::new(None),
+            net: NetState::default(),
         })
     }
 
@@ -160,7 +171,8 @@ fn main_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     exports.set(js_string!("BrowserWindow"), window, false, context)?;
     exports.set(js_string!("app"), app::make(context)?, false, context)?;
     ipc_main::add_exports(context, &exports)?;
-    let modules: [(&str, ModuleMaker); 13] = [
+    let modules: [(&str, ModuleMaker); 14] = [
+        ("session", session::make),
         ("webContents", web_contents::make_module),
         ("webFrameMain", web_frame_main::make_module),
         ("dialog", dialog::make),
