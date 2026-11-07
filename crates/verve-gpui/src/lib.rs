@@ -19,6 +19,7 @@ mod dom_view;
 mod font_name;
 mod frame_stats;
 pub(crate) mod inspector;
+pub mod keymap;
 mod menu;
 mod native;
 mod pictures;
