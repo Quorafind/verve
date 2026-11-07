@@ -167,6 +167,8 @@ pub struct State {
     pub local: BTreeMap<String, String>,
     pub session: BTreeMap<String, String>,
     pub storage: Option<Box<dyn StorageBackend>>,
+    /// The embedder's cookie jar, which `document.cookie` goes to when there is one.
+    pub cookies: Option<Rc<dyn crate::CookieBackend>>,
     pub observers: Vec<ObserverRecord>,
     /// A microtask is queued to deliver mutation records.
     pub mutation_queued: bool,
@@ -242,6 +244,7 @@ impl State {
             local: BTreeMap::new(),
             session: BTreeMap::new(),
             storage: None,
+            cookies: None,
             observers: Vec::new(),
             mutation_queued: false,
             frame_clock: FrameClock::Timer,

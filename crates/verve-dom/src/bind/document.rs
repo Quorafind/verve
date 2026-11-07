@@ -15,6 +15,11 @@ use crate::dom::{Dom, Namespace, NodeId, NodeKind};
 use crate::state::shared;
 
 /// The document a document's member is asked of: a parsed one, or the window's.
+/// The embedder's cookie jar, if the page has one: `document.cookie` goes to it.
+fn jar_of(context: &Context) -> Option<std::rc::Rc<dyn crate::CookieBackend>> {
+    shared(context).borrow().cookies.clone()
+}
+
 fn document_of(this: &JsValue, context: &Context) -> NodeId {
     read_dom(context, |dom| {
         node_id(this)
@@ -469,12 +474,21 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
     (
         "cookie",
         Some(|_, _, cx| {
+            if let Some(jar) = jar_of(cx) {
+                let url = shared(cx).borrow().url.to_string();
+                return Ok(js_text(&jar.get(&url)));
+            }
             let global = cx.global_object();
             let jar = global.get(js_string!("__cookies"), cx)?;
             Ok(if jar.is_undefined() { js_text("") } else { jar })
         }),
         Some(|_, args, cx| {
             let given = arg_text(args, 0, cx)?;
+            if let Some(jar) = jar_of(cx) {
+                let url = shared(cx).borrow().url.to_string();
+                jar.set(&url, &given);
+                return Ok(JsValue::undefined());
+            }
             let pair = given.split(';').next().unwrap_or("").trim().to_owned();
             let Some((name, _)) = pair.split_once('=') else {
                 return Ok(JsValue::undefined());

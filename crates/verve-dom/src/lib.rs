@@ -27,6 +27,7 @@
 mod animation;
 mod bind;
 pub mod canvas;
+mod cookies;
 pub mod css;
 pub mod dom;
 pub mod field;
@@ -53,6 +54,7 @@ use std::sync::Arc;
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
 
+pub use cookies::CookieBackend;
 pub use css::{Computed, Environment, Style};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
 pub use field::Draft;
@@ -144,6 +146,7 @@ pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Doc
         s.navigator = (options.user_agent.clone(), options.language.clone());
         s.schemes = schemes::Schemes::new(&options.standard_schemes, &options.secure_schemes);
         s.load.loader = options.loader.take().map(Rc::from);
+        s.cookies = options.cookies.take().map(Rc::from);
         s.load.active = s.load.loader.is_some();
         let document = s.dom.document;
         if options.user_agent_sheet {
