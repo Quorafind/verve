@@ -270,8 +270,27 @@ pub enum ControlKind {
 - 壳给了目标的指针路径也走 P24 的钩子：`pointer_move_on` 先问 `drag_moved`（拖动中只有拖动听到移动），移动后调 `drag_may_start`（鼠标选区与拖动起点）；`wheel_on`、`pointer_down_on`/`pointer_up_on` 本来就经过 `press_down`/`release`。
 - `Document::person(Act)` 是人的输入的唯一入口：给瞬时激活（`activate`，P24）并记录 `LastInput`（焦点环，P32）；两者是不同的状态（输入方式与限时的许可），过滤规则也不同（单独的修饰键不算键盘使用，但算一次按下）。`press_down`、`release`、`key_down` 开头各调一次。
 - `key_down_unhandled` 现在看默认动作实际做了什么（`Document::acted`）：复制/剪切真的复制了东西、粘贴、真的撤销了什么（没有可撤销的 Ctrl+Z 仍是菜单的）、可编辑区里的编辑键；Escape 取消拖动时 `key_down` 返回 `false`，算已处理。文本框里的方向键、删除、Enter、Tab 仍按静态规则。
-- `pointer_init(pointer, buttons)` 只用于鼠标类事件（`detail` 是点击数）；P24 的拖动事件（`dragstart` 等）改用 `person::fields(pointer, buttons, 0)`：`detail` 为 0、`buttons` 取指针此刻按住的键（`dragstart` 为 1）。拖动事件的 `detail` 没有在 Chromium 上观察，按其他非点击事件取 0。
+- `pointer_init(pointer, buttons)` 只用于鼠标类事件（`detail` 是点击数）；P24 的拖动事件改用 `person::fields`：`dragstart` 是 `detail` 0、`buttons` 1，`drag`/`dragenter`/`dragover`/`drop`/`dragend` 是 `detail` 0、`buttons` 0（第二次复查的 `drag` 探针，`Input.setInterceptDrags`；CDP 的拖动带不了按键，所以真实的系统拖动的 `buttons` 没有定论）。
 - `lib.rs` 1571 行（上限 1661）。
+
+**第四轮（第二次复查）**
+
+- 改了：
+  - 输入法：焦点移走时 verve-dom 先结束进行中的组字（`compositionend`，文字保留，在 `blur` 之前，无 `input`，`imeblur` 探针）；GPUI 桥丢掉组字状态，并在下一帧不登记输入处理器，让 GPUI 在系统一侧结束组字；密码框关闭输入法。
+  - 死键 + 空格得到一个重音（`{key:"space", key_char:"´"}`），死键 + 不能组合的字母时按键是那个字母、两个字符走文本；`WM_CHAR` 去重队列不再在焦点变化时清空（在途的 `WM_CHAR` 还会来）。
+  - 拖动与选区用壳给的目标（`drag_moved`/`drag_released` 带目标；`begin_selecting` 的“有位置”改成参数）；第二次按下（双击）不再武装拖动；`drag`/`dragenter`/`dragover`/`drop`/`dragend` 的 `buttons` 为 0。
+  - `-webkit-app-region: drag` 区域内页面收不到按下和抬起，移动变成一次 `Leave`（依据 Electron 无边框窗口文档和 GPUI 的源码，不是观察）。
+  - “已处理”只来自按键的默认动作里真的跑了的命令（`keys3` 探针）：`default_acts` 删掉；表在 `tests/input.rs`（`which_keydowns_are_handled_is_frozen_from_electron_39_8_10`）；输入法接走的键算已处理；没有页面时的 key down 报为没处理，窗口的加速键仍可用（`Hub::input`，来自 Electron 的源码，隐藏窗口观察不到）。
+  - contenteditable 里 Alt+字母不再输入；过期的壳目标（节点已被移出文档）改用页面自己的命中；held 加速键的测试数点击次数（每次重复一次）。
+- **字段没有撤销历史**（`<input>` 里输入后 Ctrl+Z 没有东西可撤销，所以点击菜单项）；真 Electron 里输入后的 Ctrl+Z 会撤销（`type-x-then-ctrl-z-in-input`）。contenteditable 的这个情形已有测试。
+- 历史备注：文档提交 `d8ca485fc`（折叠后在合并提交之下）还改了 `msg/input.rs` 里 `RendererView.cursor` 的注释；接受，不为它重做合并。
+- 没做：
+  - `<textarea>` 的插入符大小的候选框矩形（要 P31 的 `Draft` 排版量字符位置，超过约 80 行）；
+  - 三份“能输入文字”的判断合并；
+  - 滚轮后补一次合成的移动（`:hover` 在鼠标动之前滞后）；
+  - `a_wheel_the_page_prevents…` 测试加强（还要等一段时间才能断言没有 `zoom-changed`）；
+  - `contents_page.rs` 里关于 `sendInputEvent` 越过 `before-input-event` 的注释（P13 的，39.8.10 其实会发）；
+  - `replace_text_in_range` 的范围参数。
 
 **给 GPUI 测试平台的发现**：GPUI 的 `test-support` 特性有 `TestAppContext`/`VisualTestContext`（`simulate_event`、`simulate_keystrokes`、`simulate_input`、
 `simulate_mouse_down` 等），在内存里驱动窗口，不碰桌面。把 `DomView` 放进测试窗口、注入 `MouseDownEvent` 和输入法调用，就能自动测 `ImeBridge` 和
@@ -300,6 +319,6 @@ pub enum ControlKind {
 7a. 死键布局（美式国际、德语、法语等，Windows 设置里加一个）：输入 `´` 再输入 `e`，输入框里只有 `é`（不是 `´é`）；输入 `´` 再输入 `x`，得到 `´x`；`keydown` 的 `key` 先是 `Dead` 再是 `é`。
 7b. Shift+数字和标点（`!`、`:`、`+`）：页面 `keydown` 的 `shiftKey` 为 `true`；Ctrl+Shift+`=` 触发带 `CommandOrControl+Plus` 加速键的菜单项。
 7c. 在输入框里很快地连敲一串字符（或让页面忙一会儿时敲）：每个字符只出现一次。
-   提交后只有一次 `input`，`compositionstart/update/end` 各自出现。Esc 取消组字后输入框是空的。
+7d. 微软拼音输入“jia”后不选词，直接用鼠标点另一个输入框、按钮或空白处：已输入的拼音留在原来的框里、不再变化，之后键盘照常（Tab、空格、字母都有效）。7e. “´”再按空格：得到一个“´”（不是“ ´”）；“´”再按“x”：得到“´x”。7f. 候选框：`<textarea>` 里它在文本框左侧的垂直中间，空的 contenteditable 行里在整个编辑区的位置（不在插入符处，已知）。7g. 密码框里微软拼音不弹候选框（输入法被关掉）。10. 无边框窗口（`-webkit-app-region: drag` 的标题栏）：拖动窗口，松开后在文字上移动鼠标，什么也不会被选中；标题栏上的 `no-drag` 按钮仍可点击。
 8. 窗口失焦再回来：`document.hasFocus()` 先假后真，`window` 的 `blur`/`focus` 事件各一次。
 9. 打开检查器的元素拾取：拾取期间页面收不到鼠标事件，退出后恢复。

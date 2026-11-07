@@ -256,6 +256,7 @@ impl Document {
 
 - P31：`Snapshot.dom.selection()` 返回 `Option<(RangeData, Direction)>`；`Dom::selection_focus()` 是光标。P31 现读的是 `Document::selection_boundaries`。`caret_rect()` 在有范围提供者时用选区范围的第一个文本框，否则用输入框/宿主的框。
 - P32：把 GPUI 的 `InputHandler` 映射到 `CompositionEvent`；`ime_rect` 已经随每个 `RendererView` 带出。
+  - P32 阶段 1 做了 `Composition` 的 GPUI 映射和 `ime_rect`；Ctrl/Cmd+V 作为普通按键发给页面。`DragInput` 与 `ClipboardContents` 的 Shell 侧（`FileDropEvent`、读系统剪贴板）是 P32 阶段 2 的事，还没做。
 - P13：`webContents` 的编辑命令经 `document.execCommand`，现在上面列的命令都生效；`Document::exec_command` 公开（会发 `beforeinput`），`page_script::edit` 已改用它，菜单角色（撤销、重做、剪切、删除、全选、复制）因此先发 `beforeinput`。
 
 **测试命令（请协调者运行）**
