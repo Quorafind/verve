@@ -302,7 +302,7 @@ pub(crate) fn stops_of(
 ) -> (Vec<f32>, Vec<f32>) {
     let count = chars.len();
     let mut raw: Vec<Option<f32>> = vec![None; count + 1];
-    for glyph in &run.glyphs {
+    for glyph in run.glyphs.iter() {
         let at = processed
             .map
             .partition_point(|entry| entry.byte <= glyph.byte)
@@ -390,7 +390,8 @@ mod tests {
                 byte: 0,
                 is_emoji: false,
                 font: FontKey(0),
-            }],
+            }]
+            .into(),
             width: 30.,
         };
         let (stops, _) = stops_of(&run, &processed(text), &chars, 0., 0.);

@@ -45,7 +45,7 @@ pub struct PlacedGlyph {
 pub struct ShapedRun {
     pub font: FontKey,
     pub size: f32,
-    pub glyphs: Vec<PlacedGlyph>,
+    pub glyphs: Arc<[PlacedGlyph]>,
     /// The run's advance.
     pub width: f32,
 }
@@ -60,6 +60,13 @@ pub trait TextMeasurer: Send + Sync + 'static {
     fn metrics(&self, font: FontKey, size: f32) -> FontMetrics;
     /// `text` shaped in one font.
     fn shape(&self, text: &str, font: FontKey, size: f32) -> Arc<ShapedRun>;
+    /// The measurer a page uses: its own faces, over what the measurer shares among pages (the
+    /// text system and its caches). A measurer with nothing per page is its own.
+    fn for_page(self: Arc<Self>) -> Arc<dyn TextMeasurer>;
+    /// Says a layout is finished, the moment to let go of what shaping it kept (GPUI's
+    /// `WindowTextSystem::finish_frame` once that is public). Called at the end of every
+    /// [`crate::LayoutEngine::update`] that laid out again, and of every placing again.
+    fn finish_layout(&self) {}
 }
 
 /// The measurer for headless runs and tests: no fonts, so every character is half an em wide and
@@ -75,6 +82,10 @@ impl HeadlessMeasurer {
 }
 
 impl TextMeasurer for HeadlessMeasurer {
+    fn for_page(self: Arc<Self>) -> Arc<dyn TextMeasurer> {
+        self
+    }
+
     fn resolve(&self, _families: &[String], weight: f32, italic: bool) -> FontKey {
         FontKey((u64::from(weight.round() as u32) << 1) | u64::from(italic))
     }
@@ -106,7 +117,7 @@ impl TextMeasurer for HeadlessMeasurer {
             font,
             size,
             width: glyphs.len() as f32 * advance,
-            glyphs,
+            glyphs: glyphs.into(),
         })
     }
 }

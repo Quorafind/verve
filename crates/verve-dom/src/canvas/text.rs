@@ -457,7 +457,7 @@ fn outline_run(
             x: 0.,
             y: 0.,
         };
-        for glyph in &run.glyphs {
+        for glyph in run.glyphs.iter() {
             pen.x = origin.0 + glyph.x * scale_x;
             pen.y = origin.1 - glyph.y;
             if let Some(outline) = outlines.get(skrifa::GlyphId::new(glyph.id)) {

@@ -11,7 +11,7 @@ use crate::fonts::FontRegistry;
 use crate::inline::query::{self, Placement, View};
 use crate::layout::{Laid, settle};
 use crate::measure::TextMeasurer;
-use crate::paint;
+use crate::paint::{self, Text};
 use crate::place::{Placed, padding_box, place};
 use crate::tree::{BoxTree, build};
 
@@ -27,8 +27,13 @@ static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
 pub struct LayoutEngine {
     measurer: Arc<dyn TextMeasurer>,
     fonts: FontRegistry,
+    /// The document's selection, as the DOM says its ends.
+    selection: Option<Selection>,
     state: Option<State>,
 }
+
+/// The two ends of a selection: a node and an offset each.
+type Selection = ((NodeId, usize), (NodeId, usize));
 
 struct State {
     /// The snapshot's revision, the viewport and the faces it was laid out for.
@@ -57,6 +62,7 @@ impl LayoutEngine {
         Self {
             measurer,
             fonts: FontRegistry::default(),
+            selection: None,
             state: None,
         }
     }
@@ -96,8 +102,14 @@ impl LayoutEngine {
         let laid = settle(&mut tree);
         let scroll = snapshot.scroll_offsets.clone();
         let placed = place(&tree, &laid, &scroll);
-        let list = self.adopt(list_for(&tree, &laid, &placed));
         let blocks = placements(&tree, &laid, &placed);
+        let ranks = OnceLock::new();
+        let selection = self.selection_boxes(snapshot, &blocks, &ranks);
+        let text = Text {
+            measurer: &*self.measurer,
+            selection: &selection,
+        };
+        let list = self.adopt(list_for(&tree, &laid, &placed, &text));
         let spans = query::span_rects(&blocks);
         self.state = Some(State {
             key,
@@ -105,7 +117,7 @@ impl LayoutEngine {
             rects: rects_of(&tree, &placed, &spans),
             blocks,
             spans,
-            ranks: OnceLock::new(),
+            ranks,
             snapshot_offsets: snapshot.scroll_offsets.clone(),
             tree,
             laid,
@@ -113,6 +125,7 @@ impl LayoutEngine {
             placed,
             list,
         });
+        self.measurer.finish_layout();
         true
     }
 
@@ -122,14 +135,19 @@ impl LayoutEngine {
             return false;
         };
         let placed = place(&state.tree, &state.laid, &state.scroll);
-        let built = list_for(&state.tree, &state.laid, &placed);
+        let blocks = placements(&state.tree, &state.laid, &placed);
+        let selection = self.selection_boxes(&state.snapshot, &blocks, &state.ranks);
+        let text = Text {
+            measurer: &*self.measurer,
+            selection: &selection,
+        };
+        let built = list_for(&state.tree, &state.laid, &placed, &text);
         let changed = built.items != state.list.items;
         let list = if changed {
             self.adopt(built)
         } else {
             state.list
         };
-        let blocks = placements(&state.tree, &state.laid, &placed);
         let spans = query::span_rects(&blocks);
         self.state = Some(State {
             rects: rects_of(&state.tree, &placed, &spans),
@@ -139,7 +157,43 @@ impl LayoutEngine {
             list,
             ..state
         });
+        self.measurer.finish_layout();
         changed
+    }
+
+    /// Sets the document's selection: the display list shows it from now on. Answers whether the
+    /// list changed.
+    pub fn set_selection(&mut self, selection: Option<Selection>) -> bool {
+        if self.selection == selection {
+            return false;
+        }
+        self.selection = selection;
+        self.replace()
+    }
+
+    /// The selected parts of the lines of each block, by the block's box.
+    fn selection_boxes(
+        &self,
+        snapshot: &Snapshot,
+        blocks: &[Placement],
+        ranks: &OnceLock<HashMap<NodeId, usize>>,
+    ) -> HashMap<usize, Vec<Rect>> {
+        let Some((start, end)) = self.selection else {
+            return HashMap::new();
+        };
+        let (Some(from), Some(to)) = (
+            query::text_position(snapshot, start, true),
+            query::text_position(snapshot, end, false),
+        ) else {
+            return HashMap::new();
+        };
+        let view = View {
+            snapshot,
+            measurer: &*self.measurer,
+            blocks,
+            ranks,
+        };
+        query::selection_rects(&view, from, to)
     }
 
     /// Numbers a list that is not the one before it, which keeps its `Arc` when nothing changed.
@@ -379,8 +433,8 @@ impl LayoutEngine {
     }
 }
 
-fn list_for(tree: &BoxTree, laid: &Laid, placed: &Placed) -> DisplayList {
-    let (items, rasters) = paint::build(tree, laid, placed);
+fn list_for(tree: &BoxTree, laid: &Laid, placed: &Placed, text: &Text) -> DisplayList {
+    let (items, rasters) = paint::build(tree, laid, placed, text);
     let root = tree
         .html
         .filter(|html| placed.frame[*html])
@@ -425,6 +479,7 @@ fn placements(tree: &BoxTree, laid: &Laid, placed: &Placed) -> Vec<Placement> {
             let [top, _, _, left] = laid.border[index];
             let [pad_top, _, _, pad_left] = laid.padding[index];
             Some(Placement {
+                holder: index,
                 origin: [rect.x + left + pad_left, rect.y + top + pad_top],
                 layout,
                 bounds: rect,

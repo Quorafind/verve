@@ -15,6 +15,8 @@ use crate::measure::TextMeasurer;
 /// The lines of one inline formatting context, placed on the screen.
 #[derive(Clone, Debug)]
 pub(crate) struct Placement {
+    /// The box that holds the lines.
+    pub holder: usize,
     /// The top left of the block's content box, in viewport coordinates.
     pub origin: [f32; 2],
     pub layout: Arc<InlineLayout>,
@@ -196,13 +198,36 @@ fn covered(
     block: &Placement,
     fragment: &TextFragment,
     rank: &dyn Fn(NodeId) -> usize,
-    (from, to): ((usize, usize), (usize, usize)),
+    span: ((usize, usize), (usize, usize)),
 ) -> Option<Rect> {
+    let (x0, x1) = covered_x(view, fragment, rank, span)?;
+    let metrics = view.measurer.metrics(fragment.run.font, fragment.run.size);
+    let rect = Rect::new(
+        x0,
+        fragment.baseline - metrics.ascent,
+        (x1 - x0).max(0.),
+        metrics.ascent + metrics.descent,
+    );
+    Some(block.shifted(rect))
+}
+
+/// Where the part of a text fragment between `from` and `to` starts and ends, from the left of
+/// the block's content.
+fn covered_x(
+    view: &View,
+    fragment: &TextFragment,
+    rank: &dyn Fn(NodeId) -> usize,
+    (from, to): ((usize, usize), (usize, usize)),
+) -> Option<(f32, f32)> {
     if fragment.generated {
         return None;
     }
-    let source = node_text(view.snapshot, fragment.node)?;
     let at = rank(fragment.node);
+    // A node outside the span's ranks is out before its offsets are worked out.
+    if at < from.0 || at > to.0 {
+        return None;
+    }
+    let source = node_text(view.snapshot, fragment.node)?;
     let begin = (at, utf8_offset_to_utf16(source, fragment.range.start));
     let finish = (at, utf8_offset_to_utf16(source, fragment.range.end));
     if finish <= from || begin >= to {
@@ -212,14 +237,49 @@ fn covered(
     let high = to.min(finish);
     let x0 = x_at(fragment, utf16_offset_to_utf8(source, low.1));
     let x1 = x_at(fragment, utf16_offset_to_utf8(source, high.1));
-    let metrics = view.measurer.metrics(fragment.run.font, fragment.run.size);
-    let rect = Rect::new(
-        fragment.x + x0,
-        fragment.baseline - metrics.ascent,
-        (x1 - x0).max(0.),
-        metrics.ascent + metrics.descent,
-    );
-    Some(block.shifted(rect))
+    Some((fragment.x + x0, fragment.x + x1))
+}
+
+/// The selected part of each block's lines, by the block's box: a rectangle for each piece of
+/// text, from the left of the block's content, as high as its line (the way a selection is
+/// painted) rather than as high as the font.
+pub(crate) fn selection_rects(
+    view: &View,
+    start: (NodeId, usize),
+    end: (NodeId, usize),
+) -> HashMap<usize, Vec<Rect>> {
+    let order = ranks(view);
+    let rank = |node: NodeId| order.get(&node).copied().unwrap_or(usize::MAX);
+    let span = ((rank(start.0), start.1), (rank(end.0), end.1));
+    let mut found: HashMap<usize, Vec<Rect>> = HashMap::new();
+    if span.0 >= span.1 {
+        return found;
+    }
+    // Text that cannot be selected is not highlighted.
+    let texts = view.blocks.iter().flat_map(|block| {
+        block.layout.lines.iter().flat_map(move |line| {
+            line.fragments
+                .iter()
+                .filter_map(move |fragment| match fragment {
+                    Fragment::Text(text) if !text.select_none => {
+                        Some((block.holder, line.rect, text))
+                    }
+                    _ => None,
+                })
+        })
+    });
+    for (holder, line, text) in texts {
+        let Some((x0, x1)) = covered_x(view, text, &rank, span) else {
+            continue;
+        };
+        if x1 > x0 {
+            found
+                .entry(holder)
+                .or_default()
+                .push(Rect::new(x0, line.y, x1 - x0, line.height));
+        }
+    }
+    found
 }
 
 /// How far from the fragment's left edge the caret stands before byte `byte` of the node's text.

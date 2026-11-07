@@ -573,7 +573,7 @@ fn text_fragment(
         run: Arc::new(ShapedRun {
             font: text.run.font,
             size: text.run.size,
-            glyphs,
+            glyphs: glyphs.into(),
             width,
         }),
         x,
