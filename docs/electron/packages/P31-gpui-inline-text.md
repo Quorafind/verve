@@ -87,10 +87,35 @@ impl Document {
 }
 ```
 
-`@font-face`：P20 的加载管线拿到字体字节后，渲染器发 `FromRenderer::Font { family, weight, italic, bytes: Arc<[u8]> }`
-（**追加到 P02 契约**），Hub 转给 Shell，Shell 调 `cx.text_system().add_fonts(...)` 后回 `ToRendererInput::FontsChanged`
-（追加），渲染器把用到该 family 的块标脏重排。字体加载完成前按回退字体排（等于 `font-display: swap`），并让
-`document.fonts.ready` 在全部加载后 resolve。
+`@font-face`（第二阶段改了：**不走 Hub 与 Shell 的来回**）：`TextSystem::add_fonts(&self)` 在共享的 `Arc<TextSystem>` 上是 `pub` 且线程安全，渲染器线程直接注册，
+所以不加 `FromRenderer::Font` / `ToRendererInput::FontsChanged`（第一阶段写进 P02 的那一行作废）。通道是：
+
+```rust
+// verve-layout：测量器多三个方法。
+trait TextMeasurer { /* … */
+    /// 注册 `FontFace` 的字节，之后以 CSS 里的 `family` 别名使用；成功返回 true。默认不收（false）；无头测量器没有字体可拒，什么字节都收（true），
+    /// 所以无头页的字体都算加载成功。GPUI 的 `add_fonts` 按字体自己 name 表里的族名登记，所以测量器读字节里的 name 表（nameID 16，没有就 1），
+    /// 记一张别名表（CSS 族名 → 字体面），`resolve` 先查它。别名表是**页面自己的**，另一个页面看不到这个别名。
+    fn add_face(&self, family: &str, weight: f32, italic: bool, bytes: Arc<[u8]>) -> bool { false }
+    /// 页面用的测量器：字体面是页面自己的，文字系统与缓存各页共用。`Hub` 把 shell 的测量器经它交给每个页面。
+    fn for_page(self: Arc<Self>) -> Arc<dyn TextMeasurer>;
+    /// 一次布局结束（`LayoutEngine::update` 整体重排后、`replace` 之后）：放掉塑形留下的缓存。GPUI 公开 `WindowTextSystem::finish_frame` 之后在这里调它。
+    fn finish_layout(&self) {}
+}
+// verve-dom：字体字节到手（`new FontFace(f, buffer)` 立即；`new FontFace(f, 'url(..)')` 在 `load()` 取回后）时，先问宿主的字体钩子，
+// 钩子答 true 才把 face 置为 loaded，答 false 置为 error：
+pub struct FontData { pub family: String, pub weight: f32, pub italic: bool, pub bytes: Arc<[u8]> }
+pub type FontProvider = Box<dyn Fn(FontData) -> bool>;
+impl Document {
+    pub fn set_font_provider(&self, provider: Option<FontProvider>);
+    /// 宿主取回了 `url()` 字体的字节（`load()` 的加载），交给 face 的字体钩子并按答案 settle；钩子的报错以脚本错误上报。
+    pub fn settle_font_bytes(&self, runtime: &mut Runtime, face: FontFaceId, bytes: Vec<u8>);
+}
+```
+
+`PageLayout` 装的钩子：`measurer.add_face(..)`，成功则 `LayoutEngine::register_font(..)`（下一次 `update` 整体重排）并让文档的布局失效；
+`loaded`/`document.fonts.ready` 在钩子返回之后才 resolve，所以脚本在 `ready` 之后量到的宽度已经是新字体的。只支持 ttf/otf；woff/woff2 的字节注册失败，face 置为 `error`。
+样式表里的 `@font-face` 规则 verve-dom 还没有读（P22 的），只有脚本的 `FontFace` 对象走这条通道。
 
 ## 规则
 
@@ -141,6 +166,31 @@ impl Document {
 - **断行库**：`unicode-linebreak`（0.1.5，已在依赖图里：Linux/macOS 上 cosmic-text 用它；Windows 的 `electron.exe` 里它是新代码，约 21 KB），不引入第二套 UAX #14。
 - **GPUI 不打补丁**：`WindowTextSystem::finish_frame` 是 `pub(crate)`，在公开之前，渲染器线程每排若干次版（或缓存超界）就重建它的 `WindowTextSystem`。
 - **输入桥是 P32 的**：键盘、光标闪烁、输入法不在本包；本包给出选区模型、命中（点 → 文本位置）与绘制。
+
+## 第二阶段的契约（画字）
+
+```rust
+// verve-layout
+pub struct SpanPaint { pub background: Rgba, pub border: Border, pub radii: [f32; 4] }   // 行内元素的背景、边框、圆角（背景只有纯色）
+pub struct SpanBox { /* … */ pub paint: Option<Arc<SpanPaint>> }                         // None：既没有背景也没有边框
+impl LayoutEngine {
+    /// 文档选区（DOM 端点：文本节点用 UTF-16 偏移，元素用子节点下标）；变了就重建显示列表，返回是否变了。
+    pub fn set_selection(&mut self, selection: Option<((NodeId, usize), (NodeId, usize))>) -> bool;
+}
+```
+
+显示列表里每个有 `InlineLayout` 的盒，在它所在层叠上下文的“浮动之后、定位盒之前”按下面的顺序出项，所有项都在盒所在的裁剪、滚动、不透明度之内：
+1. 每个 `SpanBox` 一个 `PaintItem::Box`（背景与边框；`starts` 为假时去掉左边框，`ends` 为假时去掉右边框，该侧也不圆角：`box-decoration-break: slice`）；
+2. 选区：每行一个 `PaintItem::Box`，高度是**行盒**的高度（Chromium 填满行盒，不是 `range_rects` 的内容区高度），颜色默认 `#3390FF` 加 45% 不透明度（`::selection` 是 P22 的）；
+3. 每个文本片段：先是 `text-shadow` 的 `Glyphs`（偏移、阴影色，不模糊；emoji 没有单色的形状，阴影里不出），再是**下划线与上划线**的 `Decoration`，再是 `Glyphs`（`origin` 是片段左缘与基线，`PlacedGlyph.x` 从 `origin[0]` 算起），
+   最后是**删除线**的 `Decoration`（CSS 2.1 附录 E 7.2.1.4.1 与 Chromium 的 `TextFragmentPainter`：下划线、上划线在字下，删除线在字上；`bounds` 是线的矩形，`wavy` 对应 `text-decoration-style: wavy`；`double/dotted/dashed` 画成实线）；
+4. 原子行内盒照旧是它们自己的盒子。
+
+`Glyphs` 与 `Decoration` 的字段不变。`Shape::Glyphs` / `Shape::Decoration`（verve-gpui `plan.rs`）是它们的窗口坐标版本，不透明度乘进颜色。
+`Glyphs` 的回放按 `PlacedGlyph.font` 切段：`is_emoji` 的用 `paint_emoji`，其余用 `paint_glyph`。
+verve-dom：`Document::selection_boundaries(&self, runtime) -> Option<(Boundary, Boundary)>`（窗口选区第一个 range 的两端）；
+`document.caretPositionFromPoint(x, y)` 与 `caretRangeFromPoint(x, y)` 建在 `text_position_at` 之上。
+渲染器线程的测量器：`Hub::set_text_measurer(Arc<dyn TextMeasurer>)` 由 Shell 启动时装上（`GpuiMeasurer`，共享 `cx.text_system()`）；没装就是无头测量器。
 
 ## 步骤
 

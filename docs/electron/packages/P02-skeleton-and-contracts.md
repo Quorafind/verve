@@ -304,7 +304,7 @@ P13 第二段另加两个类型（`msg/page.rs`）：`EditCommand`（`Undo` `Red
 | `ToRenderer::{InsertCss, RemoveCss, EditCommand, ConsoleError}`、`ExecuteJavaScript.world`、`FromRenderer::ContextMenu`、`FromShell::KeyForContents`，及 `EditCommand`、`ContextMenuParams` | P13（第二段） |
 | `FromShell::KeyForContents`（`before-input-event`，Shell 不等 JS：`Hub::intercepts_keys(contents)` 为真时先投递给主进程，主进程决定后再转渲染器；上一行也列了它） | P13 / P32 |
 | `ToRendererInput::Visibility(bool)`（`document.visibilityState`） | P13 / P34 |
-| `FromRenderer::Font { family: String, weight: f32, italic: bool, bytes: Arc<[u8]> }`、`ToRendererInput::FontsChanged`（`@font-face` 的字体字节由 Hub 转给 Shell，Shell 调 `cx.text_system().add_fonts` 后回 `FontsChanged`，渲染器把排过字的块标脏重排；`weight` 取该 face 范围的下限）；P30 契约的 `PlacedGlyph.font`（画这个字形的字体，用了回退时与请求的不同） | P31 |
+| ~~`FromRenderer::Font`、`ToRendererInput::FontsChanged`~~（第二阶段作废：渲染器线程直接 `add_fonts`，见 P31 的 `@font-face` 通道；只剩 P30 契约的 `PlacedGlyph.font`：画这个字形的字体，用了回退时与请求的不同） | P31 |
 | `ToRendererInput::Choose { select, value }`（`<select>` 下拉弹层选中） | P32 |
 | `RendererView.display_list`（`Option<Arc<verve_layout::DisplayList>>`，随 `verve-layout` 接入渲染器时加）；`DisplayList.rasters`、`DisplayList.root`（页面的滚动容器）与进程内唯一的 `revision`、`Hitbox` 的形状、滚动帧 `PushScroll`/`PopScroll`（滚动只改 `Scroller` 的 offset）见 P30 的「契约调整」 | P30 |
 | `RendererView.images`、`PaintItem::Image.frame`、`DisplayList.chunks` | P35 / P33 |
