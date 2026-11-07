@@ -174,6 +174,9 @@ pub struct State {
     pub laid: Option<(u64, (f32, f32))>,
     pub scroll_offsets: HashMap<NodeId, [f32; 2]>,
     pub requests: Vec<Request>,
+    /// The selection's revision the page was last told of, and whether telling it is queued.
+    pub selection_seen: u64,
+    pub selection_queued: bool,
     pub media: crate::media::MediaStore,
     /// The pixels and objects of the page's canvases.
     #[cfg(feature = "canvas")]
@@ -263,6 +266,8 @@ impl State {
             laid: None,
             scroll_offsets: HashMap::new(),
             requests: Vec::new(),
+            selection_seen: 0,
+            selection_queued: false,
             media: crate::media::MediaStore::default(),
             #[cfg(feature = "canvas")]
             canvas: crate::canvas::CanvasStore::default(),

@@ -21,7 +21,7 @@ mod reclaim;
 mod shadow;
 
 pub use names::{camel_name, css_name, parse_style};
-pub(crate) use ranges::{Contents, Ranges, utf16_len, utf16_slice};
+pub(crate) use ranges::{Contents, Ranges, utf16_len};
 pub use ranges::{Direction, RangeData, RangeError};
 use shadow::Shadows;
 pub(crate) use shadow::is_custom_element_name;
@@ -298,6 +298,8 @@ pub struct Dom {
     partitions: HashSet<NodeId>,
     /// The live ranges and the selection: see `ranges.rs`.
     pub(crate) ranges: Ranges,
+    /// `document.designMode = "on"`: the whole document is editable.
+    pub design_mode: bool,
     /// Every `<style>` element made: the ones in the document are stylesheets.
     styles: HashSet<NodeId>,
     /// The shadow roots and what is assigned to their slots.
@@ -355,6 +357,7 @@ impl Dom {
             pinned: HashSet::new(),
             partitions: HashSet::new(),
             ranges: Ranges::default(),
+            design_mode: false,
             styles: HashSet::new(),
             shadows: Shadows::default(),
             slot_dirty: false,

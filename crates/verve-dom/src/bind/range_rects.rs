@@ -8,40 +8,30 @@
 use boa_engine::{Context, JsResult, JsValue};
 use verve::native;
 
+use super::element;
 use super::node::read_dom;
-use super::platform::boundary;
-use super::{element, node_id};
 use crate::Rect;
-use crate::layout_provider::{Boundary, fresh};
+use crate::layout_provider::fresh;
 
-/// The boxes of the text in the range, or `None` when there is no provider or the range's ends
-/// are not nodes.
+/// The boxes of the text in the range, or `None` when there is no provider.
 fn provided(this: &JsValue, context: &mut Context) -> JsResult<Option<Vec<Rect>>> {
-    let (start, start_offset) = boundary(this, context, "start")?;
-    let (end, end_offset) = boundary(this, context, "end")?;
-    let (Some(start), Some(end)) = (node_id(&start), node_id(&end)) else {
-        return Ok(None);
-    };
+    let data = super::range::data_of(this, context)?;
     let state = fresh(context);
     let hook = state.borrow().range_hook.clone();
-    let from: Boundary = (start, start_offset as usize);
-    let to: Boundary = (end, end_offset as usize);
-    Ok(hook.map(|hook| hook(from, to)))
+    Ok(hook.map(|hook| hook(data.start, data.end)))
 }
 
 /// The box of the element the range starts in: what a range answers with no provider.
 fn element_box(this: &JsValue, context: &mut Context) -> JsResult<Rect> {
-    let (container, _) = boundary(this, context, "start")?;
+    let id = super::range::data_of(this, context)?.start.0;
     let element = read_dom(context, |dom| {
-        node_id(&container).map(|id| {
-            if dom.get(id).is_some_and(|n| n.is_element()) {
-                id
-            } else {
-                dom.parent(id).unwrap_or(id)
-            }
-        })
+        if dom.get(id).is_some_and(|n| n.is_element()) {
+            id
+        } else {
+            dom.parent(id).unwrap_or(id)
+        }
     });
-    Ok(element.map_or_else(Rect::default, |id| element::painted(context, id)))
+    Ok(element::painted(context, element))
 }
 
 pub(super) fn client_rects(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {

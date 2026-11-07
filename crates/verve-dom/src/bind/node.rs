@@ -77,6 +77,7 @@ fn settle(context: &mut Context) {
         verve::report(context, &error);
     }
     super::observers::distribute(context);
+    super::range::announce(context);
     if relink_due {
         relink(context);
     }
@@ -738,34 +739,10 @@ const NODE_METHODS: &[Method] = &[
         };
         Ok(read_dom(cx, |dom| equal_nodes(dom, a, b)).into())
     }),
-    // Adjacent text nodes joined into one, and empty ones gone.
+    // Adjacent text nodes joined into one, and empty ones gone; boundaries follow the text.
     ("normalize", 0, |this, _, cx| {
         let id = node_of(this)?;
-        with_dom(cx, |dom| {
-            for parent in dom.subtree(id) {
-                let children = dom.children(parent).to_vec();
-                let mut previous: Option<NodeId> = None;
-                for child in children {
-                    let Some(NodeKind::Text(content)) = dom.get(child).map(|n| n.kind.clone())
-                    else {
-                        previous = None;
-                        continue;
-                    };
-                    if content.is_empty() {
-                        dom.detach(child);
-                        continue;
-                    }
-                    match previous {
-                        Some(before) => {
-                            let joined = format!("{}{content}", dom.text_content(before));
-                            dom.set_text(before, &joined);
-                            dom.detach(child);
-                        }
-                        None => previous = Some(child),
-                    }
-                }
-            }
-        });
+        with_dom(cx, |dom| dom.normalize(id));
         Ok(JsValue::undefined())
     }),
     ("lookupNamespaceURI", 1, |this, args, cx| {
@@ -1110,7 +1087,9 @@ const CHARACTER_DATA_ACCESSORS: &[Accessor] = &[
         Some(|this, args, cx| {
             let id = node_of(this)?;
             let value = opt_string(args, 0, cx)?.unwrap_or_default();
-            with_dom(cx, |dom| dom.set_text(id, &value));
+            // Setting the same data still replaces it, so boundaries in it go to 0.
+            let total = utf16(&data_of(this, cx)?.1).len();
+            with_dom(cx, |dom| dom.replace_data(id, 0, total, &value));
             Ok(JsValue::undefined())
         }),
     ),
@@ -1121,60 +1100,63 @@ const CHARACTER_DATA_ACCESSORS: &[Accessor] = &[
     ),
 ];
 
+/// The `IndexSizeError` of a character offset past the end of the data.
+fn check_offset(cx: &mut Context, units: &[u16], offset: f64) -> JsResult<()> {
+    if offset > units.len() as f64 {
+        return Err(dom_error(cx, "字符偏移超出数据长度", "IndexSizeError"));
+    }
+    Ok(())
+}
+
 const CHARACTER_DATA_METHODS: &[Method] = &[
     ("appendData", 1, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
         let more = arg_text(args, 0, cx)?;
-        with_dom(cx, |dom| dom.set_text(id, &format!("{data}{more}")));
+        let end = utf16(&data).len();
+        with_dom(cx, |dom| dom.replace_data(id, end, 0, &more));
         Ok(JsValue::undefined())
     }),
     ("insertData", 2, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
-        let offset = arg(args, 0).to_number(cx)?;
+        let offset = f64::from(arg(args, 0).to_u32(cx)?);
         let more = arg_text(args, 1, cx)?;
         let units = utf16(&data);
+        check_offset(cx, &units, offset)?;
         let (at, _) = span(&units, offset, 0.);
-        let joined = format!(
-            "{}{more}{}",
-            String::from_utf16_lossy(&units[..at]),
-            String::from_utf16_lossy(&units[at..])
-        );
-        with_dom(cx, |dom| dom.set_text(id, &joined));
+        with_dom(cx, |dom| dom.replace_data(id, at, 0, &more));
         Ok(JsValue::undefined())
     }),
     ("deleteData", 2, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
-        let (offset, count) = (arg(args, 0).to_number(cx)?, arg(args, 1).to_number(cx)?);
-        let units = utf16(&data);
-        if offset > units.len() as f64 {
-            return Err(dom_error(cx, "字符偏移超出数据长度", "IndexSizeError"));
-        }
-        let (start, end) = span(&units, offset, count);
-        let kept = format!(
-            "{}{}",
-            String::from_utf16_lossy(&units[..start]),
-            String::from_utf16_lossy(&units[end..])
+        let (offset, count) = (
+            f64::from(arg(args, 0).to_u32(cx)?),
+            f64::from(arg(args, 1).to_u32(cx)?),
         );
-        with_dom(cx, |dom| dom.set_text(id, &kept));
+        let units = utf16(&data);
+        check_offset(cx, &units, offset)?;
+        let (start, end) = span(&units, offset, count);
+        with_dom(cx, |dom| dom.replace_data(id, start, end - start, ""));
         Ok(JsValue::undefined())
     }),
     ("replaceData", 3, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
-        let (offset, count) = (arg(args, 0).to_number(cx)?, arg(args, 1).to_number(cx)?);
+        let (offset, count) = (
+            f64::from(arg(args, 0).to_u32(cx)?),
+            f64::from(arg(args, 1).to_u32(cx)?),
+        );
         let more = arg_text(args, 2, cx)?;
         let units = utf16(&data);
+        check_offset(cx, &units, offset)?;
         let (start, end) = span(&units, offset, count);
-        let joined = format!(
-            "{}{more}{}",
-            String::from_utf16_lossy(&units[..start]),
-            String::from_utf16_lossy(&units[end..])
-        );
-        with_dom(cx, |dom| dom.set_text(id, &joined));
+        with_dom(cx, |dom| dom.replace_data(id, start, end - start, &more));
         Ok(JsValue::undefined())
     }),
     ("substringData", 2, |this, args, cx| {
         let (_, data) = data_of(this, cx)?;
-        let (offset, count) = (arg(args, 0).to_number(cx)?, arg(args, 1).to_number(cx)?);
+        let (offset, count) = (
+            f64::from(arg(args, 0).to_u32(cx)?),
+            f64::from(arg(args, 1).to_u32(cx)?),
+        );
         let units = utf16(&data);
         let (start, end) = span(&units, offset, count);
         Ok(js_text(&String::from_utf16_lossy(&units[start..end])))
@@ -1183,7 +1165,7 @@ const CHARACTER_DATA_METHODS: &[Method] = &[
 
 const TEXT_METHODS: &[Method] = &[("splitText", 1, |this, args, cx| {
     let (id, data) = data_of(this, cx)?;
-    let offset = arg(args, 0).to_number(cx)?;
+    let offset = f64::from(arg(args, 0).to_u32(cx)?);
     let units = utf16(&data);
     if offset as usize > units.len() {
         return Err(dom_error(
@@ -1193,17 +1175,9 @@ const TEXT_METHODS: &[Method] = &[("splitText", 1, |this, args, cx| {
         ));
     }
     let (at, _) = span(&units, offset, 0.);
-    let head = String::from_utf16_lossy(&units[..at]);
-    let tail = String::from_utf16_lossy(&units[at..]);
-    let rest = with_dom(cx, |dom| {
-        dom.set_text(id, &head);
-        let rest = dom.create_text(&tail);
-        if let Some(parent) = dom.parent(id) {
-            let next = dom.sibling(id, 1, false);
-            dom.insert_before(parent, rest, next);
-        }
-        rest
-    });
+    let Some(rest) = with_dom(cx, |dom| dom.split_text(id, at)) else {
+        return Err(type_error("Illegal invocation: not a Text node"));
+    };
     Ok(wrap(cx, rest))
 })];
 

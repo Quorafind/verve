@@ -580,8 +580,7 @@ pub fn is_focusable(dom: &Dom, id: NodeId) -> bool {
     if !dom.is_connected(id) || !node.is_element() {
         return false;
     }
-    if node.attr("tabindex").is_some() || node.attr("contenteditable").is_some_and(|v| v != "false")
-    {
+    if node.attr("tabindex").is_some() || dom.editing_host(id) == Some(id) {
         return true;
     }
     match node.tag() {

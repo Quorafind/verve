@@ -99,14 +99,14 @@ impl Document {
         &self,
         runtime: &mut verve::Runtime,
     ) -> Option<(crate::Boundary, crate::Boundary)> {
-        let context = runtime.context();
-        match bind::caret::selection_bounds(context) {
-            Ok(bounds) => bounds,
-            Err(error) => {
-                verve::report(context, &error);
-                None
-            }
-        }
+        bind::range::selection_bounds(runtime.context())
+    }
+
+    /// How many ranges the document holds: the selection's, and one for each `Range` object not
+    /// yet collected.
+    pub fn live_ranges(&self) -> usize {
+        let mut state = self.state.borrow_mut();
+        state.dom.ranges.count()
     }
 
     /// A face the host was asked for was fetched: these are its bytes. The provider

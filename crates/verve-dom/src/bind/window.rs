@@ -769,7 +769,7 @@ const WINDOW_FUNCTIONS: &[Method] = &[
         let root = read_dom(cx, |dom| dom.html);
         super::element::scroll_to(root, args, cx, true)
     }),
-    ("getSelection", 0, |_, _, cx| super::platform::selection(cx)),
+    ("getSelection", 0, |_, _, cx| super::range::selection(cx)),
     ("postMessage", 2, post_message),
     ("alert", 1, |_, args, cx| {
         let message = opt_string(args, 0, cx)?.unwrap_or_default();

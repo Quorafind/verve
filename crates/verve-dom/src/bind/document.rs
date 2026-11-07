@@ -144,7 +144,7 @@ const DOCUMENT_METHODS: &[Method] = &[
             .ok_or_else(|| type_error("no such event class"))?;
         Ok(constructor.construct(&[js_text("")], None, cx)?.into())
     }),
-    ("createRange", 0, |_, _, cx| super::platform::new_range(cx)),
+    ("createRange", 0, |_, _, cx| super::range::new_range(cx)),
     ("createNodeIterator", 3, |_, args, cx| {
         super::traversal::create(args, cx, false)
     }),
@@ -225,7 +225,7 @@ const DOCUMENT_METHODS: &[Method] = &[
     ("caretPositionFromPoint", 2, |_, args, cx| {
         super::caret::position_from_point(cx, args)
     }),
-    ("getSelection", 0, |_, _, cx| super::platform::selection(cx)),
+    ("getSelection", 0, |_, _, cx| super::range::selection(cx)),
     ("exitFullscreen", 0, |_, _, cx| {
         let was = {
             let state = shared(cx);
@@ -286,8 +286,7 @@ const DOCUMENT_METHODS: &[Method] = &[
     ("execCommand", 3, |_, args, cx| {
         let command = arg_text(args, 0, cx)?.to_ascii_lowercase();
         if command == "copy" {
-            let selected =
-                super::call_method(&super::platform::selection(cx)?, "toString", &[], cx)?;
+            let selected = super::call_method(&super::range::selection(cx)?, "toString", &[], cx)?;
             let selected = text_of(&selected, cx)?;
             if !selected.is_empty() {
                 shared(cx)

@@ -23,6 +23,7 @@ pub mod node;
 pub mod observers;
 pub mod permissions;
 pub mod platform;
+pub mod range;
 pub mod range_rects;
 pub mod reveal;
 pub mod slot;

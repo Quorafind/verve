@@ -176,6 +176,12 @@ impl Ranges {
         }
     }
 
+    /// How many ranges are held, after giving back those whose object was collected.
+    pub(crate) fn count(&mut self) -> usize {
+        self.drain();
+        self.live
+    }
+
     /// Whether no range is held, the selection included.
     pub(crate) fn is_empty(&self) -> bool {
         self.live == 0
@@ -200,10 +206,6 @@ impl Ranges {
         }
         self.direction = direction;
         self.revision += 1;
-    }
-
-    pub(crate) fn set_direction(&mut self, direction: Direction) {
-        self.direction = direction;
     }
 
     /// Moves every boundary that `f` moves; the selection's revision moves with its range.

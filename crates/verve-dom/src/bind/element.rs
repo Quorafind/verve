@@ -1542,17 +1542,7 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
         "isContentEditable",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(read_dom(cx, |dom| {
-                let mut at = Some(id);
-                while let Some(node) = at {
-                    if let Some(value) = dom.get(node).and_then(|n| n.attr("contenteditable")) {
-                        return value != "false";
-                    }
-                    at = dom.parent(node);
-                }
-                false
-            })
-            .into())
+            Ok(read_dom(cx, |dom| dom.is_editable(id)).into())
         }),
         None,
     ),
@@ -1561,7 +1551,8 @@ const HTML_ELEMENT_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let id = node_of(this)?;
             Ok(js_text(&read_dom(cx, |dom| {
-                match dom.get_attr(id, "contenteditable").as_deref() {
+                let value = dom.get_attr(id, "contenteditable");
+                match value.map(|v| v.to_ascii_lowercase()).as_deref() {
                     Some("" | "true") => "true".to_owned(),
                     Some("false") => "false".to_owned(),
                     Some("plaintext-only") => "plaintext-only".to_owned(),

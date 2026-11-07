@@ -41,6 +41,7 @@ mod options;
 mod permissions;
 mod rect;
 mod schemes;
+pub mod selection;
 mod snapshot;
 mod state;
 mod storage;
