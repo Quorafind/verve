@@ -34,4 +34,8 @@ pub use gradient::{
     ColorStop, EllipseSize, Extent, Gradient, GradientPosition, LinearDirection, RadialShape,
     gradient_line, is_gradient,
 };
+pub use inline::{
+    DecorationStyle, Fragment, InlineLayout, LineBox, SpanBox, Stop, TextDecoration, TextFragment,
+    TextPaint, TextShadow,
+};
 pub use measure::{FontKey, FontMetrics, HeadlessMeasurer, PlacedGlyph, ShapedRun, TextMeasurer};
