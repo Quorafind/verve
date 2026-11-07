@@ -1050,8 +1050,8 @@ fn route(
     port: u16,
     cx: &mut Context,
 ) -> JsResult<Option<proxy::Via>> {
-    if let Some(via) = proxy::via_of(options, cx)? {
-        return Ok(Some(via));
+    if let Some(chosen) = proxy::chosen(options, cx)? {
+        return Ok(chosen);
     }
     if !get(options, "socketPath", cx)?.is_undefined()
         || get(options, "createConnection", cx)?.is_callable()

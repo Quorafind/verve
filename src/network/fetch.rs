@@ -34,7 +34,7 @@ use std::rc::Rc;
 
 use crate::browser_net::{
     BrowserNet, Decision, Gate, NetError, NetEvent, RequestHead, ResourceType, ResponseDecision,
-    ResponseHead, fresh_id, gate,
+    ResponseHead, Route, fresh_id, gate,
 };
 use crate::fetch::{Fetched, FetchedBody, OutgoingBody};
 use crate::native::{arg, closure, get, hidden, invoke, js_text, list_of, object, text_of};
@@ -489,6 +489,7 @@ fn dispatch(fetch: &JsObject, wire: Vec<(String, String)>, cx: &mut Context) -> 
     ] {
         options.set(JsString::from(key), value, false, cx)?;
     }
+    set_route(fetch, &options, &url, cx)?;
     let request = invoke(&module, "request", &[options.into()], cx)?;
     with(fetch, |f| {
         f.request = request.clone();
@@ -511,6 +512,35 @@ fn dispatch(fetch: &JsObject, wire: Vec<(String, String)>, cx: &mut Context) -> 
         None => Vec::new(),
     };
     invoke(&request, "end", &end, cx)?;
+    Ok(())
+}
+
+/// Puts the route the host chose for this hop on the request's options: a proxy of its own, or
+/// the direct connection. Without a host, or when it leaves the route to the realm, the agent's
+/// configuration decides.
+fn set_route(
+    fetch: &JsObject,
+    options: &JsObject,
+    url: &url::Url,
+    cx: &mut Context,
+) -> JsResult<()> {
+    let net = with(fetch, |f| f.gate.as_ref().map(|g| Rc::clone(&g.net)));
+    let route = net.map_or(Route::Realm, |net| net.proxy(url));
+    match route {
+        Route::Realm => {}
+        Route::Direct => crate::network::proxy::direct(options, cx)?,
+        Route::Via { host, port } => {
+            let tunnel = url.scheme() == "https";
+            crate::network::proxy::via(options, (host, port), tunnel, cx)?;
+        }
+        Route::Unsupported(message) => {
+            return Err(crate::native::coded_error(
+                cx,
+                &message,
+                "ERR_PROXY_INVALID_CONFIG",
+            ));
+        }
+    }
     Ok(())
 }
 

@@ -457,16 +457,7 @@ impl Runtime {
     /// as they are. See the `proxy` module of `network` for what is proxied and how `NO_PROXY`
     /// matches.
     pub fn set_proxy_env(&mut self, proxy: Option<ProxyEnv>) {
-        let state = shared(&self.context);
-        let mut net = state.network.borrow_mut();
-        net.proxy = proxy.map(|env| {
-            let config = Rc::new(network::proxy::Config::parse(&env));
-            (env, config)
-        });
-        let proxies = network::configured_proxies(&net);
-        if let Some(reactor) = &net.reactor {
-            reactor.send(network::reactor::Command::Proxies(proxies));
-        }
+        network::set_realm_proxy(&self.context, proxy);
     }
 
     /// The proxy [`Runtime::set_proxy_env`] set, if any.

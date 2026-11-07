@@ -226,6 +226,21 @@ pub enum FailureStyle {
     Net,
 }
 
+/// How a request the host watches reaches the network, as the host says per request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// As the realm's own proxy configuration says ([`crate::Runtime::set_proxy_env`]).
+    Realm,
+    /// Straight to the server, whatever the realm's configuration is.
+    Direct,
+    /// Through the `http:` proxy at `host`:`port`: an absolute-URI request for `http:` addresses,
+    /// a `CONNECT` tunnel for `https:` ones.
+    Via { host: String, port: u16 },
+    /// The host's route cannot be taken (a protocol this runtime does not speak): the request
+    /// fails with this message.
+    Unsupported(String),
+}
+
 /// The host's side of the browser's network. See the module documentation. Each method that
 /// may run the host's scripts is given the realm's context.
 pub trait BrowserNet {
@@ -278,6 +293,12 @@ pub trait BrowserNet {
     /// How a failure rejects the promise of a request this hook watches.
     fn failure_style(&self) -> FailureStyle {
         FailureStyle::Undici
+    }
+
+    /// The route a request for `url` takes. Asked for each request and each redirect hop, so two
+    /// hosts' requests in one realm never share a proxy. The default leaves it to the realm.
+    fn proxy(&self, _url: &url::Url) -> Route {
+        Route::Realm
     }
 
     /// The `user-agent` a request is sent with when its caller set none; `None` is the runtime's.
