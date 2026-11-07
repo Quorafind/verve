@@ -24,8 +24,9 @@ const GIVE_UP: Duration = Duration::from_secs(30);
 pub(crate) struct Capture {
     path: PathBuf,
     started: Instant,
-    /// The revision of the list last seen, and since when.
-    seen: Option<(u64, Instant)>,
+    /// The list last seen, and since when it has been the same but for the frames of animations
+    /// (a page with an animation that never ends is never still otherwise).
+    seen: Option<(Arc<verve_layout::DisplayList>, Instant)>,
     /// Set when the picture could not be made, for the process to leave with 1.
     failed: Arc<AtomicBool>,
 }
@@ -47,11 +48,14 @@ impl Capture {
             return self.give_up_after_a_while("no window drew a page");
         };
         let now = Instant::now();
-        match self.seen {
-            Some((revision, _)) if revision == list.revision => {}
-            _ => self.seen = Some((list.revision, now)),
+        match &self.seen {
+            Some((seen, _)) if seen.revision == list.revision || seen.same_but_frames(&list) => {}
+            _ => self.seen = Some((Arc::clone(&list), now)),
         }
-        let settled = self.seen.is_some_and(|(_, since)| now - since >= SETTLED);
+        let settled = self
+            .seen
+            .as_ref()
+            .is_some_and(|(_, since)| now - *since >= SETTLED);
         if !settled {
             return self.give_up_after_a_while("the page kept changing");
         }
