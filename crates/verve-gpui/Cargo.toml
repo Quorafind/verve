@@ -23,6 +23,8 @@ verve-dom = { path = "../verve-dom" }
 # The boxes of a page and the display list a window draws; the software painter's picture is
 # tiny-skia's, the one `verve-dom` already links.
 verve-layout = { path = "../verve-layout" }
+# `href`s are resolved against the page for the status of a link under the pointer.
+url = "2.5"
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 # The pictures GPUI paints (a rasterised gradient is one): the version GPUI itself uses.
 image = { workspace = true }

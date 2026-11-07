@@ -8,14 +8,18 @@ use std::sync::Arc;
 
 use gpui::{
     App, Background, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Edges, Element,
-    ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
-    LayoutId, Pixels, RenderImage, ScrollWheelEvent, StrikethroughStyle, Style, UnderlineStyle,
+    ElementId, ElementInputHandler, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    InspectorElementId, IntoElement, LayoutId, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, RenderImage, ScrollWheelEvent, StrikethroughStyle, Style, UnderlineStyle,
     Window, linear_color_stop, linear_gradient, point, px, size, transparent_black,
 };
 use verve_dom::Rect;
-use verve_layout::{Cursor, DisplayList, ImageKey, Rgba};
+use verve_layout::{DisplayList, ImageKey, Rgba};
 
+use crate::cursor;
 use crate::dom_view::DomState;
+use crate::ime;
+use crate::input;
 use crate::plan::{Command, Paint, Shape};
 use crate::text_measurer::GpuiMeasurer;
 use crate::wheel;
@@ -23,6 +27,53 @@ use crate::wheel;
 /// The page of a window, drawn from the state it shares with its view.
 pub(crate) struct DomElement {
     state: Rc<RefCell<DomState>>,
+}
+
+impl DomElement {
+    /// Registers what the frame listens to: the pointer, the wheel and, when a field has the
+    /// keyboard, the platform's text input.
+    fn listen(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        let origin = bounds.origin;
+        let state = Rc::clone(&self.state);
+        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, _| {
+            if phase.bubble() {
+                wheel::turned(&state, event, origin, window);
+            }
+        });
+        let state = Rc::clone(&self.state);
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+            if phase.bubble() {
+                input::mouse_down(&state, event, origin, window, cx);
+            }
+        });
+        let state = Rc::clone(&self.state);
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, _| {
+            if phase.bubble() {
+                input::mouse_up(&state, event, origin);
+            }
+        });
+        let state = Rc::clone(&self.state);
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, _| {
+            if phase.bubble() {
+                input::mouse_move(&state, event, origin);
+            }
+        });
+        let state = Rc::clone(&self.state);
+        window.on_mouse_event(move |event: &MouseExitEvent, phase, _, _| {
+            if phase.bubble() {
+                input::mouse_exit(&state, event);
+            }
+        });
+        let (focus, bridge, editable) = {
+            let state = self.state.borrow();
+            let editable =
+                (state.snapshot.as_ref()).is_some_and(|s| ime::editable_focus(s).is_some());
+            (state.focus.clone(), state.ime.clone(), editable)
+        };
+        if let (Some(focus), Some(bridge), true) = (focus, bridge, editable) {
+            window.handle_input(&focus, ElementInputHandler::new(bounds, bridge), cx);
+        }
+    }
 }
 
 impl DomElement {
@@ -83,15 +134,15 @@ impl Element for DomElement {
             return Vec::new();
         };
         // Every hitbox of the page is one of the frame, so the topmost box under the pointer says
-        // the cursor, `auto` (the arrow, for now) included: P32 brings the rest when the pointer
-        // is forwarded to the page.
+        // the cursor; an `auto` one is worked out from the page (a link is a hand).
         plan.hitboxes
             .iter()
             .map(|hitbox| {
                 let at = in_window(bounds.origin, hitbox.bounds);
+                let shown = state.cursor_of(hitbox.node, hitbox.cursor);
                 (
                     window.insert_hitbox(at, HitboxBehavior::Normal),
-                    cursor_style(hitbox.cursor),
+                    cursor::style(shown),
                 )
             })
             .collect()
@@ -105,7 +156,7 @@ impl Element for DomElement {
         _: &mut (),
         hitboxes: &mut Vec<(Hitbox, CursorStyle)>,
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) {
         for (hitbox, style) in hitboxes.iter() {
             window.set_cursor_style(*style, hitbox);
@@ -121,13 +172,7 @@ impl Element for DomElement {
             }
             self.state.borrow_mut().pictures.end_frame();
         }
-        let state = Rc::clone(&self.state);
-        let origin = bounds.origin;
-        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, _| {
-            if phase.bubble() {
-                wheel::turned(&state, event, origin, window);
-            }
-        });
+        self.listen(bounds, window, cx);
         if let Some(stats) = self.state.borrow_mut().stats.as_mut() {
             stats.end();
             // Stats want frames one after the other, not only when the page changes.
@@ -425,31 +470,4 @@ fn corners(radii: [f32; 4]) -> Corners<Pixels> {
 
 fn hsla([r, g, b, a]: Rgba) -> Hsla {
     gpui::Rgba { r, g, b, a }.into()
-}
-
-/// The cursor GPUI shows for a CSS `cursor`; the ones it has no picture for are the arrow.
-fn cursor_style(cursor: Cursor) -> CursorStyle {
-    match cursor {
-        Cursor::Pointer => CursorStyle::PointingHand,
-        Cursor::Text => CursorStyle::IBeam,
-        Cursor::VerticalText => CursorStyle::IBeamCursorForVerticalLayout,
-        Cursor::Crosshair => CursorStyle::Crosshair,
-        Cursor::Grab => CursorStyle::OpenHand,
-        Cursor::Grabbing => CursorStyle::ClosedHand,
-        Cursor::NotAllowed | Cursor::NoDrop => CursorStyle::OperationNotAllowed,
-        Cursor::Alias => CursorStyle::DragLink,
-        Cursor::Copy => CursorStyle::DragCopy,
-        Cursor::ContextMenu => CursorStyle::ContextualMenu,
-        Cursor::ColResize => CursorStyle::ResizeColumn,
-        Cursor::RowResize => CursorStyle::ResizeRow,
-        Cursor::EwResize | Cursor::EResize | Cursor::WResize => CursorStyle::ResizeLeftRight,
-        Cursor::NsResize | Cursor::NResize | Cursor::SResize => CursorStyle::ResizeUpDown,
-        Cursor::NwseResize | Cursor::NwResize | Cursor::SeResize => {
-            CursorStyle::ResizeUpLeftDownRight
-        }
-        Cursor::NeswResize | Cursor::NeResize | Cursor::SwResize => {
-            CursorStyle::ResizeUpRightDownLeft
-        }
-        _ => CursorStyle::Arrow,
-    }
 }
