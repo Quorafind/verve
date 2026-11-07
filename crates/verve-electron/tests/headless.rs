@@ -148,3 +148,68 @@ fn a_hidden_window_whose_page_is_drawn_gets_its_first_paint_when_it_is_shown() {
     app.hub.to_shell(show);
     assert_eq!(paints.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn an_input_methods_composition_reaches_the_focused_field_as_chromes_events() {
+    // Electron 39.8.10 (Input.imeSetComposition / Input.insertText, any text field): the first
+    // update is compositionstart, compositionupdate, beforeinput, input; a commit is
+    // compositionupdate, beforeinput, input, compositionend, and the inputs are
+    // `insertCompositionText` with `isComposing`. The page hears the same through the shell.
+    use verve_electron::msg::CompositionEvent;
+    let page = r#"<input id="i"><div id="e" contenteditable></div>"#;
+    let main = format!(
+        "const {{ BrowserWindow }} = require('electron'); const win = new BrowserWindow({{ title: 'ime', show: false }}); win.loadURL('data:text/html,{page}');"
+    );
+    let app = App::launch_script(&main, &[]);
+    let window = app.window("ime").expect("the window was made");
+    let contents = window.contents;
+    assert!(app.run_until(
+        |app| app.eval_renderer(contents, "!!document.getElementById('i')") == "true",
+        TIMEOUT
+    ));
+    let listen = "globalThis.heard = []; for (const kind of ['compositionstart', 'compositionupdate', 'compositionend', 'beforeinput', 'input']) { document.addEventListener(kind, (e) => heard.push(kind + (e.inputType ? ':' + e.inputType : '') + (e.data ? '=' + e.data : '') + (e.isComposing ? '*' : ''))); } document.getElementById('i').focus(); 0";
+    app.eval_renderer(contents, listen);
+    // `eval_renderer` answers JSON, so a string comes quoted.
+    let heard = |app: &App| {
+        app.eval_renderer(contents, "heard.join(' ')")
+            .trim_matches('"')
+            .to_owned()
+    };
+    app.shell.compose(
+        window.id,
+        CompositionEvent::Update {
+            text: "ni".into(),
+            selection: Some(2..2),
+        },
+    );
+    assert!(app.run_until(
+        |app| heard(app).contains("input:insertCompositionText=ni*"),
+        TIMEOUT
+    ));
+    assert_eq!(
+        heard(&app),
+        "compositionstart compositionupdate=ni beforeinput:insertCompositionText=ni* input:insertCompositionText=ni*"
+    );
+    app.shell
+        .compose(window.id, CompositionEvent::Commit("你".into()));
+    assert!(app.run_until(
+        |app| app.eval_renderer(contents, "document.getElementById('i').value") == "\"你\"",
+        TIMEOUT
+    ));
+    assert!(heard(&app).ends_with(
+        "compositionupdate=你 beforeinput:insertCompositionText=你* input:insertCompositionText=你* compositionend=你"
+    ));
+    // The same in an editable region, then cancelled.
+    app.eval_renderer(contents, "document.getElementById('e').focus(); 0");
+    app.shell.compose(
+        window.id,
+        CompositionEvent::Update {
+            text: "hao".into(),
+            selection: None,
+        },
+    );
+    let text = |app: &App| app.eval_renderer(contents, "document.getElementById('e').textContent");
+    assert!(app.run_until(|app| text(app) == "\"hao\"", TIMEOUT));
+    app.shell.compose(window.id, CompositionEvent::Cancel);
+    assert!(app.run_until(|app| text(app) == "\"\"", TIMEOUT));
+}

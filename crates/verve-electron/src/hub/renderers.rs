@@ -281,6 +281,7 @@ impl Hub {
                 | ToRendererInput::Wheel { .. }
                 | ToRendererInput::Key { .. }
                 | ToRendererInput::Text(_)
+                | ToRendererInput::Composition(_)
         );
         let slot = self.slot(contents);
         let slot = slot.filter(|_| by_person && self.has_renderer(contents));

@@ -36,7 +36,7 @@ pub enum ToRendererInput {
     },
     /// An input method's commit, or a paste.
     Text(String),
-    /// P24 makes it `Update { text, selection } | Commit | Cancel`.
+    /// An input method is composing, or has finished.
     Composition(CompositionEvent),
     /// The window gained (`true`) or lost focus.
     Focus(bool),
@@ -44,9 +44,20 @@ pub enum ToRendererInput {
     Visibility(bool),
 }
 
-/// What an input method is doing with a field. Empty until P24 gives it its variants.
-#[derive(Clone, Debug)]
-pub enum CompositionEvent {}
+/// What an input method is doing with the field or editable region that has the keyboard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompositionEvent {
+    /// It is composing `text` at the caret, replacing what it composed before; `selection` is
+    /// where its caret sits inside `text`, in UTF-16 units.
+    Update {
+        text: String,
+        selection: Option<std::ops::Range<usize>>,
+    },
+    /// The composition is over, settled as this text (which may differ from the last update).
+    Commit(String),
+    /// The composition was abandoned (Escape, focus lost): what it composed goes.
+    Cancel,
+}
 
 /// What a pointer did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -241,7 +241,7 @@ impl RendererGuest {
     /// What a person did to the window, to the page under it: the pointer, the wheel, keys and text
     /// act on the document ([`page_script::person`]). The page lays itself out, so the boxes a
     /// shell measured ([`ToRendererInput::Layout`]) are not taken; the viewport, the colour scheme
-    /// and the frames are; composition and focus are P24/P32's.
+    /// and the frames are; composition goes to the document (P24), focus is P32's.
     pub fn input(&mut self, msg: ToRendererInput) {
         match msg {
             ToRendererInput::Layout(_) => {}
@@ -444,7 +444,7 @@ impl Guest for RendererGuest {
             update: Some(update),
             wants_frame: self.document.wants_frame(),
             cursor: None,
-            ime_rect: None,
+            ime_rect: self.document.caret_rect(),
             display_list: Some(list),
         })
     }
