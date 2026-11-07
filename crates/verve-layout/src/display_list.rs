@@ -29,6 +29,9 @@ pub struct DisplayList {
     pub items: Vec<PaintItem>,
     /// The gradients that [`Fill::Raster`] refers to, for the renderer to rasterise.
     pub rasters: Vec<RasterSpec>,
+    /// The page's own scroll container, where a wheel ends when nothing under the pointer takes
+    /// it. `None` when the page does not scroll.
+    pub root: Option<NodeId>,
 }
 
 impl DisplayList {
@@ -54,6 +57,23 @@ impl DisplayList {
         &self,
         offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>,
     ) -> Vec<ResolvedHitbox> {
+        self.placed(offset_of)
+            .iter()
+            .filter_map(Placed::hitbox)
+            .collect()
+    }
+
+    /// The items that draw or hit (everything but the pushes and pops), each with the scroll, the
+    /// clip and the opacity it is under, in paint order. This is the one place the stack of frames,
+    /// clips and opacity groups is followed: the replay, the hitboxes and the wheel read it.
+    /// `offset_of` answers the offset the shell has scrolled a container to, if it is not the one
+    /// in the list.
+    pub fn placed(&self, offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>) -> Vec<Placed<'_>> {
+        self.walk(offset_of).placed
+    }
+
+    /// [`DisplayList::placed`], and the table of the frames the items are in.
+    fn walk(&self, offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>) -> Walk<'_> {
         let offsets: HashMap<NodeId, [f32; 2]> = self
             .items
             .iter()
@@ -62,60 +82,242 @@ impl DisplayList {
                 _ => None,
             })
             .collect();
-        let mut found = Vec::new();
-        // What each open effect had before it: the clip so far and the scroll so far.
-        let mut open: Vec<(Option<Rect>, [f32; 2])> = Vec::new();
-        let (mut clip, mut shift): (Option<Rect>, [f32; 2]) = (None, [0.; 2]);
+        let mut walk = Walk {
+            placed: Vec::new(),
+            frames: Vec::new(),
+        };
+        // What each open effect had before it.
+        let mut open: Vec<Under> = Vec::new();
+        let mut now = Under::OUTSIDE;
         for item in &self.items {
             match item {
                 PaintItem::PushClip { bounds, .. } => {
-                    open.push((clip, shift));
+                    open.push(now);
                     let seen = Rect::new(
-                        bounds.x - shift[0],
-                        bounds.y - shift[1],
+                        bounds.x - now.shift[0],
+                        bounds.y - now.shift[1],
                         bounds.width,
                         bounds.height,
                     );
-                    clip = Some(clip.map_or(seen, |outer| meet(outer, seen)));
+                    now.clip = Some(now.clip.map_or(seen, |outer| meet(outer, seen)));
                 }
                 PaintItem::PushScroll { node } => {
-                    open.push((clip, shift));
+                    open.push(now);
                     let offset = offset_of(*node)
                         .or_else(|| offsets.get(node).copied())
                         .unwrap_or([0.; 2]);
-                    shift = [shift[0] + offset[0], shift[1] + offset[1]];
+                    now.shift = [now.shift[0] + offset[0], now.shift[1] + offset[1]];
+                    walk.frames.push(Frame {
+                        node: *node,
+                        parent: now.frame,
+                    });
+                    now.frame = Some(walk.frames.len() - 1);
                 }
-                PaintItem::PushOpacity(_) => open.push((clip, shift)),
+                PaintItem::PushOpacity(alpha) => {
+                    open.push(now);
+                    now.opacity *= alpha;
+                }
                 PaintItem::PopClip | PaintItem::PopScroll | PaintItem::PopOpacity => {
-                    (clip, shift) = open.pop().unwrap_or((None, [0.; 2]));
+                    now = open.pop().unwrap_or(Under::OUTSIDE);
                 }
-                PaintItem::Hitbox {
-                    node,
-                    bounds,
-                    cursor,
-                    app_region,
-                } => {
-                    let seen = Rect::new(
-                        bounds.x - shift[0],
-                        bounds.y - shift[1],
-                        bounds.width,
-                        bounds.height,
-                    );
-                    let seen = clip.map_or(seen, |clip| meet(clip, seen));
-                    if seen.width > 0. && seen.height > 0. {
-                        found.push(ResolvedHitbox {
-                            node: *node,
-                            bounds: seen,
-                            cursor: *cursor,
-                            app_region: *app_region,
-                        });
-                    }
-                }
-                _ => {}
+                item => walk.placed.push(Placed {
+                    item,
+                    shift: now.shift,
+                    clip: now.clip,
+                    opacity: now.opacity,
+                    frame: now.frame,
+                }),
             }
         }
-        found
+        walk
     }
+
+    /// Every scroll container with its viewport in window coordinates, in paint order.
+    pub fn resolved_scrollers(
+        &self,
+        offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>,
+    ) -> Vec<ResolvedScroller> {
+        scrollers_of(&self.placed(offset_of), offset_of)
+    }
+
+    /// What the wheel does at `(x, y)` turned by `delta` (the amount the content moves up and to
+    /// the left: positive scrolls down and right): the container to scroll and where it comes to.
+    /// The wheel goes to the element on top at the point and up its scroll chain: the element
+    /// itself if it scrolls, then the frames it is in from the innermost out, and last the page.
+    /// The first of them that can move that way takes it. `None` when none can.
+    pub fn wheel(
+        &self,
+        x: f32,
+        y: f32,
+        delta: [f32; 2],
+        offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>,
+    ) -> Option<(NodeId, [f32; 2])> {
+        let walk = self.walk(offset_of);
+        let scrollers = scrollers_of(&walk.placed, offset_of);
+        let top = walk.placed.iter().rev().find_map(|placed| {
+            let hitbox = placed.hitbox()?;
+            hitbox
+                .bounds
+                .contains(x, y)
+                .then_some((hitbox.node, placed.frame))
+        });
+        let mut chain = Vec::new();
+        if let Some((node, mut frame)) = top {
+            chain.push(node);
+            while let Some(index) = frame {
+                chain.push(walk.frames[index].node);
+                frame = walk.frames[index].parent;
+            }
+        }
+        chain.extend(self.root);
+        chain.into_iter().find_map(|node| {
+            let scroller = scrollers.iter().find(|scroller| scroller.node == node)?;
+            let to = [
+                (scroller.offset[0] + delta[0]).clamp(0., scroller.most[0]),
+                (scroller.offset[1] + delta[1]).clamp(0., scroller.most[1]),
+            ];
+            (to != scroller.offset).then_some((node, to))
+        })
+    }
+}
+
+/// The clip, scroll, opacity and frame the items being walked are under.
+#[derive(Clone, Copy)]
+struct Under {
+    clip: Option<Rect>,
+    shift: [f32; 2],
+    opacity: f32,
+    frame: Option<usize>,
+}
+
+impl Under {
+    /// Under nothing: the page before any effect opens.
+    const OUTSIDE: Under = Under {
+        clip: None,
+        shift: [0.; 2],
+        opacity: 1.,
+        frame: None,
+    };
+}
+
+/// A scroll frame of a walk, and the frame it is in.
+struct Frame {
+    node: NodeId,
+    parent: Option<usize>,
+}
+
+/// The placed items of a list and the frames they are in.
+struct Walk<'a> {
+    placed: Vec<Placed<'a>>,
+    frames: Vec<Frame>,
+}
+
+fn scrollers_of(
+    placed: &[Placed<'_>],
+    offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>,
+) -> Vec<ResolvedScroller> {
+    placed
+        .iter()
+        .filter_map(|placed| placed.scroller(offset_of))
+        .collect()
+}
+
+/// A drawn or hit item and what it is under: see [`DisplayList::placed`].
+#[derive(Clone, Copy, Debug)]
+pub struct Placed<'a> {
+    pub item: &'a PaintItem,
+    /// How far the frames it is in are scrolled: the item is at its bounds minus this.
+    pub shift: [f32; 2],
+    /// The clips it is under, met, in window coordinates.
+    pub clip: Option<Rect>,
+    /// The opacity of the groups it is in, multiplied.
+    pub opacity: f32,
+    /// The innermost scroll frame it is in, as an index into the walk's frame table.
+    frame: Option<usize>,
+}
+
+impl Placed<'_> {
+    /// The hitbox this item is, placed in the window and cut to its clips; `None` for any other
+    /// item, and for a hitbox nothing of which shows.
+    pub fn hitbox(&self) -> Option<ResolvedHitbox> {
+        let PaintItem::Hitbox {
+            node,
+            bounds,
+            cursor,
+            app_region,
+        } = self.item
+        else {
+            return None;
+        };
+        let seen = self.in_window(*bounds);
+        let seen = self.clip.map_or(seen, |clip| meet(clip, seen));
+        (seen.width > 0. && seen.height > 0.).then_some(ResolvedHitbox {
+            node: *node,
+            bounds: seen,
+            cursor: *cursor,
+            app_region: *app_region,
+        })
+    }
+
+    /// The scroll container this item is, with its viewport in the window; `None` for any other
+    /// item. `offset_of` answers the offset the shell has scrolled a container to, if it is not
+    /// the list's.
+    pub fn scroller(
+        &self,
+        offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>,
+    ) -> Option<ResolvedScroller> {
+        let PaintItem::Scroller {
+            node,
+            viewport,
+            content,
+            offset,
+            scrollbar,
+        } = self.item
+        else {
+            return None;
+        };
+        let most = [
+            (content[0] - viewport.width).max(0.),
+            (content[1] - viewport.height).max(0.),
+        ];
+        let wanted = offset_of(*node).unwrap_or(*offset);
+        Some(ResolvedScroller {
+            node: *node,
+            viewport: self.in_window(*viewport),
+            clip: self.clip,
+            content: *content,
+            offset: [wanted[0].clamp(0., most[0]), wanted[1].clamp(0., most[1])],
+            most,
+            scrollbar: *scrollbar,
+            opacity: self.opacity,
+        })
+    }
+
+    /// `rect`, a rectangle in the item's frame, in the window.
+    pub fn in_window(&self, rect: Rect) -> Rect {
+        Rect::new(
+            rect.x - self.shift[0],
+            rect.y - self.shift[1],
+            rect.width,
+            rect.height,
+        )
+    }
+}
+
+/// A scroll container placed in the window: see [`DisplayList::resolved_scrollers`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedScroller {
+    pub node: NodeId,
+    /// The visible part of the box, in the window.
+    pub viewport: Rect,
+    pub clip: Option<Rect>,
+    pub content: [f32; 2],
+    /// How far it is scrolled now: the shell's if it has one, else the list's.
+    pub offset: [f32; 2],
+    /// How far it can be scrolled.
+    pub most: [f32; 2],
+    pub scrollbar: bool,
+    pub opacity: f32,
 }
 
 /// The part two rectangles share; zero-sized when they share none.
@@ -433,6 +635,7 @@ mod tests {
             revision: 1,
             items: vec![hitbox(1, 0.), hitbox(2, 5.), PaintItem::PopClip],
             rasters: Vec::new(),
+            root: None,
         };
         let none = |_: NodeId| None;
         assert_eq!(list.hit_test(2., 2., &none), Some(1));
@@ -464,6 +667,7 @@ mod tests {
                 },
             ],
             rasters: Vec::new(),
+            root: None,
         };
         let own = |_: NodeId| None;
         // At the list's own offset the box (150..160 in the frame) is at 30..40 in the window.
@@ -477,6 +681,80 @@ mod tests {
         let zero = |node: NodeId| (node == 9).then_some([0., 0.]);
         assert_eq!(list.hit_test(155., 5., &zero), None);
         assert!(list.resolved_hitboxes(&zero).is_empty());
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_nearest_container_that_can_move_and_chains_outwards() {
+        let scroller =
+            |node: NodeId, size: f32, content: [f32; 2], offset: [f32; 2]| PaintItem::Scroller {
+                node,
+                viewport: Rect::new(0., 0., size, size),
+                content,
+                offset,
+                scrollbar: true,
+            };
+        let area = |node: NodeId, size: f32| PaintItem::Hitbox {
+            node,
+            bounds: Rect::new(0., 0., size, size),
+            cursor: Cursor::Auto,
+            app_region: None,
+        };
+        // Container 2 (50 wide, 100 of content, scrolled to its end) is inside container 1 (100
+        // wide, 400 of content). Each container's box is a hitbox, its own outside its frame: the
+        // wheel starts from the topmost one under the pointer.
+        let list = DisplayList {
+            revision: 1,
+            items: vec![
+                area(1, 100.),
+                PaintItem::PushScroll { node: 1 },
+                area(2, 50.),
+                scroller(2, 50., [50., 100.], [0., 50.]),
+                PaintItem::PopScroll,
+                scroller(1, 100., [100., 400.], [0., 0.]),
+            ],
+            rasters: Vec::new(),
+            root: None,
+        };
+        let own = |_: NodeId| None;
+        // Down: the inner one is at its end, so the outer takes it.
+        assert_eq!(list.wheel(10., 10., [0., 40.], &own), Some((1, [0., 40.])));
+        // Up: the inner one can.
+        assert_eq!(list.wheel(10., 10., [0., -20.], &own), Some((2, [0., 30.])));
+        // Outside the inner one, the outer.
+        assert_eq!(
+            list.wheel(80., 80., [0., 500.], &own),
+            Some((1, [0., 300.]))
+        );
+        // Nothing sideways in boxes that have no width to scroll, and nothing outside them.
+        assert_eq!(list.wheel(10., 10., [30., 0.], &own), None);
+        assert_eq!(list.wheel(500., 10., [0., 10.], &own), None);
+        // The shell's own offset is the one the wheel moves on from.
+        let shell = |node: NodeId| (node == 1).then_some([0., 300.]);
+        assert_eq!(list.wheel(80., 80., [0., 500.], &shell), None);
+    }
+
+    #[test]
+    fn opacity_groups_multiply_and_end() {
+        let list = DisplayList {
+            revision: 1,
+            items: vec![
+                PaintItem::PushOpacity(0.5),
+                hitbox(1, 0.),
+                PaintItem::PushOpacity(0.5),
+                hitbox(2, 0.),
+                PaintItem::PopOpacity,
+                PaintItem::PopOpacity,
+                hitbox(3, 0.),
+            ],
+            rasters: Vec::new(),
+            root: None,
+        };
+        let seen: Vec<f32> = list
+            .placed(&|_| None)
+            .iter()
+            .map(|placed| placed.opacity)
+            .collect();
+        assert_eq!(seen, [0.5, 0.25, 1.]);
     }
 
     #[test]

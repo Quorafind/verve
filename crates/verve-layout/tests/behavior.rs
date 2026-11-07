@@ -592,3 +592,85 @@ fn lists_are_numbered_across_pages_so_a_new_page_never_repeats_the_number_of_an_
         assert_ne!(first.revision, second.revision);
     });
 }
+
+/// Where a wheel turned down by 30 at `(x, y)` goes, by the node's id.
+fn wheel_goes(page: &Laid, x: f32, y: f32) -> Option<(String, [f32; 2])> {
+    page.list()
+        .wheel(x, y, [0., 30.], &|_| None)
+        .map(|(node, to)| (page.name(node), to))
+}
+
+#[test]
+fn the_wheel_goes_to_the_inner_of_two_positioned_scrollers() {
+    on_page(|| {
+        // Both are positioned, so both are painted in the middle layer of their context, the
+        // outer first: it is the chain of the element under the pointer that picks the inner.
+        let page = page(
+            r#"<div id="outer" style="position:relative;overflow:auto;width:200px;height:200px">
+                <div id="inner" style="position:relative;overflow:auto;width:100px;height:100px">
+                    <div style="height:400px"></div></div>
+                <div style="height:600px"></div></div>"#,
+        );
+        assert_eq!(
+            wheel_goes(&page, 50., 50.),
+            Some(("inner".into(), [0., 30.]))
+        );
+        assert_eq!(
+            wheel_goes(&page, 150., 150.),
+            Some(("outer".into(), [0., 30.]))
+        );
+        // The inner one at its end passes the wheel on to the outer one.
+        let end = |node| (node == page.node("inner")).then_some([0., 300.]);
+        assert_eq!(
+            page.list()
+                .wheel(50., 50., [0., 30.], &end)
+                .map(|(node, to)| (page.name(node), to)),
+            Some(("outer".into(), [0., 30.]))
+        );
+    });
+}
+
+#[test]
+fn an_overlay_that_does_not_scroll_passes_the_wheel_to_the_page_not_to_what_it_covers() {
+    on_page(|| {
+        let page = page(
+            r#"<div id="list" style="position:absolute;left:0;top:0;overflow:auto;width:100px;height:100px">
+                <div style="height:300px"></div></div>
+            <div id="overlay" style="position:absolute;z-index:1;left:0;top:0;width:50px;height:100px"></div>
+            <div style="height:5000px"></div>"#,
+        );
+        // Over the overlay the page scrolls; where the list shows, the list.
+        assert_eq!(
+            wheel_goes(&page, 25., 50.),
+            Some(("page".into(), [0., 30.]))
+        );
+        assert_eq!(
+            wheel_goes(&page, 75., 50.),
+            Some(("list".into(), [0., 30.]))
+        );
+    });
+}
+
+#[test]
+fn of_two_scrollers_on_top_of_each_other_the_one_on_top_takes_the_wheel() {
+    on_page(|| {
+        let page = page(
+            r#"<div id="under" style="position:absolute;left:0;top:0;overflow:auto;width:100px;height:100px">
+                <div style="height:300px"></div></div>
+            <div id="over" style="position:absolute;left:50px;top:0;overflow:auto;width:100px;height:100px">
+                <div style="height:300px"></div></div>"#,
+        );
+        assert_eq!(
+            wheel_goes(&page, 25., 50.),
+            Some(("under".into(), [0., 30.]))
+        );
+        assert_eq!(
+            wheel_goes(&page, 75., 50.),
+            Some(("over".into(), [0., 30.]))
+        );
+        assert_eq!(
+            wheel_goes(&page, 125., 50.),
+            Some(("over".into(), [0., 30.]))
+        );
+    });
+}

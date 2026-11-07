@@ -23,7 +23,8 @@ mod value;
 
 pub use display_list::{
     AppRegionKind, Border, BorderLine, ControlKind, Cursor, DecorationKind, DisplayList, Fill,
-    ImageKey, ObjectFit, PaintItem, RasterSpec, ResolvedHitbox, Rgba, Shadow,
+    ImageKey, ObjectFit, PaintItem, Placed, RasterSpec, ResolvedHitbox, ResolvedScroller, Rgba,
+    Shadow,
 };
 pub use engine::LayoutEngine;
 pub use gradient::{

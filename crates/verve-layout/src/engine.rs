@@ -296,10 +296,15 @@ impl LayoutEngine {
 
 fn list_for(tree: &BoxTree, laid: &Laid, placed: &Placed) -> DisplayList {
     let (items, rasters) = paint::build(tree, laid, placed);
+    let root = tree
+        .html
+        .filter(|html| placed.frame[*html])
+        .map(|html| tree.boxes[html].node);
     DisplayList {
         revision: 0,
         items,
         rasters,
+        root,
     }
 }
 
