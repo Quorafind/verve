@@ -33,33 +33,61 @@
 
 ```rust
 // verve-layout
-pub struct PlacedGlyph { pub id: u32, pub x: f32, pub byte: u32, pub is_emoji: bool }
+pub struct PlacedGlyph { pub id: u32, pub x: f32, pub byte: u32, pub is_emoji: bool, pub font: FontKey /* 实际画它的字体：用了回退时与 ShapedRun.font 不同 */ }
 pub struct ShapedRun { pub font: FontKey, pub size: f32, pub glyphs: Vec<PlacedGlyph>, pub width: f32 }
 
-/// 行内格式化上下文的结果：P30 用它确定块高度，DisplayList 用它出 Glyphs/Decoration 项。
-pub struct InlineLayout { pub lines: Vec<LineBox>, pub height: f32, pub first_baseline: f32 }
-pub struct LineBox { pub rect: Rect, pub baseline: f32, pub fragments: Vec<Fragment> }
-pub enum Fragment {
-    Text { node: NodeId /* 文本节点 */, range: Range<usize> /* UTF-8 字节 */, run: Arc<ShapedRun>, x: f32, style: TextPaint },
-    Atomic { node: NodeId, rect: Rect },                    // inline-block / img / inline-flex / 表单控件
-    InlineStart { node: NodeId }, InlineEnd { node: NodeId } // 行内元素的边界：算 getClientRects、画背景边框
+/// 行内格式化上下文的结果：P30 用它确定块高度，DisplayList 用它出 Glyphs/Decoration 项。位置都是 CSS 像素，原点在块内容盒的左上角。
+pub struct InlineLayout { pub lines: Vec<LineBox>, pub height: f32, pub first_baseline: f32, pub last_baseline: f32,
+                          pub width: f32 /* 最宽一行伸到哪里（悬挂的文字也算） */ }
+pub struct LineBox {
+    pub rect: Rect, pub baseline: f32, pub fragments: Vec<Fragment>,
+    pub spans: Vec<SpanBox>,                                // 本行上有内容的每个行内元素的 border box，外层在前
 }
+pub enum Fragment {
+    Text(TextFragment),
+    Atomic { node: NodeId, rect: Rect },                    // inline-block / img / inline-flex / 表单控件的 border box
+}
+pub struct TextFragment {
+    pub node: NodeId /* 文本节点；生成的文字（::before、省略号）是所属元素 */, pub range: Range<usize> /* 文本节点里的 UTF-8 字节；生成的文字为空 */,
+    pub run: Arc<ShapedRun> /* 字形位置从片段左缘算，字间距、词间距、两端对齐已计入 */, pub x: f32, pub width: f32, pub baseline: f32,
+    pub paint: Arc<TextPaint>,
+    pub stops: Vec<Stop>,                                   // 光标能停的地方：每个字符一个，再加末尾；Stop { byte: 文本节点里的字节, x: 从片段左缘算 }
+    pub generated: bool, pub select_none: bool,
+}
+pub struct SpanBox { pub node: NodeId, pub rect: Rect, pub starts: bool /* 本行有元素的开头：画左边框与 padding */, pub ends: bool }
+// 行内元素的开头与结尾不再是片段：它们在 LineBox.spans 里（getClientRects 与画背景边框都读它）。
 
 impl LayoutEngine {
     pub fn client_rects(&self, node: NodeId) -> Vec<Rect>;                     // 行内元素每行一个盒子
-    /// 文本命中：视口坐标 → (文本节点, UTF-8 偏移)。selection 拖选、caretPositionFromPoint、document.caretRangeFromPoint 用
+    /// 一个块的行（块里没有行内内容则为 None）。
+    pub fn inline_layout(&self, node: NodeId) -> Option<Arc<InlineLayout>>;
+    /// 每个行内元素在每一行上的盒子（按元素）：交给 verve-dom 的 `Layout.fragments`。
+    pub fn fragments(&self) -> impl Iterator<Item = (NodeId, Vec<Rect>)> + '_;
+    /// 记下页面用 `@font-face` 注册的一个字体面；是新的就返回 true，下一次 `update` 全部重排（回退字体排过的文字重新整形）。
+    pub fn register_font(&mut self, family: &str, weight: f32, italic: bool) -> bool;
+    /// 文本命中：视口坐标 → (文本节点, UTF-16 偏移)（DOM 的偏移语义；片段里存 UTF-8，查询时换算）。selection 拖选、caretPositionFromPoint、document.caretRangeFromPoint 用
     pub fn text_position_at(&self, x: f32, y: f32) -> Option<(NodeId, usize)>;
-    /// Range 的盒子（Range.getClientRects / getBoundingClientRect）
+    /// Range 的盒子（Range.getClientRects / getBoundingClientRect）；端点是 DOM 的 (节点, 偏移)：文本节点用 UTF-16 偏移，元素用子节点下标。
+    /// 折叠的 range 返回一个宽度为 0 的盒子（编辑器的光标位置用它）。
     pub fn range_rects(&self, start: (NodeId, usize), end: (NodeId, usize)) -> Vec<Rect>;
 }
 
-// verve-dom 需要暴露（若 P23/P24 尚未提供，本包补上）：
-// Snapshot 里的文档选区：Option<(anchor: (NodeId, usize), focus: (NodeId, usize))>，偏移是 UTF-16（DOM 语义），
-// verve-layout 负责 UTF-16 ↔ UTF-8 换算。
-// 以及 Document::{text_position_at, range_rects} 的提供者钩子（与 P30 的布局提供者同一机制）。
+// 字体数据（verve-layout 公开导出）：
+pub enum Platform { Windows, Mac, Linux }            // Platform::current()：通用族名按它映射
+pub struct FontRegistry { /* register / contains / best / generation：@font-face 注册表，按族名，best() 按字重与斜体匹配 */ }
+
+// verve-dom（已实现）：
+pub struct Layout { /* rects, scroll_offsets, scroll_extents, */ pub fragments: Vec<(NodeId, Vec<Rect>)> /* 行内元素每行的盒子：Element.getClientRects 的答案 */ }
+pub type Boundary = (NodeId, usize);                                  // Range 的端点：节点与偏移
+pub type RangeProvider = Box<dyn Fn(Boundary, Boundary) -> Vec<Rect>>;
+impl Document {
+    /// 让 `Range.getClientRects` / `getBoundingClientRect` 向 provider 要两个端点之间文字的盒子（先把布局刷新到最新）；没有 provider 就答起点所在元素的盒子。
+    pub fn set_range_provider(&self, provider: Option<RangeProvider>);
+    // 尚未提供（第二阶段）：text_position_at 的 provider 钩子。
+}
 ```
 
-`@font-face`：P20 的加载管线拿到字体字节后，渲染器发 `FromRenderer::Font { family, weight, style, bytes: Arc<[u8]> }`
+`@font-face`：P20 的加载管线拿到字体字节后，渲染器发 `FromRenderer::Font { family, weight, italic, bytes: Arc<[u8]> }`
 （**追加到 P02 契约**），Hub 转给 Shell，Shell 调 `cx.text_system().add_fonts(...)` 后回 `ToRendererInput::FontsChanged`
 （追加），渲染器把用到该 family 的块标脏重排。字体加载完成前按回退字体排（等于 `font-display: swap`），并让
 `document.fonts.ready` 在全部加载后 resolve。
@@ -105,6 +133,14 @@ impl LayoutEngine {
 - 鼠标拖选：P32 把 `pointer_down/move/up` 交给 verve-dom，verve-dom 用 `text_position_at` 设置 `Selection`（P24 负责 DOM 侧），本包只提供命中与绘制。
 - `user-select: none` 的节点不参与命中。
 - 链接（`<a href>`）的 `cursor: pointer` 由 UA 样式表给出，进 `Hitbox` 项。
+
+## 第一阶段的决定（协调者，2026-11）
+
+- **`line-height: normal`**：布局取 `ascent + descent + line_gap`（`TextMeasurer::metrics` 给的值），不自己取整；GPUI 给的是 Windows 的 ascent（Consolas 14.719，hhea 是 11.883），Chromium 取哪张表要在真实 Electron 39.8.10 里观察，
+  测量器据此取整，结果记在第二阶段的状态里。无头测量器的 `normal` 就是 1 em。
+- **断行库**：`unicode-linebreak`（0.1.5，已在依赖图里：Linux/macOS 上 cosmic-text 用它；Windows 的 `electron.exe` 里它是新代码，约 21 KB），不引入第二套 UAX #14。
+- **GPUI 不打补丁**：`WindowTextSystem::finish_frame` 是 `pub(crate)`，在公开之前，渲染器线程每排若干次版（或缓存超界）就重建它的 `WindowTextSystem`。
+- **输入桥是 P32 的**：键盘、光标闪烁、输入法不在本包；本包给出选区模型、命中（点 → 文本位置）与绘制。
 
 ## 步骤
 

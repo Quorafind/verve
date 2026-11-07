@@ -97,12 +97,29 @@ Hub.renderer_view(id) ───────────────────�
 #[derive(Copy, Clone, Hash, Eq, PartialEq)] pub struct FontKey(pub u64);
 
 pub trait TextMeasurer: Send + Sync + 'static {
-    /// font-family 列表（已拆好）+ 粗细 + 斜体 → 字体；找不到就按回退链（P31 定义）
+    /// font-family 列表（已拆好）+ 粗细 + 斜体 → 字体；找不到就按回退链（P31 的 `fonts.rs` 把通用族换成具体名字、接上回退链再传进来）
     fn resolve(&self, families: &[String], weight: f32, italic: bool) -> FontKey;
-    fn metrics(&self, font: FontKey, size: f32) -> FontMetrics;          // ascent/descent/x_height/cap_height
-    /// 一段同一字体的文字塑形：每个字形的 id、x 偏移、对应的 UTF-8 字节下标
+    /// ascent/descent/line_gap 是 `line-height: normal` 直接用的值（实现者按 Chromium 的取整），布局不再取整；x_height/cap_height 用于 `vertical-align: middle`
+    fn metrics(&self, font: FontKey, size: f32) -> FontMetrics;
+    /// 一段同一字体请求的文字塑形：每个字形的 id、x 偏移、对应的 UTF-8 字节下标；
+    /// 字形缺失时平台会换回退字体，所以**字形自己带着画它的字体**（P31 追加：`PlacedGlyph.font`）
     fn shape(&self, text: &str, font: FontKey, size: f32) -> Arc<ShapedRun>;
+    // P31 追加（见 P31 文档的契约）：
+    /// 收下页面声明的字体面（`FontFace`/`@font-face`）的字节，之后以 CSS 里的 `family` 别名使用；是字体才返回 true。默认 false；无头测量器没有字体可拒，什么字节都收。
+    fn add_face(&self, family: &str, weight: f32, italic: bool, bytes: Arc<[u8]>) -> bool { false }
+    /// 页面用的测量器：字体面是页面自己的，文字系统与缓存各页共用。没有按页状态的测量器就是它自己。
+    fn for_page(self: Arc<Self>) -> Arc<dyn TextMeasurer>;
+    /// 一次布局结束的时刻，可以放掉塑形留下的缓存（`LayoutEngine::update` 整体重排后、`replace` 之后各调一次）。默认什么也不做。
+    fn finish_layout(&self) {}
 }
+
+// P31 追加：PlacedGlyph { id, x, byte, is_emoji, font: FontKey }。`font` 是实际画这个字形的字体（用了回退时与
+// `ShapedRun.font`——请求的字体——不同）。一个 `PaintItem::Glyphs` 是一个片段、一个颜色：用了回退字体时它里面的字形可以来自几个字体，
+// `Glyphs.font` 是请求的字体，画的时候按每个字形自己的 `font` 来；`origin` 是片段在基线上的起点，字形的 `x` 相对它。`PaintItem::Decoration` 不变：`bounds` 的高度就是线粗，
+// `wavy` 对应 `text-decoration-style: wavy`；`dotted`/`dashed`/`double` 在 v1 画成实线（GPUI 的 `UnderlineStyle` 只有实线与波浪线）。
+// 行内元素的背景与边框用既有的 `PaintItem::Box`（`node` 是该元素，每行一个片段，切开的一边宽度为 0）；选区用 `PaintItem::Box` 的纯色背景。
+// `LayoutEngine` 追加：`text_position_at(x, y) -> Option<(NodeId, usize)>`、`range_rects(start, end) -> Vec<Rect>`；
+// 偏移是 DOM 的 UTF-16 下标（布局自己换算到 UTF-8），`client_rects` 对跨行的行内元素每行返回一个盒子。
 
 pub struct LayoutEngine { /* taffy 树 + 节点映射 + 缓存 */ }
 impl LayoutEngine {
@@ -150,6 +167,8 @@ pub struct Layout {
     pub scroll_offsets: Vec<(NodeId, [f32; 2])>,
     /// 每个已渲染元素的 `[scrollWidth, scrollHeight]`（来源是 `LayoutEngine::scroll_extent`）。
     pub scroll_extents: Vec<(NodeId, [f32; 2])>,
+    /// 被分到几行的行内元素在每一行上的 border box（视口坐标）：`Element.getClientRects` 的答案（P31 加）。
+    pub fragments: Vec<(NodeId, Vec<Rect>)>,
 }
 
 impl Document {
