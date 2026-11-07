@@ -20,6 +20,7 @@ mod ipc;
 pub mod keyed;
 pub mod launcher;
 mod loader;
+pub mod log;
 pub mod main_guest;
 pub mod menu;
 pub mod msg;
