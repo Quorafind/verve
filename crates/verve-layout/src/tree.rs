@@ -4,7 +4,8 @@
 //! The boxes follow the flat tree (a shadow host's shadow root, a slot's assigned nodes). An
 //! element with `display: none` and its subtree make no box; `contents`, an inline element and
 //! the rows and row groups of a table make none of their own and their children stand in their
-//! place. Text makes no box until P31's line layout.
+//! place. A block whose content is inline (text, inline elements, atomic inlines) is a leaf that
+//! lays its lines out (see `crate::inline` and `flow.rs`); text makes no box of its own.
 //!
 //! Every box has two parents. Its *flat parent* is the box it is painted inside, which fixes the
 //! stacking order. Its *layout parent* is the box taffy lays it out in, which differs for an
@@ -13,12 +14,16 @@
 //! stood, for the insets the style leaves `auto` on both sides.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use taffy::style_helpers::{auto, length};
-use taffy::{AvailableSpace, LengthPercentage, Size, TaffyTree};
+use taffy::{LengthPercentage, Size, TaffyTree};
 use verve_dom::{NodeId, Snapshot};
 
+use crate::fonts::FontRegistry;
 use crate::grid::Areas;
+use crate::inline::{Ifc, InlineLayout, Parts};
+use crate::measure::TextMeasurer;
 use crate::props::{BoxProps, Display, Position, ReadContext, read};
 use crate::value::{Units, pixels, words};
 
@@ -37,12 +42,29 @@ pub(crate) struct BoxNode {
     pub ghost: Option<taffy::NodeId>,
     /// Which axes (x, y) take their position from the ghost.
     pub follows_ghost: [bool; 2],
+    /// A box that holds a run of inline content beside block boxes: it stands for no element
+    /// (`node` is the element it is in) and draws nothing.
+    pub anonymous: bool,
+    /// An atomic inline: a box in a line, laid out on its own and placed by the line.
+    pub atomic: bool,
+}
+
+/// An atomic inline, for the sizing that takes place before the lines are laid out.
+pub(crate) struct AtomRef {
+    pub box_index: usize,
+    /// The box of the inline formatting context the atom is in.
+    pub holder: usize,
+    /// Its place among that context's atoms.
+    pub slot: usize,
+    /// How deep in the tree: the deepest are sized first.
+    pub depth: usize,
 }
 
 /// The boxes of a page, in an order where a parent always comes before its children.
 pub(crate) struct BoxTree {
     pub boxes: Vec<BoxNode>,
-    pub taffy: TaffyTree<()>,
+    /// The tree taffy lays out; a block of inline content is a leaf holding its [`Ifc`].
+    pub taffy: TaffyTree<Ifc>,
     /// The initial containing block: the viewport at the origin.
     pub root: taffy::NodeId,
     pub viewport: (f32, f32),
@@ -53,21 +75,14 @@ pub(crate) struct BoxTree {
     pub by_node: HashMap<NodeId, usize>,
     /// How many style values fell back to their initial value.
     pub unsupported: u32,
-}
-
-impl BoxTree {
-    /// Lays the tree out in the viewport.
-    pub(crate) fn compute(&mut self) {
-        let (width, height) = self.viewport;
-        // A layout that fails leaves every box where it was; the previous result stays.
-        let _ = self.taffy.compute_layout(
-            self.root,
-            Size {
-                width: AvailableSpace::Definite(width),
-                height: AvailableSpace::Definite(height),
-            },
-        );
-    }
+    /// Every atomic inline.
+    pub atoms: Vec<AtomRef>,
+    /// The boxes that hold inline content, in tree order.
+    pub holders: Vec<usize>,
+    /// The lines of each holder, once laid out (see `atoms.rs`).
+    pub inline: Vec<Option<Arc<InlineLayout>>>,
+    /// Where each atomic inline is in its holder's content box.
+    pub atom_at: Vec<Option<[f32; 2]>>,
 }
 
 /// Where a table cell goes in the grid a table becomes.
@@ -79,19 +94,28 @@ struct Cell {
     column_span: u16,
 }
 
-struct Builder<'a> {
-    snapshot: &'a Snapshot,
-    root_font_size: f32,
-    boxes: Vec<BoxNode>,
+pub(crate) struct Builder<'a> {
+    pub snapshot: &'a Snapshot,
+    pub root_font_size: f32,
+    pub boxes: Vec<BoxNode>,
     /// The ancestors that can contain absolute boxes, innermost last: a box, whether it is
     /// positioned and whether it has a transform.
-    containers: Vec<(usize, bool, bool)>,
+    pub containers: Vec<(usize, bool, bool)>,
     cell: Option<Cell>,
-    unsupported: u32,
+    pub unsupported: u32,
+    pub measurer: Arc<dyn TextMeasurer>,
+    pub fonts: &'a FontRegistry,
+    /// The inline content of the boxes that hold it, by box.
+    pub ifcs: Vec<(usize, Parts)>,
 }
 
-/// The boxes of the document and a taffy tree holding their styles, ready to be laid out.
-pub(crate) fn build(snapshot: &Snapshot) -> BoxTree {
+/// The boxes of the document and a taffy tree holding their styles, ready to be laid out. Text is
+/// measured with `measurer`; `fonts` are the faces the page registered.
+pub(crate) fn build(
+    snapshot: &Snapshot,
+    measurer: &Arc<dyn TextMeasurer>,
+    fonts: &FontRegistry,
+) -> BoxTree {
     let root_font_size = snapshot
         .style(snapshot.dom.html, "font-size")
         .and_then(|text| pixels(text, &Units::new(16., 16., snapshot.viewport)))
@@ -103,6 +127,9 @@ pub(crate) fn build(snapshot: &Snapshot) -> BoxTree {
         containers: Vec::new(),
         cell: None,
         unsupported: 0,
+        measurer: measurer.clone(),
+        fonts,
+        ifcs: Vec::new(),
     };
     let mut top = Vec::new();
     builder.visit(snapshot.dom.html, None, None, &mut top);
@@ -143,7 +170,7 @@ impl Builder<'_> {
         }
     }
 
-    fn visit_children(
+    pub(crate) fn visit_children(
         &mut self,
         node: NodeId,
         parent: Option<usize>,
@@ -155,7 +182,7 @@ impl Builder<'_> {
         }
     }
 
-    fn make_box(
+    pub(crate) fn make_box(
         &mut self,
         node: NodeId,
         mut props: BoxProps,
@@ -176,6 +203,8 @@ impl Builder<'_> {
             children: Vec::new(),
             ghost: None,
             follows_ghost: ghost_axes,
+            anonymous: false,
+            atomic: false,
             props,
         });
         let props = &self.boxes[index].props;
@@ -188,7 +217,7 @@ impl Builder<'_> {
             self.visit_table(node, index, &mut children);
         } else {
             let areas = (!areas.is_empty()).then_some(&areas);
-            self.visit_children(node, Some(index), areas, &mut children);
+            self.build_content(node, index, areas, &mut children);
         }
         self.containers.pop();
         if self.boxes[index].props.display.is_flex_or_grid() {
@@ -359,7 +388,7 @@ impl Builder<'_> {
 
     /// Creates the taffy nodes and joins them as the boxes are joined.
     fn finish(mut self, viewport: (f32, f32)) -> BoxTree {
-        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let mut taffy: TaffyTree<Ifc> = TaffyTree::new();
         taffy.disable_rounding();
         let html_node = self.snapshot.dom.html;
         let html = self.boxes.iter().position(|b| b.node == html_node);
@@ -369,12 +398,7 @@ impl Builder<'_> {
         {
             root.props.style.display = taffy::Display::FlowRoot;
         }
-        for node in &mut self.boxes {
-            // A taffy node is made from the style and holds no copy the boxes could drift from.
-            node.taffy = taffy
-                .new_leaf(node.props.style.clone())
-                .expect("a taffy leaf is made from a style alone");
-        }
+        let (atoms, holders) = self.make_nodes(&mut taffy);
         join_children(&mut self.boxes, &mut taffy);
         let (width, height) = viewport;
         let root_style = taffy::Style {
@@ -398,12 +422,14 @@ impl Builder<'_> {
             .boxes
             .iter()
             .enumerate()
+            .filter(|(_, b)| !b.anonymous)
             .map(|(i, b)| (b.node, i))
             .collect();
         let body = self
             .boxes
             .iter()
-            .position(|b| b.node == self.snapshot.dom.body);
+            .position(|b| b.node == self.snapshot.dom.body && !b.anonymous);
+        let count = self.boxes.len();
         BoxTree {
             boxes: self.boxes,
             taffy,
@@ -413,13 +439,58 @@ impl Builder<'_> {
             body,
             by_node,
             unsupported: self.unsupported,
+            atoms,
+            holders,
+            inline: vec![None; count],
+            atom_at: vec![None; count],
         }
+    }
+
+    /// Creates the taffy node of every box: a leaf from its style, holding the inline content if
+    /// the box has any. Answers the atomic inlines and the boxes that hold content.
+    fn make_nodes(&mut self, taffy: &mut TaffyTree<Ifc>) -> (Vec<AtomRef>, Vec<usize>) {
+        let mut contents: HashMap<usize, Parts> =
+            std::mem::take(&mut self.ifcs).into_iter().collect();
+        let mut atoms = Vec::new();
+        let mut holders = Vec::new();
+        for index in 0..self.boxes.len() {
+            // A taffy node is made from the style and holds no copy the boxes could drift from.
+            let style = self.boxes[index].props.style.clone();
+            let node = match contents.remove(&index) {
+                Some(parts) => {
+                    for (slot, atom) in parts.atoms.iter().enumerate() {
+                        atoms.push(AtomRef {
+                            box_index: atom.box_index,
+                            holder: index,
+                            slot,
+                            depth: self.depth_of(atom.box_index),
+                        });
+                    }
+                    holders.push(index);
+                    let ifc = Ifc::new(self.measurer.clone(), parts);
+                    taffy.new_leaf_with_context(style, ifc)
+                }
+                None => taffy.new_leaf(style),
+            };
+            self.boxes[index].taffy = node.expect("a taffy leaf is made from a style alone");
+        }
+        (atoms, holders)
+    }
+
+    fn depth_of(&self, index: usize) -> usize {
+        let mut depth = 0;
+        let mut at = self.boxes[index].parent;
+        while let Some(parent) = at {
+            depth += 1;
+            at = self.boxes[parent].parent;
+        }
+        depth
     }
 }
 
 /// Sets each taffy node's children: its flat children that it lays out, in paint order, and then
 /// the absolute boxes hung under it from elsewhere. A hung box's ghost stays in its flat parent.
-fn join_children(boxes: &mut [BoxNode], taffy: &mut TaffyTree<()>) {
+fn join_children(boxes: &mut [BoxNode], taffy: &mut TaffyTree<Ifc>) {
     for node in boxes.iter_mut() {
         if node.follows_ghost != [false; 2] {
             node.ghost = taffy.new_leaf(node.props.style.clone()).ok();
@@ -429,7 +500,8 @@ fn join_children(boxes: &mut [BoxNode], taffy: &mut TaffyTree<()>) {
     for (index, node) in boxes.iter().enumerate() {
         for &child in &node.children {
             let child = &boxes[child];
-            if child.parent == Some(index) {
+            // An atomic inline is placed by its line, not by taffy: it is no child of the leaf.
+            if child.parent == Some(index) && !child.atomic {
                 lists[index].push(child.taffy);
             }
             if let Some(ghost) = child.ghost {

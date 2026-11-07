@@ -43,6 +43,18 @@ pub(crate) struct Paint {
 }
 
 impl Paint {
+    /// The look of a box that draws nothing: the anonymous boxes that hold inline content.
+    pub(crate) fn none() -> Paint {
+        Paint {
+            background_color: [0.; 4],
+            layers: Vec::new(),
+            border: Border::NONE,
+            radii: [(Dim::Px(0.), Dim::Px(0.)); 4],
+            shadows: Vec::new(),
+            outline: None,
+        }
+    }
+
     pub(crate) fn read(snapshot: &Snapshot, node: NodeId, units: &Units, color: Rgba) -> Paint {
         let text = |property: &str| snapshot.style(node, property);
         let colored = |property: &str| {
@@ -105,6 +117,15 @@ impl Paint {
             resolved = resolved.map(|radius| radius * scale);
         }
         resolved
+    }
+
+    /// The corner radii that are lengths, in pixels; a percentage is none. An inline element has no
+    /// one box to take a percentage of.
+    pub(crate) fn px_radii(&self) -> [f32; 4] {
+        self.radii.map(|(x, y)| {
+            let px = |dim: Dim| if let Dim::Px(px) = dim { px } else { 0. };
+            px(x).min(px(y)).max(0.)
+        })
     }
 
     /// The backgrounds back to front for a box of `size`. Gradients the shell cannot paint as

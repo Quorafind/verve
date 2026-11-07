@@ -35,6 +35,9 @@ pub struct PlacedGlyph {
     /// The UTF-8 byte of the text the glyph is for.
     pub byte: u32,
     pub is_emoji: bool,
+    /// The font that draws the glyph. When the requested font lacks a character the platform
+    /// takes another one for it, so this differs from [`ShapedRun::font`] for such a glyph.
+    pub font: FontKey,
 }
 
 /// A run of text in one font, shaped.
@@ -42,7 +45,7 @@ pub struct PlacedGlyph {
 pub struct ShapedRun {
     pub font: FontKey,
     pub size: f32,
-    pub glyphs: Vec<PlacedGlyph>,
+    pub glyphs: Arc<[PlacedGlyph]>,
     /// The run's advance.
     pub width: f32,
 }
@@ -57,6 +60,20 @@ pub trait TextMeasurer: Send + Sync + 'static {
     fn metrics(&self, font: FontKey, size: f32) -> FontMetrics;
     /// `text` shaped in one font.
     fn shape(&self, text: &str, font: FontKey, size: f32) -> Arc<ShapedRun>;
+    /// Takes the bytes of a face a page declared (`FontFace`, `@font-face`) to draw with as
+    /// `family`; answers whether they were a font it can use. The faces are the page's: another
+    /// page does not see the name. A measurer with no fonts at all takes any bytes, as
+    /// [`HeadlessMeasurer`] does.
+    fn add_face(&self, _family: &str, _weight: f32, _italic: bool, _bytes: Arc<[u8]>) -> bool {
+        false
+    }
+    /// The measurer a page uses: its own faces, over what the measurer shares among pages (the
+    /// text system and its caches). A measurer with nothing per page is its own.
+    fn for_page(self: Arc<Self>) -> Arc<dyn TextMeasurer>;
+    /// Says a layout is finished, the moment to let go of what shaping it kept (GPUI's
+    /// `WindowTextSystem::finish_frame` once that is public). Called at the end of every
+    /// [`crate::LayoutEngine::update`] that laid out again, and of every placing again.
+    fn finish_layout(&self) {}
 }
 
 /// The measurer for headless runs and tests: no fonts, so every character is half an em wide and
@@ -72,6 +89,10 @@ impl HeadlessMeasurer {
 }
 
 impl TextMeasurer for HeadlessMeasurer {
+    fn for_page(self: Arc<Self>) -> Arc<dyn TextMeasurer> {
+        self
+    }
+
     fn resolve(&self, _families: &[String], weight: f32, italic: bool) -> FontKey {
         FontKey((u64::from(weight.round() as u32) << 1) | u64::from(italic))
     }
@@ -86,6 +107,11 @@ impl TextMeasurer for HeadlessMeasurer {
         }
     }
 
+    fn add_face(&self, _family: &str, _weight: f32, _italic: bool, _bytes: Arc<[u8]>) -> bool {
+        // No fonts to refuse a face: a headless page's fonts all load, and measure the same.
+        true
+    }
+
     fn shape(&self, text: &str, font: FontKey, size: f32) -> Arc<ShapedRun> {
         let advance = size * Self::ADVANCE;
         let glyphs: Vec<PlacedGlyph> = text
@@ -96,13 +122,14 @@ impl TextMeasurer for HeadlessMeasurer {
                 x: place as f32 * advance,
                 byte: byte as u32,
                 is_emoji: false,
+                font,
             })
             .collect();
         Arc::new(ShapedRun {
             font,
             size,
             width: glyphs.len() as f32 * advance,
-            glyphs,
+            glyphs: glyphs.into(),
         })
     }
 }
@@ -120,6 +147,7 @@ mod tests {
         assert_eq!(run.glyphs.len(), 5);
         assert_eq!(run.glyphs[2].byte, 3);
         assert_eq!(run.glyphs[2].x, 20.);
+        assert_eq!(run.glyphs[2].font, font);
         assert_eq!(measurer.metrics(font, 10.).ascent, 8.);
     }
 

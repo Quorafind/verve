@@ -4,7 +4,7 @@
 //! `z-index`, the in-flow blocks, the floats, the positioned boxes with `z-index: auto` or `0` in
 //! tree order, and the contexts with a positive `z-index`. A positioned box with `z-index: auto`
 //! paints like a context of its own, but what stacks inside it belongs to the context above.
-//! Text and inline content (P31) go between the floats and the positioned boxes.
+//! Text and inline content go between the floats and the positioned boxes.
 //!
 //! Clips, scroll frames and opacity groups are not nested the way the boxes are: a box is cut by
 //! the overflow of its containing blocks, which an absolute box does not share with its parent. So
@@ -13,6 +13,10 @@
 //! are placed as if it were not scrolled, and the replay moves them.
 
 use verve_dom::Rect;
+
+mod text;
+
+pub(crate) use text::Text;
 
 use crate::display_list::{Border, Fill, PaintItem, RasterSpec};
 use crate::layout::Laid;
@@ -48,6 +52,7 @@ struct Layers {
 }
 
 struct Painter<'a> {
+    text: &'a Text<'a>,
     tree: &'a BoxTree,
     laid: &'a Laid,
     placed: &'a Placed,
@@ -65,11 +70,13 @@ pub(crate) fn build(
     tree: &BoxTree,
     laid: &Laid,
     placed: &Placed,
+    text: &Text,
 ) -> (Vec<PaintItem>, Vec<RasterSpec>) {
     let Some(html) = tree.html else {
         return (Vec::new(), Vec::new());
     };
     let mut painter = Painter {
+        text,
         tree,
         laid,
         placed,
@@ -145,7 +152,6 @@ impl Painter<'_> {
             self.layer(below);
         }
         self.flow_with_floats(index);
-        // P31: the inline content of the context's blocks is painted here.
         for middle in layers.middle {
             self.layer(middle);
         }
@@ -177,15 +183,24 @@ impl Painter<'_> {
 
     fn flow_with_floats(&mut self, index: usize) {
         let mut floats = Vec::new();
-        self.flow(index, &mut floats);
+        let mut holders = vec![index];
+        self.flow(index, &mut floats, &mut holders);
         for float in floats {
             self.unit(float);
+        }
+        // The text and inline boxes of the blocks go over the floats, as CSS 2.1 Appendix E has it.
+        for &holder in &holders {
+            self.inline_content(holder);
+        }
+        // A scroller's bars go over everything inside it, its text too: innermost first.
+        for &holder in holders.iter().skip(1).rev() {
+            self.scroller(holder);
         }
     }
 
     /// The in-flow, non-positioned descendants of `parent`, painted in tree order; floats are
     /// set aside for after.
-    fn flow(&mut self, parent: usize, floats: &mut Vec<usize>) {
+    fn flow(&mut self, parent: usize, floats: &mut Vec<usize>, holders: &mut Vec<usize>) {
         let tree = self.tree;
         for &child in &tree.boxes[parent].children {
             if self.kind(child) != Kind::Flow {
@@ -196,8 +211,8 @@ impl Painter<'_> {
                 continue;
             }
             self.paint_box(child);
-            self.flow(child, floats);
-            self.scroller(child);
+            holders.push(child);
+            self.flow(child, floats, holders);
         }
     }
 
@@ -222,7 +237,7 @@ impl Painter<'_> {
         let tree = self.tree;
         let node = &tree.boxes[index];
         let rect = self.placed.paint_rect[index];
-        if rect.width <= 0. || rect.height <= 0. || !node.props.input.visible {
+        if node.anonymous || rect.width <= 0. || rect.height <= 0. || !node.props.input.visible {
             return;
         }
         let around = around(tree, self.laid, self.placed, index);

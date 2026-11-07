@@ -44,9 +44,9 @@ mod update;
 mod window_state;
 mod world;
 
-pub use layout_provider::{Layout, LayoutProvider};
+pub use layout_provider::{Boundary, Layout, LayoutProvider, PositionProvider, RangeProvider};
 pub use update::{Changes, Update};
-pub use window_state::{Align, FontFaceId, FontOutcome, ScrollRequest};
+pub use window_state::{Align, FontData, FontFaceId, FontOutcome, FontProvider, ScrollRequest};
 
 use std::cell::{Ref, RefCell};
 use std::collections::HashSet;
@@ -57,7 +57,7 @@ use boa_engine::{Context, JsResult, JsValue, js_string};
 
 pub use css::{Computed, Environment, Style};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
-pub use field::Draft;
+pub use field::{Draft, utf8_offset_to_utf16, utf16_offset_to_utf8};
 pub use input::{Key, Modifiers, Pointer};
 pub use load::{Destination, LoadError, LoadEvent, LoadRequest, LoadResult, Loader, Ready};
 pub use media::{

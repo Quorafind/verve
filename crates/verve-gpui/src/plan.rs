@@ -17,12 +17,20 @@
 //!   lose the box's radii;
 //! - the outer shadow of a box is drawn whole, not cut out of the box, so it shows through a
 //!   translucent one;
-//! - `dotted` borders are dashed, and `double`, `groove`, `ridge`, `inset` and `outset` are solid.
+//! - `dotted` borders are dashed, and `double`, `groove`, `ridge`, `inset` and `outset` are solid;
+//! - an emoji is drawn in its own colours with no opacity: GPUI's `paint_emoji` takes no colour and
+//!   `with_element_opacity` is `pub(crate)` in the fork, so one that is partly faded is drawn in
+//!   full (one that is fully faded is left out). The fork patch that makes `with_element_opacity`
+//!   public lifts it;
+//! - a glyph's vertical offset from the shaper (`ShapedGlyph.position.y`, which marks such as
+//!   Arabic vowel signs use) is dropped: every glyph sits on the baseline.
+
+use std::sync::Arc;
 
 use verve_dom::{NodeId, Rect};
 use verve_layout::{
-    BorderLine, DisplayList, Fill, ImageKey, PaintItem, Placed, ResolvedHitbox, ResolvedScroller,
-    Rgba,
+    BorderLine, DecorationKind, DisplayList, Fill, ImageKey, PaintItem, Placed, PlacedGlyph,
+    ResolvedHitbox, ResolvedScroller, Rgba,
 };
 
 /// The width of the thin scrollbar a scroll container shows, and the gap to its edge.
@@ -67,6 +75,23 @@ pub enum Shape {
         radii: [f32; 4],
         paint: Paint,
     },
+    /// Shaped text: each glyph in the font that draws it, from `origin` (the left end of the
+    /// baseline). `bounds` is where all of it is, for skipping what is out of the window.
+    Glyphs {
+        origin: [f32; 2],
+        size: f32,
+        color: Rgba,
+        glyphs: Arc<[PlacedGlyph]>,
+        bounds: Rect,
+    },
+    /// An underline, overline or line-through: `bounds` is the line itself.
+    Decoration {
+        bounds: Rect,
+        color: Rgba,
+        wavy: bool,
+        /// A line through the text, which GPUI draws as a strikethrough.
+        through: bool,
+    },
     /// The border of a box that has one color all round, drawn in the box's own edge.
     Border {
         bounds: Rect,
@@ -108,6 +133,8 @@ pub fn plan(list: &DisplayList, offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>) 
                     lower_scrollbars(&scroller, &mut out.commands);
                 }
             }
+            PaintItem::Glyphs { .. } => lower_glyphs(&placed, &mut out.commands),
+            PaintItem::Decoration { .. } => lower_decoration(&placed, &mut out.commands),
             PaintItem::Hitbox { .. } => out.hitboxes.extend(placed.hitbox()),
             _ => {}
         }
@@ -155,6 +182,52 @@ fn lower_box(placed: &Placed, out: &mut Vec<Command>) {
     if border.is_visible() {
         lower_border(border, bounds, *radii, opacity, &mut push);
     }
+}
+
+fn lower_glyphs(placed: &Placed, out: &mut Vec<Command>) {
+    let PaintItem::Glyphs {
+        origin,
+        size,
+        color,
+        glyphs,
+        ..
+    } = placed.item
+    else {
+        return;
+    };
+    let at = placed.in_window(Rect::new(origin[0], origin[1], 0., 0.));
+    let reach = glyphs.last().map_or(0., |glyph| glyph.x) + size * 1.5;
+    out.push(Command {
+        clip: placed.clip,
+        shape: Shape::Glyphs {
+            origin: [at.x, at.y],
+            size: *size,
+            color: fade(*color, placed.opacity),
+            glyphs: Arc::clone(glyphs),
+            bounds: Rect::new(at.x - size * 0.5, at.y - size * 1.2, reach, size * 1.8),
+        },
+    });
+}
+
+fn lower_decoration(placed: &Placed, out: &mut Vec<Command>) {
+    let PaintItem::Decoration {
+        kind,
+        bounds,
+        color,
+        wavy,
+    } = placed.item
+    else {
+        return;
+    };
+    out.push(Command {
+        clip: placed.clip,
+        shape: Shape::Decoration {
+            bounds: placed.in_window(*bounds),
+            color: fade(*color, placed.opacity),
+            wavy: *wavy,
+            through: *kind == DecorationKind::LineThrough,
+        },
+    });
 }
 
 fn shadow_of(shadow: &verve_layout::Shadow, bounds: Rect, radii: [f32; 4], opacity: f32) -> Shape {
@@ -368,7 +441,7 @@ fn lower_scrollbars(scroller: &ResolvedScroller, out: &mut Vec<Command>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verve_layout::{Border, Shadow};
+    use verve_layout::{Border, DecorationKind, FontKey, Shadow};
 
     const RED: Rgba = [1., 0., 0., 1.];
     const BLUE: Rgba = [0., 0., 1., 1.];
@@ -426,6 +499,7 @@ mod tests {
                 Shape::Shadow { inset: true, .. } => "inset",
                 Shape::Fill { .. } => "fill",
                 Shape::Border { .. } => "border",
+                Shape::Glyphs { .. } | Shape::Decoration { .. } => "text",
             })
             .collect();
         assert_eq!(kinds, ["drop", "fill", "inset", "border"]);
@@ -462,6 +536,67 @@ mod tests {
         };
         assert_eq!((bounds.height, bounds.y), (25., 15. / 300. * 75.));
         assert_eq!(drawn.len(), 2, "no horizontal bar: the content fits across");
+    }
+
+    #[test]
+    fn text_in_a_frame_moves_with_it_and_fades_with_its_group() {
+        let glyph = |x| PlacedGlyph {
+            id: 7,
+            x,
+            byte: 0,
+            is_emoji: false,
+            font: FontKey(3),
+        };
+        let items = vec![
+            PaintItem::PushScroll { node: 9 },
+            PaintItem::PushOpacity(0.5),
+            PaintItem::Glyphs {
+                node: 1,
+                origin: [10., 30.],
+                font: FontKey(3),
+                size: 10.,
+                color: RED,
+                glyphs: vec![glyph(0.), glyph(6.)].into(),
+            },
+            PaintItem::Decoration {
+                kind: DecorationKind::Underline,
+                bounds: Rect::new(10., 32., 12., 1.),
+                color: BLUE,
+                wavy: true,
+            },
+            PaintItem::PopOpacity,
+            PaintItem::PopScroll,
+            PaintItem::Scroller {
+                node: 9,
+                viewport: Rect::new(0., 0., 200., 100.),
+                content: [200., 400.],
+                offset: [0., 15.],
+                scrollbar: false,
+            },
+        ];
+        let drawn = shapes(items);
+        let Shape::Glyphs {
+            origin,
+            color,
+            glyphs,
+            bounds,
+            ..
+        } = &drawn[0]
+        else {
+            panic!("glyphs first, got {drawn:?}");
+        };
+        assert_eq!((*origin, *color), ([10., 15.], [1., 0., 0., 0.5]));
+        assert_eq!(glyphs.len(), 2);
+        assert!(bounds.contains(10., 15.) && bounds.contains(21., 15.));
+        assert_eq!(
+            drawn[1],
+            Shape::Decoration {
+                bounds: Rect::new(10., 17., 12., 1.),
+                color: [0., 0., 1., 0.5],
+                wavy: true,
+                through: false,
+            }
+        );
     }
 
     #[test]

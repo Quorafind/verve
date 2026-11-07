@@ -65,3 +65,52 @@ fn a_face_with_an_address_loads_until_the_host_says_so() {
         );
     });
 }
+
+#[test]
+fn the_host_takes_the_bytes_of_a_face_and_says_whether_it_loaded() {
+    on_page(|| {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let mut page = Page::new(Options::default());
+        let taken = Rc::new(RefCell::new(Vec::new()));
+        let record = Rc::clone(&taken);
+        page.document.set_font_provider(Some(Box::new(move |font| {
+            record.borrow_mut().push((
+                font.family.clone(),
+                font.weight,
+                font.italic,
+                font.bytes.len(),
+            ));
+            font.family != "Broken"
+        })));
+        page.eval(
+            r#"window.good = new FontFace('"Brand"', new ArrayBuffer(8),
+                   { weight: 'bold', style: 'italic' });
+               window.bad = new FontFace('Broken', new ArrayBuffer(4));
+               window.remote = new FontFace('Remote', 'url(remote.ttf)', { weight: '300 500' });
+               window.states = [];
+               bad.loaded.catch(() => states.push('bad failed'));
+               remote.load().then(() => states.push('remote loaded'));"#,
+        );
+        page.runtime.run_microtasks();
+        assert_eq!(
+            page.eval("[good.status, bad.status, remote.status].join()"),
+            "loaded,error,loading"
+        );
+        let asked = page.document.take_requests();
+        let [Request::LoadFont { face, .. }] = &asked[..] else {
+            panic!("one fetch: {asked:?}");
+        };
+        page.document
+            .settle_font_bytes(&mut page.runtime, *face, vec![0; 12]);
+        assert_eq!(page.eval("states.join()"), "bad failed,remote loaded");
+        assert_eq!(
+            *taken.borrow(),
+            [
+                ("Brand".to_owned(), 700., true, 8),
+                ("Broken".to_owned(), 400., false, 4),
+                ("Remote".to_owned(), 300., false, 12),
+            ]
+        );
+    });
+}

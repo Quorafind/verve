@@ -493,15 +493,10 @@ impl Document {
                 }
                 _ => self.fail_image(runtime, &url),
             },
-            Wait::Font(face) => {
-                let ok = result.body.is_ok() && result.status < 400;
-                let outcome = if ok {
-                    FontOutcome::Loaded
-                } else {
-                    FontOutcome::Failed
-                };
-                self.settle_font(runtime, face, outcome);
-            }
+            Wait::Font(face) => match result.body {
+                Ok(bytes) if result.status < 400 => self.settle_font_bytes(runtime, face, bytes),
+                _ => self.settle_font(runtime, face, FontOutcome::Failed),
+            },
             Wait::Fetch(resolve, reject) => net::answer(runtime, resolve, reject, result),
         }
     }

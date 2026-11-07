@@ -12,7 +12,7 @@
 ## 背景（先读）
 
 - `src/isolate.rs`：`Guest` trait、`Isolate`、`Outbox`、`InterruptHandle`。所有 JS 线程都用它。
-- `crates/verve-dom/src/lib.rs`：`install`、`Document`、`Snapshot`、`Update`、`Request`、输入方法、`set_layout`。
+- `crates/verve-dom/src/lib.rs`：`install`、`Document`、`Snapshot`、`Update`、`Request`、输入方法、`set_layout`、`set_layout_provider`（P30）、`set_range_provider`、`Layout.fragments`、`RangeProvider`、`Boundary`（P31）。
 - `crates/verve-dom/tests/isolate.rs`：文档放在 isolate 里、另一线程读快照的现成例子。
 - `src/cli.rs`：`verve run` 的事件循环（什么时候退出、怎样睡到下一个到期点）。
 - 参考（只读）：`F:\dev\sandbox-v2\su-editor\crates\su-shell\src\editor\obsidian\view.rs`——su-editor 把计算样式映射成
@@ -309,7 +309,7 @@ P13 第二段另加两个类型（`msg/page.rs`）：`EditCommand`（`Undo` `Red
 | `ToRenderer::InspectTree { at }`（`openDevTools` 的文本转储与 `inspectElement`；第二阶段的 `InspectorEval` 不在其中） | P43 |
 | `FromShell::KeyForContents`（`before-input-event`，Shell 不等 JS：`Hub::intercepts_keys(contents)` 为真时先投递给主进程，主进程决定后再转渲染器；上一行也列了它） | P13 / P32 |
 | `ToRendererInput::Visibility(bool)`（`document.visibilityState`） | P13 / P34 |
-| `FromRenderer::Font(..)`、`ToRendererInput::FontsChanged`（`@font-face` 注册到 GPUI 文字系统） | P31 |
+| ~~`FromRenderer::Font`、`ToRendererInput::FontsChanged`~~（第二阶段作废：渲染器线程直接 `add_fonts`，见 P31 的 `@font-face` 通道；只剩 P30 契约的 `PlacedGlyph.font`：画这个字形的字体，用了回退时与请求的不同） | P31 |
 | `ToRendererInput::Choose { select, value }`（`<select>` 下拉弹层选中） | P32 |
 | `RendererView.display_list`（`Option<Arc<verve_layout::DisplayList>>`，随 `verve-layout` 接入渲染器时加）；`DisplayList.rasters`、`DisplayList.root`（页面的滚动容器）与进程内唯一的 `revision`、`Hitbox` 的形状、滚动帧 `PushScroll`/`PopScroll`（滚动只改 `Scroller` 的 offset）见 P30 的「契约调整」 | P30 |
 | `RendererView.images`、`PaintItem::Image.frame`、`DisplayList.chunks` | P35 / P33 |

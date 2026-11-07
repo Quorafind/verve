@@ -762,7 +762,7 @@ fn node_length(dom: &Dom, id: NodeId) -> usize {
     }
 }
 
-fn set_boundary(
+pub(super) fn set_boundary(
     this: &JsValue,
     context: &mut Context,
     which: &str,
@@ -777,7 +777,11 @@ fn set_boundary(
     Ok(())
 }
 
-fn boundary(this: &JsValue, context: &mut Context, which: &str) -> JsResult<(JsValue, u32)> {
+pub(super) fn boundary(
+    this: &JsValue,
+    context: &mut Context,
+    which: &str,
+) -> JsResult<(JsValue, u32)> {
     let node = get(this, &format!("{which}Container"), context)?;
     let offset = get(this, &format!("{which}Offset"), context)?.to_u32(context)?;
     Ok((node, offset))
@@ -1048,27 +1052,10 @@ const RANGE_METHODS: &[Method] = &[
         })))
     }),
     ("getBoundingClientRect", 0, |this, _, cx| {
-        let (container, _) = boundary(this, cx, "start")?;
-        let element = read_dom(cx, |dom| {
-            node_id(&container).map(|id| {
-                if dom.get(id).is_some_and(|n| n.is_element()) {
-                    id
-                } else {
-                    dom.parent(id).unwrap_or(id)
-                }
-            })
-        });
-        match element {
-            Some(id) => {
-                let rect = super::element::painted(cx, id);
-                super::element::rect_object(cx, rect)
-            }
-            None => make_rect(cx, [0.; 4]),
-        }
+        super::range_rects::bounding(this, cx)
     }),
     ("getClientRects", 0, |this, _, cx| {
-        let rect = super::call_method(this, "getBoundingClientRect", &[], cx)?;
-        Ok(native::array(cx, vec![rect]))
+        super::range_rects::client_rects(this, cx)
     }),
     ("compareBoundaryPoints", 2, |_, _, _| Ok(0.into())),
     ("comparePoint", 2, |_, _, _| Ok(0.into())),
@@ -1092,7 +1079,7 @@ pub fn selection(context: &mut Context) -> JsResult<JsValue> {
     Ok(made.into())
 }
 
-fn selection_ranges(this: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
+pub(super) fn selection_ranges(this: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
     let ranges = get(this, "__ranges", context)?;
     list_of(&ranges, context)
 }

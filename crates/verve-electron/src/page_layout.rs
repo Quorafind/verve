@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use verve::Runtime;
-use verve_dom::{Document, Layout, Request, ScrollRequest};
-use verve_layout::{DisplayList, HeadlessMeasurer, LayoutEngine};
+use verve_dom::{Document, FontData, Layout, Request, ScrollRequest};
+use verve_layout::{DisplayList, LayoutEngine, TextMeasurer};
 
 /// The layout of one page.
 pub(crate) struct PageLayout {
@@ -21,10 +21,10 @@ pub(crate) struct PageLayout {
 }
 
 impl PageLayout {
-    /// Lays `document` out from now on, measuring text with the headless measurer: P31 brings
-    /// the shell's real one.
-    pub(crate) fn install(document: &Document) -> Self {
-        let engine = Rc::new(RefCell::new(LayoutEngine::new(Arc::new(HeadlessMeasurer))));
+    /// Lays `document` out from now on, measuring text with `measurer`: the shell's over GPUI's
+    /// text system, or the headless one.
+    pub(crate) fn install(document: &Document, measurer: Arc<dyn TextMeasurer>) -> Self {
+        let engine = Rc::new(RefCell::new(LayoutEngine::new(Arc::clone(&measurer))));
         let provider = Rc::clone(&engine);
         document.set_layout_provider(Some(Box::new(move |update| {
             let mut engine = provider.borrow_mut();
@@ -36,12 +36,45 @@ impl PageLayout {
                     .rects()
                     .filter_map(|(node, _)| Some((node, engine.scroll_extent(node)?)))
                     .collect(),
+                fragments: engine.fragments().collect(),
             }
+        })));
+        // A range's boxes come from the same lines. The provider is asked after the layout is up
+        // to date, and is not called while the engine is being updated.
+        let ranges = Rc::clone(&engine);
+        document.set_range_provider(Some(Box::new(move |start, end| {
+            ranges.borrow().range_rects(start, end)
+        })));
+        let positions = Rc::clone(&engine);
+        document.set_position_provider(Some(Box::new(move |x, y| {
+            positions.borrow().text_position_at(x, y)
+        })));
+        // The bytes of a font the page declared go to the measurer; the layout then takes the face
+        // by its family, and the document is laid out again.
+        let fonts = Rc::clone(&engine);
+        document.set_font_provider(Some(Box::new(move |font: FontData| {
+            let FontData {
+                family,
+                weight,
+                italic,
+                bytes,
+            } = font;
+            if !measurer.add_face(&family, weight, italic, bytes) {
+                return false;
+            }
+            fonts.borrow_mut().register_font(&family, weight, italic);
+            true
         })));
         Self {
             engine,
             published: 0,
         }
+    }
+
+    /// Shows the document's selection as it is now: the display list has it from here on.
+    pub(crate) fn show_selection(&self, runtime: &mut Runtime, document: &Document) {
+        let selection = document.selection_boundaries(runtime);
+        self.engine.borrow_mut().set_selection(selection);
     }
 
     /// The display list of the document as it is laid out now, and whether it is not the one the

@@ -6,10 +6,14 @@
 //! under a point, and the [`DisplayList`] to paint. Nothing here knows GPUI; text is measured
 //! through [`TextMeasurer`].
 
+mod atoms;
 mod display_list;
 mod engine;
+mod flow;
+pub mod fonts;
 mod gradient;
 mod grid;
+mod inline;
 mod layout;
 mod measure;
 mod paint;
@@ -27,8 +31,13 @@ pub use display_list::{
     Shadow,
 };
 pub use engine::LayoutEngine;
+pub use fonts::{FontRegistry, Platform};
 pub use gradient::{
     ColorStop, EllipseSize, Extent, Gradient, GradientPosition, LinearDirection, RadialShape,
     gradient_line, is_gradient,
+};
+pub use inline::{
+    DecorationStyle, Fragment, InlineLayout, LineBox, SpanBox, SpanPaint, Stop, TextDecoration,
+    TextFragment, TextPaint, TextShadow,
 };
 pub use measure::{FontKey, FontMetrics, HeadlessMeasurer, PlacedGlyph, ShapedRun, TextMeasurer};

@@ -157,6 +157,15 @@ pub struct State {
     /// Works `rects` out again when a script reads them after the document changed, if a layout
     /// provider is installed ([`crate::Document::set_layout_provider`]).
     pub layout_hook: Option<Rc<dyn Fn()>>,
+    /// Answers the boxes of a range of text, if the page's layout can
+    /// ([`crate::Document::set_range_provider`]).
+    pub range_hook: Option<crate::layout_provider::RangeHook>,
+    /// Answers the text position under a point, if the page's layout can
+    /// ([`crate::Document::set_position_provider`]).
+    pub position_hook: Option<crate::layout_provider::PositionHook>,
+    /// Takes the bytes of a font a page declared, if the page's text can use them
+    /// ([`crate::Document::set_font_provider`]).
+    pub font_hook: Option<crate::window_state::FontHook>,
     /// `[scrollWidth, scrollHeight]` of each box, as the provider last worked them out.
     pub scroll_extents: HashMap<NodeId, [f32; 2]>,
     /// The revision and viewport the provider last laid the document out for.
@@ -238,6 +247,9 @@ impl State {
             adopted: BTreeMap::new(),
             rects: HashMap::new(),
             layout_hook: None,
+            range_hook: None,
+            position_hook: None,
+            font_hook: None,
             scroll_extents: HashMap::new(),
             laid: None,
             scroll_offsets: HashMap::new(),

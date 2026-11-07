@@ -9,6 +9,7 @@
 //! [`crate::Document::settle_font`].
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use boa_engine::{
     Context, Finalize, JsData, JsObject, JsResult, JsSymbol, JsValue, Trace, js_string,
@@ -24,7 +25,7 @@ use super::{
     webidl_class,
 };
 use crate::state::shared;
-use crate::{FontFaceId, FontOutcome, Request};
+use crate::{FontData, FontFaceId, FontOutcome, Request};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FaceStatus {
@@ -154,7 +155,11 @@ fn construct_face(
     let (promise, resolvers) = JsPromise::new_pending(context);
     let id = FontFaceId(shared(context).borrow_mut().id());
     let prototype = prototype_of_target(new_target, context)?;
-    let bytes = matches!(source, Source::Bytes);
+    let bytes = match source {
+        Source::Bytes => verve::encoding::bytes_of(&arg(args, 1), context)?.unwrap_or_default(),
+        Source::Url(_) => Vec::new(),
+    };
+    let has_bytes = matches!(source, Source::Bytes);
     let face = Face {
         id,
         descriptors,
@@ -165,8 +170,8 @@ fn construct_face(
         reject: resolvers.reject,
     };
     let object = JsObject::from_proto_and_data(prototype, FaceData(GcRefCell::new(face)));
-    if bytes {
-        settle(context, &object, FontOutcome::Loaded)?;
+    if has_bytes {
+        accept(context, &object, bytes.into())?;
     }
     Ok(object.into())
 }
@@ -193,6 +198,49 @@ fn settle(context: &mut Context, face: &JsObject, outcome: FontOutcome) -> JsRes
     };
     hook.call(&JsValue::undefined(), &[result], context)?;
     refresh(context, !ok)
+}
+
+/// A face's bytes are in: the page's text takes them if it can (see
+/// [`crate::Document::set_font_provider`]), and the face loads or fails by its answer. The layout
+/// is stale after a font it uses.
+fn accept(context: &mut Context, face: &JsObject, bytes: Arc<[u8]>) -> JsResult<()> {
+    let data = with_face(&face.clone().into(), |f| font_data(&f.descriptors, bytes))?;
+    let hook = shared(context).borrow().font_hook.clone();
+    let ok = hook.as_ref().is_none_or(|hook| hook(data));
+    if ok && hook.is_some() {
+        shared(context).borrow_mut().laid = None;
+    }
+    let outcome = if ok {
+        FontOutcome::Loaded
+    } else {
+        FontOutcome::Failed
+    };
+    settle(context, face, outcome)
+}
+
+/// What a face's descriptors say of the font: its family, the lower end of its weight and its
+/// slant.
+fn font_data(descriptors: &[String], bytes: Arc<[u8]>) -> FontData {
+    let weight = match descriptors[2].split_whitespace().next() {
+        Some("bold") => 700.,
+        Some(word) => word.parse().unwrap_or(400.),
+        None => 400.,
+    };
+    FontData {
+        family: descriptors[0].trim().trim_matches(['"', '\'']).to_owned(),
+        weight,
+        italic: descriptors[1].starts_with("italic") || descriptors[1].starts_with("oblique"),
+        bytes,
+    }
+}
+
+/// The bytes of a face the host was asked for arrived: see [`crate::Document::settle_font_bytes`].
+pub fn deliver_face(context: &mut Context, id: FontFaceId, bytes: Arc<[u8]>) -> JsResult<()> {
+    let face = shared(context).borrow_mut().fonts.pending.remove(&id);
+    match face {
+        Some(face) => accept(context, &face, bytes),
+        None => Ok(()),
+    }
 }
 
 /// The host fetched the face it was asked for: see [`crate::Document::settle_font`].

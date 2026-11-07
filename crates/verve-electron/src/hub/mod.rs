@@ -26,6 +26,7 @@ mod diagnostics;
 mod records;
 mod renderers;
 mod shell;
+mod text;
 mod windows;
 
 pub use records::ConsoleLine;
@@ -105,6 +106,10 @@ pub struct Hub {
     devtools: Mutex<BTreeSet<ContentsId>>,
     /// Whether `devtools` has a page, so that a console line asks the set only when it might.
     any_devtools: AtomicBool,
+    /// What the pages' text is laid out with: the shell's, once it is up.
+    measurer: Mutex<Option<Arc<dyn verve_layout::TextMeasurer>>>,
+    /// A page has been given its measurer (whichever it was).
+    measurer_taken: AtomicBool,
 }
 
 impl Hub {
@@ -133,6 +138,8 @@ impl Hub {
             log: OnceLock::new(),
             devtools: Mutex::new(BTreeSet::new()),
             any_devtools: AtomicBool::new(false),
+            measurer: Mutex::new(None),
+            measurer_taken: AtomicBool::new(false),
         })
     }
 
