@@ -68,8 +68,18 @@ pub struct EditState {
     histories: HashMap<NodeId, History>,
     /// `defaultParagraphSeparator`: `div` unless a script chose `p`.
     separator: Option<String>,
-    style_with_css: bool,
+    pub(crate) composition: Option<crate::ime::Composition>,
+    /// The box last worked out for the input method's candidate window, and what it was for:
+    /// the target, the selection's revision and the layout's key.
+    pub(crate) caret: Option<CaretBox>,
+    /// Text fields whose selection moved and have yet to be told so (`selectionchange`).
+    pub(crate) field_changes: Vec<NodeId>,
 }
+
+/// What a caret box was worked out for, and the box.
+pub(crate) type CaretBox = (CaretKey, Option<crate::Rect>);
+/// The target, the selection's revision and the layout it was worked out for.
+pub(crate) type CaretKey = (NodeId, u64, Option<(u64, (f32, f32))>);
 
 fn separator(cx: &Context) -> String {
     crate::state::shared(cx)
@@ -622,10 +632,7 @@ pub(crate) fn exec_command(
 ) -> JsResult<bool> {
     let name = name.to_ascii_lowercase();
     match name.as_str() {
-        "stylewithcss" => {
-            crate::state::shared(cx).borrow_mut().editing.style_with_css = value == "true";
-            return Ok(true);
-        }
+        "stylewithcss" => return Ok(true),
         "defaultparagraphseparator" => {
             let value = value.to_ascii_lowercase();
             if value == "div" || value == "p" {
