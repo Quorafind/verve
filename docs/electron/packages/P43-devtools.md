@@ -91,19 +91,30 @@ Verve 没有 Chromium DevTools，也不实现 Chrome DevTools 协议。本包提
 - 页面窗口上高亮悬停/选中的节点（Shell 自己画覆盖层，不经过渲染器）；元素拾取模式（点页面选节点）；
 - 底部：console 列表 + REPL 输入框。
 
-为 REPL 在 `msg/page.rs` **追加**：
+为 REPL 与检查器窗口在 `msg/` **追加**（P02 同步记录）：
 
 ```rust
-// 主进程/Shell → 渲染器
+// Shell（检查器窗口）→ 渲染器，经 Hub::to_renderer
 ToRenderer::InspectorEval { call: u64, code: String }
-// 渲染器 → Hub（转给检查器所在的 Shell）
+// 渲染器 → Hub；Hub 不交给主进程，转给检查器所在的 Shell
 FromRenderer::InspectorEvalReply { call: u64, text: String, is_error: bool }  // text 为 util.inspect 的结果
-// 主进程 → Shell
+// 主进程 → Shell：开/关某页的检查器窗口
 ToShell::Inspector { contents: ContentsId, open: bool }
+// Hub → Shell：上面那条答复，窗口按 call 找回它问的一行
+ToShell::InspectorReply { contents: ContentsId, call: u64, text: String, is_error: bool }
+// Shell → 主进程：窗口自己的事
+FromShell::Inspector { contents: ContentsId, event: InspectorEvent }   // Closed | Focused | Blurred
 ```
 
 REPL 在页面的主世界执行（`contextIsolation` 下不进入 preload 的隔离世界），结果用 Verve 的 `util.inspect` 格式化成文本后再跨线程，
-不传活对象。
+不传活对象；求值本身不写页面的 console（不触发 `'console-message'`）。
+
+- 无头 Shell 不画窗口：`ToShell::Inspector` 只被记下（`HeadlessShell::open_inspectors()`），第一阶段的文本转储照旧由页面写；
+  `ToShell::InspectorReply` 也被记下（`inspector_replies()`），供测试读。无头 Shell 可以模拟用户关窗和聚焦（`close_inspector`、`focus_inspector`）。
+- 检查器窗口读的数据：页面每次发布的 `RendererView.update`（Hub 在 Shell 来不及读时把 `Changes` 合并而不是丢弃）和
+  `display_list`，以及 Hub 为每页留的最近 500 条 console（`Hub::console_since`）。
+- 窗口开着时 `isDevToolsOpened()` 为 `true`（第一阶段的语义）；`'devtools-closed'` 在用户关窗口或 `closeDevTools()` 时发，
+  `'devtools-focused'` 在窗口得到焦点时发，`isDevToolsFocused()` 随焦点；`devToolsWebContents` 仍为 `null`。
 
 ## 步骤
 

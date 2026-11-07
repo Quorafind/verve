@@ -100,6 +100,12 @@ pub enum ToShell {
     Dialog { call: u64, parent: Option<WindowId>, spec: DialogSpec, reply: DialogReply },
     /// P14：`nativeTheme.themeSource`，让 Shell 切换窗口的亮暗标题栏。
     SetThemeSource(ThemeSource),
+    // —— P43 追加（第二阶段）——
+    /// `openDevTools()`（`open: true`）/ `closeDevTools()`：Shell 为 `contents` 开或关检查器窗口。已开着再开、
+    /// 已关再关都不做事；无头 Shell 只记下它（文本转储仍由页面写）
+    Inspector { contents: ContentsId, open: bool },
+    /// Hub 把渲染器的 `InspectorEvalReply` 转给检查器：窗口按 `call` 找回它问的那一行；检查器已关则丢弃
+    InspectorReply { contents: ContentsId, call: u64, text: String, is_error: bool },
 }
 
 /// P14：`DialogSpec::{Open, Save, MessageBox}`、`DialogReply::{Async, Sync(SyncSender<DialogResult>)}`、
@@ -154,7 +160,13 @@ pub enum FromShell {
     DialogResult { call: u64, result: DialogResult },             // P14：异步对话框的答复
     /// P13（第二段）：`before-input-event`——页面的 `intercept_keys` 为真（主进程有监听者）时，Shell 把键盘事件发到这里而不是直接发渲染器；主进程发事件，未阻止就用 `Hub::input` 转交
     KeyForContents { contents: ContentsId, down: bool, key: verve_dom::Key },
+    /// P43（第二阶段）：检查器窗口的事 —— 用户关了它（`Closed`：主进程发 `'devtools-closed'`）、它得到或失去焦点
+    /// （`'devtools-focused'`、`isDevToolsFocused()`）
+    Inspector { contents: ContentsId, event: InspectorEvent },
 }
+
+/// P43（第二阶段）：检查器窗口自己发生的事。
+pub enum InspectorEvent { Closed, Focused, Blurred }
 
 pub enum WindowEvent {
     Shown, Hidden, Focus, Blur,
@@ -209,6 +221,11 @@ pub enum ToRenderer {
     /// `webContents.openDevTools()` / `inspectElement(x, y)`：渲染器把元素树（`at` 为 `None`）或 `at` 处元素的一行
     /// 写到终端（经 `Hub` 的日志输出），不回消息
     InspectTree { at: Option<(f32, f32)> },
+    // —— P43 追加（第二阶段）——
+    /// 检查器的 REPL：页面在**主世界**（`contextIsolation` 下不是 preload 的隔离世界）把 `code` 当脚本求值，
+    /// 结果用 Verve 的 `util.inspect` 格式化成文本，答 `FromRenderer::InspectorEvalReply`；求值不写页面的 console，
+    /// 不触发 `'console-message'`。`call` 由 Hub 的一个计数器编号（`Hub::next_inspector_call`），检查器窗口先后开关也不会重号
+    InspectorEval { call: u64, code: String },
 }
 
 // ---------- 渲染器 → 主进程 ----------
@@ -238,6 +255,11 @@ pub enum FromRenderer {
     // —— P13 追加（第二段）——
     /// 页面的 `contextmenu` 事件未被 `preventDefault`（右键松开）：主进程发 `webContents` 的 `context-menu`
     ContextMenu(ContextMenuParams),
+    // —— P43 追加（第二阶段）——
+    /// `ToRenderer::InspectorEval { call }` 的答复：`text` 是求值结果的 `util.inspect` 文本，或抛出的错误的 inspect 文本
+    /// （`is_error` 为 `true`）；从不带活对象。Hub 收到后**不交给主进程**，转给检查器所在的 Shell
+    /// （`ToShell::InspectorReply`）；没有开着的检查器时丢弃
+    InspectorEvalReply { call: u64, text: String, is_error: bool },
 }
 
 pub enum PageEvent {
@@ -299,7 +321,7 @@ P13 第二段另加两个类型（`msg/page.rs`）：`EditCommand`（`Undo` `Red
 | `ToRenderer::EditCommand(EditCommand)`（菜单 role：copy/paste/undo/selectAll…）——P13 已经追加，P15 直接复用，不再改 | P13（P15 复用） |
 | `MenuOp` 的全部变体（`Upsert`、`Drop`、`SetApplicationMenu`、`SetWindowMenu`、`SetMenuBarVisibility`、`Popup`、`ClosePopup`、`Tray*`、`Shortcut*`）与 `msg/menu.rs` 的 `MenuSpec`/`MenuItemSpec`/`TrayOp`/`TrayEvent`；`FromShell::{MenuWillShow, MenuWillClose, Tray, Shortcut, TrayBounds}`（详见 P15「接口契约」，实现与那里一致） | P15 |
 | `ToRenderer::SetProxy(…)` | P16 |
-| `ToRenderer::InspectorEval { call, code }`、`FromRenderer::InspectorEvalReply { call, result }`、`ToShell::Inspector(…)` | P43 |
+| `ToRenderer::InspectorEval { call, code }`、`FromRenderer::InspectorEvalReply { call, text, is_error }`（答复的是文本，不是 `result`）、`ToShell::Inspector { contents, open }`、`ToShell::InspectorReply { contents, call, text, is_error }`（Hub 把答复转给 Shell）、`FromShell::Inspector { contents, event }` 与 `InspectorEvent::{Closed, Focused, Blurred}`（第二阶段） | P43 |
 | Shell 提供 `native_handle(WindowId) -> Option<RawWindowHandle>`（对话框父窗口、muda 挂菜单） | P34（P14/P15 使用） |
 | `AppEvent::Ready`（Shell 启动完成，`app` 的 `ready` 依据）— P10 已加，由 Hub 在 `start` 时发 | P10 |
 | `WindowEvent::FirstPaint`（`ready-to-show` 的精确依据）、`WindowEvent::NativeHandle(u64)` | P13 / P34 |
