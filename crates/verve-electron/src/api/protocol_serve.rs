@@ -1,8 +1,9 @@
 //! Running a scheme's handler for a request and handing its answer on, a chunk at a time.
 //!
-//! The engine answers the main process's `net.fetch` (the answer goes through a kernel
-//! `Responder`). What an asker brings is the [`Sink`] the answer is written to and whether the
-//! engine reads on its own or on demand.
+//! The same engine answers every kind of asker: a page's own load of a script or sheet (the
+//! whole answer is collected and sent once, as P20's loader wants it) and the main process's
+//! `net.fetch` (the answer goes through a kernel `Responder`). What differs is the [`Sink`] the
+//! answer is written to and whether the engine reads on its own or on demand.
 //!
 //! A handler answers with a web `Response`, whose body is a `ReadableStream` read here with
 //! `reader.read()` — one read for each pull, which is how a reader that stops reading stops the
@@ -12,6 +13,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use boa_engine::object::builtins::JsPromise;
 use boa_engine::{Context, JsObject, JsResult, JsValue};
@@ -20,7 +22,9 @@ use verve::browser_net::{NetError, Responder};
 use verve::native::{self, arg, get, invoke, js_text};
 
 use super::protocol::{Entry, HandlerKind};
-use crate::msg::{ProtoRequest, SessionId};
+use crate::hub::Hub;
+use crate::ids::ContentsId;
+use crate::msg::{ProtoRequest, ProtocolResponse, ResourceType, SessionId, ToRenderer};
 
 /// Where an answer is written.
 pub(crate) trait Sink {
@@ -443,4 +447,106 @@ impl Sink for ToResponder {
             respond.fail(error);
         }
     }
+}
+
+/// A page's load of a script, sheet or document: the whole answer, sent once.
+struct ToLoader {
+    hub: Arc<Hub>,
+    contents: ContentsId,
+    call: u64,
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl Sink for ToLoader {
+    fn head(&mut self, status: u16, _: String, headers: Vec<(String, String)>) {
+        self.status = status;
+        self.headers = headers;
+    }
+    fn chunk(&mut self, bytes: Vec<u8>) {
+        self.body.extend(bytes);
+    }
+    fn end(&mut self) {
+        let mime = self
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.clone());
+        let response = ProtocolResponse {
+            status: self.status,
+            mime,
+            headers: std::mem::take(&mut self.headers),
+            body: Ok(std::mem::take(&mut self.body)),
+        };
+        self.hub.to_renderer(
+            self.contents,
+            ToRenderer::ProtocolResponse {
+                call: self.call,
+                response,
+            },
+        );
+    }
+    fn fail(&mut self, error: NetError) {
+        let response = ProtocolResponse {
+            status: 0,
+            mime: None,
+            headers: Vec::new(),
+            body: Err((error.code, error.short_name().to_owned())),
+        };
+        self.hub.to_renderer(
+            self.contents,
+            ToRenderer::ProtocolResponse {
+                call: self.call,
+                response,
+            },
+        );
+    }
+}
+
+/// A page's load of a resource (P20's `ProtocolRequest`).
+pub(crate) fn from_loader(
+    context: &mut Context,
+    contents: ContentsId,
+    call: u64,
+    request: crate::msg::ProtocolRequest,
+) {
+    let hub = Arc::clone(&super::shared(context).hub);
+    let session = hub
+        .session_of(contents)
+        .map_or_else(|| super::session::default_id(context), |s| s.id());
+    let sink = Box::new(ToLoader {
+        hub,
+        contents,
+        call,
+        status: 0,
+        headers: Vec::new(),
+        body: Vec::new(),
+    });
+    let resource_type = match request.destination.as_str() {
+        "document" => ResourceType::MainFrame,
+        "script" => ResourceType::Script,
+        "style" => ResourceType::Stylesheet,
+        "image" => ResourceType::Image,
+        "font" => ResourceType::Font,
+        _ => ResourceType::Other,
+    };
+    let request = ProtoRequest {
+        url: request.url,
+        method: request.method,
+        headers: request.headers,
+        referrer: String::new(),
+        body: request.body,
+        resource_type,
+    };
+    start(
+        context,
+        Job {
+            session,
+            request,
+            call: None,
+            auto: true,
+        },
+        sink,
+    );
 }

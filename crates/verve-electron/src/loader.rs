@@ -1,9 +1,10 @@
 //! What a page is loaded from: `file:` (through the app's virtual filesystem, so `app.asar`
-//! is read), `data:`, and the custom schemes the main process answers. The network's own
-//! `http`, `https` and `blob` are Verve's `fetch`, which the page's document uses itself.
+//! is read), `data:`, and the schemes the main process answers: custom ones, and `file:`, `http:`
+//! or `https:` too once `protocol.handle` claims them. The network's own `http`, `https` and
+//! `blob` that nothing claims are Verve's `fetch`, which the page's document uses itself.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +14,7 @@ use verve::vfs::Overlay;
 use verve_dom::{Destination, LoadError, LoadRequest, LoadResult, Loader};
 
 use crate::api::mime;
+use crate::hub::Session;
 use crate::msg::{FromRenderer, ProtocolRequest, ProtocolResponse};
 
 type Done = Box<dyn FnOnce(LoadResult)>;
@@ -22,8 +24,9 @@ type Done = Box<dyn FnOnce(LoadResult)>;
 #[derive(Clone)]
 pub struct ElectronLoader {
     overlay: Option<Arc<dyn Overlay>>,
-    /// The custom schemes the main process answers (`protocol.handle`).
-    schemes: Rc<RefCell<BTreeSet<String>>>,
+    /// The session the page belongs to: the schemes its main process answers
+    /// (`protocol.handle`) are the session's.
+    session: Arc<Session>,
     /// Asks for the main process, until the guest sends them.
     outbox: Rc<RefCell<Vec<FromRenderer>>>,
     /// The asks not yet answered, by their number.
@@ -36,21 +39,18 @@ pub struct ElectronLoader {
 impl ElectronLoader {
     /// A loader reading files through `overlay` first, then from the disk; its asks are
     /// numbered from `calls`.
-    pub fn new(overlay: Option<Arc<dyn Overlay>>, calls: Arc<AtomicU64>) -> Self {
+    pub fn new(
+        overlay: Option<Arc<dyn Overlay>>,
+        calls: Arc<AtomicU64>,
+        session: Arc<Session>,
+    ) -> Self {
         Self {
             overlay,
-            schemes: Rc::default(),
+            session,
             outbox: Rc::default(),
             calls: Rc::default(),
             next: calls,
         }
-    }
-
-    /// Makes `scheme` one the main process answers (P16 registers them).
-    pub fn register_scheme(&self, scheme: &str) {
-        self.schemes
-            .borrow_mut()
-            .insert(scheme.to_ascii_lowercase());
     }
 
     /// How many asks the main process has not answered yet.
@@ -79,20 +79,20 @@ impl ElectronLoader {
         });
     }
 
-    /// A `file:` address for the page that asked: only a page that is a file itself may read
-    /// one (Electron's `webSecurity`), and only on this machine — a `file://host/share/…` is
-    /// refused, since none was seen to load from a file page. The browser's own `loadURL`
-    /// (no initiator) may read any.
-    fn file_for(&self, request: LoadRequest) -> LoadResult {
+    /// Whether the page that asked may read this `file:` address: only a page that is a file
+    /// itself may (Electron's `webSecurity`), and only on this machine — a `file://host/share/…`
+    /// is refused, since none was seen to load from a file page. The browser's own `loadURL`
+    /// (no initiator) may read any. The rule holds whether the file is read here or a `file`
+    /// handler answers for it (Electron 39.8.10, probe5: with such a handler an `app://` page
+    /// still fails to `fetch`, `XMLHttpRequest`, `<img>` and `<script>` a `file:` address, and
+    /// a `loadFile` page still reads it).
+    fn file_allowed(request: &LoadRequest) -> bool {
         let local = matches!(request.url.host_str(), None | Some("" | "localhost"));
         let allowed = request
             .initiator
             .as_ref()
             .is_none_or(|from| from.scheme() == "file");
-        if local && allowed {
-            return self.read_file(request.url);
-        }
-        LoadResult::failed(request.url, -10, "ERR_ACCESS_DENIED")
+        local && allowed
     }
 
     fn read_file(&self, url: Url) -> LoadResult {
@@ -163,9 +163,12 @@ fn destination_name(destination: Destination) -> &'static str {
 impl Loader for ElectronLoader {
     fn fetch(&self, request: LoadRequest, done: Box<dyn FnOnce(LoadResult)>) {
         match request.url.scheme() {
-            "file" => done(self.file_for(request)),
+            "file" if !Self::file_allowed(&request) => {
+                done(LoadResult::failed(request.url, -10, "ERR_ACCESS_DENIED"))
+            }
+            scheme if self.session.handles(scheme) => self.ask(request, done),
+            "file" => done(self.read_file(request.url)),
             "data" => done(Self::data(request.url)),
-            scheme if self.schemes.borrow().contains(scheme) => self.ask(request, done),
             _ => done(LoadResult::failed(
                 request.url,
                 -302,
@@ -175,13 +178,22 @@ impl Loader for ElectronLoader {
     }
 
     fn handles(&self, scheme: &str) -> bool {
-        matches!(scheme, "file" | "data") || self.schemes.borrow().contains(scheme)
+        matches!(scheme, "file" | "data") || self.session.handles(scheme)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A loader of a session that answers the given custom schemes.
+    fn loader_for(schemes: &[&str], calls: Arc<AtomicU64>) -> ElectronLoader {
+        let session = Arc::new(Session::new(1, ""));
+        for scheme in schemes {
+            session.set_handled(scheme, true);
+        }
+        ElectronLoader::new(None, calls, session)
+    }
 
     fn answer_of(loader: &ElectronLoader, url: &str) -> LoadResult {
         let slot = Rc::new(RefCell::new(None));
@@ -203,7 +215,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_err_file_not_found_and_a_folder_is_a_failure() {
-        let loader = ElectronLoader::new(None, Arc::default());
+        let loader = loader_for(&[], Arc::default());
         let dir = std::env::temp_dir();
         let missing = Url::from_file_path(dir.join("verve-p20-missing.html")).unwrap();
         let result = answer_of(&loader, missing.as_str());
@@ -217,7 +229,7 @@ mod tests {
 
     #[test]
     fn a_file_is_read_with_the_type_its_name_says() {
-        let loader = ElectronLoader::new(None, Arc::default());
+        let loader = loader_for(&[], Arc::default());
         let path = std::env::temp_dir().join(format!("verve-p20-{}.css", std::process::id()));
         std::fs::write(&path, "a{}").unwrap();
         let result = answer_of(&loader, Url::from_file_path(&path).unwrap().as_str());
@@ -227,10 +239,40 @@ mod tests {
     }
 
     #[test]
+    fn a_file_handler_is_asked_for_the_pages_that_may_read_files_and_refuses_the_rest() {
+        let loader = loader_for(&["file"], Arc::default());
+        let load = |initiator: Option<&str>| {
+            let slot = Rc::new(RefCell::new(None));
+            let sink = Rc::clone(&slot);
+            let request = LoadRequest {
+                url: Url::parse("file:///data/x.txt").unwrap(),
+                initiator: initiator.map(|from| Url::parse(from).unwrap()),
+                destination: verve_dom::Destination::Script,
+                method: "GET".into(),
+                headers: Vec::new(),
+                body: None,
+            };
+            loader.fetch(
+                request,
+                Box::new(move |result| *sink.borrow_mut() = Some(result)),
+            );
+            slot.take()
+        };
+        let refused = load(Some("app://host/")).expect("refused at once");
+        assert_eq!(refused.body.unwrap_err().code, -10);
+        assert!(loader.take_outbox().is_empty());
+        // The browser's own load, and a page that is a file itself, reach the handler.
+        for allowed in [None, Some("file:///data/index.html")] {
+            assert!(load(allowed).is_none());
+            assert_eq!(loader.take_outbox().len(), 1);
+        }
+    }
+
+    #[test]
     fn a_custom_scheme_is_asked_of_the_main_process_and_answered_once() {
-        let loader = ElectronLoader::new(None, Arc::default());
+        let loader = loader_for(&[], Arc::default());
         assert!(!loader.handles("app"));
-        loader.register_scheme("APP");
+        let loader = loader_for(&["app"], Arc::default());
         assert!(loader.handles("app"));
         let slot = Rc::new(RefCell::new(None));
         let sink = Rc::clone(&slot);
@@ -264,7 +306,7 @@ mod tests {
 
     #[test]
     fn only_a_file_page_reads_a_file_and_only_a_local_one() {
-        let loader = ElectronLoader::new(None, Arc::default());
+        let loader = loader_for(&[], Arc::default());
         let path = std::env::temp_dir().join(format!("verve-p20-init-{}.txt", std::process::id()));
         std::fs::write(&path, "x").unwrap();
         let url = Url::from_file_path(&path).unwrap();
@@ -297,11 +339,9 @@ mod tests {
     fn asks_are_numbered_across_documents_and_a_late_answer_finds_nothing() {
         let calls = Arc::new(AtomicU64::new(0));
         let (old, new) = (
-            ElectronLoader::new(None, calls.clone()),
-            ElectronLoader::new(None, calls),
+            loader_for(&["app"], calls.clone()),
+            loader_for(&["app"], calls),
         );
-        old.register_scheme("app");
-        new.register_scheme("app");
         let ask = |loader: &ElectronLoader| {
             let slot = Rc::new(RefCell::new(None));
             let sink = Rc::clone(&slot);

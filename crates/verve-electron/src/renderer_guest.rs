@@ -65,7 +65,8 @@ impl RendererGuest {
         .expect("a page's electron module installs");
         let outbox = api::ipc_renderer::outbox(runtime.context());
         set_up_process(&mut runtime, &outbox);
-        let loader = ElectronLoader::new(hub.overlay(), hub.protocol_calls());
+        let session = hub.session_for(prefs.partition.as_deref());
+        let loader = ElectronLoader::new(hub.overlay(), hub.protocol_calls(), session);
         let document = verve_dom::install(
             &mut runtime,
             Options {
@@ -98,13 +99,6 @@ impl RendererGuest {
     /// The preferences the page was made with.
     pub fn preferences(&self) -> &WebPreferences {
         &self.prefs
-    }
-
-    /// Makes `scheme` one the main process answers: what the page asks of it goes to the main
-    /// process as a [`FromRenderer::ProtocolRequest`] (P16 registers a scheme per
-    /// `protocol.handle`).
-    pub fn register_scheme(&mut self, scheme: &str) {
-        self.loader.register_scheme(scheme);
     }
 
     /// Lets work finished on another thread — a socket, a worker — wake the isolate.

@@ -1,7 +1,7 @@
-//! `protocol`: what a session says about itself, `protocol.handle` with `net.fetch` of files and
-//! of a file inside `app.asar`, and what a handler that misbehaves does to a `net.fetch`. The
-//! expected values are frozen from Electron 39.8.10 (probes in the P16 scratch folder; the source
-//! of each is named where it is not obvious).
+//! `protocol`: what a session says about itself, `protocol.handle` and the older calls with
+//! `net.fetch`, and a page loaded from a handler. The expected values are frozen from Electron
+//! 39.8.10 (probes in the P16 scratch folder; the source of each is named where it is not
+//! obvious).
 
 #![allow(clippy::unwrap_used)]
 
@@ -9,6 +9,26 @@ mod support;
 
 use serde_json::{Value, json};
 use support::{App, TIMEOUT};
+
+const INDEX: &str = "<!doctype html><title>Bundle</title><link rel=stylesheet href=./a.css>\
+<script src=./a.js></script><body>hello";
+
+/// The files of the site every test serves.
+fn site() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("site/index.html", INDEX),
+        ("site/a.css", "body { color: red }"),
+        ("site/a.js", "window.fromScript = 'ran';"),
+        ("site/data.json", r#"{"x":1}"#),
+    ]
+}
+
+/// Waits for the page titled `Bundle`: its contents id.
+fn bundle(app: &App) -> u32 {
+    app.window("Bundle")
+        .unwrap_or_else(|| panic!("no window; console: {:?}", app.console()))
+        .contents
+}
 
 /// A script run in the main process after the app is ready; the answer is `globalThis.out`.
 fn main_says(script: &str) -> Value {
@@ -113,6 +133,28 @@ fn a_file_handler_reads_files_by_passing_over_the_handlers_and_a_stream_protocol
     // of a file answers 200 `OK` and its text, and the handler is asked once for each fetch.
     assert_eq!(out["file"], json!([200, "OK", true, 1]));
     assert_eq!(out["stream"], "abc");
+}
+
+#[test]
+fn a_file_handler_answers_for_the_page_load_file_makes() {
+    let main = "const { app, BrowserWindow, protocol, net } = require('electron');
+        globalThis.seen = [];
+        app.whenReady().then(() => {
+          protocol.handle('file', (req) => {
+            seen.push(new URL(req.url).pathname.split('/').pop());
+            return net.fetch(req, { bypassCustomProtocolHandlers: true });
+          });
+          const win = new BrowserWindow({ show: false });
+          win.loadFile('site/index.html');
+        });";
+    let app = App::launch_script(main, &site());
+    let contents = bundle(&app);
+    let done = |app: &App| app.eval_renderer(contents, "window.fromScript") == r#""ran""#;
+    assert!(app.run_until(done, TIMEOUT), "console: {:?}", app.console());
+    let seen: Value = serde_json::from_str(&app.eval_main("globalThis.seen")).unwrap();
+    for name in ["index.html", "a.js", "a.css"] {
+        assert!(seen.as_array().unwrap().contains(&json!(name)), "{seen}");
+    }
 }
 
 #[test]
