@@ -38,6 +38,18 @@ pub(crate) enum Dim {
     Percent(f32),
 }
 
+impl Dim {
+    /// What it comes to against a containing block `basis` wide (an unbounded basis makes a
+    /// percentage nothing; `auto` is nothing too).
+    pub(crate) fn resolve(self, basis: f32) -> f32 {
+        match self {
+            Dim::Px(px) => px,
+            Dim::Percent(share) if basis.is_finite() => share * basis,
+            Dim::Percent(_) | Dim::Auto => 0.,
+        }
+    }
+}
+
 /// A length or a percentage: `None` for a value that is neither, and for `calc()` that mixes a
 /// length with a percentage, which taffy 0.13 cannot hold without a calc resolver.
 pub(crate) fn length_percent(text: &str, units: &Units) -> Option<Dim> {
