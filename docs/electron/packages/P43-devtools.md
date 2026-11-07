@@ -129,4 +129,61 @@ Chrome DevTools 协议、断点调试、性能面板、网络面板、源码映�
 
 ## 状态
 
-（实现者完成后填写）
+### 第一阶段（已完成）
+
+做了：
+- `log.rs`：`VERVE_ELECTRON_LOG` 的过滤表（`Filter`，`OnceLock` 里的进程级 `Log`，关闭的类别只一次原子读，无新依赖）、`diag!` 宏、
+  颜色（Node 22 `lib/internal/tty.js` 的顺序：`FORCE_COLOR` 为空/`1`/`true`/`2`/`3` 开、其它值关；没有它时有 `NO_COLOR`（含空值）则关；否则看是否 TTY）、`VERVE_ELECTRON_LOG_FILE`、`AttachConsole(ATTACH_PARENT_PROCESS)`
+  （`attach_parent_console`，Windows 才有实现；任何东西要写终端时——日志开关、`VERVE_ELECTRON_LOG` 的任一类别、开关警告——由 `launcher::boot` 调用，P40 切到 GUI 子系统后沿用）。
+  测试用 `Log::to_memory` 读终端输出，`Hub::set_log` 换上。
+- `'console-message'`（`api/console_message.rs`）：事件对象 + 已弃用的位置参数 + 一次性弃用警告，全按 Electron 39.8.10 的观测
+  （`tests/electron/devtools/expected/`）。渲染器 console 写终端的条件：`ELECTRON_ENABLE_LOGGING`（任何非空值）、`--enable-logging`、
+  `VERVE_ELECTRON_LOG` 含 `console`，或该页 DevTools 开着；格式 `[renderer:<id> <文件名>:<行>] <消息>`，按级别着色。
+- 未捕获错误：渲染器的 `Uncaught …`/`Uncaught (in promise) …` 进 console（因此 `console-message`），带抛出处的行号与文件（取自错误 `stack` 的第一个脚本帧，
+  具名函数的 `at f (file:l:c)` 与匿名函数、顶层的 `at file:l:c` 两种写法都认），不再把栈拼进文本；抛出的字符串不带引号。
+  主进程（没有 `Profile`、`on_uncaught` 为 `Report` 的 realm）：`lib.rs` 的 `report()` 在 `uncaughtException` 监听器之后，把栈写到 stderr（`process::print_uncaught`），
+  并把 Electron `lib/browser/init.ts` 的文本 `Uncaught Exception:\n` + `e.stack`（无栈时 `${name}: ${message}`）交给 shell 的错误框；`verve run` 的路径（有 `Profile`）不变。
+  GUI shell 在 `VERVE_NO_SYSTEM_DIALOGS` 下不弹框，并像 headless shell 一样在 stderr 写一行 `[app] error box …`（此前只有无窗口的系统框遵守它）。
+  渲染器崩溃/被中断的 stderr 一行原因是 P13 已有的（`main_guest.rs` 的 `Gone` 分支）。
+- 参数：`--inspect`、`--inspect-brk`、`--inspect-port`、`--inspect-publish-uid`、`--remote-debugging-port`、`--remote-debugging-pipe`、`--js-flags`、
+  `--log-level`、`--v`、`--vmodule` 每个名字启动时在 stderr 一行警告（`launcher::unsupported_switch_warnings`），仍在 `process.argv`/`app.commandLine`。
+- `VERVE_ELECTRON_LOG` 接线（只加调用，`hub/diagnostics.rs`）：`ipc`（每条 IPC 一行）、`lifecycle`（页面事件与窗口事件）、`load`（`Load`/`Reload`）、
+  `shell`（双向消息）、`input`、`protocol`（请求与回答）、`asar`（打包应用）、`console`。`perf` 类别能解析，但没有现成的诊断点可接。
+- `openDevTools()` 等（`api/devtools.rs`、`inspector.rs`、`ToRenderer::InspectTree`）：见下。`webPreferences.devTools: false` 时与 Electron 一样什么也不做（观测）。
+  `inspectElement(x, y)` 只打印该点元素的一行，不改变开关状态。`'devtools-opened'`/`'devtools-closed'` 在调用返回后的下一轮发。`devTools: false` 的窗口上 `inspectElement` 也什么都不做。
+- `console-message` 的弃用警告现在走新加的 `define::deprecate_once`（一次、`process.noDeprecation` 时不写）；`contents_history` 的旧导航方法警告也改走它（原来是 `eprintln!`，现在写主进程 console）。
+- 内核 `Cloned::array_len`：IPC 诊断行的参数个数。
+
+没做：主进程的未处理拒绝（合同 2 第 2 行）：`src/hooks.rs` 里它仍只是一行 console，没有错误框、也不发 `uncaughtException`；Node 22 的 throw 模式加上 `init.ts` 装的监听器本会弹框。第二阶段（GPUI 检查器窗口、REPL 的 `InspectorEval` 消息，等 P30 合并）；`'devtools-focused'`（DevTools 从不聚焦）；`perf` 类别的接线；
+P40 的 fuse `EnableNodeCliInspectArguments` 关闭时的行为。
+
+和 Electron 的已知差异：
+- `'console-message'` 的 `message` 是 Verve 的 `util.inspect` 文本（`console.log('plain', 1, {a: 1})` 得 `plain 1 { a: 1 }`、`%s` 会替换），Electron 是 Chromium 的
+  文本（`plain 1 [object Object]`、不替换）。内核的 console 只把格式化后的文本交给 sink。
+- 行号是脚本文本内的行：内联 `<script>` 紧跟标签时与 Chromium 的文档行号一致，脚本前有换行时不同；拒绝原因不是 `Error` 时（`Promise.reject('x')`）没有位置（行号 0，`sourceId` 空），Electron 给拒绝处的行。
+- 终端格式是文档约定的 `[renderer:<id> <文件>:<行>] …`，不是 Chromium 的 `[pid:时间:INFO:CONSOLE:行] "…", source: … (行)`（Electron 把所有级别都写成 INFO）；已冻结在 `expected/console-logging.txt`。
+- `--inspect` 在 Electron 里还写 Node 的两行 `Debugger listening on …`（`expected/inspect.txt`），Verve 只写一行警告。
+- `--enable-logging=file`、`ELECTRON_ENABLE_LOGGING=file` 在 Electron 里写文件，Verve 仍写 stderr（P10 的开关表里同样记了）。
+- `inspectElement` 不会像 Electron 那样打开 DevTools，只打印一行。
+- 没有活着观测 `openDevTools()` 本身（会在用户桌面上弹出 DevTools 窗口）：事件名与开关语义来自文档与 `devTools: false` 的观测；没有探测主进程未捕获异常（会弹错误框），
+  改读 electron.exe 里的 `init.ts`（`expected/main-uncaught.txt`）；`--inspect-brk` 会一直等调试器，未探测。
+
+文本转储的格式：第一行 `[devtools:<id>] element tree of <url>`，之后每个元素一行：两个空格的缩进（每层）、标签、`#id`、`.class`（每个）、盒子 `x,y,宽,高`
+（取整到 0.1 px，页面没有给它画盒子时是 `-`）、`display` 的计算值。盒子来自 `Document::rect`（新加在 verve-dom 的 `rect.rs`），它经 `laid()` 读 P30 的布局提供者（先按需重新布局），所以 DOM 改动后几何是新的。
+
+越界的改动（任务书「修改」之外）：内核的提交（`src/uncaught.rs`、`src/process.rs`、`src/lib.rs`、`src/hooks.rs`、`src/embed.rs`、`src/clone.rs`）、verve-dom 的 `rect.rs`、verve-gpui 的 `dialog.rs` 与新测试文件 `crates/verve-gpui/tests/electron_debug.rs`、`crates/verve-gpui/tests/support/mod.rs`，各在自己的提交里，不与 verve-electron 的改动混在一起：
+- 内核：console sink 的第三个参数现在真有值（调用 console 的脚本的位置、未捕获错误的抛出处，在新的 `src/uncaught.rs` 里），
+  未捕获错误的 console 行在有 sink 时不再附 `(栈)`；`src/process.rs`/`src/lib.rs`：主进程错误框的文本与 stderr 的栈（上面）；`tests/embedder_hooks.rs` 加了测试。
+- `crates/verve-dom/src/rect.rs`：`Document::rect`（读 P30 的布局）。`crates/verve-gpui/src/dialog.rs`：`VERVE_NO_SYSTEM_DIALOGS` 下不弹错误框、改写一行。
+- `crates/verve-electron/Cargo.toml`：`windows-sys` 加 `Win32_System_Console`（不动 `Cargo.lock`）。
+
+给其他包：
+- P40：`verve_electron::log::attach_parent_console()` 已在 `launcher::boot` 里调用，GUI 子系统的 exe 不需要再写一份。
+- P42：IPC 路径上多了每条消息一次 `Hub::log()` 的读取和一次原子读（`hub/diagnostics.rs`），未设 `VERVE_ELECTRON_LOG` 时不格式化任何东西；请用 IPC 基准确认无可测差异。
+- P30：已在变基时完成（P43 现在建在 df018328 上）。
+  - `Document::rect` 改为 `self.laid().rects.get(&node).copied()`；P30 没有现成的公开读取（`laid()` 是 `pub(crate)`），所以没有加第二份。`inspectElement` 的 `hit_test` 本来就走 `laid()`。
+  - `tests/devtools.rs` 的 `open_dev_tools_dumps_…` 现在断言 verve-layout 配 headless 度量器给出的盒子（窗口 800 x 600，视口取窗口外框的尺寸）：`html 0,0,800,32`（内容 16 + body 上下各 8 的外边距）、
+    `body 8,8,784,16`、`div#main`/`p` 同为 `8,8,784,16`（测试页给 `p` 写了 `margin:0`，以免 1em 的外边距穿过 div 与 body 折叠而依赖折叠细节）、`head`/`script` 是 `-`（`display: none`）；
+    (1,1) 在 body 的外边距里，命中 `html`。数字的由来写在测试的注释里。
+  - `tests/preload.rs` 的 `KNOWN_DIFFERENCES` 删去了「未处理拒绝的行带栈」一条：内核现在在有 sink 时不再附栈，渲染器的行与录制的 `Uncaught (in promise) Error: nope` 相同。未跑测试确认，请中央跑 `bridge_matrix`。
+  - 第二阶段的 `InspectorEval` 在这里没有加。
