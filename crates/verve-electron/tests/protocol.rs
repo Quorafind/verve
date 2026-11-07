@@ -94,6 +94,28 @@ fn a_session_knows_what_it_is_and_hands_out_the_same_object() {
 }
 
 #[test]
+fn a_file_handler_reads_files_by_passing_over_the_handlers_and_a_stream_protocol_takes_a_stream() {
+    let out = main_says(
+        "const { pathToFileURL } = require('url');
+         let asked = 0;
+         protocol.handle('file', (req) => { asked++; return net.fetch(req, { bypassCustomProtocolHandlers: true }); });
+         const own = await net.fetch(pathToFileURL(__filename).toString());
+         const text = await own.text();
+         note('file', [own.status, own.statusText, text === require('fs').readFileSync(__filename, 'utf8'), asked]);
+         protocol.registerStreamProtocol('stream', (req, callback) => {
+           const readable = new (require('stream').PassThrough)();
+           readable.end('abc');
+           callback(readable);
+         });
+         note('stream', await (await net.fetch('stream://h/')).text());",
+    );
+    // Electron 39.8.10 (probe4): with a `file` handler that passes over the handlers, `net.fetch`
+    // of a file answers 200 `OK` and its text, and the handler is asked once for each fetch.
+    assert_eq!(out["file"], json!([200, "OK", true, 1]));
+    assert_eq!(out["stream"], "abc");
+}
+
+#[test]
 fn net_fetch_reads_a_file_inside_app_asar_through_the_apps_filesystem() {
     let main = "const { app, protocol, net } = require('electron');
         const { pathToFileURL } = require('url'); const path = require('path');

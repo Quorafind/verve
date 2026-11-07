@@ -30,6 +30,7 @@ pub(crate) mod page_state;
 pub(crate) mod power;
 pub(crate) mod process;
 pub(crate) mod protocol;
+pub(crate) mod protocol_legacy;
 pub(crate) mod protocol_serve;
 pub(crate) mod safe_storage;
 pub(crate) mod screen;
@@ -85,7 +86,7 @@ pub(crate) struct MainState {
 pub(crate) struct NetState {
     /// The objects scripts hold for the sessions.
     pub(crate) objects: session::Objects,
-    /// The handlers of `protocol.handle`, by session.
+    /// The handlers of `protocol.handle` and the older calls, by session.
     pub(crate) protocols: protocol::Registry,
     /// The requests the handlers are answering.
     pub(crate) serving: protocol_serve::Serving,

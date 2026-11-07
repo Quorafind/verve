@@ -1,8 +1,9 @@
-//! `protocol`: the schemes the main process answers for a session.
+//! `protocol`: the schemes the main process answers for the pages of a session.
 //!
-//! `protocol.handle(scheme, handler)` (`protocol.ts` and `protocol.cc` of Electron 39.8.10) puts a
-//! handler in one table per session, and the main process's own `net.fetch` asks it. A scheme the
-//! app *registers* is its own (`app:`); one it *intercepts* is a built-in's (`http`, `https`,
+//! `protocol.handle(scheme, handler)` and the older `register*Protocol`/`intercept*Protocol`
+//! calls (`protocol.ts` and `protocol.cc` of Electron 39.8.10) put a handler in one table per
+//! session, and the session's pages — and the main process's own `net.fetch` — ask it. A scheme
+//! the app *registers* is its own (`app:`); one it *intercepts* is a built-in's (`http`, `https`,
 //! `file`), whose handler stands in for the network. `handle` picks between the two by the
 //! scheme's name. The module's own functions (`protocol.handle`) are the default session's.
 
@@ -20,6 +21,13 @@ use crate::msg::SessionId;
 pub(crate) enum HandlerKind {
     /// `protocol.handle`: `(request) => Response`.
     Handle,
+    /// `register*Protocol`: `(request, callback)`, the callback given a path.
+    File,
+    Buffer,
+    String,
+    Stream,
+    /// The callback is given the address to ask instead.
+    Http,
 }
 
 impl boa_gc::Finalize for HandlerKind {}
@@ -81,6 +89,12 @@ enum Op {
     Handle,
     Unhandle,
     IsHandled,
+    Register(HandlerKind),
+    Unregister,
+    IsRegistered,
+    Intercept(HandlerKind),
+    Unintercept,
+    IsIntercepted,
 }
 
 /// Defines the functions of the class, each running its [`Op`] on the session `this` is of.
@@ -98,6 +112,22 @@ methods! {
     handle => Op::Handle,
     unhandle => Op::Unhandle,
     is_protocol_handled => Op::IsHandled,
+    register_file_protocol => Op::Register(HandlerKind::File),
+    register_buffer_protocol => Op::Register(HandlerKind::Buffer),
+    register_string_protocol => Op::Register(HandlerKind::String),
+    register_stream_protocol => Op::Register(HandlerKind::Stream),
+    register_http_protocol => Op::Register(HandlerKind::Http),
+    register_protocol => Op::Register(HandlerKind::Stream),
+    unregister_protocol => Op::Unregister,
+    is_protocol_registered => Op::IsRegistered,
+    intercept_file_protocol => Op::Intercept(HandlerKind::File),
+    intercept_buffer_protocol => Op::Intercept(HandlerKind::Buffer),
+    intercept_string_protocol => Op::Intercept(HandlerKind::String),
+    intercept_stream_protocol => Op::Intercept(HandlerKind::Stream),
+    intercept_http_protocol => Op::Intercept(HandlerKind::Http),
+    intercept_protocol => Op::Intercept(HandlerKind::Stream),
+    unintercept_protocol => Op::Unintercept,
+    is_protocol_intercepted => Op::IsIntercepted,
 }
 
 /// The methods of the `Protocol` class: name, `length` and function.
@@ -109,6 +139,22 @@ const METHODS: &[(
     ("handle", 2, handle),
     ("unhandle", 1, unhandle),
     ("isProtocolHandled", 1, is_protocol_handled),
+    ("registerFileProtocol", 2, register_file_protocol),
+    ("registerBufferProtocol", 2, register_buffer_protocol),
+    ("registerStringProtocol", 2, register_string_protocol),
+    ("registerStreamProtocol", 2, register_stream_protocol),
+    ("registerHttpProtocol", 2, register_http_protocol),
+    ("registerProtocol", 2, register_protocol),
+    ("unregisterProtocol", 1, unregister_protocol),
+    ("isProtocolRegistered", 1, is_protocol_registered),
+    ("interceptFileProtocol", 2, intercept_file_protocol),
+    ("interceptBufferProtocol", 2, intercept_buffer_protocol),
+    ("interceptStringProtocol", 2, intercept_string_protocol),
+    ("interceptStreamProtocol", 2, intercept_stream_protocol),
+    ("interceptHttpProtocol", 2, intercept_http_protocol),
+    ("interceptProtocol", 2, intercept_protocol),
+    ("uninterceptProtocol", 1, unintercept_protocol),
+    ("isProtocolIntercepted", 1, is_protocol_intercepted),
 ];
 
 /// The class of `session.protocol`.
@@ -192,6 +238,30 @@ fn run(this: &JsValue, args: &[JsValue], op: Op, context: &mut Context) -> JsRes
             true
         }
         Op::IsHandled => registry.has(session_id, &scheme, is_built_in(&scheme)),
+        Op::Register(kind) => add(
+            context,
+            session_id,
+            &scheme,
+            Entry {
+                kind,
+                handler,
+                intercept: false,
+            },
+        ),
+        Op::Intercept(kind) => add(
+            context,
+            session_id,
+            &scheme,
+            Entry {
+                kind,
+                handler,
+                intercept: true,
+            },
+        ),
+        Op::Unregister => drop_entry(context, session_id, &scheme, false),
+        Op::Unintercept => drop_entry(context, session_id, &scheme, true),
+        Op::IsRegistered => registry.has(session_id, &scheme, false),
+        Op::IsIntercepted => registry.has(session_id, &scheme, true),
     };
     Ok(match op {
         Op::Handle | Op::Unhandle => JsValue::undefined(),

@@ -149,6 +149,7 @@ fn run_handler(context: &mut Context, serial: u64, entry: &Entry, job: &Job) -> 
             promise.then(Some(ok), Some(err), context)?;
             Ok(())
         }
+        legacy => super::protocol_legacy::run(context, serial, legacy, entry, &job.request),
     }
 }
 
