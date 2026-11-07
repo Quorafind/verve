@@ -79,6 +79,7 @@ mod string_decoder;
 mod timers;
 #[cfg(feature = "typescript")]
 mod typescript;
+mod uncaught;
 mod url;
 mod url_pattern;
 mod util;
@@ -1079,6 +1080,17 @@ pub fn now(context: &Context) -> Millis {
 
 /// Writes a line to the console the host reads with [`Runtime::take_console`].
 pub fn console_line(context: &Context, level: Level, text: String) {
+    console_line_at(context, level, text, None);
+}
+
+/// [`console_line`] for a line that knows where it comes from, as an uncaught error does; with
+/// none, the sink is told the line of the script that called the console.
+pub(crate) fn console_line_at(
+    context: &Context,
+    level: Level,
+    text: String,
+    at: Option<SourcePos>,
+) {
     let state = shared(context);
     if let Some(profile) = state.profile.borrow().as_ref() {
         profile.console(level, &text);
@@ -1088,7 +1100,11 @@ pub fn console_line(context: &Context, level: Level, text: String) {
     // cell borrowed.
     let sink = state.console_sink.borrow().clone();
     if let Some(sink) = sink {
-        sink(level, &text, None);
+        sink(
+            level,
+            &text,
+            at.or_else(|| embed::call_site(context)).as_ref(),
+        );
         return;
     }
     if state.echo {
@@ -1109,14 +1125,7 @@ pub fn report(context: &mut Context, error: &JsError) {
     if process::heard_by_listeners(context, error) {
         return;
     }
-    let text = describe(context, error);
-    let frames = thrown_at(context, error);
-    let line = if frames.is_empty() {
-        format!("Uncaught {text}")
-    } else {
-        format!("Uncaught {text} ({frames})")
-    };
-    console_line(context, Level::Error, line.clone());
+    let line = uncaught::console_uncaught(context, "Uncaught", error);
     process::after_uncaught(context, |_| line);
 }
 

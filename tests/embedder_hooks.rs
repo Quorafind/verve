@@ -1003,6 +1003,7 @@ fn console_lines_go_to_a_sink() {
     let lines = Rc::new(RefCell::new(Vec::new()));
     let heard = lines.clone();
     rt.set_console_sink(Some(Box::new(move |level, text, position| {
+        // `eval` code has no file, so there is no position to tell.
         assert!(position.is_none());
         heard.borrow_mut().push(format!("{level:?}:{text}"));
     })));
@@ -1013,6 +1014,77 @@ fn console_lines_go_to_a_sink() {
     rt.set_console_sink(None);
     rt.eval("console.log('three')").unwrap();
     assert_eq!(rt.take_console().len(), 1);
+}
+
+#[test]
+fn a_console_sink_is_told_which_script_wrote_the_line() {
+    let mut rt = Runtime::new();
+    let places = Rc::new(RefCell::new(Vec::new()));
+    let heard = places.clone();
+    rt.set_console_sink(Some(Box::new(move |_, text, position| {
+        let at = position.map(|at| (at.file.clone(), at.line));
+        heard.borrow_mut().push((text.to_owned(), at));
+    })));
+    rt.run_module(
+        Path::new("/app/page.js"),
+        "console.log('a');
+
+console.warn('b')",
+    )
+    .unwrap();
+    let places = places.borrow();
+    let expected = [("a", 1), ("b", 3)];
+    assert_eq!(places.len(), expected.len(), "{places:?}");
+    for ((text, at), (want, line)) in places.iter().zip(expected) {
+        let (file, found) = at.as_ref().expect("a position");
+        assert!(file.ends_with("page.js"), "{places:?}");
+        assert_eq!((text.as_str(), *found), (want, line), "{places:?}");
+    }
+}
+
+/// What a console sink hears of `source`, run as `/app/page.js`, with the errors it leaves uncaught.
+fn uncaught_in(source: &str) -> Vec<(String, Option<u32>)> {
+    let mut rt = Runtime::new();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let told = heard.clone();
+    rt.set_console_sink(Some(Box::new(move |_, text, position| {
+        told.borrow_mut()
+            .push((text.to_owned(), position.map(|at| at.line)));
+    })));
+    let _ = rt.load_module(Path::new("/app/page.js"), source);
+    heard.take()
+}
+
+#[test]
+fn a_sink_hears_where_an_uncaught_error_was_thrown() {
+    let said = |line: u32| vec![("Uncaught Error: x".to_owned(), Some(line))];
+    // A named function, an arrow nobody named, and the top level of the file: Boa writes the
+    // last two frames without the parentheses around the place.
+    let named = "function fail() {
+  throw new Error('x');
+}
+queueMicrotask(fail);";
+    assert_eq!(uncaught_in(named), said(2));
+    let arrow = "
+queueMicrotask(() => {
+  throw new Error('x');
+});";
+    assert_eq!(uncaught_in(arrow), said(3));
+    assert_eq!(
+        uncaught_in(
+            "
+
+throw new Error('x');"
+        ),
+        said(3)
+    );
+}
+
+#[test]
+fn a_sink_hears_a_thrown_string_without_quotes() {
+    let heard = uncaught_in("queueMicrotask(() => { throw 'plain'; });");
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert_eq!(heard[0].0, "Uncaught plain");
 }
 
 #[test]
