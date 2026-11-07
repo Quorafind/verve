@@ -419,3 +419,16 @@ The cost is verve-dom's own code, with no new dependency (`unicode-segmentation`
 - live ranges in the arena and their boundary rules, and `Range`/`StaticRange`/`Selection` on them;
 - the contenteditable key paths, `beforeinput` with target ranges, the undo history and `execCommand`;
 - composition in fields and editable regions, and the caret box for the candidate window.
+
+## P35: pictures, background images and the media stubs (phase 1)
+
+`electron/p35-images` merged on `docs/electron-plan` after P43 phase 2 and P24 phase 1: `cargo build --release -p verve-gpui --bin
+electron --features jit` is 37,452,288 bytes against 37,295,616 for P24's merge, +156,672 bytes. It was measured at 31dfdba6; the
+tested tip 3a2ff089 adds only a guard in the cascade's `revert-layer` and test waits. Alone on `124ca9af` round 1 measured +133,120.
+The budget is 400 KB for both phases. The cap (41,943,040) leaves 4,490,752 bytes.
+
+The cost is P35's own code, with no new crate (it decodes with P25's `canvas::decode`, through `image`, which was already linked):
+- source choice (`srcset`, `sizes`, `<picture>`) and the `background` shorthand opened into per-layer longhands, in verve-dom;
+- intrinsic sizes, `object-fit`/`object-position` and background tiles, in verve-layout;
+- one decode thread per page and the published image table, in verve-electron;
+- the picture cache and drawing in both painters, in verve-gpui.
