@@ -208,6 +208,8 @@ impl Shell {
             }
             // The frames follow the system's theme until P34 draws them by the source.
             ToShell::SetThemeSource(_) => {}
+            // The inspector window is drawn from the next commit on.
+            ToShell::Inspector { .. } | ToShell::InspectorReply { .. } => {}
             ToShell::Quit { .. } => {
                 self.native.release();
                 cx.update(|cx| cx.quit());

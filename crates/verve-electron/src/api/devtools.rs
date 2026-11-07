@@ -1,12 +1,14 @@
 //! `webContents`' DevTools: `openDevTools()`, `closeDevTools()`, `toggleDevTools()`,
 //! `isDevToolsOpened()`, `isDevToolsFocused()`, `devToolsWebContents` and `inspectElement(x, y)`.
 //!
-//! Verve has no Chromium DevTools. Opening them says `'devtools-opened'`, makes the page dump its
-//! element tree to the terminal (`inspector.rs`) and sends the page's console there for as long as
-//! they stay open; `options` are accepted and ignored, there is no DevTools `webContents`, and the
-//! DevTools never have the focus. A window made with `webPreferences.devTools: false` cannot open
-//! them (Electron 39.8.10: the call does nothing and no event is said). The `toggleDevTools` menu
-//! role calls the same methods.
+//! Verve has no Chromium DevTools. Opening them says `'devtools-opened'` and asks the shell for
+//! its inspector window. A shell with none (the headless one) gets the page's element tree as text
+//! on the terminal (`inspector.rs`) and the page's console there for as long as they stay open.
+//! `options` are accepted and ignored, and there is no DevTools `webContents`. The inspector
+//! window says when a person closes it (`'devtools-closed'`) and when it has the focus
+//! (`'devtools-focused'`, `isDevToolsFocused()`).
+//! A window made with `webPreferences.devTools: false` cannot open them (Electron 39.8.10: the call
+//! does nothing and no event is said). The `toggleDevTools` menu role calls the same methods.
 
 use boa_engine::native_function::NativeFunctionPointer;
 use boa_engine::{Context, JsObject, JsResult, JsValue};
@@ -16,7 +18,7 @@ use super::define::{self, Args};
 use super::web_contents::record_of;
 use super::{contents_ipc, shared};
 use crate::ids::ContentsId;
-use crate::msg::ToRenderer;
+use crate::msg::{InspectorEvent, ToRenderer, ToShell};
 
 const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("openDevTools", 0, |this, _, cx| {
@@ -43,8 +45,8 @@ const METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(shared(cx).hub.is_devtools_open(contents).into())
     }),
     ("isDevToolsFocused", 0, |this, _, cx| {
-        record_of(this, cx)?;
-        Ok(false.into())
+        let contents = record_of(this, cx)?.page.contents;
+        Ok(shared(cx).hub.is_devtools_focused(contents).into())
     }),
     ("inspectElement", 2, inspect_element),
 ];
@@ -63,7 +65,14 @@ fn open(context: &mut Context, contents: ContentsId) {
         return;
     }
     hub.set_devtools_open(contents, true);
-    hub.to_renderer(contents, ToRenderer::InspectTree { at: None });
+    // A window shows the tree; only a shell with none gets it as text on the terminal.
+    if !hub.has_inspector_window() {
+        hub.to_renderer(contents, ToRenderer::InspectTree { at: None });
+    }
+    hub.to_shell(ToShell::Inspector {
+        contents,
+        open: true,
+    });
     said_later(context, contents, "devtools-opened");
 }
 
@@ -72,7 +81,43 @@ fn close(context: &mut Context, contents: ContentsId) {
     let hub = &shared(context).hub;
     if hub.is_devtools_open(contents) {
         hub.set_devtools_open(contents, false);
+        hub.set_devtools_focused(contents, false);
+        hub.to_shell(ToShell::Inspector {
+            contents,
+            open: false,
+        });
         said_later(context, contents, "devtools-closed");
+    }
+}
+
+/// What the shell's inspector window of page `contents` did by itself. A person closing it closes
+/// the DevTools; gaining the focus says `'devtools-focused'` once, and losing it only clears
+/// `isDevToolsFocused()`. Said as the shell's message is heard, not after a call, since no call
+/// asked for it.
+pub(crate) fn window_event(
+    context: &mut Context,
+    contents: ContentsId,
+    event: InspectorEvent,
+) -> JsResult<()> {
+    let hub = &shared(context).hub;
+    if !hub.is_devtools_open(contents) {
+        return Ok(());
+    }
+    match event {
+        InspectorEvent::Closed => {
+            hub.set_devtools_open(contents, false);
+            hub.set_devtools_focused(contents, false);
+            said(context, contents, "devtools-closed")
+        }
+        InspectorEvent::Focused if !hub.is_devtools_focused(contents) => {
+            hub.set_devtools_focused(contents, true);
+            said(context, contents, "devtools-focused")
+        }
+        InspectorEvent::Focused => Ok(()),
+        InspectorEvent::Blurred => {
+            hub.set_devtools_focused(contents, false);
+            Ok(())
+        }
     }
 }
 

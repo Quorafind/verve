@@ -194,6 +194,9 @@ impl RendererGuest {
             ToRenderer::InspectTree { at } => {
                 inspector::dump(&self.document, &self.log, self.contents, at);
             }
+            ToRenderer::InspectorEval { call, code } => {
+                inspector::eval(&mut self.runtime, call, &code);
+            }
             ToRenderer::BeforeUnload { call } => self.before_unload(call),
             ToRenderer::Unload { call } => self.unload(call),
             _ => {}

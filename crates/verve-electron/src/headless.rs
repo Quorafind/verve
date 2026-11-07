@@ -23,8 +23,8 @@ use crate::accelerator::Accelerator;
 use crate::hub::{Hub, ShellPort};
 use crate::ids::{ContentsId, WindowId};
 use crate::msg::{
-    AppEvent, DialogReply, DialogResult, DialogSpec, Display, FromShell, MenuId, MenuSpec, Rect,
-    ToRendererInput, ToShell, TrayEvent, TrayId, WindowEvent, WindowOp,
+    AppEvent, DialogReply, DialogResult, DialogSpec, Display, FromShell, InspectorEvent, MenuId,
+    MenuSpec, Rect, ToRendererInput, ToShell, TrayEvent, TrayId, WindowEvent, WindowOp,
 };
 use window::Window;
 
@@ -80,6 +80,8 @@ struct State {
     menus: menu::Desk,
     dark: bool,
     exit: Option<i32>,
+    /// The pages whose inspector window is open, in the order they were opened.
+    inspectors: Vec<ContentsId>,
 }
 
 /// What the shell has of a page: the last document it published.
@@ -149,7 +151,16 @@ impl State {
             }
             ToShell::Window { window, op } => self.apply_op(*window, op, primary, &mut out),
             ToShell::Menu(op) => self.menus.apply(op, &mut out),
-            ToShell::ErrorBox { .. } | ToShell::Dialog { .. } | ToShell::SetThemeSource(_) => {}
+            ToShell::ErrorBox { .. }
+            | ToShell::Dialog { .. }
+            | ToShell::SetThemeSource(_)
+            | ToShell::InspectorReply { .. } => {}
+            ToShell::Inspector { contents, open } => {
+                self.inspectors.retain(|page| page != contents);
+                if *open {
+                    self.inspectors.push(*contents);
+                }
+            }
             ToShell::Quit { exit_code } => {
                 self.exit = Some(*exit_code);
                 self.windows.values_mut().for_each(|window| {
@@ -174,7 +185,12 @@ impl State {
                 });
                 return;
             }
-            WindowOp::Destroy | WindowOp::CloseAnswer { prevented: false } => window.close(),
+            WindowOp::Destroy | WindowOp::CloseAnswer { prevented: false } => {
+                // The page's inspector goes with its window.
+                self.inspectors
+                    .retain(|page| *page != window.shown.contents);
+                window.close()
+            }
             _ => window.apply(op, primary),
         };
         out.window(window, events, primary.scale_factor);
@@ -345,6 +361,56 @@ impl HeadlessShell {
             position: Some((1808., 1048.)),
             modifiers: verve_dom::Modifiers::default(),
         });
+    }
+
+    /// The pages whose inspector window is open, in the order they were opened: the headless
+    /// shell draws none, so this is what the main process asked for.
+    pub fn open_inspectors(&self) -> Vec<ContentsId> {
+        self.state().inspectors.clone()
+    }
+
+    /// The answers the inspector windows were given to their REPL, as
+    /// `(page, call, text, is_error)`, in order.
+    pub fn inspector_replies(&self) -> Vec<(ContentsId, u64, String, bool)> {
+        let received = self.state().received.clone();
+        received
+            .into_iter()
+            .filter_map(|msg| match msg {
+                ToShell::InspectorReply {
+                    contents,
+                    call,
+                    text,
+                    is_error,
+                } => Some((contents, call, text, is_error)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A person closes the inspector window of page `contents`, if it is open.
+    pub fn close_inspector(&self, contents: ContentsId) {
+        let was_open = {
+            let mut state = self.state();
+            let open = state.inspectors.contains(&contents);
+            state.inspectors.retain(|page| *page != contents);
+            open
+        };
+        if was_open {
+            self.say(FromShell::Inspector {
+                contents,
+                event: InspectorEvent::Closed,
+            });
+        }
+    }
+
+    /// The inspector window of page `contents` gains (`true`) or loses the focus.
+    pub fn focus_inspector(&self, contents: ContentsId, focused: bool) {
+        let event = if focused {
+            InspectorEvent::Focused
+        } else {
+            InspectorEvent::Blurred
+        };
+        self.say(FromShell::Inspector { contents, event });
     }
 
     /// The global shortcuts the app registered, by the number it was registered under.
@@ -632,6 +698,13 @@ fn describe(msg: &ToShell) -> String {
         ToShell::ErrorBox { title, content } => format!("[app] error box {title:?} {content:?}"),
         ToShell::Dialog { call, spec, .. } => format!("[dialog {call}] {spec:?}"),
         ToShell::SetThemeSource(source) => format!("[app] theme source {source:?}"),
+        ToShell::Inspector { contents, open } => format!("[inspector {contents}] open {open}"),
+        ToShell::InspectorReply {
+            contents,
+            call,
+            text,
+            is_error,
+        } => format!("[inspector {contents}] reply #{call} error {is_error}: {text}"),
     }
 }
 

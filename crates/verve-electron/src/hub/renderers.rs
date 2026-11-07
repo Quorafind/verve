@@ -52,6 +52,11 @@ pub(super) struct RendererSlot {
 }
 
 impl RendererSlot {
+    /// Which document's isolate the page has now.
+    pub(super) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     /// Called on the page's own thread, by its isolate, when it has a view, events, or died:
     /// the view waits for the shell, the events go to the main process's thread, and a page
     /// that died is reported to it — once — as `render-process-gone`.
@@ -66,8 +71,13 @@ impl RendererSlot {
             Some(isolate) => (isolate.take_view(), isolate.take_events(), isolate.health()),
             None => (None, Vec::new(), Health::Alive),
         };
-        if let Some(view) = view {
-            *lock(&self.view) = Some(view);
+        if let Some(mut view) = view {
+            let mut waiting = lock(&self.view);
+            // A view the shell has not read yet is replaced, but what changed in it is not lost.
+            if let Some(unread) = waiting.take() {
+                carry_changes(unread, &mut view);
+            }
+            *waiting = Some(view);
         }
         if !events.is_empty() {
             hub.from_renderer_batch(self.contents, generation, events);
@@ -85,6 +95,24 @@ impl RendererSlot {
             );
         }
     }
+}
+
+/// Adds the update of the view `unread`, which `newer` takes the place of, to `newer`'s: a newer
+/// view with no update keeps the unread one, and with one it has the changes of both. The nodes
+/// the unread view freed are said once, however many views pass before the shell looks.
+fn carry_changes(unread: RendererView, newer: &mut RendererView) {
+    let Some(old) = unread.update else {
+        return;
+    };
+    let Some(new) = newer.update.as_mut() else {
+        newer.update = Some(old);
+        return;
+    };
+    let mut changes = old.changes;
+    changes.merge(std::mem::take(&mut new.changes));
+    let mut seen = std::collections::HashSet::new();
+    changes.removed.retain(|node| seen.insert(*node));
+    new.changes = changes;
 }
 
 /// Interrupts the script a page is running and lets its isolate go.
@@ -124,6 +152,7 @@ impl Hub {
         });
         // Registered first: what the page says while its isolate is made is heard.
         lock(&self.renderers).insert(contents, Arc::clone(&slot));
+        self.start_kept_console(contents);
         self.spawn_renderer(&slot);
         RendererHandle {
             contents,
@@ -180,6 +209,7 @@ impl Hub {
         }
         stop(&slot);
         lock(&slot.input).clear();
+        self.clear_kept_console(contents);
         // Nothing the old document said from here on is heard, nor what is said for it.
         slot.generation.fetch_add(1, Ordering::SeqCst);
         *lock(&slot.view) = None;
@@ -223,6 +253,7 @@ impl Hub {
             } = event
             {
                 self.log_console(Some(contents), message);
+                self.keep_console(contents, *level, (source, *line), message);
                 self.forward_console(contents, *level, (source, *line), message);
             }
             if let FromRenderer::Lifecycle(page_event) = event {
@@ -230,6 +261,8 @@ impl Hub {
             }
             self.log_from_renderer(contents, event);
         }
+        // The REPL's answers are the inspector window's, and the main process never hears them.
+        let events = self.take_inspector_replies(contents, events);
         // At most `PER_JOB` to a job, so what the shell or another page says in the meantime is
         // heard between them.
         let mut events = events.into_iter().peekable();
@@ -375,6 +408,47 @@ mod tests {
     use super::super::tests::{app, wait};
     use super::*;
     use crate::msg::LoadOptions;
+
+    /// A view whose document changed at `nodes` since the view before it.
+    fn view_changing(nodes: Vec<verve_dom::NodeId>) -> RendererView {
+        let mut runtime = verve::Runtime::new();
+        let document = verve_dom::install(&mut runtime, verve_dom::Options::default())
+            .expect("a document installs");
+        let mut update = document.update();
+        update.changes = verve_dom::Changes {
+            nodes,
+            ..verve_dom::Changes::default()
+        };
+        RendererView {
+            applied: 0,
+            update: Some(update),
+            wants_frame: false,
+            cursor: None,
+            ime_rect: None,
+            display_list: None,
+        }
+    }
+
+    #[test]
+    fn a_view_the_shell_did_not_read_leaves_its_changes_to_the_one_that_replaces_it() {
+        let mut unread = view_changing(vec![5, 9]);
+        unread.update.as_mut().unwrap().changes.removed = vec![3, 4];
+        let mut newer = view_changing(vec![7, 9]);
+        newer.update.as_mut().unwrap().changes.removed = vec![4, 6];
+        carry_changes(unread, &mut newer);
+        let changes = newer.update.expect("an update").changes;
+        assert_eq!(changes.nodes, [5, 7, 9]);
+        assert_eq!(changes.removed, [3, 4, 6]);
+    }
+
+    #[test]
+    fn a_newer_view_with_no_update_keeps_the_unread_ones() {
+        let unread = view_changing(vec![5]);
+        let mut newer = view_changing(vec![]);
+        newer.update = None;
+        carry_changes(unread, &mut newer);
+        assert_eq!(newer.update.expect("the unread update").changes.nodes, [5]);
+    }
 
     #[test]
     fn a_page_that_panics_is_reported_gone_once() {

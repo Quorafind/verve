@@ -83,8 +83,8 @@ impl Hub {
         lock(&self.devtools).contains(&contents)
     }
 
-    /// Writes a line of page `contents`' console to the terminal, if logging is on or its
-    /// DevTools are open; Electron writes nothing otherwise.
+    /// Writes a line of page `contents`' console to the terminal, if logging is on or (in a shell
+    /// with no inspector window) its DevTools are open; Electron writes nothing otherwise.
     pub(super) fn forward_console(
         &self,
         contents: ContentsId,
@@ -93,7 +93,9 @@ impl Hub {
         text: &str,
     ) {
         let log = self.log();
-        let devtools = self.any_devtools.load(Ordering::Relaxed) && self.is_devtools_open(contents);
+        let devtools = self.any_devtools.load(Ordering::Relaxed)
+            && self.is_devtools_open(contents)
+            && !self.has_inspector_window();
         if log.console() || devtools {
             log.console_line(contents, level, at, text);
         }
