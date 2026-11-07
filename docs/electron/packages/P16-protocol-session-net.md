@@ -442,3 +442,51 @@ cargo test -p verve-electron --test net
 cargo test -p verve-electron --test page_load
 ```
 
+
+### 阶段 2a（cookie 罐、webRequest、阶段 1 的两条遗留）
+
+**做了什么**
+
+- **cookie 罐**（`hub/cookies.rs`）：`Jar`（纯逻辑，时钟是参数）与 `CookieStore`（锁、文件、`watched`）。RFC 6265 的域匹配/路径匹配、`Secure`（回环主机视同安全传输）、`HttpOnly`、`SameSite`、过期、host-only、
+  `__Secure-`/`__Host-` 前缀；`Set-Cookie` 行由 `cookie` crate（`default-features = false`，只解析）读，罐是自写的。新增依赖只有 `cookie 0.18.2`（它拉 `version_check` 作构建依赖，`time` 本来就在图里），
+  `Cargo.lock` 只多了这两处，没有顺带升级别的包。持久化 `Cookies.json`（见契约），`Hub::set_user_data` 由 `MainState::new` 与 `app.setPath('userData')` 通知，`Hub::shutdown` 写盘（没被「启动」过的临时应用不写）。
+- **`session.cookies`**（`api/cookies.rs`）：`get`/`set`/`remove`/`flushStore`、`changed(event, cookie, cause, removed)`；错误文本与 `Cookie` 的字段取自 Electron 39.8.10 的观察（契约里列了）。页面线程改的罐经 `FromRenderer::Cookies` 到主进程发 `changed`，
+  且只在脚本取过 `session.cookies` 之后才发。
+- **请求的接线**（`net_watch.rs`，页面与主进程共用一个 `Watch`）：`before_send` 附 `Cookie` 再问 `onBeforeRequest`/`onBeforeSendHeaders`，`headers_received` 先问 `onHeadersReceived` 再存 `Set-Cookie`，`notify` 对应其余五个阶段。
+  页面的 `RendererNet`（`renderer_net.rs`）直接读写 `SessionState`，没有主进程往返；`MainNet`（`net.fetch`/`net.request`）同一份代码，`net.fetch` 默认用罐（`credentials: 'omit'` 不用），`net.request` 看 `useSessionCookies`/`credentials`。
+- **webRequest**（`api/web_request.rs`、`api/match_pattern.rs`）：八个阶段的 `onX([filter, ]listener|null)`，每阶段一个监听者，后设覆盖前设；match pattern 的解析与匹配（含 `filter.types`）；`details` 的字段与次序、`uploadData`（Buffer）、`requestHeaders`/`responseHeaders` 的形状；
+  `callback({cancel, redirectURL, requestHeaders, responseHeaders, statusLine})`。没有监听者或 filter 不匹配时页面不发任何消息（`Session::web_request_messages()` 在发送处计数，测试断言）；主进程自己的请求直接在主 realm 里跑监听者。
+- **verve-dom**：`CookieBackend` 与 `Options::cookies`，`document.cookie` 的读写转给它；没有它时仍是窗口内的旧实现。
+- **阶段 1 遗留**：页面载入别的文档时（`RendererGuest::load`），之前它向主进程要的东西作废：加载器的未决询问丢掉，`FromRenderer::Navigating` 让主进程取消仍在服务的处理器应答（`Served`）与它们的读者（`protocol_serve::cancel_all`，现在也认加载器的询问）；
+  等 `webRequest` 回复的请求被取消。`file:` 的应答有了 `last-modified`（磁盘文件的修改时间；`app.asar` 内的没有）。
+- **测试**：`tests/session.rs`（9 个）、`tests/protocol.rs` 一个、`tests/net.rs` 一个、`hub::cookies`、`api::match_pattern`、`files`、`net_watch` 的单元测试、verve-dom 的 `tests/cookie_backend.rs`。
+
+**没做 / 只做了一部分**
+
+- 阶段 2b 的权限、代理、下载与 `--test session` 的其余部分没有开始。`Session` 对象还没有 `setPermissionRequestHandler`、`setProxy`、`downloadURL`、`on('will-download')`。
+- 没有公共后缀表（单标签的 `Domain` 只在等于主机名时接受）；也没有 Chromium 的淘汰规则（每域 180、总共 3000 个）。登记给 P41。
+- 内核没有把 fetch 的凭证模式告诉宿主，所以页面的请求一律附 cookie（含跨源），跨 site 时只按 `SameSite` 过滤；site 取主机名最后两段。登记给 P41。
+- 写盘：改动后若距上次写已过 30 秒才写，没有定时器；之间的改动在 `flushStore()`、退出、`CookieStore` 被丢弃时写。会话 cookie 不落盘。`app.setPath('sessionData')` 不影响 cookie 的位置（只认 `userData`）。
+- `details`：`ip` 只在地址本身是 IP 字面量时给；`fromCache` 恒为 `false`；`frame` 是页面的主框架对象，子框架的请求也是；页面自己载入的文档、`<script>`/`<link>`/`<img>` 子资源不经页面线程的 `fetch`，所以
+  文档载入（若走 `fetch`）的 `resourceType` 是 `xhr` 而不是 `mainFrame`，由加载器取的子资源（只有 `file:`、`data:` 与自定义 scheme）不经 `webRequest`——与 Electron 不同，没有逐项核实。
+- WebSocket 握手不经 `before_send`（内核没接），登记给 P41。`onBeforeSendHeaders` 里对 `Cookie` 头的改动照样被发送，不再被罐覆盖。
+- 没有跑任何测试（只跑了 `cargo check`）；测试期望都来自 `probe5`/`probe6` 的观察，没有拿真 Electron 对跑过。
+
+**给其他包的备注**
+
+- **P23**：verve-dom 新增 `CookieBackend`（`get(url) -> String`、`set(url, line)`）与 `Options::cookies`；`document.cookie` 的访问器只在 `bind/document.rs` 里多走一步 `jar_of`。页面的 `document.cookie` 看不到 `HttpOnly`，写不了 `HttpOnly`。
+- **P30**：`renderer_guest.rs` 这一阶段又动了四处：`Options::cookies`、`ToRenderer::WebRequestReply` 一条分支、`load()` 开头的 `abandon`、两处 `set_page`。
+- **P20**：`ElectronLoader::abandon()`；加载器的询问现在以 `Asker::Loader(contents)` 登记，页面载入别的文档时被取消。
+- **阶段 2b 的人**：`Session` 的状态在 `hub/sessions.rs`，`webRequest` 与 `cookies` 的对象表在 `NetState`（`api/mod.rs`）；`MainNet::for_request(cx, session, (bypass, cookies))` 是主进程请求的唯一入口。
+
+**要跑的命令（逐个跑）**
+
+```
+cargo test -p verve-dom --test cookie_backend
+cargo test -p verve-electron --lib
+cargo test -p verve-electron --test session
+cargo test -p verve-electron --test protocol
+cargo test -p verve-electron --test net
+cargo test -p verve-electron --test page_load
+cargo test -p verve --test browser_net
+```
