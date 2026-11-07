@@ -27,6 +27,22 @@ impl Changes {
             && self.removed.is_empty()
             && !self.restyled_all
     }
+
+    /// Adds what `later` says changed after this: the lists of nodes stay sorted and without
+    /// repeats, and `removed` is the two in order.
+    pub fn merge(&mut self, later: Changes) {
+        for (mine, theirs) in [
+            (&mut self.nodes, later.nodes),
+            (&mut self.restyled, later.restyled),
+            (&mut self.partitions, later.partitions),
+        ] {
+            mine.extend(theirs);
+            mine.sort_unstable();
+            mine.dedup();
+        }
+        self.removed.extend(later.removed);
+        self.restyled_all |= later.restyled_all;
+    }
 }
 
 /// A snapshot and what changed since the last: [`Document::update`]'s answer.
@@ -37,8 +53,17 @@ pub struct Update {
 
 impl Document {
     /// Brings the styles up to date and answers a snapshot, with what changed since the last
-    /// update.
+    /// update. That includes what [`Document::set_layout_provider`]'s layout took on the way.
     pub fn update(&self) -> Update {
+        let mut update = self.take_update();
+        let mut carried = std::mem::take(&mut self.view.borrow_mut().carried);
+        carried.merge(std::mem::take(&mut update.changes));
+        update.changes = carried;
+        update
+    }
+
+    /// [`Document::update`] without what an earlier layout took, which the caller keeps.
+    pub(crate) fn take_update(&self) -> Update {
         self.absorb();
         self.sync_images();
         self.commit_canvases();
@@ -68,8 +93,8 @@ impl Document {
         Snapshot(Arc::new(SnapshotData {
             dom: state.dom.clone(),
             styles: view.computed.clone(),
-            revision: state.dom.revision.wrapping_add(state.revision),
-            viewport: (state.env.width, state.env.height),
+            revision: state.layout_key().0,
+            viewport: state.layout_key().1,
             url: state.url.to_string(),
             scroll_offsets: state.scroll_offsets.clone(),
             media: state.media.snapshot(),

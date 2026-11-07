@@ -203,13 +203,15 @@ const DOCUMENT_METHODS: &[Method] = &[
     ("elementFromPoint", 2, |_, args, cx| {
         let x = arg(args, 0).to_number(cx)? as f32;
         let y = arg(args, 1).to_number(cx)? as f32;
-        let found = crate::hit_test(&shared(cx).borrow(), x, y).first().copied();
+        let found = crate::hit_test(&crate::layout_provider::fresh(cx).borrow(), x, y)
+            .first()
+            .copied();
         Ok(wrap_opt(cx, found))
     }),
     ("elementsFromPoint", 2, |_, args, cx| {
         let x = arg(args, 0).to_number(cx)? as f32;
         let y = arg(args, 1).to_number(cx)? as f32;
-        let found = crate::hit_test(&shared(cx).borrow(), x, y);
+        let found = crate::hit_test(&crate::layout_provider::fresh(cx).borrow(), x, y);
         Ok(super::node::node_list(found, cx))
     }),
     ("getSelection", 0, |_, _, cx| super::platform::selection(cx)),

@@ -33,6 +33,7 @@ pub mod field;
 pub mod html;
 mod inner_text;
 mod input;
+mod layout_provider;
 mod load;
 mod media;
 mod rect;
@@ -43,6 +44,7 @@ mod update;
 mod window_state;
 mod world;
 
+pub use layout_provider::{Layout, LayoutProvider};
 pub use update::{Changes, Update};
 pub use window_state::{Align, FontFaceId, FontOutcome, ScrollRequest};
 
@@ -301,6 +303,8 @@ pub(crate) struct View {
     partitions: HashSet<NodeId>,
     removed: Vec<NodeId>,
     restyled_all: bool,
+    /// What a layout took from the next update ([`Document::set_layout_provider`]).
+    carried: Changes,
     /// The element a button went down on, for the click its release makes.
     pressed: Option<NodeId>,
     /// The element the pointer was last over.
@@ -550,7 +554,10 @@ impl Document {
         self.deliver_layout(runtime);
     }
 
-    fn deliver_layout(&self, runtime: &mut verve::Runtime) {
+    /// Tells the resize and intersection observers whose targets moved or changed size. A drawer
+    /// that reports boxes does it with them; a page whose layout is the provider's does it
+    /// itself, after each turn.
+    pub fn deliver_layout(&self, runtime: &mut verve::Runtime) {
         let context = runtime.context();
         if bind::observers::watching_layout(context)
             && let Err(error) = bind::observers::deliver_layout(context)
@@ -665,6 +672,14 @@ impl Document {
         view.changed.retain(|id| !gone.contains(id));
         view.restyled.retain(|id| !gone.contains(id));
         view.partitions.retain(|id| !gone.contains(id));
+        let carried = &mut view.carried;
+        for nodes in [
+            &mut carried.nodes,
+            &mut carried.restyled,
+            &mut carried.partitions,
+        ] {
+            nodes.retain(|id| !gone.contains(id));
+        }
         view.removed.extend(freed_all.iter().copied());
         freed_all.len()
     }
@@ -674,11 +689,11 @@ impl Document {
     /// The element under `(x, y)`, from what was last painted: what the pointer's events
     /// target. `None` outside every painted box.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
-        hit_test(&self.state.borrow(), x, y).first().copied()
+        hit_test(&self.laid(), x, y).first().copied()
     }
 
     fn pointer_target(&self, pointer: &Pointer) -> NodeId {
-        let state = self.state.borrow();
+        let state = self.laid();
         hit_test(&state, pointer.x, pointer.y)
             .first()
             .copied()
@@ -954,13 +969,7 @@ impl Document {
     /// A press on `node` from start to end — down, up, click — as a pointer at its painted
     /// box's middle: for a drawer that hit tests itself, and for tests.
     pub fn press(&self, runtime: &mut verve::Runtime, node: NodeId) -> bool {
-        let rect = self
-            .state
-            .borrow()
-            .rects
-            .get(&node)
-            .copied()
-            .unwrap_or_default();
+        let rect = self.laid().rects.get(&node).copied().unwrap_or_default();
         let pointer = Pointer {
             x: rect.x + rect.width / 2.,
             y: rect.y + rect.height / 2.,

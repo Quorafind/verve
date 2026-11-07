@@ -887,7 +887,7 @@ const WINDOW_ACCESSORS: &[Accessor] = &[
 ];
 
 fn window_scroll(context: &Context, axis: usize) -> f64 {
-    let state = shared(context);
+    let state = crate::layout_provider::fresh(context);
     let state = state.borrow();
     let html = state.dom.html;
     f64::from(state.scroll_offsets.get(&html).map_or(0., |o| o[axis]))

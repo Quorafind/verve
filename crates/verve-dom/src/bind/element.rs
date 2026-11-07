@@ -205,7 +205,7 @@ pub fn svg_class(tag: &str) -> Option<&'static str> {
 /// Where `id` was last painted: its own box when the drawer measured it, else the box round
 /// what of it was measured, else (for the root and the body) the viewport; nothing otherwise.
 pub fn painted(context: &Context, id: NodeId) -> Rect {
-    let state = shared(context);
+    let state = crate::layout_provider::fresh(context);
     let state = state.borrow();
     if let Some(rect) = state.rects.get(&id) {
         return *rect;
@@ -258,7 +258,7 @@ fn painted_part(this: &JsValue, context: &mut Context, part: usize) -> JsResult<
 
 fn scrolled(this: &JsValue, context: &mut Context, axis: usize) -> JsResult<JsValue> {
     let id = node_of(this)?;
-    let offset = shared(context)
+    let offset = crate::layout_provider::fresh(context)
         .borrow()
         .scroll_offsets
         .get(&id)
@@ -899,28 +899,27 @@ const ELEMENT_ACCESSORS: &[Accessor] = &[
     ),
 ];
 
-/// How big what is inside `this` is on `axis`: what the drawer painted of its content, at least
-/// its own box.
+/// How big what is inside `this` is on `axis`: what the layout says (`scrollWidth`,
+/// `scrollHeight`), else what the drawer painted of its content, at least its own box.
 fn content_size(this: &JsValue, context: &mut Context, axis: usize) -> JsResult<JsValue> {
     let id = node_of(this)?;
     let own = painted(context, id);
     let state = shared(context);
     let state = state.borrow();
-    let mut far = if axis == 0 {
-        own.x + own.width
-    } else {
-        own.y + own.height
-    };
-    for (node, rect) in &state.rects {
-        if *node != id && state.dom.contains(id, *node) {
-            far = far.max(if axis == 0 {
-                rect.x + rect.width
-            } else {
-                rect.y + rect.height
-            });
-        }
+    if let Some(extent) = state.scroll_extents.get(&id) {
+        return Ok(f64::from(extent[axis].round()).into());
     }
-    let size = if axis == 0 { far - own.x } else { far - own.y };
+    let edge = |r: &Rect| {
+        if axis == 0 {
+            r.x + r.width
+        } else {
+            r.y + r.height
+        }
+    };
+    let far = (state.rects.iter())
+        .filter(|(node, _)| **node != id && state.dom.contains(id, **node))
+        .fold(edge(&own), |far, (_, rect)| far.max(edge(rect)));
+    let size = far - if axis == 0 { own.x } else { own.y };
     Ok(f64::from(size.max(0.).round()).into())
 }
 

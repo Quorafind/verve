@@ -280,7 +280,11 @@ fn rendered(context: &mut Context, node: NodeId, axis: Axis) -> u32 {
         return value.max(0.) as u32;
     }
     let natural = report(context, node).natural;
-    let painted = shared(context).borrow().rects.get(&node).copied();
+    let painted = crate::layout_provider::fresh(context)
+        .borrow()
+        .rects
+        .get(&node)
+        .copied();
     match (painted, axis) {
         (Some(rect), Axis::Width) => rect.width.round() as u32,
         (Some(rect), Axis::Height) => rect.height.round() as u32,
