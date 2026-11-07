@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>2000 paragraphs</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #fff; color: #202124; font: 14px/1.5 sans-serif; }
+  p { margin: 0 0 6px; padding: 0 8px; }
+  p:nth-child(3n) { text-align: justify; }
+  a { color: #1a0dab; text-decoration: underline; }
+  code { background: #eee; padding: 0 2px; }
+</style>
+<div id="page"></div>
+<script>
+  // 2000 paragraphs, each a few lines long, with a link, a code span and a bold run in them.
+  const words = 'layout of inline text breaks lines at the places the rules allow and fills each one'.split(' ');
+  const page = document.getElementById('page');
+  for (let i = 0; i < 2000; i++) {
+    const p = document.createElement('p');
+    const at = (n) => words[(i + n) % words.length];
+    p.innerHTML =
+      `${at(0)} ${at(1)} ${at(2)} <a href="#">${at(3)} ${at(4)}</a> ${at(5)} <code>${at(6)}()</code> ` +
+      `${at(7)} <b>${at(8)} ${at(9)}</b> ${at(10)} ${at(11)} ${at(12)} ${at(13)} ${at(14)} ${at(15)} ` +
+      `${at(16)} 中文排版按字断行，标点不在行首 ${at(17)} ${at(18)} ${at(19)} ${at(20)} ${at(21)} ${at(22)} ${at(23)}`;
+    page.appendChild(p);
+  }
+</script>
