@@ -126,9 +126,10 @@ impl RendererNet {
         }
     }
 
-    /// The page is loading another document: the requests of the last one that wait on a
-    /// `webRequest` listener are given up, and a request the listener held goes no further.
-    pub(crate) fn abandon(&self, context: &mut Context) {
+    /// The page is loading another document: the requests of the last one that wait on the main
+    /// process are given up (a request a listener held goes no further), and the main process is
+    /// told so, if there was anything to tell (`asked`: the loader had asks out too).
+    pub(crate) fn abandon(&self, asked: bool, context: &mut Context) {
         let held: Vec<Then> = self
             .asks
             .pending
@@ -142,6 +143,10 @@ impl RendererNet {
         };
         for then in held {
             then(cancel.clone(), context);
+        }
+        let streaming = std::mem::take(&mut *self.open.borrow_mut());
+        if asked || !streaming.is_empty() {
+            self.outbox.borrow_mut().push(FromRenderer::Navigating);
         }
     }
 

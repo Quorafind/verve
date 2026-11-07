@@ -62,6 +62,15 @@ impl ElectronLoader {
         self.calls.borrow().len()
     }
 
+    /// The page is loading another document: the asks the last one made are given up, and an
+    /// answer that still comes is ignored. Whether there were any.
+    pub fn abandon(&self) -> bool {
+        let mut calls = self.calls.borrow_mut();
+        let any = !calls.is_empty();
+        calls.clear();
+        any
+    }
+
     /// What this loader asks of the main process since last asked.
     pub fn take_outbox(&self) -> Vec<FromRenderer> {
         std::mem::take(&mut *self.outbox.borrow_mut())

@@ -268,6 +268,7 @@ impl MainGuest {
             FromRenderer::ProtocolRequest { call, request } => {
                 protocol_serve::from_loader(context, contents, call, request);
             }
+            FromRenderer::Navigating => protocol_serve::cancel_all(context, contents),
             FromRenderer::Cookies { session, changes } => {
                 api::cookies::emit_changes(context, session, changes);
             }

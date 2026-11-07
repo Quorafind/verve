@@ -42,6 +42,8 @@ pub(crate) enum Asker {
     Main,
     /// A page's `fetch`.
     Page(ContentsId),
+    /// A page's load of a script, sheet, image or document.
+    Loader(ContentsId),
 }
 
 /// One request being answered.
@@ -141,20 +143,21 @@ pub(crate) fn cancel(context: &mut Context, who: Asker, call: u64) {
     }
 }
 
-/// Page `contents` is gone (closed, or its process died): every request it asked for is given up,
-/// so no handler goes on producing a body nobody will read.
+/// Page `contents` is gone (closed, or its process died) or is loading another document: every
+/// request it asked for is given up, so no handler goes on producing a body nobody will read.
 pub(crate) fn cancel_all(context: &mut Context, contents: ContentsId) {
-    let who = Asker::Page(contents);
-    let calls: Vec<u64> = super::shared(context)
+    let theirs =
+        |asker: &Asker| matches!(asker, Asker::Page(c) | Asker::Loader(c) if *c == contents);
+    let asks: Vec<(Asker, u64)> = super::shared(context)
         .net
         .serving
         .calls
         .borrow()
         .keys()
-        .filter(|(asker, _)| *asker == who)
-        .map(|(_, call)| *call)
+        .filter(|(asker, _)| theirs(asker))
+        .copied()
         .collect();
-    for call in calls {
+    for (who, call) in asks {
         cancel(context, who, call);
     }
 }
@@ -628,7 +631,7 @@ pub(crate) fn from_loader(
         Job {
             session,
             request,
-            call: None,
+            call: Some((Asker::Loader(contents), call)),
             auto: true,
         },
         sink,

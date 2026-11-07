@@ -47,9 +47,12 @@ pub(crate) fn start(
         *page.load.borrow_mut() = Some(settle);
         JsValue::from(promise)
     });
-    // When the page's isolate is replaced, what it was asked will never be answered.
+    // When the page's isolate is replaced, what it was asked will never be answered, and what
+    // its handlers were still producing for it is given up, since nobody will read it.
+    let contents = record.page.contents;
     if record.page.to_renderer(ToRenderer::Load { url, options }) {
-        shared(context).calls.fail(context, record.page.contents);
+        shared(context).calls.fail(context, contents);
+        super::protocol_serve::cancel_all(context, contents);
     }
     Ok(promise)
 }

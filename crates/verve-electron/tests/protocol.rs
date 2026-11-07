@@ -180,6 +180,36 @@ fn a_handler_streams_a_megabyte_and_a_reader_that_pauses_stops_its_producer() {
 }
 
 #[test]
+fn a_page_that_loads_another_document_gives_up_what_its_handler_was_still_producing() {
+    let setup = "globalThis.cancelled = 0;
+        protocol.handle('app', (req) => {
+          if (new URL(req.url).pathname !== '/endless') return globalThis.served(req);
+          const body = new ReadableStream({
+            pull(controller) { controller.enqueue(new Uint8Array(1024)); },
+            cancel() { cancelled++; },
+          });
+          return new Response(body);
+        });";
+    let app = site_app(FULL, setup);
+    let contents = bundle(&app);
+    let read = app.run_page(
+        contents,
+        "globalThis.reader = (await fetch('app://bundle/endless')).body.getReader();
+         return (await reader.read()).value.length;",
+        TIMEOUT,
+    );
+    assert_eq!(read["value"], 1024);
+    assert_eq!(app.eval_main("globalThis.cancelled"), "0");
+    // The page goes to another document: nobody will read the rest, and the handler is told.
+    app.eval_renderer(
+        contents,
+        "setTimeout(() => { location.href = 'app://bundle/index.html?again'; }, 20); 1",
+    );
+    let told = |app: &App| app.eval_main("globalThis.cancelled") == "1";
+    assert!(app.run_until(told, TIMEOUT), "console: {:?}", app.console());
+}
+
+#[test]
 fn fetch_of_a_scheme_without_supportfetchapi_rejects_but_xhr_and_page_loads_do_not() {
     let app = site_app(
         "{ standard: true, secure: true }",

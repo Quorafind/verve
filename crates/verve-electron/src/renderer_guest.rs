@@ -240,7 +240,8 @@ impl RendererGuest {
     /// is told to the main process as the loader reports it.
     fn load(&mut self, url: &str) {
         // Whatever the last document was waiting for is of no use to this one.
-        self.net.abandon(self.runtime.context());
+        let asked = self.loader.abandon();
+        self.net.abandon(asked, self.runtime.context());
         self.require_from(url);
         self.document
             .navigate_initial_with(&mut self.runtime, url, preload::run);
