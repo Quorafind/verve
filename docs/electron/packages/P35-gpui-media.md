@@ -118,6 +118,25 @@ Fill::Picture { image: ImageKey, area: Rect, tile: Rect, step: [f32; 2], count: 
 - **画哪一帧**：Shell 只画 `frame`；第一阶段恒为 0，动图见第二阶段。
 - **第一阶段的偏差**：`<img>` 的 `border-radius` 不裁图（`PaintItem::Image` 没有 `radii`）；每层最多 4096 块瓦片，超出的部分不画（`space`/`round` 都实现了）。
 
+### 第二阶段的契约（SVG、canvas 表面、动图）
+
+- **canvas 的键**：最高两位 `01`；第 61–32 位是 canvas 节点编号的低 30 位（槽位）；第 31–0 位是 `CanvasFrame.generation` 的低 32 位。
+  `canvas_key(node, generation)`、`canvas_slot(key)`（在 `verve-layout/src/images.rs`）。布局从 `Snapshot.canvases` 读出当前 generation 写进
+  `PaintItem::Image.image`；渲染器只在表里放**当前**键的画面（`CanvasFrame` 的预乘 RGBA 转成 straight-alpha BGRA），旧 generation 的键随之离开表；
+  Shell 画到一个新 generation 时，立刻让同一槽位的旧 `RenderImage` 退役（不等 300 帧的宽限）。显示列表没点名的 canvas 不转换。
+- **矢量图**：`DisplayList.vectors: Vec<VectorSpec { key: ImageKey, source: Arc<[u8]> }>` 追加在末尾，与 `rasters` 对称：布局在显示列表里放 SVG 文本，
+  Shell 在 GPUI 线程上用 GPUI 已链接的 resvg 按设备像素尺寸栅格化。内联 `<svg>` 的键是序列化文本（含内容盒的 `width`/`height`）的 62 位散列，`00` 开头，
+  所以文本不变就是同一个键；`<img src=x.svg>` 和背景的键仍是 `key_for_url`，`source` 是文档持有的字节（`Arc` 克隆，不复制）。
+  Shell 的缓存键是 `(ImageKey, 设备像素宽, 设备像素高)`，尺寸变了就重新栅格化，不拉伸位图；一帧没画到的栅格 60 帧后还给图集。
+  `<img src=x.svg>` 和背景里的 SVG 文本由渲染器放进 `ImageTable::vector(key)`（`PageImages` 对 SVG 字节不解码，直接把文本交给表；`ImageTable::with_vectors`），
+  Shell 先找显示列表的 `vectors`，再找表。resvg/usvg 与 GPUI 同版本同特性（0.46.0，`text` `system-fonts` `memmap-fonts` `raster-images`），由 `verve-layout` 直接依赖，`cargo tree -d` 不出现第二份。
+- **动图**：`ImageFrames.frames` 每帧带时长，另有 `loops: u32`（0 = 无限；GIF 读 NETSCAPE2.0 扩展，没有这个扩展就播一遍；`ImageFrames` 追加字段）。
+  画哪一帧由渲染器定：`PageImages::animate` 为显示列表点名且多于一帧的图片各记一个起点，按已过的时间算出帧号，**改写显示列表里的 `frame`**（新 `revision`）再发布。
+  页面何时醒来：`RendererGuest::next_due` 返回到下一次换帧的剩余时间（一个定时器，不是 5 ms 轮询）。显示列表不再点名的图片停止计时，再次点名时从第 0 帧重新开始。
+  时长不超过 10 ms 的帧按 100 ms 算（Chromium 源码 `gif_image_decoder.cc` 的做法；本包的观察见「状态」）。
+- **SVG 的几何**：`verve_dom::Layout` 追加 `svg_boxes: Vec<(NodeId, Rect)>`，是 usvg 树里每个有 `id` 的元素在 `<svg>` 内容盒坐标里的包围盒（序列化时给没有 `id` 的元素补一个）。
+  文档的 `getBBox()` 读这张表；布局提供者还把这些盒子平移到页面坐标，放进 `rects`，`getBoundingClientRect()` 读到的就是它们。
+
 ## 步骤
 
 1. `ImageTable` 与 `RendererView.images`；GPUI 侧 `ImageKey → RenderImage` 缓存与释放。

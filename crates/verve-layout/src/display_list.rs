@@ -450,9 +450,10 @@ pub enum Fill {
 }
 
 /// A picture the renderer owns, by number. The top two bits tell the kind: `1x` for a rasterised
-/// gradient (the top bit set, the next one arbitrary), `01` for a canvas surface (P35, second
-/// phase) and `00` for a picture the page loads (P35), whose other 62 bits are a hash of its
-/// address, so two addresses share a picture with a chance of 2^-62.
+/// gradient (the top bit set, the next one arbitrary), `01` for a canvas surface (P35: bits
+/// 61–32 are the canvas's slot, bits 31–0 its generation, see `canvas_key`) and `00` for a
+/// picture the page loads or an inline SVG (P35), whose other 62 bits are a hash of its address
+/// or of its text, so two of them share a picture with a chance of 2^-62.
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct ImageKey(pub u64);
 
