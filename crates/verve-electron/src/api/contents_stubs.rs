@@ -1,5 +1,5 @@
 //! The members of `webContents` Verve records, answers with a constant or does not do: audio,
-//! offscreen painting, DevTools (P43), printing, capture, the WebRTC policies and the rest of the
+//! offscreen painting, printing, capture, the WebRTC policies and the rest of the
 //! table Electron documents.
 //!
 //! Each still checks the page is there first, so a destroyed `webContents` throws as it does in
@@ -46,10 +46,6 @@ const TABLE: &[(&str, usize, Answer)] = &[
     ("setWebRTCIPHandlingPolicy", 1, Nothing),
     ("setWebRTCUDPPortRange", 1, Nothing),
     ("stopFindInPage", 1, Nothing),
-    ("openDevTools", 0, Nothing),
-    ("closeDevTools", 0, Nothing),
-    ("toggleDevTools", 0, Nothing),
-    ("inspectElement", 2, Nothing),
     ("inspectSharedWorker", 0, Nothing),
     ("inspectServiceWorker", 0, Nothing),
     ("setDevToolsWebContents", 1, Nothing),
@@ -58,8 +54,6 @@ const TABLE: &[(&str, usize, Answer)] = &[
     ("isBeingCaptured", 0, False),
     ("isOffscreen", 0, False),
     ("isPainting", 0, False),
-    ("isDevToolsOpened", 0, False),
-    ("isDevToolsFocused", 0, False),
     ("isCurrentlyAudible", 0, False),
     ("setVisualZoomLevelLimits", 2, Resolved),
     ("capturePage", 0, Rejected),
@@ -203,14 +197,6 @@ pub(crate) fn install(context: &mut Context, prototype: &JsObject) -> JsResult<(
                 }),
             ),
             ("session", session, None),
-            (
-                "devToolsWebContents",
-                |this, _, cx| {
-                    record_of(this, cx)?;
-                    Ok(JsValue::null())
-                },
-                None,
-            ),
         ],
     )
 }

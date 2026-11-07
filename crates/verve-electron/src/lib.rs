@@ -16,6 +16,7 @@ mod beat;
 pub mod headless;
 pub mod hub;
 pub mod ids;
+mod inspector;
 mod ipc;
 pub mod keyed;
 pub mod launcher;

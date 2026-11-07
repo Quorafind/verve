@@ -157,6 +157,14 @@ impl MainGuest {
         self.runtime.run_microtasks();
     }
 
+    /// `'devtools-opened'` or `'devtools-closed'` of page `contents`, heard after the call that
+    /// asked for it returned.
+    pub(crate) fn devtools_event(&mut self, contents: ContentsId, event: &str) {
+        let said = api::devtools::said(self.runtime.context(), contents, event);
+        api::define::report(self.runtime.context(), said);
+        self.runtime.run_microtasks();
+    }
+
     pub(crate) fn all_closed(&mut self) {
         app::quit::all_closed(self.runtime.context());
     }

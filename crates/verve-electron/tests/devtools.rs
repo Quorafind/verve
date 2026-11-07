@@ -215,3 +215,118 @@ fn the_ipc_category_writes_a_line_for_each_message_and_nothing_when_it_is_off() 
     );
     assert!(!loads.contains("[verve:ipc]"), "{loads}");
 }
+
+/// A page with a few elements, and a console line a while after the DevTools are opened.
+const TREE_PAGE: &str =
+    "<body><div id=\"main\" class=\"wide dark\"><p style=\"margin:0; height:16px\">hi</p></div>
+<script>
+console.log('before');
+setTimeout(() => console.warn('late'), 700);
+</script></body>";
+
+/// The app of the DevTools tests: it opens them on the tree page, then toggles them twice, and
+/// logs what `isDevToolsOpened()` and the events said.
+const DEVTOOLS_APP: &str = r"const { app, BrowserWindow } = require('electron');
+app.on('window-all-closed', () => {});
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const log = (...parts) => console.log(parts.join(' '));
+app.whenReady().then(async () => {
+  const win = new BrowserWindow({ show: false });
+  const wc = win.webContents;
+  wc.on('devtools-opened', () => log('event opened', wc.isDevToolsOpened()));
+  wc.on('devtools-closed', () => log('event closed', wc.isDevToolsOpened()));
+  await win.loadFile('page.html');
+  await sleep(300);
+  log('start', wc.isDevToolsOpened(), wc.isDevToolsFocused(), String(wc.devToolsWebContents));
+  wc.openDevTools({ mode: 'detach', activate: false });
+  log('open', wc.isDevToolsOpened());
+  await sleep(100);
+  wc.openDevTools();
+  wc.inspectElement(1, 1);
+  wc.inspectElement(-5, -5);
+  await sleep(900);
+  wc.toggleDevTools();
+  log('toggled', wc.isDevToolsOpened());
+  await sleep(100);
+  wc.closeDevTools();
+  log('DONE');
+});";
+
+#[test]
+fn open_dev_tools_dumps_the_element_tree_and_sends_the_console_to_the_terminal() {
+    let log = Arc::new(Log::to_memory(Filter::default()));
+    let files = [("page.html", TREE_PAGE)];
+    let app = App::launch_script_logged(DEVTOOLS_APP, &files, Arc::clone(&log));
+    assert!(
+        app.run_until(|app| app.console().iter().any(|l| l == "DONE"), TIMEOUT),
+        "{:?}",
+        app.console()
+    );
+    let main = support::written_by(&support::console_of(&app), "main");
+    assert_eq!(
+        main,
+        [
+            "start false false null",
+            "open true",
+            "event opened true",
+            "toggled false",
+            "event closed false",
+            "DONE",
+        ]
+    );
+    let written = log.written();
+    let lines: Vec<&str> = written.lines().collect();
+    assert!(
+        lines[0].starts_with("[devtools:1] element tree of file:///"),
+        "{written}"
+    );
+    // The tree: indent, tag, #id, .classes, the box, the display. The boxes are what verve-layout
+    // gives the page with the headless measurer, in a window of 800 x 600 (the viewport is the
+    // window's size here):
+    // - `html` is a block at the corner, as wide as the viewport (800) and as tall as its content,
+    //   which is the body's 16px line plus the body's UA margin of 8px above and below (32);
+    // - `body` is inset by that 8px margin on every side: 8,8, and 800 - 16 = 784 wide, and 16 tall,
+    //   the paragraph's own `height: 16px`, so the numbers do not depend on how text is laid out;
+    // - `div#main` and `p` fill the body's content box, the paragraph's UA margin of 1em being
+    //   taken away by its inline `margin:0`, so no margin collapses through the body and div;
+    // - `head` and `script` are `display: none`, which have no box (`-`).
+    let elements: Vec<&str> = lines[1..].iter().take(6).copied().collect();
+    assert_eq!(
+        elements,
+        [
+            "html 0,0,800,32 block",
+            "  head - none",
+            "  body 8,8,784,16 block",
+            "    div#main.wide.dark 8,8,784,16 block",
+            "      p 8,8,784,16 block",
+            "    script - none",
+        ],
+        "{written}"
+    );
+    // `inspectElement(1, 1)` is the deepest box at the point: the body's margin keeps it off the
+    // body, so it is `html`. (-5, -5) is outside every box and prints nothing.
+    let at_point: Vec<&&str> = lines[7..]
+        .iter()
+        .filter(|l| l.starts_with("html "))
+        .collect();
+    assert_eq!(at_point, [&"html 0,0,800,32 block"], "{written}");
+    // The console of the page is on the terminal from the open, not before it.
+    assert!(written.contains("] late\n"), "{written}");
+    assert!(!written.contains("] before\n"), "{written}");
+}
+
+#[test]
+fn a_window_made_with_dev_tools_off_cannot_open_them() {
+    // Electron 39.8.10: with `webPreferences.devTools: false`, `openDevTools()` and
+    // `toggleDevTools()` return undefined and do nothing, and no event is said.
+    let lines = support::run(
+        "const win = new BrowserWindow({ show: false, webPreferences: { devTools: false } });
+         const wc = win.webContents;
+         wc.on('devtools-opened', () => log('opened'));
+         log(wc.openDevTools(), wc.isDevToolsOpened());
+         wc.toggleDevTools();
+         await sleep(200);
+         log(wc.isDevToolsOpened(), wc.devToolsWebContents);",
+    );
+    assert_eq!(lines, ["undefined false", "false null"]);
+}
