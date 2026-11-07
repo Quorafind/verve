@@ -16,6 +16,7 @@ mod capture;
 mod dialog;
 mod dom_element;
 mod dom_view;
+mod frame_stats;
 mod pictures;
 mod plan;
 mod platform;

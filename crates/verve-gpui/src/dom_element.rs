@@ -74,6 +74,9 @@ impl Element for DomElement {
         _: &mut App,
     ) -> Vec<(Hitbox, CursorStyle)> {
         let mut state = self.state.borrow_mut();
+        if let Some(stats) = state.stats.as_mut() {
+            stats.begin();
+        }
         state.viewport = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         let Some(plan) = state.plan() else {
             return Vec::new();
@@ -124,6 +127,11 @@ impl Element for DomElement {
                 wheel::turned(&state, event, origin, window);
             }
         });
+        if let Some(stats) = self.state.borrow_mut().stats.as_mut() {
+            stats.end();
+            // Stats want frames one after the other, not only when the page changes.
+            window.request_animation_frame();
+        }
     }
 }
 

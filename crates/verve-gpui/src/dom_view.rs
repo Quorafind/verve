@@ -19,6 +19,7 @@ use verve_layout::DisplayList;
 
 use crate::app_region::{self, AppRegion};
 use crate::dom_element::DomElement;
+use crate::frame_stats::FrameStats;
 use crate::pictures::Pictures;
 use crate::plan::{self, Plan};
 
@@ -43,6 +44,7 @@ pub(crate) struct DomState {
     /// How big the page was drawn, in CSS pixels.
     pub viewport: (f32, f32),
     pub tell: Option<Tell>,
+    pub stats: Option<FrameStats>,
 }
 
 impl DomState {
@@ -93,7 +95,10 @@ pub struct DomView {
 impl DomView {
     /// A view with nothing to draw yet, over `background` (`None` for a window that is transparent).
     pub fn new(background: Option<Rgba>) -> Self {
-        let state = DomState::default();
+        let state = DomState {
+            stats: FrameStats::from_env(),
+            ..DomState::default()
+        };
         Self {
             state: Rc::new(RefCell::new(state)),
             background,

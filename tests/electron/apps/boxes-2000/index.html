@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>2000 boxes</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #202124; }
+  #stage { position: relative; width: 800px; height: 600px; overflow: hidden; }
+  #stage > div { position: absolute; width: 14px; height: 12px; }
+</style>
+<div id="stage"></div>
+<script>
+  // 2000 absolutely positioned boxes, 50 across and 40 down.
+  const stage = document.getElementById('stage');
+  for (let i = 0; i < 2000; i++) {
+    const box = document.createElement('div');
+    box.style.left = (i % 50) * 16 + 'px';
+    box.style.top = Math.floor(i / 50) * 14 + 'px';
+    box.style.background = `rgb(${(i * 37) % 256}, ${(i * 91) % 256}, ${(i * 53) % 256})`;
+    stage.append(box);
+  }
+</script>
