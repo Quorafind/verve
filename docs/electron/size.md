@@ -480,3 +480,14 @@ code):
   give these back, at the cost of SVGs not drawing pictures embedded in them;
 - P35's own code (the SVG writer, frames, surfaces, budgets) in verve-layout, verve-gpui, verve-electron and verve-dom, about 70 KiB;
 - the rest is in `std` and rounding.
+
+## P32: form controls (phase 2, part 1)
+
+`electron/p32-controls` merged on `docs/electron-plan` after P35 phase 2: `cargo build --release -p verve-gpui --bin electron --features
+jit` is 38,218,240 bytes against 38,151,168 for P35's size note, +67,072 bytes, measured at the merged tip. P32 has now cost 153,600
+bytes of its 400 KB for both phases; part 2 (the `<select>` popup, range drag, the pickers, file drops, the echo) is still to come.
+The cap (41,943,040) leaves 3,724,800 bytes.
+
+The cost is P32's own code, with no new crate: control sizes and baselines and the field's caret, selection and composition rects in
+verve-layout, the UA sheet's control rules and the per-field undo history in verve-dom, the drawing of controls and the caret in
+verve-gpui, and `Choose` in verve-electron.
