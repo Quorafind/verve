@@ -1,0 +1,2 @@
+stdout: variant handled listenerCount at start 1
+stdout: unhandledRejection main reject promise [object Promise]

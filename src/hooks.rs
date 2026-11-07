@@ -14,7 +14,7 @@
 //! The same hooks note promises rejected with no handler, and tell `process` of them —
 //! `unhandledRejection`, `rejectionHandled` — once the microtasks are done.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -159,19 +159,31 @@ impl HostHooks for Hooks {
         let promise = promise.clone().upcast();
         let state = rejections(context);
         match operation {
-            OperationType::Reject => state.pending.borrow_mut().push(promise),
+            OperationType::Reject => {
+                // Node numbers a rejection when it has no handler yet, whether or not one
+                // arrives within the turn.
+                let id = state.last_id.get() + 1;
+                state.last_id.set(id);
+                state.pending.borrow_mut().push((promise, id));
+            }
             OperationType::Handle => {
                 let mut pending = state.pending.borrow_mut();
-                if let Some(at) = pending.iter().position(|p| JsObject::equals(p, &promise)) {
+                if let Some(at) = pending
+                    .iter()
+                    .position(|(p, _)| JsObject::equals(p, &promise))
+                {
                     // Handled within the same turn: it was never unhandled.
                     pending.remove(at);
                     return;
                 }
                 drop(pending);
                 let mut reported = state.reported.borrow_mut();
-                if let Some(at) = reported.iter().position(|p| JsObject::equals(p, &promise)) {
-                    reported.remove(at);
-                    state.handled_late.borrow_mut().push(promise);
+                if let Some(at) = reported
+                    .iter()
+                    .position(|(p, _)| JsObject::equals(p, &promise))
+                    && let Some((promise, id)) = reported.remove(at)
+                {
+                    state.handled_late.borrow_mut().push((promise, id));
                 }
             }
         }
@@ -181,14 +193,16 @@ impl HostHooks for Hooks {
 /// Promises rejected with no handler, from the rejection to the end of the turn, and after.
 #[derive(Default)]
 struct Rejections {
-    /// Rejected with no handler, not yet reported.
-    pending: RefCell<Vec<JsObject>>,
+    /// The number of the latest rejection that had no handler when it rejected.
+    last_id: Cell<u64>,
+    /// Rejected with no handler, not yet reported, with its number.
+    pending: RefCell<Vec<(JsObject, u64)>>,
     /// Reported as unhandled, so a handler added later is `rejectionHandled`. Only the latest
     /// [`REMEMBERED_REJECTIONS`] are kept: each holds its reason alive, and a program that
     /// leaves hundreds unhandled is not going to handle the oldest.
-    reported: RefCell<VecDeque<JsObject>>,
+    reported: RefCell<VecDeque<(JsObject, u64)>>,
     /// Reported, and handled after all.
-    handled_late: RefCell<Vec<JsObject>>,
+    handled_late: RefCell<Vec<(JsObject, u64)>>,
 }
 
 const REMEMBERED_REJECTIONS: usize = 256;
@@ -205,8 +219,10 @@ fn rejections(context: &mut Context) -> Rc<Rejections> {
 /// Tells `process` of the rejections this turn left unhandled — `unhandledRejection`, with the
 /// reason and the promise — and of reported ones that have a handler now (`rejectionHandled`).
 /// With nobody listening for `unhandledRejection`, the reason goes to the console, as an uncaught
-/// error does. Called when the microtask queue is empty; `true` when it said anything, since a
-/// listener may have queued microtasks of its own.
+/// error does — or, in a host that reports its uncaught errors (an Electron main process), to
+/// Node's warnings (two for the rejection, one more if it is handled later). Called when the
+/// microtask queue is empty; `true` when it said anything, since a listener may have queued
+/// microtasks of its own.
 pub(crate) fn report_rejections(context: &mut Context) -> bool {
     let Some(state) = context.get_data::<Rc<Rejections>>().cloned() else {
         return false;
@@ -217,7 +233,18 @@ pub(crate) fn report_rejections(context: &mut Context) -> bool {
         return false;
     }
     let process = crate::native::global(context, "process").unwrap_or_default();
-    for promise in pending {
+    // Node tells of the rejections handled late before it looks at the new ones.
+    for (promise, id) in handled_late {
+        let heard = emit(
+            &process,
+            &[js_text("rejectionHandled"), promise.into()],
+            context,
+        );
+        if !heard && crate::process::reports_to_host(context) {
+            crate::uncaught::warn_handled_rejection(context, id);
+        }
+    }
+    for (promise, id) in pending {
         let Ok(PromiseState::Rejected(reason)) =
             JsPromise::from_object(promise.clone()).map(|p| p.state())
         else {
@@ -234,6 +261,8 @@ pub(crate) fn report_rejections(context: &mut Context) -> bool {
         );
         if !heard && crate::process::profile(context).is_some() {
             crate::process::unhandled_rejection(context, reason);
+        } else if !heard && crate::process::reports_to_host(context) {
+            crate::uncaught::warn_unhandled_rejection(context, &reason, id);
         } else if !heard {
             let error = JsError::from_opaque(reason);
             crate::uncaught::console_uncaught(context, "Uncaught (in promise)", &error);
@@ -242,14 +271,7 @@ pub(crate) fn report_rejections(context: &mut Context) -> bool {
         if reported.len() == REMEMBERED_REJECTIONS {
             reported.pop_front();
         }
-        reported.push_back(promise);
-    }
-    for promise in handled_late {
-        emit(
-            &process,
-            &[js_text("rejectionHandled"), promise.into()],
-            context,
-        );
+        reported.push_back((promise, id));
     }
     true
 }

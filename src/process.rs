@@ -129,7 +129,9 @@ pub enum UncaughtBehavior {
     Exit,
     /// Told to the host, which decides: an Electron main process keeps running (and may show a
     /// dialog) until it quits. The host is given the error's stack as Electron's `init.ts` gives
-    /// it (see `error_box_text`), and the stack is written to standard error.
+    /// it (see `error_box_text`), and the stack is written to standard error. A rejection nobody
+    /// handled does not reach the host: it becomes Node's `UnhandledPromiseRejectionWarning`s
+    /// (Electron runs Node in the `warn-with-error-code` mode).
     Report(Arc<dyn Fn(&str) + Send + Sync>),
 }
 
@@ -288,10 +290,12 @@ const PROCESS_FUNCTIONS: &[(
             format!("[{code}] {name}")
         };
         if !warnings_silenced(cx) {
+            let hint = crate::uncaught::trace_hint(cx, &name)
+                .map_or_else(String::new, |h| format!("\n{h}"));
             console_line(
                 cx,
                 Level::Warn,
-                format!("(node:{}) {label}: {message}", std::process::id()),
+                format!("(node:{}) {label}: {message}{hint}", std::process::id()),
             );
         }
         let error = boa_engine::JsNativeError::error()
@@ -1255,6 +1259,14 @@ fn error_box_text(context: &mut Context, error: &JsError) -> String {
         return stack;
     }
     format!("{}: {}", read("name"), read("message"))
+}
+
+/// Whether this realm's host decides what an uncaught error does ([`UncaughtBehavior::Report`]).
+pub(crate) fn reports_to_host(context: &Context) -> bool {
+    matches!(
+        crate::shared(context).process.borrow().on_uncaught,
+        UncaughtBehavior::Report(_)
+    )
 }
 
 /// An error nobody caught in a realm with no profile whose host is told of it
