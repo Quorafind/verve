@@ -97,6 +97,7 @@ mod real {
     };
     use verve_electron::NativeImage;
     use verve_electron::accelerator::Accelerator as Wanted;
+    use verve_electron::keyed::Keyed;
     use verve_electron::msg::{MenuItemId, MenuItemKind, MenuItemSpec, MenuSpec};
 
     use super::*;
@@ -121,9 +122,9 @@ mod real {
     /// The native menus built from what the main process sent.
     pub(crate) struct Menus {
         on: bool,
-        menus: BTreeMap<MenuId, Built>,
+        menus: Keyed<Built>,
         /// The menu each window shows as its bar.
-        bars: BTreeMap<WindowId, MenuId>,
+        bars: Keyed<MenuId>,
         /// The menu that is the macOS menu bar.
         app: Option<MenuId>,
         /// The windows whose script hid the bar: it stays hidden when the menu is sent anew.
@@ -135,8 +136,8 @@ mod real {
         pub fn new(on: bool) -> Self {
             Self {
                 on,
-                menus: BTreeMap::new(),
-                bars: BTreeMap::new(),
+                menus: Keyed::new(),
+                bars: Keyed::new(),
                 app: None,
                 hidden: std::collections::BTreeSet::new(),
             }

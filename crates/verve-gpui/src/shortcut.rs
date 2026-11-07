@@ -37,11 +37,10 @@ mod stub {
 
 #[cfg(any(windows, target_os = "macos"))]
 mod real {
-    use std::collections::BTreeMap;
-
     use global_hotkey::hotkey::HotKey;
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
     use verve_electron::accelerator::Accelerator;
+    use verve_electron::keyed::Keyed;
 
     use super::*;
 
@@ -49,7 +48,7 @@ mod real {
     pub(crate) struct Shortcuts {
         on: bool,
         manager: Option<GlobalHotKeyManager>,
-        taken: BTreeMap<u32, HotKey>,
+        taken: Keyed<HotKey>,
     }
 
     /// Calls `pressed` with the system's id of a hotkey each time one is pressed.
@@ -72,7 +71,7 @@ mod real {
             Self {
                 on,
                 manager: None,
-                taken: BTreeMap::new(),
+                taken: Keyed::new(),
             }
         }
 

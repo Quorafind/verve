@@ -7,7 +7,6 @@
 //! `Tray` nothing refers to any more is collected and its icon goes with it.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -20,6 +19,7 @@ use super::define::{self, Args, Fields, Kind};
 use super::menu_state::{self, menu_of};
 use super::native_image::image_arg;
 use super::shared;
+use crate::keyed::Keyed;
 use crate::msg::{MenuOp, TrayEvent, TrayId, TrayOp};
 use crate::pixels::NativeImage;
 
@@ -32,7 +32,7 @@ const MENU_KEY: &str = "__contextMenu";
 #[derive(Default)]
 struct Trays {
     next: TrayId,
-    live: BTreeMap<TrayId, Record>,
+    live: Keyed<Record>,
 }
 
 struct Record {

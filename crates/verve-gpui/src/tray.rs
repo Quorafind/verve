@@ -36,13 +36,13 @@ mod stub {
 
 #[cfg(any(windows, target_os = "macos"))]
 mod real {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use tray_icon::{
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     };
     use verve_electron::NativeImage;
+    use verve_electron::keyed::Keyed;
     use verve_electron::msg::{MenuId, MenuOp, Rect, TrayEvent, TrayId, TrayOp};
 
     use super::*;
@@ -58,9 +58,9 @@ mod real {
     /// The icons the shell has made.
     pub(crate) struct Trays {
         on: bool,
-        icons: BTreeMap<TrayId, TrayIcon>,
+        icons: Keyed<TrayIcon>,
         /// The menu each icon shows, to be given again when the menu is sent anew.
-        menus: BTreeMap<TrayId, MenuId>,
+        menus: Keyed<MenuId>,
         /// Icons just double-clicked: the button-up that ends the double click is not a click.
         doubled: std::collections::BTreeSet<TrayId>,
     }
@@ -143,8 +143,8 @@ mod real {
         pub fn new(on: bool) -> Self {
             Self {
                 on,
-                icons: BTreeMap::new(),
-                menus: BTreeMap::new(),
+                icons: Keyed::new(),
+                menus: Keyed::new(),
                 doubled: std::collections::BTreeSet::new(),
             }
         }

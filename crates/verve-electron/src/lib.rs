@@ -17,6 +17,7 @@ pub mod headless;
 pub mod hub;
 pub mod ids;
 mod ipc;
+pub mod keyed;
 pub mod launcher;
 mod loader;
 pub mod main_guest;

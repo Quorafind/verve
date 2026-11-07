@@ -27,6 +27,7 @@ use super::native_image::image_of;
 use super::shared;
 use crate::accelerator::Accelerator;
 use crate::ids::{ContentsId, WindowId};
+use crate::keyed::Keyed;
 use crate::menu::MenuBook;
 use crate::msg::{MenuId, MenuItemId, MenuItemKind, MenuItemSpec, MenuOp, MenuSpec, ToShell};
 use crate::pixels::NativeImage;
@@ -60,11 +61,11 @@ struct Inner {
     next_group: u32,
     next_call: u64,
     items: BTreeMap<MenuItemId, WeakJsObject>,
-    attached: BTreeMap<MenuId, Attached>,
+    attached: Keyed<Attached>,
     app_menu: Option<JsObject>,
     /// Whether `Menu.setApplicationMenu` was called: the default menu is for apps that did not.
     app_menu_set: bool,
-    window_menus: BTreeMap<WindowId, JsObject>,
+    window_menus: Keyed<JsObject>,
     popups: BTreeMap<u64, Popup>,
     pictures: BTreeMap<String, Arc<NativeImage>>,
     menu_class: Option<JsObject>,
