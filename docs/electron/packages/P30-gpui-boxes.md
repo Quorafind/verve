@@ -374,4 +374,57 @@ cargo clippy --locked -p verve-layout --all-targets -- -D warnings
 
 第二轮还动了 verve-dom，所以也要 `cargo test --locked -p verve-dom --test css`（切分器的行为不变）和 `cargo check --locked -p verve-dom -p verve-electron --all-targets`。
 
-（第二阶段待续：步骤 5、6、8。）
+### 第二阶段 A：接进页面（无 GPUI）
+
+**做了**：
+
+- 第一阶段遗留两处：表格的 `width` 按 border-box 算（`border-spacing` 变成的外圈 padding 之前被加在 `width` 之外，多了 8px）；`place.rs` 的 `scroll_state` 返回具名的 `ScrollState`（clippy `type_complexity`）。都以 fixup 并入原提交。
+- **verve-dom 布局提供者**（`layout_provider.rs`）：`Document::set_layout_provider(Option<LayoutProvider>)`，`LayoutProvider = Box<dyn FnMut(&Update) -> Layout>`，
+  `Layout { rects, scroll_offsets, scroll_extents }`（契约见上）。脚本读几何（`getBoundingClientRect`、`offset*`/`client*`/`scroll*`、`img.width`、观察者、`elementFromPoint`/`elementsFromPoint`）
+  或指针对准（`hit_test`、`press`）时，若文档过期，就 `take_update()` 出快照交给 provider，无声地换掉 `rects`、`scroll_offsets`（夹取后的）与 `scroll_extents`。
+  “过期”按任务书的规则：自上次布局以来有未见的 `Changes`（`view.changed`/`restyled`，其中包括动画只改样式、不动任何修订号的节点）；另外 `(dom.revision + state.revision, 视口)` 与上次不同也算
+  （脚本改了文档但还没被 `absorb` 时，靠它）。provider 取走的 `Changes` 存在 `View.carried`，下一次 `Document::update()` 并回，所以绘制方一个变化也不会少（`sweep` 会清掉其中已释放的节点）。
+  没有 provider 时行为不变。另有 `Document::ensure_layout()` 和公开的 `Document::deliver_layout()`（观察者）。provider 以弱引用持有文档，重入时不再被问。
+  为了不超 `lib.rs` 的行数上限，`Changes`/`Update`/`Document::update`/`snapshot` 搬到 `update.rs`（`pub use` 不变），加了 `Changes::merge`。没有动 `Options`。
+  `scrollTop`/`scrollLeft`（含 `window.scrollY`）读时走 `fresh`，`scrollWidth`/`scrollHeight` 读 `scroll_extents`（没有 provider 时仍是子孙矩形的并集）；
+  `clientWidth`/`clientHeight`/`offset*` 仍取自元素的 border box 矩形（没有扣边框和滚动条，P31/P32 之后再细化）。
+- **`RendererGuest`**（`page_layout.rs`）：`PageLayout` 持有 `LayoutEngine`（无头测量器，P31 换真的）并装成 provider；`publish` 先 `ensure_layout()`，再 `update()`，`RendererView.display_list` 带上列表；
+  只要列表变了（比如滚动）也会发布。`deliver_layout()` 每个回合在 `tick()` 里、`beat::run` 和 `pump` 之后调用一次（回调提的请求由随后的 `drain` 取走）：没有 Shell 报告盒子，ResizeObserver/IntersectionObserver 靠它在无头下也会触发（它们原先随 Shell 的 `Layout` 消息来）。
+  `drain` 不再整树布局：观察者读几何走 `element::painted` → `layout_provider::fresh`，只在有人读且文档过期时才布局，所以一批 100 条消息只布局一次。
+  `Request::Scroll`：`To`/`By` 在文档里已经做完（`request_scroll` 写偏移，下一次读时布局夹取并写回，`scroll` 事件由它的定时器发，只一次），渲染器不再重放；`Reveal` 经 `apply_scroll` 处理，
+  再 `set_layout`、`set_scroll_offsets`。这些请求**不再发给 Shell**；同一批里别的请求先入 outbox，滚动后处理。
+- **无头 Shell**：删掉 `FakeLayout`/`BlockStack`、`HeadlessOptions.layout`、公开的 `verve_electron::FakeLayout`、`headless/layout.rs`，不再发 `ToRendererInput::Layout`；`RendererGuest::input` 忽略它（变体保留，已废弃）。布局全在页面线程。
+  无头窗口的视口等于窗口的 bounds（宽高）；真 Electron 的 `BrowserWindow` `width`/`height` 含窗口边框，除非 `useContentSize`，所以两者在有边框时不一样。
+- 测试：`crates/verve-dom/tests/layout_provider.rs`（一次布局只问一次、变化仍进 `update()`、无 provider 不变、视口变化、读不触发观察者、动画改样式后重布局、滚动夹取与 `scrollBy` 不重复、`scrollHeight` 不随滚动变），
+  `crates/verve-electron/tests/geometry.rs`（`style.width='123px'` 后同步读 123、`elementFromPoint`、容器与页面滚动及夹取、`scrollBy` 两次得 100、ResizeObserver 在 observe 之后和宽度变化之后各触发一次）。
+- **任务书「修改」之外动过的文件**：`verve-dom` 的 `state.rs`（`layout_hook`/`laid`/`scroll_extents`/`layout_key`）、`bind/document.rs`（`elementFromPoint` 读前布局）、`bind/element.rs`（`painted`/`scrolled`/`content_size`）、`bind/window.rs`（`scrollY`）、`canvas/img.rs`（`img.width`）；
+  `verve-electron` 的 `lib.rs`（去掉 `FakeLayout` 导出）、`Cargo.toml`（依赖 `verve-layout`）、`headless.rs`、`msg/input.rs`。
+
+**期望变了的现有测试**（文字在 P31 之前不进布局，且 `BlockStack` 忽略边距而真布局不忽略）：
+
+- `tests/headless.rs`：`blocks_stack_over_the_full_width_and_text_is_sixteen_pixels_a_line` 改名并去掉“每字 8px、按钮和文字一样宽”的断言（那是假布局的规则）；页面改成给 div/p/button 明确 `height:16px`、边距清零，断言 `a=[0,0,500,16]`、`p=[0,16,500,16]`、`b=[0,32,500,16]`。
+  `resizing_a_window…`：文字折行变成“块宽等于窗口宽”，`[0,0,40,32]` → `[0,0,40,16]`。
+- `tests/web_contents.rs::input_events_click_and_type_in_the_page`：按钮/链接/可编辑 div 原靠 16px 一行的假高度，现在在样式里明确 `height:16px` 并清边距，坐标 (5,5)/(5,21)/(5,37) 不变。
+- `tests/fixtures.rs::a_react_app_built_by_vite_…` 仍 `#[ignore]`（理由写着 P30 和 P20）：点击靠 `press(node)`，不依赖几何，P30 已不是障碍；是否放开由协调者试跑后定。
+
+**已知偏差 / 给后面的人**：
+
+- 每次 `publish` 前若文档变了就整树重新布局（P33 做增量）。**给 P33**：`request_scroll` 里的 `touch()` 会移动引擎的键（修订号），所以每次 `scrollTop =` 都走整树重建，引擎“只重新摆放”的快路径走不到；
+  `publish` 在文档变了时会取两份 O(n) 的快照（provider 一份、`update()` 一份）。
+- 滚轮在渲染器上仍只派发 `wheel` 事件，滚动目标与本地预测是第二阶段 B 的事。`ToRendererInput::ScrollOffsets` 仍未处理。
+- Electron 行为：本阶段的新测试断言的是 Verve 自己的规则（同步读几何、夹取到可滚范围），没有再对照 Electron 采样；窗口高度 300 取自 `BrowserWindow` 的 `height`。
+
+**要跑的测试**（一次一条）：
+
+```
+cargo test --locked -p verve-layout
+cargo test --locked -p verve-dom --test layout_provider
+cargo test --locked -p verve-dom
+cargo test --locked -p verve-electron --test geometry
+cargo test --locked -p verve-electron --test headless
+cargo test --locked -p verve-electron --test web_contents
+cargo test --locked -p verve-electron
+cargo clippy --locked -p verve-layout -p verve-dom -p verve-electron --all-targets -- -D warnings
+```
+
+（第二阶段 B 待续：GPUI `DomElement`、`--screenshot`、`boxes` 夹具、2000 盒页面。）
