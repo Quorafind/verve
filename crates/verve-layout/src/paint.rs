@@ -222,7 +222,7 @@ impl Painter<'_> {
         let tree = self.tree;
         let node = &tree.boxes[index];
         let rect = self.placed.paint_rect[index];
-        if rect.width <= 0. || rect.height <= 0. || !node.props.input.visible {
+        if node.anonymous || rect.width <= 0. || rect.height <= 0. || !node.props.input.visible {
             return;
         }
         let around = around(tree, self.laid, self.placed, index);

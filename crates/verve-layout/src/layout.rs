@@ -64,7 +64,7 @@ fn read(tree: &BoxTree) -> Laid {
         padding: Vec::with_capacity(count),
         extent: Vec::with_capacity(count),
     };
-    for node in &tree.boxes {
+    for (index, node) in tree.boxes.iter().enumerate() {
         let Ok(layout) = tree.taffy.layout(node.taffy) else {
             laid.origin.push([0.; 2]);
             laid.size.push([0.; 2]);
@@ -73,16 +73,35 @@ fn read(tree: &BoxTree) -> Laid {
             laid.extent.push([0.; 2]);
             continue;
         };
-        let base = node.parent.map_or([0.; 2], |parent| laid.origin[parent]);
-        laid.origin
-            .push([base[0] + layout.location.x, base[1] + layout.location.y]);
+        let at = match (tree.atom_at[index], node.parent) {
+            // An atomic inline is where its line put it, in the content box of its block.
+            (Some(inside), Some(parent)) => {
+                let [top, _, _, left] = laid.border[parent];
+                let [pad_top, _, _, pad_left] = laid.padding[parent];
+                let from = laid.origin[parent];
+                [
+                    from[0] + left + pad_left + inside[0],
+                    from[1] + top + pad_top + inside[1],
+                ]
+            }
+            _ => {
+                let base = node.parent.map_or([0.; 2], |parent| laid.origin[parent]);
+                [base[0] + layout.location.x, base[1] + layout.location.y]
+            }
+        };
+        laid.origin.push(at);
         laid.size.push([layout.size.width, layout.size.height]);
         let b = layout.border;
         laid.border.push([b.top, b.right, b.bottom, b.left]);
         let p = layout.padding;
         laid.padding.push([p.top, p.right, p.bottom, p.left]);
-        laid.extent
-            .push([layout.content_size.width, layout.content_size.height]);
+        let mut extent = [layout.content_size.width, layout.content_size.height];
+        if let Some(lines) = &tree.inline[index] {
+            // Lines reach as far as they do, past the box's edge if they overflow it.
+            extent[0] = extent[0].max(b.left + p.left + lines.width);
+            extent[1] = extent[1].max(b.top + p.top + lines.height);
+        }
+        laid.extent.push(extent);
     }
     laid
 }

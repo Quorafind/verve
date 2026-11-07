@@ -6,8 +6,10 @@
 //! under a point, and the [`DisplayList`] to paint. Nothing here knows GPUI; text is measured
 //! through [`TextMeasurer`].
 
+mod atoms;
 mod display_list;
 mod engine;
+mod flow;
 pub mod fonts;
 mod gradient;
 mod grid;

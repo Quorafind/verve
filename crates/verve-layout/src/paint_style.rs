@@ -43,6 +43,18 @@ pub(crate) struct Paint {
 }
 
 impl Paint {
+    /// The look of a box that draws nothing: the anonymous boxes that hold inline content.
+    pub(crate) fn none() -> Paint {
+        Paint {
+            background_color: [0.; 4],
+            layers: Vec::new(),
+            border: Border::NONE,
+            radii: [(Dim::Px(0.), Dim::Px(0.)); 4],
+            shadows: Vec::new(),
+            outline: None,
+        }
+    }
+
     pub(crate) fn read(snapshot: &Snapshot, node: NodeId, units: &Units, color: Rgba) -> Paint {
         let text = |property: &str| snapshot.style(node, property);
         let colored = |property: &str| {

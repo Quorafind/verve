@@ -205,6 +205,35 @@ pub(crate) struct BoxProps {
 }
 
 impl BoxProps {
+    /// The properties of an anonymous block box: in flow, drawing nothing, taking no pointer.
+    pub(crate) fn anonymous() -> Self {
+        Self {
+            display: Display::Block,
+            position: Position::Static,
+            float: false,
+            z_index: None,
+            order: 0,
+            opacity: 1.,
+            overflow: [Clip::Visible; 2],
+            translation: None,
+            sticky: [None; 4],
+            style: taffy::Style::default(),
+            paint: Paint::none(),
+            input: Input {
+                visible: true,
+                pointer_events: false,
+                cursor: Cursor::Auto,
+                app_region: None,
+                scrollbar: false,
+            },
+            isolated: false,
+            contains_fixed: false,
+            padding_percent: [None; 2],
+            unsupported: 0,
+            grid_areas: grid::Areas::default(),
+        }
+    }
+
     /// Whether the box starts a stacking context of its own.
     pub(crate) fn is_stacking_context(&self, in_flex_or_grid: bool) -> bool {
         self.position == Position::Fixed

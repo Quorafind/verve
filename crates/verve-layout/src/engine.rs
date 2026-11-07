@@ -1,12 +1,14 @@
 //! The layout engine: a snapshot in, geometry and a display list out.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use verve_dom::{Align, Changes, NodeId, Rect, ScrollRequest, Snapshot};
 
 use crate::display_list::DisplayList;
+use crate::fonts::FontRegistry;
+use crate::inline::query::{self, Placement, View};
 use crate::layout::{Laid, settle};
 use crate::measure::TextMeasurer;
 use crate::paint;
@@ -24,12 +26,21 @@ static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
 /// incremental engine is P33's); a scroll only moves what is already laid out.
 pub struct LayoutEngine {
     measurer: Arc<dyn TextMeasurer>,
+    fonts: FontRegistry,
     state: Option<State>,
 }
 
 struct State {
-    /// The snapshot's revision and the viewport it was laid out for.
-    key: (u64, [u32; 2]),
+    /// The snapshot's revision, the viewport and the faces it was laid out for.
+    key: (u64, [u32; 2], u64),
+    /// The document the boxes were made from, for the text of its nodes.
+    snapshot: Snapshot,
+    /// The lines of every block of inline content, placed on the screen.
+    blocks: Vec<Placement>,
+    /// The border box of an inline element on each line it has content on.
+    spans: HashMap<NodeId, Vec<Rect>>,
+    /// The document order of the nodes, for the questions about ranges; worked out at the first.
+    ranks: OnceLock<HashMap<NodeId, usize>>,
     /// The scroll offsets the snapshot had when this was last brought up to date.
     snapshot_offsets: HashMap<NodeId, [f32; 2]>,
     tree: BoxTree,
@@ -45,8 +56,16 @@ impl LayoutEngine {
     pub fn new(measurer: Arc<dyn TextMeasurer>) -> Self {
         Self {
             measurer,
+            fonts: FontRegistry::default(),
             state: None,
         }
+    }
+
+    /// Notes a face the page registered with `@font-face`; every later layout asks for it by its
+    /// family. Answers whether the face is new, in which case the next [`LayoutEngine::update`]
+    /// lays everything out again (text laid out in a fallback font is shaped again).
+    pub fn register_font(&mut self, family: &str, weight: f32, italic: bool) -> bool {
+        self.fonts.register(family, weight, italic)
     }
 
     /// The measurer text is shaped with.
@@ -60,6 +79,7 @@ impl LayoutEngine {
         let key = (
             snapshot.revision,
             [snapshot.viewport.0.to_bits(), snapshot.viewport.1.to_bits()],
+            self.fonts.generation(),
         );
         if let Some(state) = &mut self.state
             && state.key == key
@@ -72,15 +92,21 @@ impl LayoutEngine {
             state.scroll = snapshot.scroll_offsets.clone();
             return self.replace();
         }
-        let mut tree = build(snapshot);
+        let mut tree = build(snapshot, &self.measurer, &self.fonts);
         let laid = settle(&mut tree);
         let scroll = snapshot.scroll_offsets.clone();
         let placed = place(&tree, &laid, &scroll);
         let list = self.adopt(list_for(&tree, &laid, &placed));
+        let blocks = placements(&tree, &laid, &placed);
+        let spans = query::span_rects(&blocks);
         self.state = Some(State {
             key,
+            snapshot: snapshot.clone(),
+            rects: rects_of(&tree, &placed, &spans),
+            blocks,
+            spans,
+            ranks: OnceLock::new(),
             snapshot_offsets: snapshot.scroll_offsets.clone(),
-            rects: rects_of(&tree, &placed),
             tree,
             laid,
             scroll,
@@ -103,8 +129,12 @@ impl LayoutEngine {
         } else {
             state.list
         };
+        let blocks = placements(&state.tree, &state.laid, &placed);
+        let spans = query::span_rects(&blocks);
         self.state = Some(State {
-            rects: rects_of(&state.tree, &placed),
+            rects: rects_of(&state.tree, &placed, &spans),
+            blocks,
+            spans,
             placed,
             list,
             ..state
@@ -131,10 +161,65 @@ impl LayoutEngine {
         self.state.as_ref()?.rects.get(&node).copied()
     }
 
-    /// The boxes of an element that `getClientRects` lists: one for a block-level element. An
-    /// inline element split over lines has one a line (P31).
+    /// The boxes of an element that `getClientRects` lists: one for a block-level element, and
+    /// for an inline element one on each line it has content on.
     pub fn client_rects(&self, node: NodeId) -> Vec<Rect> {
-        self.rect(node).into_iter().collect()
+        match self.state.as_ref().and_then(|state| state.spans.get(&node)) {
+            Some(lines) => lines.clone(),
+            None => self.rect(node).into_iter().collect(),
+        }
+    }
+
+    /// The lines of a block that holds inline content (text, inline elements, atomic inlines),
+    /// laid out: `None` for an element that does not.
+    pub fn inline_layout(&self, node: NodeId) -> Option<Arc<crate::InlineLayout>> {
+        let state = self.state.as_ref()?;
+        let index = *state.tree.by_node.get(&node)?;
+        state.tree.inline[index].clone()
+    }
+
+    /// The boxes inline elements have on each of their lines, by element: what `getClientRects`
+    /// of an element split over lines answers.
+    pub fn fragments(&self) -> impl Iterator<Item = (NodeId, Vec<Rect>)> + '_ {
+        self.state.iter().flat_map(|state| {
+            state
+                .spans
+                .iter()
+                .map(|(node, rects)| (*node, rects.clone()))
+        })
+    }
+
+    /// The text position nearest the point `(x, y)` in the window: the text node and the offset
+    /// in it, in UTF-16 units. `None` where there is no text to be near.
+    pub fn text_position_at(&self, x: f32, y: f32) -> Option<(NodeId, usize)> {
+        let state = self.state.as_ref()?;
+        query::position_at(&self.view(state), x, y)
+    }
+
+    /// The boxes of the text between two positions, one for each piece of text on each line: what
+    /// a range's `getClientRects` answers. A position is a node and an offset, a UTF-16 offset in
+    /// a text node and a child index in an element.
+    pub fn range_rects(&self, start: (NodeId, usize), end: (NodeId, usize)) -> Vec<Rect> {
+        let Some(state) = self.state.as_ref() else {
+            return Vec::new();
+        };
+        let snapshot = &state.snapshot;
+        let (Some(from), Some(to)) = (
+            query::text_position(snapshot, start, true),
+            query::text_position(snapshot, end, false),
+        ) else {
+            return Vec::new();
+        };
+        query::range_rects(&self.view(state), from, to)
+    }
+
+    fn view<'a>(&'a self, state: &'a State) -> View<'a> {
+        View {
+            snapshot: &state.snapshot,
+            measurer: &*self.measurer,
+            blocks: &state.blocks,
+            ranks: &state.ranks,
+        }
     }
 
     /// `[scrollWidth, scrollHeight]` of an element, and `None` for one with no box.
@@ -308,11 +393,43 @@ fn list_for(tree: &BoxTree, laid: &Laid, placed: &Placed) -> DisplayList {
     }
 }
 
-fn rects_of(tree: &BoxTree, placed: &Placed) -> HashMap<NodeId, Rect> {
-    tree.boxes
+fn rects_of(
+    tree: &BoxTree,
+    placed: &Placed,
+    spans: &HashMap<NodeId, Vec<Rect>>,
+) -> HashMap<NodeId, Rect> {
+    let mut rects: HashMap<NodeId, Rect> = spans
         .iter()
-        .zip(&placed.rect)
-        .map(|(node, rect)| (node.node, *rect))
+        .filter_map(|(node, lines)| {
+            let first = *lines.first()?;
+            Some((*node, lines.iter().fold(first, |all, line| all.union(line))))
+        })
+        .collect();
+    rects.extend(
+        tree.boxes
+            .iter()
+            .zip(&placed.rect)
+            .filter(|(node, _)| !node.anonymous)
+            .map(|(node, rect)| (node.node, *rect)),
+    );
+    rects
+}
+
+/// The lines of every block of inline content, placed in the window.
+fn placements(tree: &BoxTree, laid: &Laid, placed: &Placed) -> Vec<Placement> {
+    tree.holders
+        .iter()
+        .filter_map(|&index| {
+            let layout = tree.inline[index].clone()?;
+            let rect = placed.rect[index];
+            let [top, _, _, left] = laid.border[index];
+            let [pad_top, _, _, pad_left] = laid.padding[index];
+            Some(Placement {
+                origin: [rect.x + left + pad_left, rect.y + top + pad_top],
+                layout,
+                bounds: rect,
+            })
+        })
         .collect()
 }
 
