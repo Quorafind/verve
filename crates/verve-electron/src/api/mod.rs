@@ -23,6 +23,7 @@ pub(crate) mod native_image;
 pub(crate) mod native_theme;
 pub(crate) mod navigation;
 pub(crate) mod net;
+pub(crate) mod net_request;
 pub(crate) mod notification;
 pub(crate) mod page_calls;
 pub(crate) mod page_events;
@@ -77,11 +78,11 @@ pub(crate) struct MainState {
     pub(crate) deprecated: std::cell::RefCell<Vec<String>>,
     /// The `BrowserWindow` class, for the windows `window.open` makes.
     pub(crate) window_class: std::cell::RefCell<Option<boa_engine::JsObject>>,
-    /// What `session` and `protocol` keep.
+    /// What `session`, `protocol` and `net` keep.
     pub(crate) net: NetState,
 }
 
-/// What the main process keeps for sessions and custom schemes.
+/// What the main process keeps for sessions, custom schemes and `net.request`.
 #[derive(Default)]
 pub(crate) struct NetState {
     /// The objects scripts hold for the sessions.
@@ -90,6 +91,8 @@ pub(crate) struct NetState {
     pub(crate) protocols: protocol::Registry,
     /// The requests the handlers are answering.
     pub(crate) serving: protocol_serve::Serving,
+    /// The `net.request`s a script made.
+    pub(crate) requests: net_request::Requests,
 }
 
 impl MainState {

@@ -1,8 +1,9 @@
 //! `net`: the main process's own network (`lib/browser/api/net.ts` and `net-fetch.ts` of
-//! Electron 39.8.10). `net.fetch` is the kernel's `fetch` asked of a session's
-//! [`MainNet`](super::main_net), answering a `Response` the way Electron builds it — a plain
-//! `new Response(body, { status, statusText, headers })`, so with no `url`, of type `default`,
-//! and not `redirected`; `redirect: 'manual'` fails with `Redirect was cancelled`.
+//! Electron 39.8.10). `net.request` is [`ClientRequest`](super::net_request); `net.fetch` is the
+//! kernel's `fetch` asked of a session's [`MainNet`](super::main_net), answering a `Response` the
+//! way Electron builds it — a plain `new Response(body, { status, statusText, headers })`, so with
+//! no `url`, of type `default`, and not `redirected`; `redirect: 'manual'` fails with `Redirect
+//! was cancelled`.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use verve::native::{self, arg, get, invoke, js_text};
 
 use super::define::{self, Fields};
 use super::main_net::MainNet;
+use super::net_request;
 use crate::hub::Session;
 
 /// The `net` module.
@@ -22,6 +24,7 @@ pub(crate) fn make(context: &mut Context) -> JsResult<JsValue> {
         context,
         &module,
         &[
+            ("request", 2, request),
             ("fetch", 1, |_, args, cx| {
                 let session = super::shared(cx).hub.session_for(None);
                 fetch(cx, &session, &arg(args, 0), &arg(args, 1))
@@ -39,6 +42,16 @@ pub(crate) fn make(context: &mut Context) -> JsResult<JsValue> {
         &[("online", |_, _, cx| Ok(is_online(cx)?.into()), None)],
     )?;
     Ok(module.into())
+}
+
+/// `net.request(options, callback)`.
+fn request(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if !super::shared(context).app.is_ready() {
+        return Err(define::error(
+            "net module can only be used after app is ready",
+        ));
+    }
+    Ok(net_request::new_request(context, &arg(args, 0), &arg(args, 1))?.into())
 }
 
 /// `net.fetch(input, init)` through `session`.
