@@ -16,6 +16,8 @@ mod document;
 #[cfg(feature = "canvas")]
 mod effects;
 #[cfg(feature = "canvas")]
+pub use self::effects::blur_pixels;
+#[cfg(feature = "canvas")]
 mod element;
 #[cfg(feature = "canvas")]
 mod fonts;

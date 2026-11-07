@@ -137,7 +137,7 @@ struct Line {
 }
 
 /// Three box blurs standing in for a Gaussian of `sigma`, on premultiplied pixels.
-fn blur_pixels(pixmap: &mut Pixmap, sigma: f32) {
+pub fn blur_pixels(pixmap: &mut Pixmap, sigma: f32) {
     if sigma <= 0. {
         return;
     }
