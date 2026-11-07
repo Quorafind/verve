@@ -14,6 +14,8 @@ pub(crate) mod context_bridge;
 pub(crate) mod cookies;
 pub mod define;
 pub(crate) mod dialog;
+pub(crate) mod download;
+pub(crate) mod download_item;
 pub(crate) mod input_events;
 pub(crate) mod ipc_main;
 pub(crate) mod ipc_renderer;
@@ -106,6 +108,8 @@ pub(crate) struct NetState {
     pub(crate) permissions: permissions::Objects,
     /// Whether `setProxy` has warned about a mode it does not support: once is enough.
     pub(crate) proxy_warned: std::cell::Cell<bool>,
+    /// The downloads, and the objects of those a script was given.
+    pub(crate) downloads: download::Objects,
 }
 
 impl MainState {

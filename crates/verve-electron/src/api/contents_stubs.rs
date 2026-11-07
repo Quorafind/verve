@@ -70,7 +70,6 @@ const TABLE: &[(&str, usize, Answer)] = &[
     ("adjustSelection", 1, Throws),
     ("replace", 1, Throws),
     ("replaceMisspelling", 1, Throws),
-    ("downloadURL", 1, Throws),
     ("beginFrameSubscription", 1, Throws),
     ("endFrameSubscription", 0, Throws),
 ];

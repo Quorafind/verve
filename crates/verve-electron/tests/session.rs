@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use support::{App, TIMEOUT};
 use verve_electron::launcher::{Start, Target};
+use verve_electron::msg::DialogResult;
 
 /// What a server heard: the path of each request, and its headers (names lowercase).
 type Seen = Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>;
@@ -65,7 +66,10 @@ fn answer(stream: &mut std::net::TcpStream, heard: &Seen) {
             .cloned()
             .collect::<std::collections::BTreeMap<_, _>>()
     );
-    heard.lock().unwrap().push((path.clone(), headers));
+    heard.lock().unwrap().push((path.clone(), headers.clone()));
+    if path.starts_with("/slow") {
+        return slow(stream, &headers, !path.contains("norange"));
+    }
     let (status, extra, text) = match path.split('?').next().unwrap_or("") {
         "/page" => (
             "200 OK",
@@ -76,6 +80,17 @@ fn answer(stream: &mut std::net::TcpStream, heard: &Seen) {
             "200 OK",
             "set-cookie: s=1; Path=/\r\nset-cookie: h=2; HttpOnly; Path=/\r\n".to_owned(),
             "set".to_owned(),
+        ),
+        "/dl" => (
+            "200 OK",
+            "content-type: application/octet-stream\r\n".to_owned(),
+            "a".repeat(300_000),
+        ),
+        "/att" => (
+            "200 OK",
+            "content-type: text/plain\r\ncontent-disposition: attachment; filename=\"att.txt\"\r\n"
+                .to_owned(),
+            "attached".to_owned(),
         ),
         "/redir" => (
             "302 Found",
@@ -93,6 +108,46 @@ fn answer(stream: &mut std::net::TcpStream, heard: &Seen) {
         text.len()
     );
     let _ = stream.write_all(reply.as_bytes());
+}
+
+/// How long `/slow` is: it answers `SLOW_LENGTH` bytes, the byte at `i` being `a + i % 26`, in
+/// pieces of 100 000 with a pause between them, and honours `Range: bytes=N-` unless the path
+/// says `norange`, when it answers the whole body with 200.
+const SLOW_LENGTH: usize = 600_000;
+
+fn slow_byte(at: usize) -> u8 {
+    b'a' + (at % 26) as u8
+}
+
+fn slow(stream: &mut std::net::TcpStream, headers: &[(String, String)], ranges: bool) {
+    let from = headers
+        .iter()
+        .filter(|_| ranges)
+        .find(|(name, _)| name == "range")
+        .and_then(|(_, value)| value.strip_prefix("bytes="))
+        .and_then(|value| value.trim_end_matches('-').parse::<usize>().ok());
+    let start = from.unwrap_or(0);
+    let head = match from {
+        Some(start) => format!(
+            "HTTP/1.1 206 Partial Content\r\ncontent-range: bytes {start}-{}/{SLOW_LENGTH}\r\n",
+            SLOW_LENGTH - 1
+        ),
+        None => "HTTP/1.1 200 OK\r\n".to_owned(),
+    };
+    let head = format!(
+        "{head}content-type: application/octet-stream\r\naccept-ranges: bytes\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        SLOW_LENGTH - start
+    );
+    if stream.write_all(head.as_bytes()).is_err() {
+        return;
+    }
+    for piece in (start..SLOW_LENGTH).collect::<Vec<_>>().chunks(100_000) {
+        let bytes: Vec<u8> = piece.iter().map(|at| slow_byte(*at)).collect();
+        if stream.write_all(&bytes).is_err() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
 }
 
 /// The headers of the last request for `path`, by name.
@@ -158,7 +213,8 @@ fn done(app: &App) -> Value {
 fn page_app(setup: &str, base: &str) -> App {
     let main = format!(
         "const {{ app, BrowserWindow, session, net }} = require('electron');
-         globalThis.out = {{}}; globalThis.session = session; const base = '{base}';
+         globalThis.out = {{}}; globalThis.session = session; globalThis.require = require; globalThis.net = net;
+         const base = '{base}'; globalThis.base = base;
          app.whenReady().then(async () => {{
            {setup}
            const win = new BrowserWindow({{ show: false }});
@@ -827,4 +883,239 @@ fn rules_for_http_only_send_https_requests_nowhere_near_the_proxy() {
     );
     assert_eq!(outcome, r#""failed""#);
     assert_eq!(paths(&proxied), Vec::<String>::new());
+}
+
+/// What the downloads of the tests do, in the main process: every `will-download` is logged
+/// with what the item says at that moment, saved under `dir` (except `/nosave`, which a listener
+/// refuses), and every event of the item is logged too. `/slow-cancel` is cancelled and
+/// `/slow-pause` paused for 400 ms, at the first `updated`.
+fn downloads_setup(dir: &Path) -> String {
+    let dir = serde_json::to_string(&dir.to_string_lossy()).unwrap();
+    format!(
+        "const path = require('path'); const fs = require('fs'); const dir = {dir};
+         globalThis.log = [];
+         session.defaultSession.on('will-download', (event, item, wc) => {{
+           const e = {{ url: item.getURL(), name: item.getFilename(), mime: item.getMimeType(), total: item.getTotalBytes(),
+             state: item.getState(), savePath: item.getSavePath(), wc: wc && wc.id, events: [] }};
+           log.push(e);
+           if (e.url.includes('/nosave')) {{ event.preventDefault(); return; }}
+           const target = path.join(dir, 'f' + log.length + '-' + item.getFilename());
+           item.setSavePath(target);
+           e.after = item.getSavePath() === target;
+           let first = true;
+           item.on('updated', (ev, state) => {{
+             e.events.push(['updated', state, item.isPaused(), fs.existsSync(target + '.crdownload')]);
+             if (e.url.includes('slow-pause') && item.getReceivedBytes() === 0) return;
+             if (!first) return; first = false;
+             if (e.url.includes('slow-cancel')) item.cancel();
+             if (e.url.includes('slow-pause')) {{ item.pause(); e.paused = [item.isPaused(), item.canResume(), item.getState()]; e.pausedAt = item.getReceivedBytes();
+               setTimeout(() => item.resume(), 400); }}
+           }});
+           item.on('done', (ev, state) => {{
+             e.events.push(['done', state, fs.existsSync(target), fs.existsSync(target + '.crdownload')]);
+             e.size = fs.existsSync(target) ? fs.statSync(target).size : null; e.received = item.getReceivedBytes(); e.target = target; e.done = true;
+           }});
+         }});"
+    )
+}
+
+/// The entry of `log` for the download of `url_end`, once it is done (or at once, for one that
+/// is refused: `refused`).
+fn download_of(app: &App, url_end: &str, refused: bool) -> Value {
+    let find = format!("globalThis.log.find((e) => e.url.endsWith('{url_end}'))");
+    let read = |app: &App| -> Value {
+        let text = app.eval_main(&format!("{find} || null"));
+        serde_json::from_str(&text).unwrap_or(Value::Null)
+    };
+    let ready = |app: &App| {
+        let found = read(app);
+        found.get("done").is_some() || (refused && !found.is_null())
+    };
+    assert!(
+        app.run_until(ready, TIMEOUT),
+        "console: {:?}",
+        app.console()
+    );
+    read(app)
+}
+
+#[test]
+fn a_download_with_a_save_path_completes_and_cancel_leaves_nothing() {
+    let (port, _) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let dir = App::scratch_dir("downloads");
+    let app = page_app(&downloads_setup(&dir), &base);
+    done(&app);
+    let contents = contents_of(&app);
+    app.eval_main("session.defaultSession.downloadURL(base + '/dl'); 1");
+    let item = download_of(&app, "/dl", false);
+    // `will-download` is heard with the head's facts, and a session's own call names no page
+    // (Electron 39.8.10, `probe7`).
+    assert_eq!(item["name"], "dl");
+    assert_eq!(item["mime"], "application/octet-stream");
+    assert_eq!(item["total"], 300_000);
+    assert_eq!(item["state"], "progressing");
+    assert_eq!(item["savePath"], "");
+    assert_eq!(item["after"], true);
+    assert_eq!(item["wc"], Value::Null);
+    let events = item["events"].as_array().unwrap();
+    // Verve opens its partial file (`<target>.crdownload`) before the first `updated`; Chromium's
+    // temporary name differs and is not observable by an app, so only the final state is pinned.
+    assert_eq!(
+        events.first().unwrap(),
+        &json!(["updated", "progressing", false, true])
+    );
+    assert_eq!(
+        events.last().unwrap(),
+        &json!(["done", "completed", true, false])
+    );
+    assert_eq!(item["size"], 300_000);
+    assert_eq!(item["received"], 300_000);
+    // A `webContents` names itself, and the attachment's own file name is the item's.
+    app.eval_main("win.webContents.downloadURL(base + '/att'); 1");
+    let attached = download_of(&app, "/att", false);
+    assert_eq!(attached["name"], "att.txt");
+    assert_eq!(attached["mime"], "text/plain");
+    assert_eq!(attached["wc"], contents);
+    let target = attached["target"].as_str().unwrap();
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "attached");
+    // A listener that prevents the default has no download: nothing is heard of it.
+    app.eval_main("session.defaultSession.downloadURL(base + '/nosave'); 1");
+    let refused = download_of(&app, "/nosave", true);
+    assert_eq!(refused["events"], json!([]));
+    // `cancel()` ends it as `cancelled`, with neither the file nor the partial one left.
+    app.eval_main("session.defaultSession.downloadURL(base + '/slow-cancel'); 1");
+    let cancelled = download_of(&app, "/slow-cancel", false);
+    let last = cancelled["events"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last, json!(["done", "cancelled", false, false]));
+}
+
+#[test]
+fn a_paused_download_goes_on_with_a_range_request_and_ends_whole() {
+    let (port, seen) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let dir = App::scratch_dir("downloads");
+    let app = page_app(&downloads_setup(&dir), &base);
+    done(&app);
+    app.eval_main("session.defaultSession.downloadURL(base + '/slow-pause'); 1");
+    let item = download_of(&app, "/slow-pause", false);
+    // Paused, it can be resumed and is still `progressing` (Electron 39.8.10, `probe7`).
+    assert_eq!(item["paused"], json!([true, true, "progressing"]));
+    assert_eq!(
+        item["events"].as_array().unwrap().last().unwrap(),
+        &json!(["done", "completed", true, false])
+    );
+    let bytes = std::fs::read(item["target"].as_str().unwrap()).unwrap();
+    let expected: Vec<u8> = (0..SLOW_LENGTH).map(slow_byte).collect();
+    assert!(bytes == expected, "the file is {} bytes", bytes.len());
+    // The resumed request asks for the rest: `bytes=N-`, from where the pause left off.
+    let ranges = range_values(&seen, "/slow-pause");
+    assert_eq!(
+        ranges.len(),
+        1,
+        "the second request asked for the rest: {ranges:?}"
+    );
+    let from = ranges[0].trim_start_matches("bytes=").trim_end_matches('-');
+    let from: u64 = from.parse().unwrap();
+    assert!(
+        from > 0 && from >= item["pausedAt"].as_u64().unwrap(),
+        "{from}"
+    );
+}
+
+#[test]
+fn a_server_that_ignores_range_makes_the_resumed_download_start_over_and_end_whole() {
+    let (port, seen) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let dir = App::scratch_dir("downloads");
+    let app = page_app(&downloads_setup(&dir), &base);
+    done(&app);
+    app.eval_main("session.defaultSession.downloadURL(base + '/slow-pause-norange'); 1");
+    let item = download_of(&app, "/slow-pause-norange", false);
+    assert_eq!(
+        item["events"].as_array().unwrap().last().unwrap(),
+        &json!(["done", "completed", true, false])
+    );
+    // The 200 to the range request restarts the file at its start: no byte twice, none missing.
+    let bytes = std::fs::read(item["target"].as_str().unwrap()).unwrap();
+    let expected: Vec<u8> = (0..SLOW_LENGTH).map(slow_byte).collect();
+    assert!(bytes == expected, "the file is {} bytes", bytes.len());
+    assert_eq!(range_values(&seen, "/slow-pause-norange").len(), 1);
+}
+
+/// The `Range` headers the requests for `path` carried.
+fn range_values(seen: &Seen, path: &str) -> Vec<String> {
+    let all = seen.lock().unwrap();
+    all.iter()
+        .filter(|(p, _)| p == path)
+        .flat_map(|(_, headers)| headers.iter().filter(|(name, _)| name == "range"))
+        .map(|(_, value)| value.clone())
+        .collect()
+}
+
+/// A `will-download` listener that does not name a path, so the save dialog is asked.
+const ASKING_SETUP: &str = "globalThis.log = [];
+    session.defaultSession.on('will-download', (event, item) => {
+      const e = { url: item.getURL() }; log.push(e);
+      item.on('done', (ev, state) => { e.state = state; e.target = item.getSavePath(); e.done = true; });
+    });";
+
+#[test]
+fn without_a_save_path_the_save_dialog_chooses_and_cancelling_it_cancels_the_download() {
+    let (port, _) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let dir = App::scratch_dir("downloads");
+    let app = page_app(ASKING_SETUP, &base);
+    done(&app);
+    // The person picks a file in the dialog (a preset answer: no real dialog opens).
+    let chosen = dir.join("chosen.bin");
+    app.shell.queue_dialog_answer(DialogResult::Save {
+        canceled: false,
+        file_path: Some(chosen.clone()),
+    });
+    app.eval_main("session.defaultSession.downloadURL(base + '/dl'); 1");
+    let item = download_of(&app, "/dl", false);
+    assert_eq!(item["state"], "completed");
+    assert_eq!(std::fs::metadata(&chosen).unwrap().len(), 300_000);
+    // Without an answer the headless shell cancels the dialog, and the download ends cancelled.
+    app.eval_main("session.defaultSession.downloadURL(base + '/att'); 1");
+    let item = download_of(&app, "/att", false);
+    assert_eq!(item["state"], "cancelled");
+    assert_eq!(app.shell.dialogs().len(), 2);
+}
+
+#[test]
+fn a_download_link_and_an_attachment_page_are_downloads() {
+    let (port, _) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let dir = App::scratch_dir("downloads");
+    let app = page_app(&downloads_setup(&dir), &base);
+    done(&app);
+    let contents = contents_of(&app);
+    app.run_page(
+        contents,
+        "document.body.insertAdjacentHTML('beforeend', '<a id=l href=\"/dl\" download=\"x.bin\">d</a>');
+         document.getElementById('l').click(); return 1;",
+        TIMEOUT,
+    );
+    let link = download_of(&app, "/dl", false);
+    assert_eq!(link["name"], "x.bin");
+    assert_eq!(link["wc"], contents);
+    assert_eq!(link["size"], 300_000);
+    // A page that is an attachment fails to load (`ERR_FAILED`, -2) and is saved instead.
+    app.eval_main(
+        "win.loadURL(base + '/att').catch((e) => { globalThis.load_error = String(e.message); }); 1",
+    );
+    let attached = download_of(&app, "/att", false);
+    assert_eq!(attached["name"], "att.txt");
+    assert!(app.run_until(
+        |app| app.eval_main("typeof load_error") == r#""string""#,
+        TIMEOUT
+    ));
+    assert!(app.eval_main("load_error").contains("ERR_FAILED (-2)"));
 }

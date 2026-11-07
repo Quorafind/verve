@@ -92,6 +92,17 @@ pub(crate) fn of_path(path: &Path) -> &'static str {
         .map_or("application/octet-stream", |(_, mime)| mime)
 }
 
+/// An extension a file of type `mime` is usually given, if it has a distinctive one.
+pub(crate) fn extension_of(mime: &str) -> Option<&'static str> {
+    if mime == "application/octet-stream" {
+        return None;
+    }
+    TYPES
+        .iter()
+        .find(|(_, known)| *known == mime)
+        .map(|(extension, _)| *extension)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

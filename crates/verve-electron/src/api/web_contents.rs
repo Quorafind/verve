@@ -62,6 +62,7 @@ fn make_class(context: &mut Context) -> JsResult<JsObject> {
     contents_page::install(context, &prototype)?;
     contents_history::install_legacy(context, &prototype)?;
     contents_stubs::install(context, &prototype)?;
+    super::download_item::install_contents(context, &prototype)?;
     Ok(class)
 }
 
