@@ -154,8 +154,10 @@ impl Document {
 
   `dataTransfer.files` 中的 `File` 由 P03 的"带路径 File"构造（`webUtils.getPathForFile(file)` 返回该路径，`file.path` **不存在**——
   Electron 32 起已移除）。文件内容惰性读取，读取经过渲染器的文件系统权限（Electron 渲染器中拖入的文件可读）。
-  若页面不处理 `drop`（未 `preventDefault` 的 `dragover`/`drop`），浏览器会导航到该文件——Electron 中同样会发 `will-navigate`；
-  按此实现（发 `Request::Navigate` 到 `file://…`）。
+  若页面不处理 `drop`（未 `preventDefault` 的 `dragover`/`drop`）：Electron 39.8.10 在默认的 `navigateOnDragDrop: false` 下
+  **不导航**、不发 `will-navigate`、不开窗口，放下就是一次 `dragleave`（第二阶段复审实测，`SCRATCH\p24-review3\out-navdrop.txt`）；
+  本包照此实现，不发 `Request::Navigate`。`navigateOnDragDrop: true` 时 Electron 对同一次放下调 `setWindowOpenHandler(文件地址,
+  'foreground-tab')`（仍没有 `will-navigate`），这一情形没有接（`WebPreferences.navigate_on_drag_drop` 已有，默认 false）。
 - P02 需追加 `ToRendererInput::Drag(DragInput)`（`Enter{data,pointer}/Over{pointer}/Leave/Drop{pointer}`），P34 从 GPUI 的
   文件拖放事件（`FileDropEvent`）产生它。
 - 拖出到系统（`webContents.startDrag(item)`，主进程 API）：v1 不支持，登记（P13 中抛 `ERR_NOT_SUPPORTED`）。
@@ -167,13 +169,20 @@ impl Document {
     未阻止时默认取当前选区（文本框取 Draft 选区）的 `text/plain` 与 `text/html`；cut 再删除选区（产生 `deleteByCut` 的 beforeinput/input）。
     结果写剪贴板：`Request::CopyText` 扩展为 `Request::WriteClipboard { text: Option<String>, html: Option<String>, custom: Vec<(String, Vec<u8>)> }`
     （修改 `crates/verve-dom/src/lib.rs` 的 `Request`，同步现有测试）。
-  - paste：渲染器需要剪贴板内容——**剪贴板由 Shell/主进程持有**。流程：Shell 在发出 paste 键之前读取剪贴板，随
-    `ToRendererInput::Paste(ClipboardData { text, html, files, image_png })`（需新增）一起送达；`Document::paste(runtime, data)`（需新增）
-    发 `paste` 事件，未阻止时按 `insertFromPaste` 插入（contenteditable 插 HTML 时做基本清理：去掉 `<script>`、事件属性；文本框插纯文本）。
+  - paste：渲染器需要剪贴板内容——**剪贴板由 Shell/主进程持有**。流程（第二轮修订，没有 `Paste` 消息）：Ctrl/Cmd+V 的 keydown
+    先送到页面，默认动作向 Shell 要剪贴板（`Request::ReadClipboard`），Shell 回 `ClipboardContents { call, data }`；
+    `Document::paste(runtime, data)` 发 `paste` 事件，未阻止时按 `insertFromPaste` 插入（contenteditable 插 HTML 时做基本清理：去掉 `<script>`、事件属性；文本框插纯文本）。
 - `navigator.clipboard.writeText/write` → `Request::WriteClipboard`，promise 立即 resolve；`readText/read`：发
   `Request::ReadClipboard { call }`（需新增），Shell 回 `ToRendererInput::ClipboardContents { call, data }`（需新增）后 resolve。
   Electron 中这些在有焦点的页面上默认允许（权限由 P16 的 `setPermissionRequestHandler` 决定，未设置时允许）。
 - 图片：`ClipboardItem` 支持 `image/png`（字节来自 Shell；P25 不需要介入）。
+- **第二阶段定下的消息（谁产生）**：
+  - 类型：`ClipboardData { text, html, files: Vec<PathBuf>, image_png }`、`ExternalDrag`、`DropEffect` 定义在 verve-dom（`clipboard.rs`、`drag.rs`），消息直接用它们，不再另定义。
+  - `verve_dom::Request`：`CopyText` 改为 `WriteClipboard { text, html, custom }`，新增 `ReadClipboard { call }`。主进程把页面的这两条原样转给 Shell：`ToShell::WriteClipboard { text, html, custom }`、`ToShell::ReadClipboard { contents, call }`。**剪贴板归 Shell**：无头壳在内存里保存一份（测试从不碰真实剪贴板），GPUI 壳读写系统剪贴板（P32 补全 HTML 与图片）。
+  - `ToRendererInput::ClipboardContents { call, data }`：**Shell 产生**，回答 `ToShell::ReadClipboard`；页面的 `navigator.clipboard.read*`、Ctrl/Cmd+V 与 `EditCommand::Paste` 的读取都由它结算（`Document::settle_clipboard`）。
+  - **没有 `Paste` 消息**（第二轮删去）：Chromium 里粘贴是 Ctrl/Cmd+V 的 keydown 默认动作，页面要先听到 keydown、能 `preventDefault`，`before-input-event` 也要看到它。所以 P32 把 Ctrl/Cmd+V 当普通按键发给页面，除此之外不需要为粘贴做任何事；`Document::key_down` 的默认动作是 `Document::request_paste`（发 `Request::ReadClipboard`，待 Shell 回 `ClipboardContents` 时粘贴）。Ctrl+Shift+V 与菜单角色 `pasteAndMatchStyle` 粘贴纯文本；Ctrl+C/X 是按键的默认动作（渲染器内处理）。
+  - `ToRendererInput::Drag(DragInput)`，`DragInput::{Enter { data: ExternalDrag, pointer }, Over { pointer }, Leave, Drop { pointer }}`：**P34/P32 产生**，由 GPUI 的 `FileDropEvent`（及 `ExternalPaths`）转换；渲染器侧调用 `Document::drag_enter/over/leave/drop`，并把答案写进 `RendererView.drop_effect`（`Option<DropEffect>`，供 Shell 画光标）。
+  - 页面内拖放不经过任何消息：它是 `Document::pointer_down/move/up` 上的状态机。
 
 ## 步骤
 
@@ -206,12 +215,12 @@ impl Document {
 
 ## 给其他包的备注
 
-- **P02**：`CompositionEvent` 按 §3 定义；追加 `ToRendererInput::{Drag(DragInput), Paste(ClipboardData), ClipboardContents{call,data}}`、
+- **P02**：`CompositionEvent` 按 §3 定义；追加 `ToRendererInput::{Drag(DragInput), ClipboardContents{call,data}}`、
   `ToRenderer::EditCommand(EditCommand)`；`verve_dom::Request` 的 `CopyText` 改为 `WriteClipboard{…}`，新增 `ReadClipboard{call}`。
 - **P03**：带路径的 `File` 构造（与 P21 的需求相同）。
 - **P31**：画 `SnapshotData.selection`/`caret`；回报文本片段与行盒（`Document::set_fragments`，P23 定义）供 `Range.getClientRects`、
   `Selection.modify(line)`、点击定位光标（`caretPositionFromPoint`/`caretRangeFromPoint` 需本包实现，依赖片段回报）。
-- **P32**：GPUI `InputHandler` ↔ `CompositionEvent`，`ime_rect` ↔ `bounds_for_range`；Ctrl+V 之前读取剪贴板并随 `Paste` 送达。
+- **P32**：GPUI `InputHandler` ↔ `CompositionEvent`，`ime_rect` ↔ `bounds_for_range`；Ctrl/Cmd+V 当普通按键发给页面，粘贴不需要别的消息；`ToShell::{WriteClipboard, ReadClipboard}` 见 §5 末尾。
 - **P34**：GPUI 文件拖放事件 → `ToRendererInput::Drag`。
 - **P15**：菜单 role → `ToRenderer::EditCommand`。
 
