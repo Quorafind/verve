@@ -393,3 +393,17 @@ The largest functions were `MainGuest::from_renderer` (50.5 KiB, one match, sinc
 (13.0 KiB), `web_request::run` (11.3 KiB), `net_request::incoming_message` (8.7 KiB) and `protocol_serve::start` (8.0 KiB).
 
 Candidates for P42: net_request's closure per method, and the near-copies between the request and download paths.
+
+## P43: the inspector window and the REPL (phase 2)
+
+`electron/p43-inspector` at its tested tip (744b2afe; merged as `3c6b8eb8` on `124ca9af`): `cargo build --release -p verve-gpui
+--bin electron --features jit` is 37,128,192 bytes against 36,822,016 for `124ca9af` (P16 merged and the cap raised), +306,176 bytes
+(299 KiB), within the 300 KiB budget. The cap (41,943,040) leaves 4,814,848 bytes.
+
+The cost is P43's own code, with no new dependency:
+- the inspector model in verve-gpui: the element tree updated from `Update`'s changes, computed styles, the box model and the console;
+- the window: the tree, the styles and box-model panes, the console and the REPL line editor;
+- the highlight and the element picker over the page window;
+- the Hub's routing of REPL calls and replies, and the per-page console ring;
+- in the kernel, `inspect_value` and Node's `UnhandledPromiseRejectionWarning`/`PromiseRejectionHandledWarning` text, with V8's
+  naming of a reason.
