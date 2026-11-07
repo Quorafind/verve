@@ -20,6 +20,7 @@ use verve_electron::ids::{ContentsId, WindowId};
 use verve_electron::msg::{
     Display, Rect, TitleBarStyle, ToRendererInput, ToShell, WindowEvent, WindowOp, WindowOptions,
 };
+use verve_layout::DisplayList;
 
 use crate::app_region::AppRegion;
 use crate::dom_view::{DomView, white};
@@ -57,13 +58,13 @@ pub(crate) fn framed(options: &WindowOptions) -> bool {
     options.frame && options.title_bar_style == TitleBarStyle::Default
 }
 
-/// The colour under a window's page: none for a transparent window, white unless it was given.
+/// The color under a window's page: none for a transparent window, white unless it was given.
 fn background(options: &WindowOptions) -> Option<Rgba> {
     let given = options.background_color.map(color_of);
     (!options.transparent).then(|| given.unwrap_or_else(white))
 }
 
-/// `[r, g, b, a]` as the colour GPUI paints.
+/// `[r, g, b, a]` as the color GPUI paints.
 fn color_of([r, g, b, a]: [u8; 4]) -> Rgba {
     rgba(u32::from_be_bytes([r, g, b, a]))
 }
@@ -141,9 +142,9 @@ pub(crate) fn open(opening: Opening, display: &Display, cx: &mut AsyncApp) -> Op
         owner,
     } = opening;
     let bounds = opening_bounds(options, display);
-    let colour = background(options);
+    let color = background(options);
     let opened = cx.open_window(gpui_options(options, bounds), |_, cx| {
-        cx.new(|_| DomView::new(colour))
+        cx.new(|_| DomView::new(color))
     });
     let handle = match opened {
         Ok(handle) => handle,
@@ -341,6 +342,16 @@ impl Window {
             window.prompt(level, message, detail, answers, cx)
         });
         asked.ok().map(|chosen| async move { chosen.await.ok() })
+    }
+
+    /// Hands the window the display list its page published.
+    pub fn show_list(&self, list: Arc<DisplayList>, cx: &mut AsyncApp) {
+        self.show(
+            move |view| {
+                view.show(list);
+            },
+            cx,
+        );
     }
 
     /// Sets the regions the window is dragged by.

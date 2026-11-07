@@ -258,14 +258,14 @@ impl Shell {
     /// Hands each window what its page published since the last turn.
     fn draw(&mut self, cx: &mut AsyncApp) {
         for window in self.windows.values() {
-            let Some(update) = self
+            let Some(list) = self
                 .hub
                 .renderer_view(window.contents)
-                .and_then(|view| view.update)
+                .and_then(|view| view.display_list)
             else {
                 continue;
             };
-            window.show(move |view| view.show(update.snapshot), cx);
+            window.show_list(list, cx);
         }
     }
 }

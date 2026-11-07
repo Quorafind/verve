@@ -7,13 +7,15 @@
 //!
 //! The windows are [`window`]'s (one per `BrowserWindow`: frame, limits, drag areas, owner and
 //! modal windows, what they report), the system's part of them [`platform`]'s, and
-//! [`shell`] only says which window a message is for. P30 replaces [`DomView`]'s drawing with
-//! the display list `verve-layout` makes on the page's own thread and hands the window its
-//! [`AppRegion`]s.
+//! [`shell`] only says which window a message is for. What a window draws is the display list
+//! `verve-layout` makes on the page's own thread ([`DomElement`](dom_element)), and the
+//! [`AppRegion`]s the window is dragged by are the list's own hitboxes.
 
 mod app_region;
 mod dialog;
+mod dom_element;
 mod dom_view;
+mod plan;
 mod platform;
 mod report;
 mod shell;
