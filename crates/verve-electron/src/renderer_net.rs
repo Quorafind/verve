@@ -22,7 +22,7 @@ use url::Url;
 use verve::Runtime;
 use verve::browser_net::{
     BrowserNet, Decider, Decision, FailureStyle, NetError, NetEvent, RequestHead, Responder,
-    ResponseDecision, ResponseHead,
+    ResponseDecision, ResponseHead, Route,
 };
 use verve_dom::CookieBackend;
 
@@ -319,5 +319,9 @@ impl BrowserNet for RendererNet {
 
     fn user_agent(&self) -> Option<String> {
         self.session.user_agent()
+    }
+
+    fn proxy(&self, url: &url::Url) -> Route {
+        self.session.route(url)
     }
 }

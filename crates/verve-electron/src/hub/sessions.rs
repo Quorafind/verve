@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::cookies::CookieStore;
+use super::proxy::Proxy;
 use super::{Hub, lock};
 use crate::api::match_pattern::Patterns;
 use crate::msg::{SessionId, WebRequestStage};
@@ -52,6 +53,8 @@ pub struct Session {
     web_request_asks: AtomicU64,
     /// Which permission handlers the app set ([`Session::set_permission_handler`]).
     permission_handlers: AtomicU8,
+    /// How the session's requests reach the network.
+    proxy: Mutex<Option<Proxy>>,
 }
 
 #[derive(Default)]
@@ -74,6 +77,7 @@ impl Session {
             web_request: Mutex::default(),
             web_request_asks: AtomicU64::new(0),
             permission_handlers: AtomicU8::new(0),
+            proxy: Mutex::new(None),
         }
     }
 
@@ -171,6 +175,26 @@ impl Session {
 
     fn handler_bit(check: bool) -> u8 {
         if check { 2 } else { 1 }
+    }
+
+    /// Puts `proxy` in place of the session's last, or connects directly again with `None`.
+    pub fn set_proxy(&self, proxy: Option<Proxy>) {
+        *lock(&self.proxy) = proxy;
+    }
+
+    /// What `resolveProxy` answers for `url`.
+    pub fn resolve_proxy(&self, url: &url::Url) -> String {
+        lock(&self.proxy)
+            .as_ref()
+            .map_or_else(|| "DIRECT".to_owned(), |proxy| proxy.resolve(url))
+    }
+
+    /// How a request of this session for `url` reaches the network: asked for each request, so
+    /// two sessions' requests in one realm never share a proxy. Direct when the app set none.
+    pub fn route(&self, url: &url::Url) -> verve::browser_net::Route {
+        lock(&self.proxy)
+            .as_ref()
+            .map_or(verve::browser_net::Route::Direct, |proxy| proxy.route(url))
     }
 
     /// The user agent `setUserAgent` gave, if any.

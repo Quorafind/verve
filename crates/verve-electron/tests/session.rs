@@ -112,6 +112,14 @@ fn paths(seen: &Seen) -> Vec<String> {
         .collect()
 }
 
+/// A local port nothing listens on, so a request that goes there directly fails at once. The
+/// proxy tests use it instead of a name under `.invalid`: some resolvers answer every name, and
+/// the connection then hangs.
+fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
 /// Runs the app `main_js` with `profile` as its `userData`; the script fills `globalThis.out`
 /// and sets `out.done`.
 fn launch(main_js: &str, profile: &Path) -> App {
@@ -635,4 +643,188 @@ fn denying_notifications_makes_the_pages_request_answer_denied() {
         "try { session.defaultSession.setPermissionRequestHandler(5); 'ok' } catch (e) { e.message }",
     );
     assert!(refused.contains("Must pass null or function"), "{refused}");
+}
+
+#[test]
+fn a_proxy_the_test_started_sees_the_requests_of_the_page_and_of_the_main_process() {
+    let (port, direct) = server();
+    let (proxy_port, proxied) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = format!(
+        "await session.defaultSession.setProxy({{ proxyRules: 'http://127.0.0.1:{proxy_port}' }});
+         globalThis.resolved = [await session.defaultSession.resolveProxy('http://proxied.test/x'),
+           await session.defaultSession.resolveProxy(base + '/x'), await session.defaultSession.resolveProxy()];"
+    );
+    let app = page_app(&setup, &base);
+    done(&app);
+    let contents = contents_of(&app);
+    // The proxy's own address is reached by the page's load of `/page`: the loopback is direct.
+    assert_eq!(paths(&direct), ["/page"]);
+    let page = app.run_page(
+        contents,
+        "const a = await fetch('http://proxied.test/from-page'); const b = await fetch('/direct');
+         return [a.status, b.status];",
+        TIMEOUT,
+    );
+    assert_eq!(page["value"], json!([200, 200]));
+    app.eval_main("net.fetch('http://proxied.test/from-main').then((r) => r.text()).then((t) => { globalThis.main_body = t; }); 1");
+    assert!(app.run_until(
+        |app| app.eval_main("typeof main_body") == r#""string""#,
+        TIMEOUT
+    ));
+    assert_eq!(
+        paths(&proxied),
+        [
+            "http://proxied.test/from-page",
+            "http://proxied.test/from-main"
+        ]
+    );
+    assert_eq!(paths(&direct), ["/page", "/direct"]);
+    let resolved = app.eval_main("JSON.stringify(resolved)");
+    let want = format!(r#""[\"PROXY 127.0.0.1:{proxy_port}\",\"DIRECT\",\"DIRECT\"]""#);
+    assert_eq!(resolved, want);
+    // Back to direct, and a mode Electron does not have is refused with its words.
+    let after = app.eval_main(
+        "session.defaultSession.setProxy({ mode: 'direct' })
+           .then(() => session.defaultSession.resolveProxy('http://proxied.test/x'))
+           .then((r) => { globalThis.direct = r; });
+         session.defaultSession.setProxy({ mode: 'bogus' }).catch((e) => { globalThis.refused = e.message; }); 1",
+    );
+    assert_eq!(after, "1");
+    assert!(app.run_until(
+        |app| app.eval_main("typeof refused") == r#""string""#,
+        TIMEOUT
+    ));
+    assert_eq!(app.eval_main("direct"), r#""DIRECT""#);
+    assert_eq!(
+        app.eval_main("refused"),
+        r#""Invalid mode, must be one of direct, auto_detect, pac_script, fixed_servers or system""#
+    );
+}
+
+/// Runs `code` in the main process, waits until it has set `globalThis.<name>` and answers that
+/// value as JSON text.
+fn main_result(app: &App, code: &str, name: &str) -> String {
+    app.eval_main(&format!("{code}; 1"));
+    assert!(
+        app.run_until(
+            |app| app.eval_main(&format!("typeof globalThis.{name}")) != r#""undefined""#,
+            TIMEOUT
+        ),
+        "console: {:?}",
+        app.console()
+    );
+    // `eval_main` answers its result as JSON, and the result here is already JSON text.
+    let text = app.eval_main(&format!("JSON.stringify(globalThis.{name})"));
+    serde_json::from_str(&text).unwrap()
+}
+
+#[test]
+fn a_sessions_proxy_is_the_route_of_its_requests_only_and_node_and_global_fetch_stay_direct() {
+    let (port, _) = server();
+    let (proxy_port, proxied) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = format!(
+        "await session.defaultSession.setProxy({{ proxyRules: 'http://127.0.0.1:{proxy_port}' }});"
+    );
+    let app = page_app(&setup, &base);
+    done(&app);
+    let through = main_result(
+        &app,
+        "net.fetch('http://proxied.test/net').then((r) => { globalThis.through = r.status; })",
+        "through",
+    );
+    assert_eq!(through, "200");
+    // Node's `http` and the global `fetch` of the main process are not Electron's network
+    // stack: after the session's proxy was used they still connect directly, and the proxy hears
+    // nothing of them. They aim at a closed local port, so going direct fails at once, where the
+    // proxy would have answered. The kernel's own proxy settings don't skip the loopback, so a
+    // proxy wrongly set on the main process would still be heard.
+    let closed = closed_port();
+    let node = main_result(
+        &app,
+        &format!(
+            "globalThis.node = []; const note = (what) => () => {{ node.push(what); if (node.length === 2) globalThis.node_done = true; }};
+             require('http').get('http://127.0.0.1:{closed}/node-http', () => note('reached')()).on('error', note('failed'));
+             fetch('http://127.0.0.1:{closed}/node-fetch').then(note('reached'), note('failed'))"
+        ),
+        "node_done",
+    );
+    assert_eq!(node, "true");
+    assert_eq!(
+        app.eval_main("JSON.stringify(node)"),
+        r#""[\"failed\",\"failed\"]""#
+    );
+    assert_eq!(paths(&proxied), ["http://proxied.test/net"]);
+}
+
+#[test]
+fn two_sessions_with_two_proxies_and_slow_listeners_each_reach_only_their_own() {
+    let (port, _) = server();
+    let (proxy_a, seen_a) = server();
+    let (proxy_b, seen_b) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = format!(
+        "const a = session.fromPartition('a'); const b = session.fromPartition('b');
+         await a.setProxy({{ proxyRules: 'http://127.0.0.1:{proxy_a}' }});
+         await b.setProxy({{ proxyRules: 'http://127.0.0.1:{proxy_b}' }});
+         for (const [s, delay] of [[a, 150], [b, 20]]) {{
+           s.webRequest.onBeforeRequest((details, callback) => setTimeout(() => callback({{}}), delay));
+         }}
+         globalThis.a = a; globalThis.b = b;"
+    );
+    let app = page_app(&setup, &base);
+    done(&app);
+    // `a`'s listener answers after `b`'s, so each decision is still pending while the other
+    // session's requests are decided and sent.
+    let statuses = main_result(
+        &app,
+        "Promise.all([a.fetch('http://one.test/1'), b.fetch('http://two.test/1'), a.fetch('http://one.test/2'),
+           b.fetch('http://two.test/2')]).then((r) => { globalThis.statuses = r.map((x) => x.status); })",
+        "statuses",
+    );
+    assert_eq!(statuses, "[200,200,200,200]");
+    let mut a = paths(&seen_a);
+    a.sort();
+    let mut b = paths(&seen_b);
+    b.sort();
+    assert_eq!(a, ["http://one.test/1", "http://one.test/2"]);
+    assert_eq!(b, ["http://two.test/1", "http://two.test/2"]);
+}
+
+#[test]
+fn rules_for_http_only_send_https_requests_nowhere_near_the_proxy() {
+    let (port, direct) = server();
+    let (proxy_port, proxied) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = format!(
+        "await session.defaultSession.setProxy({{ proxyRules: 'http=127.0.0.1:{proxy_port}' }});
+         globalThis.resolved = await session.defaultSession.resolveProxy('https://secure.invalid/');"
+    );
+    let app = page_app(&setup, &base);
+    done(&app);
+    assert_eq!(app.eval_main("resolved"), r#""DIRECT""#);
+    // The window's load of `/page` is direct, since the loopback is never proxied unless
+    // `<-loopback>` says so; `out.done` doesn't wait for it, so the test does.
+    assert!(app.run_until(|_| paths(&direct) == ["/page"], TIMEOUT));
+    // With `<-loopback>`, an `http:` request to a closed local port would go to the proxy, while
+    // an `https:` one goes direct: it fails at once, and no `CONNECT` reaches the proxy.
+    let closed = closed_port();
+    let outcome = main_result(
+        &app,
+        &format!(
+            "const s = session.defaultSession;
+             s.setProxy({{ proxyRules: 'http=127.0.0.1:{proxy_port}', proxyBypassRules: '<-loopback>' }})
+               .then(() => Promise.all(['http', 'https'].map((scheme) => s.resolveProxy(`${{scheme}}://127.0.0.1:{closed}/`))))
+               .then((routes) => {{ globalThis.routes = routes; return net.fetch('https://127.0.0.1:{closed}/x'); }})
+               .then(() => {{ globalThis.outcome = 'reached'; }}, () => {{ globalThis.outcome = 'failed'; }})"
+        ),
+        "outcome",
+    );
+    assert_eq!(
+        app.eval_main("JSON.stringify(routes)"),
+        format!(r#""[\"PROXY 127.0.0.1:{proxy_port}\",\"DIRECT\"]""#)
+    );
+    assert_eq!(outcome, r#""failed""#);
+    assert_eq!(paths(&proxied), Vec::<String>::new());
 }

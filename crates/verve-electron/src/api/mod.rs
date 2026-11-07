@@ -39,6 +39,7 @@ pub(crate) mod protocol_serve;
 pub(crate) mod safe_storage;
 pub(crate) mod screen;
 pub(crate) mod session;
+pub(crate) mod session_proxy;
 pub(crate) mod shell;
 pub(crate) mod system_preferences;
 pub(crate) mod web_contents;
@@ -103,6 +104,8 @@ pub(crate) struct NetState {
     pub(crate) web: web_request::Objects,
     /// The permission handlers of the sessions.
     pub(crate) permissions: permissions::Objects,
+    /// Whether `setProxy` has warned about a mode it does not support: once is enough.
+    pub(crate) proxy_warned: std::cell::Cell<bool>,
 }
 
 impl MainState {

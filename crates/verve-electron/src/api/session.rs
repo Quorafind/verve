@@ -17,7 +17,7 @@ use verve::native::{self, ClassSpec, NewOnly, arg, js_text};
 
 use super::define::{self, Args, Kind};
 use super::permissions::{self, Which};
-use super::{app, cookies, net, protocol, web_request};
+use super::{app, cookies, net, protocol, session_proxy, web_request};
 use crate::hub::Session;
 use crate::msg::SessionId;
 
@@ -79,6 +79,8 @@ fn session_class(context: &mut Context) -> JsResult<JsObject> {
                 ("isPersistent", 0, is_persistent),
                 ("fetch", 1, fetch),
                 ("resolveHost", 1, resolve_host),
+                ("setProxy", 1, session_proxy::set_proxy),
+                ("resolveProxy", 1, session_proxy::resolve_proxy),
                 ("setPermissionRequestHandler", 1, |this, args, cx| {
                     permissions::set_handler(cx, this, args, Which::Request)
                 }),

@@ -22,12 +22,15 @@ use crate::msg::{AppEvent, Display, FromShell, PageEvent, ToShell};
 use crate::{ElectronOptions, MainGuest};
 
 pub mod cookies;
+mod proxy;
 mod records;
 mod renderers;
 mod sessions;
 mod shell;
+pub mod system_proxy;
 mod windows;
 
+pub use proxy::{Config as ProxyConfig, Proxy};
 pub use records::ConsoleLine;
 pub use renderers::RendererHandle;
 use renderers::{RendererSlot, stop};

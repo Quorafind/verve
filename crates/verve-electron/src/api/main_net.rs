@@ -1,7 +1,9 @@
 //! The browser's network for the main process's own requests (`net.fetch`, `net.request`,
 //! `session.fetch`): a [`BrowserNet`] of one session, handed to the kernel's `fetch` for each
 //! request rather than installed on the realm, since the main process's global `fetch` is Node's
-//! and does not go through a session.
+//! and does not go through a session. The session's proxy is the request's own route
+//! ([`BrowserNet::proxy`]); Node's `http`, `https` and the global `fetch` stay unproxied, as in
+//! Electron.
 //!
 //! A scheme the session's `protocol.handle` took is answered by its handler, on this thread; a
 //! `file:` address nobody took is read from the disk or `app.asar`.
@@ -13,7 +15,7 @@ use std::sync::Arc;
 use boa_engine::Context;
 use verve::browser_net::{
     BrowserNet, Decider, Decision, FailureStyle, NetError, NetEvent, RequestHead, Responder,
-    ResponseDecision, ResponseHead,
+    ResponseDecision, ResponseHead, Route,
 };
 
 use super::protocol_serve::{self, Asker, Job, ToResponder};
@@ -132,6 +134,10 @@ impl BrowserNet for MainNet {
 
     fn failure_style(&self) -> FailureStyle {
         FailureStyle::Net
+    }
+
+    fn proxy(&self, url: &url::Url) -> Route {
+        self.session.route(url)
     }
 
     fn user_agent(&self) -> Option<String> {
