@@ -17,6 +17,7 @@ use verve_dom::{NodeId, Snapshot};
 use crate::display_list::{AppRegionKind, Cursor, Rgba};
 use crate::grid::{self, Raw};
 use crate::paint_style::{Paint, border_side_width};
+use crate::replaced::{self, Replaced};
 use crate::transform::{Translation, parse_transform, parse_translate};
 use crate::value::{Dim, Units, length_percent, number, pixels};
 
@@ -202,6 +203,26 @@ pub(crate) struct BoxProps {
     /// How many properties fell back to `auto` or to their initial value.
     pub unsupported: u32,
     pub grid_areas: grid::Areas,
+    /// The picture a replaced element shows, once it has arrived.
+    pub picture: Option<Replaced>,
+    /// How a picture's size follows its ratio, which layout works out after the first pass.
+    pub follow: Follow,
+}
+
+/// How the size of a replaced element with a picture follows the picture's ratio (CSS 2.1,
+/// 10.3.2 and 10.4). Taffy's own aspect ratio carries a limit on one side across to the other,
+/// which Chromium does not do for a side that was given, so layout does it.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+pub(crate) enum Follow {
+    #[default]
+    Nothing,
+    /// The width is given: the height is the used width over the ratio.
+    Height(f32),
+    /// The height is given: the width is the used height times the ratio.
+    Width(f32),
+    /// Neither is given: the size is the picture's own (the content size here), cut by the
+    /// limits on both sides as the table of CSS 2.1, 10.4, has it.
+    Natural([f32; 2]),
 }
 
 impl BoxProps {
@@ -231,6 +252,8 @@ impl BoxProps {
             padding_percent: [None; 2],
             unsupported: 0,
             grid_areas: grid::Areas::default(),
+            picture: None,
+            follow: Follow::Nothing,
         }
     }
 
@@ -365,7 +388,12 @@ pub(crate) fn read(context: &ReadContext, node: NodeId) -> BoxProps {
     item_alignment(&reader, &mut style);
     flex(&mut reader, &mut style);
     grid_container(&reader, &mut style);
-    intrinsic(&reader, tag, &mut style);
+    let picture = replaced::read_picture(snapshot, node, tag, &reader.units);
+    let natural = picture
+        .as_ref()
+        .filter(|_| matches!(tag, Some("img" | "video")))
+        .map(|p| p.natural);
+    let follow = intrinsic(&reader, tag, natural, &mut style);
     grid_item(&reader, context.parent_areas, &mut style);
     let translation = translation_of(&reader);
     reader.unsupported += u32::from(translation.as_ref().is_some_and(|t| t.lossy));
@@ -394,6 +422,8 @@ pub(crate) fn read(context: &ReadContext, node: NodeId) -> BoxProps {
         unsupported: reader.unsupported,
         style,
         grid_areas: grid::areas(reader.text_or("grid-template-areas", "none")),
+        picture,
+        follow,
     }
 }
 
@@ -748,11 +778,23 @@ fn grid_item(reader: &Reader, areas: Option<&grid::Areas>, style: &mut taffy::St
 /// The size of a replaced element that its attributes and the web platform give it: `<canvas>`,
 /// `<iframe>`, `<video>`, `<embed>`, `<object>` and `<svg>` are 300 by 150, and a picture is
 /// what its `width` and `height` say. A size a style sets wins.
-fn intrinsic(reader: &Reader, tag: Option<&str>, style: &mut taffy::Style) {
+///
+/// An `<img>` whose picture has arrived is as big as the picture, or follows its ratio from the one
+/// side its attributes or its style give; before that, `width` and `height` together give the
+/// size. Answers how the size follows the ratio, if it does.
+fn intrinsic(
+    reader: &Reader,
+    tag: Option<&str>,
+    natural: Option<[f32; 2]>,
+    style: &mut taffy::Style,
+) -> Follow {
+    // A `<video>` with a poster is as big as its poster; without one, 300x150.
+    let sized_by_picture = tag == Some("img") || (tag == Some("video") && natural.is_some());
     let default = match tag {
+        Some("video") if natural.is_some() => None,
         Some("canvas" | "iframe" | "video" | "embed" | "object" | "svg") => Some(300.),
         Some("img") => None,
-        _ => return,
+        _ => return Follow::Nothing,
     };
     style.item_is_replaced = true;
     let attribute = |name: &str| {
@@ -764,12 +806,39 @@ fn intrinsic(reader: &Reader, tag: Option<&str>, style: &mut taffy::Style) {
             .and_then(|value| value.trim().trim_end_matches("px").parse::<f32>().ok())
             .filter(|size| *size >= 0.)
     };
-    if style.size.width == Dimension::AUTO {
-        let width = attribute("width").or(default);
-        style.size.width = width.map_or(Dimension::AUTO, length);
+    // The attributes are presentational hints: a declaration of the property, `auto` too, wins.
+    let said = |name: &str| reader.text(name).is_some();
+    let wide = attribute("width").filter(|_| !said("width"));
+    let high = attribute("height").filter(|_| !said("height"));
+    let natural = natural.filter(|size| size[0] > 0. && size[1] > 0.);
+    let (css_wide, css_high) = (
+        style.size.width != Dimension::AUTO,
+        style.size.height != Dimension::AUTO,
+    );
+    if !css_wide {
+        style.size.width = wide.or(default).map_or(Dimension::AUTO, length);
     }
-    if style.size.height == Dimension::AUTO {
-        let height = attribute("height").or(default.map(|width| width / 2.));
-        style.size.height = height.map_or(Dimension::AUTO, length);
+    if !css_high {
+        style.size.height = high
+            .or(default.map(|width| width / 2.))
+            .map_or(Dimension::AUTO, length);
+    }
+    let known = (
+        style.size.width != Dimension::AUTO,
+        style.size.height != Dimension::AUTO,
+    );
+    let (Some(size), true, None) = (natural, sized_by_picture, style.aspect_ratio) else {
+        return Follow::Nothing;
+    };
+    let ratio = size[0] / size[1];
+    match known {
+        (true, false) => Follow::Height(ratio),
+        (false, true) => Follow::Width(ratio),
+        (false, false) => {
+            style.size.width = length(size[0]);
+            style.size.height = length(size[1]);
+            Follow::Natural(size)
+        }
+        (true, true) => Follow::Nothing,
     }
 }

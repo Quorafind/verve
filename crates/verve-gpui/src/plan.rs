@@ -261,6 +261,8 @@ fn lower_fill(
 ) {
     match fill {
         Fill::Color(color) => push(filled(bounds, radii, Paint::Solid(fade(*color, opacity)))),
+        // Pictures are drawn from the next commit on.
+        Fill::Picture { .. } => {}
         Fill::Raster(key) => push(filled(
             bounds,
             radii,

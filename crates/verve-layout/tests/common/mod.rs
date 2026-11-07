@@ -163,6 +163,7 @@ impl Laid {
             .iter()
             .filter(|item| match item {
                 PaintItem::Box { node: n, .. }
+                | PaintItem::Image { node: n, .. }
                 | PaintItem::Hitbox { node: n, .. }
                 | PaintItem::Scroller { node: n, .. } => *n == node,
                 _ => false,

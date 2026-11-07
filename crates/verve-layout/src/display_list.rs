@@ -369,13 +369,16 @@ pub enum PaintItem {
         color: Rgba,
         wavy: bool,
     },
-    /// A picture, drawn into `bounds` and cut to `clip` (P35).
+    /// A picture, the whole of it drawn into `bounds` (already fitted to its box) and cut to
+    /// `clip` (P35). `fit` is the style's keyword, kept for the record; `frame` is the frame of
+    /// an animation to show.
     Image {
         node: NodeId,
         bounds: Rect,
         clip: Rect,
         image: ImageKey,
         fit: ObjectFit,
+        frame: u32,
     },
     /// A form control the shell draws in the platform's way (P32).
     Control {
@@ -433,10 +436,23 @@ pub enum Fill {
     /// A gradient too complex for the shell to paint as it is: the renderer rasterises it
     /// ([`DisplayList::rasters`]) and the picture is stretched over the box.
     Raster(ImageKey),
+    /// A `background-image: url()` layer: the tiles of the picture, cut to `area`. Rectangles are
+    /// relative to the top left of the box's border box. The tile at `(i, j)` is `tile` moved by
+    /// `(i * step[0], j * step[1])`, for `i` below `count[0]` and `j` below `count[1]`.
+    Picture {
+        image: ImageKey,
+        area: Rect,
+        tile: Rect,
+        step: [f32; 2],
+        count: [u32; 2],
+        frame: u32,
+    },
 }
 
-/// A picture the renderer owns, by number. The keys of rasterised gradients have the top bit set;
-/// pictures the page loads (P35) leave it clear.
+/// A picture the renderer owns, by number. The top two bits tell the kind: `1x` for a rasterised
+/// gradient (the top bit set, the next one arbitrary), `01` for a canvas surface (P35, second
+/// phase) and `00` for a picture the page loads (P35), whose other 62 bits are a hash of its
+/// address, so two addresses share a picture with a chance of 2^-62.
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct ImageKey(pub u64);
 

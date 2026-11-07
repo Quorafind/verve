@@ -530,6 +530,8 @@ th { font-weight: bold; text-align: center }
 col { display: table-column }
 colgroup { display: table-column-group }
 input, select, textarea, button, img, video, canvas, iframe, svg, audio, progress, meter { display: inline-block }
+video { object-fit: contain }
+audio:not([controls]) { display: none }
 body { margin: 8px }
 p, blockquote, figure, dl, menu { margin-top: 1em; margin-bottom: 1em }
 ul, ol { margin-top: 1em; margin-bottom: 1em; padding-left: 40px }
