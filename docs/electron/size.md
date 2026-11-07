@@ -432,3 +432,17 @@ The cost is P35's own code, with no new crate (it decodes with P25's `canvas::de
 - intrinsic sizes, `object-fit`/`object-position` and background tiles, in verve-layout;
 - one decode thread per page and the published image table, in verve-electron;
 - the picture cache and drawing in both painters, in verve-gpui.
+
+## P24: clipboard events, drag and drop, and mouse selection (phase 2)
+
+`electron/p24-editing` merged on `docs/electron-plan` after P35 phase 1: `cargo build --release -p verve-gpui --bin electron
+--features jit` is 37,627,904 bytes against 37,452,288 for P35's merge, +175,616 bytes, measured at the merge c2a87aa0. With phase 1
+(+167,424) P24 has cost 343,040 bytes of its 450 KB budget for both phases. The cap (41,943,040) leaves 4,315,136 bytes.
+
+The cost is P24's own code, with no new dependency:
+- `DataTransfer`, the `copy`/`cut`/`paste` events with their default actions, transient activation and `navigator.clipboard`, in
+  verve-dom;
+- drag and drop inside the page and from the system, and selection by dragging the pointer, in verve-dom;
+- the clipboard messages and dropped files, in verve-electron, and the shells' clipboards (in memory when the shell may not touch
+  the desktop);
+- HTML serialization that writes end tags for empty foreign elements, with XML serialization kept apart.
