@@ -762,7 +762,7 @@ fn node_length(dom: &Dom, id: NodeId) -> usize {
     }
 }
 
-fn set_boundary(
+pub(super) fn set_boundary(
     this: &JsValue,
     context: &mut Context,
     which: &str,
@@ -1079,7 +1079,7 @@ pub fn selection(context: &mut Context) -> JsResult<JsValue> {
     Ok(made.into())
 }
 
-fn selection_ranges(this: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
+pub(super) fn selection_ranges(this: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
     let ranges = get(this, "__ranges", context)?;
     list_of(&ranges, context)
 }

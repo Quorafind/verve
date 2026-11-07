@@ -10,6 +10,7 @@
 //! `style`, a `<style>`'s sheet — carries a [`Handle`]: what kind of thing, and its number.
 
 pub mod animation;
+pub mod caret;
 pub mod computed;
 pub mod custom;
 pub mod document;

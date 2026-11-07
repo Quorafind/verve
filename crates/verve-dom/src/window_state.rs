@@ -48,6 +48,23 @@ pub enum Align {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FontFaceId(pub(crate) u32);
 
+/// A font a page declared, with its bytes: what [`Document::set_font_provider`]'s provider is
+/// given.
+#[derive(Clone, Debug)]
+pub struct FontData {
+    /// The family the page calls it by.
+    pub family: String,
+    /// The weight (the lower end of a range) and slant the face declared.
+    pub weight: f32,
+    pub italic: bool,
+    pub bytes: std::sync::Arc<[u8]>,
+}
+
+/// Takes the bytes of a declared font and answers whether the page's text can use them.
+pub type FontProvider = Box<dyn Fn(FontData) -> bool>;
+
+pub(crate) type FontHook = std::rc::Rc<dyn Fn(FontData) -> bool>;
+
 /// How the host's fetch of a face ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FontOutcome {
@@ -65,6 +82,46 @@ impl Document {
         let mut state = self.state.borrow_mut();
         state.fragments.clear();
         state.fragments.extend(fragments);
+    }
+
+    /// Makes `provider` the one that takes the bytes of every font the page declares (`new
+    /// FontFace(family, buffer)`, and the body of a `url()` face fetched for `load()`): the face
+    /// is `loaded` when it answers `true` and `error` when it answers `false`. A layout that
+    /// uses a font is laid out again after it. Without one every face with bytes loads.
+    pub fn set_font_provider(&self, provider: Option<FontProvider>) {
+        self.state.borrow_mut().font_hook =
+            provider.map(|provider| std::rc::Rc::from(provider) as FontHook);
+    }
+
+    /// The two ends of the first range of the window's selection: what a drawer paints as
+    /// selected. `None` when nothing is selected.
+    pub fn selection_boundaries(
+        &self,
+        runtime: &mut verve::Runtime,
+    ) -> Option<(crate::Boundary, crate::Boundary)> {
+        let context = runtime.context();
+        match bind::caret::selection_bounds(context) {
+            Ok(bounds) => bounds,
+            Err(error) => {
+                verve::report(context, &error);
+                None
+            }
+        }
+    }
+
+    /// A face the host was asked for was fetched: these are its bytes. The provider
+    /// ([`Document::set_font_provider`]) decides whether it loaded.
+    pub fn settle_font_bytes(
+        &self,
+        runtime: &mut verve::Runtime,
+        face: FontFaceId,
+        bytes: Vec<u8>,
+    ) {
+        let context = runtime.context();
+        if let Err(error) = bind::fonts::deliver_face(context, face, bytes.into()) {
+            verve::report(context, &error);
+        }
+        runtime.run_microtasks();
     }
 
     /// A font the host was asked for ([`crate::Request::LoadFont`]) was fetched, or failed: the

@@ -46,7 +46,7 @@ mod world;
 
 pub use layout_provider::{Boundary, Layout, LayoutProvider, PositionProvider, RangeProvider};
 pub use update::{Changes, Update};
-pub use window_state::{Align, FontFaceId, FontOutcome, ScrollRequest};
+pub use window_state::{Align, FontData, FontFaceId, FontOutcome, FontProvider, ScrollRequest};
 
 use std::cell::{Ref, RefCell};
 use std::collections::HashSet;

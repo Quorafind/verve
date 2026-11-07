@@ -214,6 +214,12 @@ const DOCUMENT_METHODS: &[Method] = &[
         let found = crate::hit_test(&crate::layout_provider::fresh(cx).borrow(), x, y);
         Ok(super::node::node_list(found, cx))
     }),
+    ("caretRangeFromPoint", 2, |_, args, cx| {
+        super::caret::range_from_point(cx, args)
+    }),
+    ("caretPositionFromPoint", 2, |_, args, cx| {
+        super::caret::position_from_point(cx, args)
+    }),
     ("getSelection", 0, |_, _, cx| super::platform::selection(cx)),
     ("exitFullscreen", 0, |_, _, cx| {
         let was = {

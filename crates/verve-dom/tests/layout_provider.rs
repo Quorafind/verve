@@ -224,3 +224,52 @@ fn the_text_position_under_a_point_comes_from_the_position_provider() {
         assert_eq!(page.document.text_position_at(3., 2.), None);
     });
 }
+
+#[test]
+fn caret_range_and_position_from_a_point_name_the_text_the_provider_finds() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        page.eval("document.body.innerHTML = '<p id=p>hello</p>'");
+        let text = page.eval(
+            "document.getElementById('p').firstChild === document.body.firstChild.firstChild",
+        );
+        assert_eq!(text, "true");
+        assert_eq!(
+            page.eval(
+                "String(document.caretRangeFromPoint(3, 4)) + document.caretPositionFromPoint(3, 4)"
+            ),
+            "nullnull",
+            "no provider, no text to be near"
+        );
+        let node = page.find("p");
+        let first = page.document.update().snapshot.dom.children(node)[0];
+        page.document
+            .set_position_provider(Some(Box::new(move |x, _| Some((first, x as usize)))));
+        assert_eq!(
+            page.eval(
+                r#"const r = document.caretRangeFromPoint(3, 4);
+                   const c = document.caretPositionFromPoint(2, 4);
+                   [r.collapsed, r.startContainer.nodeValue, r.startOffset,
+                    c.offsetNode === r.startContainer, c.offset].join()"#
+            ),
+            "true,hello,3,true,2"
+        );
+    });
+}
+
+#[test]
+fn the_selection_is_readable_by_the_host_as_two_boundaries() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        page.eval("document.body.innerHTML = '<p id=p>hello</p>'");
+        assert_eq!(page.document.selection_boundaries(&mut page.runtime), None);
+        page.eval(
+            "const s = document.getSelection(); const t = document.getElementById('p').firstChild; s.setBaseAndExtent(t, 1, t, 4)",
+        );
+        let text = page.document.update().snapshot.dom.children(page.find("p"))[0];
+        assert_eq!(
+            page.document.selection_boundaries(&mut page.runtime),
+            Some(((text, 1), (text, 4)))
+        );
+    });
+}
