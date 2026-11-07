@@ -18,6 +18,7 @@ mod dom_element;
 mod dom_view;
 mod font_name;
 mod frame_stats;
+pub(crate) mod inspector;
 mod menu;
 mod native;
 mod pictures;
