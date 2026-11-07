@@ -9,5 +9,6 @@
 pub mod boxmodel;
 pub mod console;
 pub mod model;
+pub mod overlay;
 pub mod styles;
 pub mod tree;

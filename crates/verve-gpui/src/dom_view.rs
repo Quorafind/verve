@@ -20,6 +20,8 @@ use verve_layout::DisplayList;
 use crate::app_region::{self, AppRegion};
 use crate::dom_element::DomElement;
 use crate::frame_stats::FrameStats;
+use crate::inspector::model::Highlight;
+use crate::inspector::overlay::{self, Picker};
 use crate::pictures::Pictures;
 use crate::plan::{self, Plan};
 
@@ -90,6 +92,10 @@ pub struct DomView {
     regions: Vec<AppRegion>,
     /// Called as each frame is built: how the window knows its first one.
     drawn: Option<Drawn>,
+    /// The node the inspector points at, drawn over the page.
+    highlight: Option<Highlight>,
+    /// Takes the pointer while the inspector picks a node.
+    picker: Option<Picker>,
 }
 
 impl DomView {
@@ -104,7 +110,19 @@ impl DomView {
             background,
             regions: Vec::new(),
             drawn: None,
+            highlight: None,
+            picker: None,
         }
+    }
+
+    /// Draws the box of the node `highlight` names over the page, or nothing.
+    pub(crate) fn set_highlight(&mut self, highlight: Option<Highlight>) {
+        self.highlight = highlight;
+    }
+
+    /// Takes the pointer for `picker` (the inspector's element picker), or gives it back.
+    pub(crate) fn set_picker(&mut self, picker: Option<Picker>) {
+        self.picker = picker;
     }
 
     /// The color under the page, `None` for none.
@@ -183,8 +201,19 @@ impl Render for DomView {
         if let Some(background) = self.background {
             page = page.bg(background);
         }
-        page.child(DomElement::new(Rc::clone(&self.state)))
-            .child(app_region::layer(&self.regions))
+        let mut page = page
+            .child(DomElement::new(Rc::clone(&self.state)))
+            .child(app_region::layer(&self.regions));
+        if let Some(highlight) = self.highlight {
+            page = page.child(overlay::highlight_layer(Rc::clone(&self.state), highlight));
+        }
+        if let Some(picker) = &self.picker {
+            page = page.child(overlay::pick_layer(
+                Rc::clone(&self.state),
+                Rc::clone(picker),
+            ));
+        }
+        page
     }
 }
 
