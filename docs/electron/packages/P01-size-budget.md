@@ -60,7 +60,7 @@ feature 开关把不需要的东西拿掉，并给之后每个包提供一个"�
    | **合计** | **≈ 20 MB** |
 
    初始预算是估计值；实测后在 `size.md` 修订，并标出超支项的处理方案（换更小的 crate、按需加载、feature 关闭）。
-6. CI：加一个检查，`electron` release 体积超过 **34 MB**（`--max-bytes 35651584`）就失败（先只在 Windows x64）。
+6. CI：加一个检查，`electron` release 体积超过 **36 MB**（`--max-bytes 37748736`；2026-11-07 前是 34 MB / 35651584）就失败（先只在 Windows x64）。
 
 ## 验收
 
@@ -97,6 +97,6 @@ UPX 之类的可执行压缩（会触发杀软误报、拖慢启动）；改动�
 - `jit` 在体积上 +5.9 MB（实测，当时 20.38 → 26.31 MB），默认是否开交给 P42。
 - `intl-full` 没做：`src/intl/` 只有 81 KB，Boa 没开 `intl`，没有可关的大表。
 - 步骤 5（GPUI 之后重量 `electron` bin）和步骤 6（CI 体积检查）没做：`electron` bin 还不存在。脚本已有
-  `--max-bytes` / `-MaxBytes`，等 bin 出现后在 CI 里加一行（34 MB 上限 = 35651584，见 README「目标」）即可。
+  `--max-bytes` / `-MaxBytes`，等 bin 出现后在 CI 里加一行（36 MB 上限 = 37748736，2026-11-07 起，见 README「目标」）即可。
 - 没有逐个 feature 单独构建；每个开关的体积是默认构建的 cargo-bloat `.text` 估计值。
 - 注意：目录名 `default.exe` 在这台机器的 Git Bash 下无法启动（退出码 127），与 Verve 无关。
