@@ -9,14 +9,15 @@ use std::sync::Arc;
 use gpui::{
     App, Background, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Edges, Element,
     ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
-    LayoutId, Pixels, RenderImage, ScrollWheelEvent, Style, Window, linear_color_stop,
-    linear_gradient, point, px, size, transparent_black,
+    LayoutId, Pixels, RenderImage, ScrollWheelEvent, StrikethroughStyle, Style, UnderlineStyle,
+    Window, linear_color_stop, linear_gradient, point, px, size, transparent_black,
 };
 use verve_dom::Rect;
 use verve_layout::{Cursor, DisplayList, ImageKey, Rgba};
 
 use crate::dom_view::DomState;
 use crate::plan::{Command, Paint, Shape};
+use crate::text_measurer::GpuiMeasurer;
 use crate::wheel;
 
 /// The page of a window, drawn from the state it shares with its view.
@@ -155,39 +156,39 @@ impl DomElement {
         let mask = command.clip.map(|clip| ContentMask {
             bounds: in_window(origin, clip),
         });
+        // Text and its lines are the many shapes of a page: the ones outside the window or
+        // outside their own clip are not asked of the text system.
+        if let Shape::Glyphs { bounds, .. } = &command.shape
+            && !self.shows(*bounds, command.clip, origin, window)
+        {
+            return;
+        }
         window.with_content_mask(mask, |window| match &command.shape {
             Shape::Fill {
                 bounds,
                 radii,
                 paint,
             } => self.fill(*bounds, *radii, paint, list, origin, window),
+            Shape::Glyphs {
+                origin: at,
+                size,
+                color,
+                glyphs,
+                ..
+            } => paint_glyphs(*at, *size, *color, glyphs, origin, window),
+            Shape::Decoration {
+                bounds,
+                color,
+                wavy,
+                through,
+            } => paint_decoration(*bounds, *color, *wavy, *through, origin, window),
             Shape::Border {
                 bounds,
                 radii,
                 widths,
                 color,
                 dashed,
-            } => {
-                let edges = Edges {
-                    top: px(widths[0]),
-                    right: px(widths[1]),
-                    bottom: px(widths[2]),
-                    left: px(widths[3]),
-                };
-                let style = if *dashed {
-                    BorderStyle::Dashed
-                } else {
-                    BorderStyle::Solid
-                };
-                window.paint_quad(gpui::quad(
-                    in_window(origin, *bounds),
-                    corners(*radii),
-                    transparent_black(),
-                    edges,
-                    hsla(*color),
-                    style,
-                ));
-            }
+            } => paint_border(*bounds, *radii, *widths, *color, *dashed, origin, window),
             Shape::Shadow {
                 bounds,
                 radii,
@@ -212,6 +213,19 @@ impl DomElement {
                 }
             }
         });
+    }
+
+    /// Whether a rectangle of the page is in the window and in its clip.
+    fn shows(
+        &self,
+        bounds: Rect,
+        clip: Option<Rect>,
+        origin: gpui::Point<Pixels>,
+        window: &Window,
+    ) -> bool {
+        let at = in_window(origin, bounds);
+        let view = Bounds::new(point(px(0.), px(0.)), window.viewport_size());
+        at.intersects(&view) && clip.is_none_or(|clip| at.intersects(&in_window(origin, clip)))
     }
 
     fn fill(
@@ -256,6 +270,93 @@ impl DomElement {
         let spec = list.rasters.iter().find(|spec| spec.key == key)?;
         let scale = window.scale_factor().ceil().max(1.);
         self.state.borrow_mut().pictures.get(spec, scale, alpha)
+    }
+}
+
+/// Draws an underline, an overline (`through` false) or a line through text.
+fn paint_decoration(
+    bounds: Rect,
+    color: Rgba,
+    wavy: bool,
+    through: bool,
+    origin: gpui::Point<Pixels>,
+    window: &mut Window,
+) {
+    let at = in_window(origin, bounds);
+    let color = hsla(color);
+    if through {
+        let style = StrikethroughStyle {
+            thickness: px(bounds.height),
+            color: Some(color),
+        };
+        window.paint_strikethrough(at.origin, at.size.width, &style);
+    } else {
+        let style = UnderlineStyle {
+            thickness: px(bounds.height),
+            color: Some(color),
+            wavy,
+        };
+        window.paint_underline(at.origin, at.size.width, &style);
+    }
+}
+
+/// Draws a border: one colour, each side as wide as `widths` (top, right, bottom, left) says.
+fn paint_border(
+    bounds: Rect,
+    radii: [f32; 4],
+    widths: [f32; 4],
+    color: Rgba,
+    dashed: bool,
+    origin: gpui::Point<Pixels>,
+    window: &mut Window,
+) {
+    let edges = Edges {
+        top: px(widths[0]),
+        right: px(widths[1]),
+        bottom: px(widths[2]),
+        left: px(widths[3]),
+    };
+    let style = if dashed {
+        BorderStyle::Dashed
+    } else {
+        BorderStyle::Solid
+    };
+    window.paint_quad(gpui::quad(
+        in_window(origin, bounds),
+        corners(radii),
+        transparent_black(),
+        edges,
+        hsla(color),
+        style,
+    ));
+}
+
+/// Draws shaped glyphs from the left end of their baseline: each in the font that shaped it, an
+/// emoji in colour. GPUI's `paint_emoji` takes no colour and does not follow the element's
+/// opacity (`with_element_opacity` is `pub(crate)` in the fork), so an emoji whose faded alpha
+/// is nothing is left out and one that is partly faded is drawn in full: the fork patch that makes
+/// `with_element_opacity` public lifts that.
+fn paint_glyphs(
+    at: [f32; 2],
+    size: f32,
+    color: Rgba,
+    glyphs: &[verve_layout::PlacedGlyph],
+    origin: gpui::Point<Pixels>,
+    window: &mut Window,
+) {
+    let color = hsla(color);
+    for glyph in glyphs {
+        if glyph.is_emoji && color.a <= 0.004 {
+            continue;
+        }
+        let place = point(origin.x + px(at[0] + glyph.x), origin.y + px(at[1]));
+        let font = GpuiMeasurer::font_id(glyph.font);
+        // An error is a glyph the platform could not draw; the text goes on without it.
+        let _ = if glyph.is_emoji {
+            window.paint_emoji(place, font, gpui::GlyphId(glyph.id), px(size))
+        } else {
+            window.paint_glyph(place, font, gpui::GlyphId(glyph.id), px(size), color)
+        };
     }
 }
 

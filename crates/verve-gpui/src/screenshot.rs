@@ -131,6 +131,14 @@ impl Painter<'_> {
                 mask.as_ref(),
             ),
             Shape::Shadow { .. } => {}
+            // The software painter has no fonts: a line through text is a plain bar, and the
+            // text itself is left out.
+            Shape::Decoration { bounds, color, .. } => {
+                if let Some(path) = rounded(*bounds, [0.; 4]) {
+                    self.fill(&path, *bounds, &Fill::Solid(*color), mask.as_ref());
+                }
+            }
+            Shape::Glyphs { .. } => {}
         }
     }
 
