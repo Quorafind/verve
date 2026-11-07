@@ -137,6 +137,9 @@ Fill::Picture { image: ImageKey, area: Rect, tile: Rect, step: [f32; 2], count: 
 - **SVG 的几何**：`verve_dom::Layout` 追加 `svg_boxes: Vec<(NodeId, Rect)>`，是 usvg 树里每个有 `id` 的元素在 `<svg>` 内容盒坐标里的包围盒（序列化时给没有 `id` 的元素补一个）。
   文档的 `getBBox()` 读这张表；布局提供者还把这些盒子平移到页面坐标，放进 `rects`，`getBoundingClientRect()` 读到的就是它们。
 
+- **`DisplayList::same_but_frames`**（公开，在契约类型上）：除动图帧号外两张列表相同。`--screenshot` 用它判断"页面不再变了"，永不结束的动图因此不会让它等满 30 s。
+- **`Document::commit_canvases`**（verve-dom，现在是 `pub`）：把任务里画过的 canvas 提交为节点改动。自己做布局的渲染器要在布局前调用，否则任务里重画的 canvas 的新 generation 进不了显示列表。
+
 ## 步骤
 
 1. `ImageTable` 与 `RendererView.images`；GPUI 侧 `ImageKey → RenderImage` 缓存与释放。
@@ -204,7 +207,7 @@ Fill::Picture { image: ImageKey, area: Rect, tile: Rect, step: [f32; 2], count: 
   - `image_size` 不看 EXIF 方向而 `decode` 会转，带旋转的手机 JPEG 固有尺寸会宽高颠倒；
   - 布局每次读 `<img>` 仍要对地址做一次散列（`snapshot.images.get`），只在布局重做时发生，不在每帧；
   - 解码后的像素在 CPU 上有两份（`ImageTable` 与 `RenderImage`）；
-  - 页面图片在 GPUI 里不画之后保留 300 帧才还给图集，来回滚动不会重新拷贝和上传；列表不点名但文档还持有字节的图片，解码好的像素在 128 MiB 的预算内保留（最久没被点名的先丢），隐藏再显示不会空白；
+  - 页面图片在 GPUI 里不画之后按 64 MiB 的字节预算保留（最久没画的先丢；渲染器从表里放掉的立刻还给图集），来回滚动不会重新拷贝和上传；列表不点名但文档还持有字节的图片，解码好的像素在 128 MiB 的预算内保留（最久没被点名的先丢），隐藏再显示不会空白；
   - 历史：gpui 测试在 `feat(gpui): Draw pictures and background tiles…` 之后单独一个提交，video/audio 的 UA 规则在 `feat(layout)` 里（要重排提交）；两者都没改。
 - 顺序：测试 `tests/images.rs` 的 `srcset` 一条用 `data:` URL，只验证 `src` 与 `srcset` 的配合（见观察）。
 
@@ -259,7 +262,7 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 
 - 第一阶段留下的三项：`<img>` 的 `border-radius` 裁剪（`PaintItem::Image` 仍没有 `radii`）、破图盒与 `alt`、flex 里 `<img>` 的拉伸，**都没做**（预算花在 SVG/canvas/动图/夹具上）；观察到的数字仍在上面第一阶段的记录里。
 - canvas 没有记录脏矩形（只整张转换、整张上传；任务书说记录，但没有使用者，留给 P33）。每个 generation 都在页面线程上整张转 BGRA（1920×1080 约 8 MB）。
-- 动图改写显示列表是整张列表的拷贝（`with_frames`，每次换帧一次）：条目很多的页面换帧会有 O(条目) 的开销，P33 的块缓存之后应只改动有动图的块。动图只在显示列表点名时计时，没有"页面不可见就停"的判断（渲染器不知道窗口是否被遮住；`hidden` 的页面本来不出帧）。
+- 动图改写显示列表是整张列表的拷贝（`with_frames`，每次换帧一次）：条目很多的页面换帧会有 O(条目) 的开销，P33 的块缓存之后应只改动有动图的块。动图只在显示列表点名时计时，没有"页面不可见就停"的判断（渲染器不知道窗口是否被遮住；窗口不被绘制时，渲染器按 `Visibility` 让 `document.hidden` 为真并冻结动图，`backgroundThrottling: false` 则不隐藏）。
 - 无限循环的动图会让 `--screenshot` 等不到"列表 600 ms 不变"（它每 100 ms 换一次 revision）；夹具的 GIF 只播两遍。`getBBox` 与 `getBoundingClientRect` 对嵌套带 `transform` 的元素取的是 usvg 的盒子（上面的观察对得上），但 `<use>` 引用的、`<text>`（字体用系统字体，度量与 Chromium 不同）、`<foreignObject>`（不支持）没有对照观察。
 - 动画 WebP 与 APNG 的解码走同一个函数，但没有测试数据；GIF 的 disposal 由 `image` 的 `GifDecoder` 处理，没有单独测。
 - 256 MB 的 LRU 仍然没有（第一阶段说过）。
@@ -328,3 +331,15 @@ cargo test --locked -p verve-gpui --features jit --test images -- --ignored a_sc
 cargo test --locked -p verve-gpui --features jit --test images -- --ignored --nocapture two_hundred
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
+
+### 第二阶段第三轮
+
+只做了 `cargo check` 和一次 workspace clippy；测试由协调者跑。
+
+- **第二轮引入的四个与 Chromium 不符之处**：绘制属性（`fill`/`stroke`…）现在和 `color`、`font-*` 一样只写在根上和与父元素不同的地方，不再盖过后代自己的 `fill="…"`（Electron 39.8.10，`p35-review4\probe\out-svg.json` 的三种情形，布局测试冻结）；根上只跳过 `opacity`，`filter:invert(1)` 又画成青色；带未声明前缀的元素（`sodipodi:namedview`、`rdf:RDF`）连同子树一起跳过；只有 `viewBox` 的 SVG 的自然尺寸把 300×150 按比例收（24×24 → 150×150，90×30 → 300×100，40×20 → 300×150，`p35-review4atio\out.json`）。`getComputedStyle` 仍不看表现属性，没改。
+- **内存**：渲染器里，列表里有但不在窗口上下各一屏之内的图，在列表静止约 1 s 后放掉（`release_far`，`next_due` 带这个定时器）；128 MiB 的闲置预算只留给列表根本不画的图。`Pictures`：表里没有的图立刻退役（不再让 `by_page` 抱着渲染器的 `Arc`），预算里把 `faded` 算上。动图的时钟留到图离开列表为止（有限循环的动图滚走再滚回不会从头来），只有 `next_frame` 看"是否在窗口附近"。测试断言：峰值至少比第一个样本高 80 MB、低于 400 MB，滚动停止后 5 s 内工作集回落至少峰值与首样本之差的一半，200 张都加载并滚过 90000 px。中心第一次测到的曲线（第二轮代码）：`[131, 175, 221, 233, 234, 232, 232, 231, 233, 233, 233, 233, 232, 233, 236, 232, 233, 253, 249, 249]`（平在 233 MB，不回落）；本轮的曲线待协调者的运行填入。
+- **隐藏窗口**：`backgroundThrottling: false` 的页面不被隐藏（Electron 文档：它也影响 Page Visibility API）；隐藏时 rAF 不排下一帧（Electron 39.8.10：从未显示、`paintWhenInitiallyHidden: false` 的窗口 1.2 s 内 rAF 0 帧），显示时接着排。
+- **`<use>` 的细节**：`find_id` 取树序里第一个同 id 的元素（和 `getElementById` 一致），只跟 `use`/`feImage`/`textPath`/`mpath`/渐变/`pattern` 的 `href`，只复制 SVG 命名空间里的目标；精灵测试断言画出绿色。非 XML 的控制字符在 `escape` 里丢掉。
+- **测试**：canvas 测试的 `<canvas>` 加 `display:block`；`pictures` 的单元测试按字节预算和"表里没有就退役"重写；被截断字符的测试用奇数长度的前缀，并断言第 4096 字节确实落在字符中间；矢量只留一个尺寸的测试断言退役数和 `by_vector.len() == 1`。
+- **历史**：`has_no_inner_boxes` 并入布局提交，canvas 修复并入加它的测试的提交，提交说明里写了 MUST 1 查过的路径。
+- **没做**：SVG 在 `<img>`/背景里按另一比例画时的拉伸；`getBBox` 对 `<use>`/嵌套 `<svg>`/空 `<g>` 的边角；CSS `transform` 作用于 SVG 元素；canvas 重画整页重排；`<defs>` 里 `url(#…)` 渐变的复制；隐藏时 rAF 的单元测试。
