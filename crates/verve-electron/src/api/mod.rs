@@ -42,6 +42,7 @@ pub(crate) mod safe_storage;
 pub(crate) mod screen;
 pub(crate) mod session;
 pub(crate) mod session_proxy;
+pub(crate) mod session_stubs;
 pub(crate) mod shell;
 pub(crate) mod system_preferences;
 pub(crate) mod web_contents;

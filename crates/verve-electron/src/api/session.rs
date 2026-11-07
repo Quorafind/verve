@@ -17,7 +17,9 @@ use verve::native::{self, ClassSpec, NewOnly, arg, js_text};
 
 use super::define::{self, Args, Kind};
 use super::permissions::{self, Which};
-use super::{app, cookies, download_item, net, protocol, session_proxy, web_request};
+use super::{
+    app, cookies, download_item, net, protocol, session_proxy, session_stubs, web_request,
+};
 use crate::hub::Session;
 use crate::msg::SessionId;
 
@@ -62,7 +64,7 @@ fn session_class(context: &mut Context) -> JsResult<JsObject> {
         return Ok(class);
     }
     let emitter = define::emitter(context)?;
-    let (class, _) = native::class(
+    let (class, prototype) = native::class(
         context,
         ClassSpec {
             name: "Session",
@@ -96,11 +98,13 @@ fn session_class(context: &mut Context) -> JsResult<JsObject> {
                 ("protocol", get_protocol, None),
                 ("cookies", get_cookies, None),
                 ("webRequest", get_web_request, None),
+                ("netLog", session_stubs::net_log, None),
             ],
             new_only: Some(NewOnly::Native),
             ..ClassSpec::default()
         },
     )?;
+    session_stubs::install(context, &prototype)?;
     *state.net.objects.class.borrow_mut() = Some(class.clone());
     Ok(class)
 }

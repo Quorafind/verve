@@ -885,6 +885,35 @@ fn rules_for_http_only_send_https_requests_nowhere_near_the_proxy() {
     assert_eq!(paths(&proxied), Vec::<String>::new());
 }
 
+#[test]
+fn the_session_methods_that_do_nothing_exist_resolve_and_store_what_they_are_given() {
+    let (port, _) = server();
+    let base = format!("http://127.0.0.1:{port}");
+    let app = page_app("", &base);
+    done(&app);
+    let result = main_result(
+        &app,
+        "(async () => { const s = session.defaultSession; const out = {};
+           for (const name of ['clearCache', 'clearStorageData', 'clearAuthCache', 'clearHostResolverCache',
+             'closeAllConnections', 'forceReloadProxyConfig']) out[name] = await s[name]() === undefined;
+           out.size = await s.getCacheSize();
+           s.setSpellCheckerEnabled(false); s.setSpellCheckerLanguages(['en-US']);
+           out.spell = [s.isSpellCheckerEnabled(), s.getSpellCheckerLanguages(), s.addWordToSpellCheckerDictionary('x')];
+           out.flush = s.flushStorageData() === undefined;
+           s.setDownloadPath('/tmp'); s.setSSLConfig({}); s.setCertificateVerifyProc(null);
+           out.net = [typeof s.netLog.startLogging, s.netLog.currentlyLogging, await s.netLog.stopLogging(), s.netLog === s.netLog];
+           globalThis.stubs = out; })()",
+        "stubs",
+    );
+    let got: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(got["size"], 0);
+    assert_eq!(got["clearCache"], true);
+    assert_eq!(got["closeAllConnections"], true);
+    assert_eq!(got["flush"], true);
+    assert_eq!(got["spell"], json!([false, ["en-US"], true]));
+    assert_eq!(got["net"], json!(["function", false, "", true]));
+}
+
 /// What the downloads of the tests do, in the main process: every `will-download` is logged
 /// with what the item says at that moment, saved under `dir` (except `/nosave`, which a listener
 /// refuses), and every event of the item is logged too. `/slow-cancel` is cancelled and
