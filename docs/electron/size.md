@@ -305,3 +305,32 @@ Two branches, measured each at its tested tip with `cargo build --release -p ver
 
 Together −61,952 bytes (−0.18 %). The cap (35,651,584) leaves 1.03 MB. Neither branch adds a crate or changes a manifest;
 the bytes come from builders and helpers that each existed several times over and now exist once.
+
+## P15: Menu, MenuItem, Tray and globalShortcut
+
+`electron/p15-menu-tray` at b3b39ebf (merged as `88d46a4e` after seven small fixes that move no measurable size): `cargo build --release -p verve-gpui --bin electron --features jit` is
+35,122,688 bytes against 34,617,856 for `b1a27600`, +504,832 bytes (+1.46 %). The package's budget was 300 KB, then the task's own
+400 KB once the user raised the cap to 36 MB (37,748,736) on 2026-11-07. The coordinator accepted the overrun: each of the last two fix
+rounds took only 8–9 KB off, and the cap leaves 2.6 MB after P15.
+
+Where it goes (`cargo bloat --release --crates` and per function, unstripped, first round):
+- **The three new crates are small.** muda is 35 KiB, and tray-icon and global-hotkey are a few KiB each. `windows-sys 0.59`, a second
+  copy that every published global-hotkey requires, has no code of its own.
+- **The rest is P15's own code in `verve_electron` and `verve_gpui`**, about 4,800 lines. Named functions come to about 140 KiB. The
+  largest are:
+  - `menu_state::read_nested`, 11.9 KiB;
+  - `MenuItem::init`, 8.1 KiB;
+  - `menu::sort::sort_entries`, 8.0 KiB;
+  - `click_item`, `popup`, `build_from_template` and `Shortcuts::apply`, 5–7 KiB each.
+  The remainder is per-type generic copies, closure glue, the role tables and the unwind tables.
+- **Already cut:**
+  - one `Keyed<V>` map instead of a `BTreeMap<u32, T>` per kind;
+  - static role labels;
+  - no `Debug` formatting on release paths;
+  - merged helpers.
+
+Candidates for P42: split `read_nested` and `MenuItem::init` so they stop inlining their helpers, and drop the headless shell's menu
+model from builds that never run `--headless`.
+
+The GPUI fork's `image` features compile nine decoders Verve never uses. exr and tiff alone are 174 KiB of `.text`, and the user's fork
+patch (2026-11-07) removes them. That is not counted here, because it is in the base too.
