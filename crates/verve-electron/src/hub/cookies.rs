@@ -52,7 +52,7 @@ pub struct Access {
 }
 
 /// The host of `url`, lowercase, without the brackets of an IPv6 address.
-fn host_of(url: &Url) -> Option<String> {
+pub fn host_of(url: &Url) -> Option<String> {
     let host = url.host_str()?.to_ascii_lowercase();
     Some(
         host.trim_start_matches('[')
@@ -75,7 +75,7 @@ fn secure_transport(url: &Url, host: &str) -> bool {
 }
 
 /// RFC 6265 5.1.3: `host` is `domain` or a subdomain of it (never, for an address).
-fn domain_match(host: &str, domain: &str) -> bool {
+pub fn domain_match(host: &str, domain: &str) -> bool {
     if host == domain {
         return true;
     }
@@ -91,7 +91,7 @@ fn path_match(path: &str, cookie: &str) -> bool {
 }
 
 /// RFC 6265 5.1.4: the path a cookie gets when it names none.
-fn default_path(url: &Url) -> String {
+pub fn default_path(url: &Url) -> String {
     let path = url.path();
     match path.rfind('/') {
         Some(0) | None => "/".to_owned(),

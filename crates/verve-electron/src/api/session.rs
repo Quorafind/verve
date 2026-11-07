@@ -16,7 +16,7 @@ use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
 use verve::native::{self, ClassSpec, NewOnly, arg, js_text};
 
 use super::define::{self, Args, Kind};
-use super::{app, net, protocol};
+use super::{app, cookies, net, protocol};
 use crate::hub::Session;
 use crate::msg::SessionId;
 
@@ -79,7 +79,10 @@ fn session_class(context: &mut Context) -> JsResult<JsObject> {
                 ("fetch", 1, fetch),
                 ("resolveHost", 1, resolve_host),
             ],
-            accessors: &[("protocol", get_protocol, None)],
+            accessors: &[
+                ("protocol", get_protocol, None),
+                ("cookies", get_cookies, None),
+            ],
             new_only: Some(NewOnly::Native),
             ..ClassSpec::default()
         },
@@ -138,6 +141,11 @@ fn resolve_host(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
 fn get_protocol(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let session = session_of(this, context)?;
     Ok(protocol::object_of(context, session.id())?.into())
+}
+
+fn get_cookies(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let session = session_of(this, context)?;
+    Ok(cookies::object_of(context, &session)?.into())
 }
 
 // ─── The module ─────────────────────────────────────────────────────────────────────────────

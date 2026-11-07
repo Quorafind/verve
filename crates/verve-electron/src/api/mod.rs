@@ -11,6 +11,7 @@ pub(crate) mod contents_ipc;
 pub(crate) mod contents_page;
 pub(crate) mod contents_stubs;
 pub(crate) mod context_bridge;
+pub(crate) mod cookies;
 pub mod define;
 pub(crate) mod dialog;
 pub(crate) mod input_events;
@@ -94,6 +95,8 @@ pub(crate) struct NetState {
     pub(crate) serving: protocol_serve::Serving,
     /// The `net.request`s a script made.
     pub(crate) requests: net_request::Requests,
+    /// The objects of the sessions' `cookies`.
+    pub(crate) cookies: cookies::Objects,
 }
 
 impl MainState {
