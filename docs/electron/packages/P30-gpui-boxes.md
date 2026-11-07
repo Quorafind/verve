@@ -427,4 +427,75 @@ cargo test --locked -p verve-electron
 cargo clippy --locked -p verve-layout -p verve-dom -p verve-electron --all-targets -- -D warnings
 ```
 
-（第二阶段 B 待续：GPUI `DomElement`、`--screenshot`、`boxes` 夹具、2000 盒页面。）
+### 第二阶段 B：GPUI 绘制
+
+**做了**：
+
+- **`verve-layout`**：`DisplayList::placed(offset_of)` 是唯一跟着“帧 / 裁剪 / 不透明度栈”走的地方（`resolved_hitboxes` 建在它上面，行为不变），同一趟还建出帧表（每个 `PushScroll` 的节点和它外层的帧），
+  每个 `Placed` 记着自己最内层的帧；`Placed::hitbox()` / `Placed::scroller(offset_of)` 把一项解析到窗口坐标。新增 `resolved_scrollers` 和 `wheel(x, y, delta, offset_of)`。
+  **滚轮的目标是命中元素的滚动链，不是几何上第一个包含指针的 `Scroller`**：取指针处最上面的（已裁剪的）命中盒，链是“命中的节点自己（若它是滚动容器），再从最内层向外的各帧，最后是页面”
+  （`DisplayList.root`：页面自己的滚动容器，页面不滚动时为 `None`），第一个能往这个方向动的容器拿到这一格，返回它和夹取后的新偏移。因此 `position: relative; overflow: auto` 嵌套时内层先滚
+  （两者都落在层叠上下文的中间层，列表里外层的 `Scroller` 在前），盖在列表上的不滚动的浮层把滚轮交给页面而不是它下面的列表，两个叠着的滚动容器里上面那个先滚。
+  列表的 `revision` 现在是进程内唯一的（静态 `AtomicU64`）：导航会换新的 isolate 和引擎，以前每个引擎从 1 数起，新页面的第一张列表会和旧页面最后一张撞号，被窗口当成同一张丢掉。
+  单元测试：滚轮链、不透明度叠乘；`tests/behavior.rs`：嵌套的定位滚动容器、不滚动的浮层、叠着的兄弟滚动容器、跨页面的列表号不重复。
+- **渲染器上的滚轮**：`ToRendererInput::Wheel` 先派发 `wheel` 事件（`dy` 为 DOM 的 `deltaY`：正为向下），没被阻止才用 `DisplayList::wheel` 找容器，经 `apply_scroll(By)` 滚、`set_scroll_offsets` 通知页面。
+  `webContents.sendInputEvent({type: 'mouseWheel'})` 的 `deltaX`/`deltaY` 是 Blink `WebMouseWheelEvent` 的符号（正为滚轮朝远离人的方向转，页面向上/向左滚），传给页面前取反。
+  **在真 Electron 39.8.10（Windows，DPR 1）观察到**：`deltaY: 70` 让页面的 `wheel` 事件 `deltaY` = -70，顶端不动；`deltaY: -20` 得 `deltaY` = 20，`scrollY` = 20；`deltaX: 50` 得 `deltaX` = -50。
+  （另外，窗口刚建好时的第一个 `sendInputEvent` 被丢掉，没有 `wheel` 事件。）`geometry.rs` 有一条测试（容器 → 页面链、反向、`preventDefault`），用 Electron 的符号。
+- **verve-gpui**（新依赖 `verve-layout`、同一份 `tiny-skia 0.11` 与 `image 0.25`，`Cargo.lock` 只多了这三行边）：
+  - `plan.rs`：把显示列表降成 `Plan { commands, hitboxes }`：窗口坐标里的形状序列（阴影 → 背景层 → 内阴影 → 边框，滚动条拇指，拇指由 `Scroller` 自己的 `Placed` 算）和解析后的命中盒，不透明度乘进每个颜色，裁剪取矩形。
+    整个 `plan()` 只走一趟 `DisplayList::placed`，不再每盒分配 `Vec`。两个绘制后端共用它。
+  - `dom_element.rs`：`DomElement`（`request_layout` 铺满、`prepaint` 为**每个**命中盒插一个 GPUI 命中盒，`cursor: auto` 也映射成箭头，这样 `cursor: auto` 的背景盖在 `cursor: pointer` 的按钮上时不会显示手；
+    `paint` 逐形状用 `with_content_mask` + `paint_quad` / `paint_drop_shadows` / `paint_inset_shadows` / `paint_image`）。计划按（列表的 `Arc` 指针，预测的代数）缓存，一帧只算一次。
+  - `wheel.rs`：`ScrollWheelEvent` → `DisplayList::wheel`（Shell 本地预测偏移，`window.refresh()`；指针位置先减去页面在窗口里的原点）并把 `ToRendererInput::Wheel` 发给渲染器。
+    **每一张送到的列表**（包括 `preventDefault` 的或没动任何东西的滚轮发布的同一张）都清掉预测，以渲染器的偏移为准，否则视图会一直停在没人确认的预测上，而渲染器的矩形和 P32 的命中测试没有滚动。
+  - `raster.rs` / `pictures.rs`：`Fill::Raster` 的栅格化（径向、圆锥、`repeating-*`；逐像素、预乘混色），**由我们自己的代码在 GPUI 线程上画**（不是契约原先写的渲染器线程上的 tiny-skia；契约已改），
+    每边最多 2048 设备像素（更大的元素以低一点的缩放画，`paint_image` 拉伸）。GPUI 的 sprite 管线按 straight alpha 混合（SRC_ALPHA / INV_SRC_ALPHA，着色器里 `color.a *= opacity`），所以栅格先 `unpremultiply`
+    （用 verve-dom 的 `canvas::unpremultiply`）再转 BGRA；`opacity < 1` 的盒子只缩放 alpha 通道。缓存按（渐变，缩放）；每张图保留一份淡出副本（最近一次的不透明度），一帧里没画到的图在帧末放弃，
+    下一帧开头还给 GPUI 的图集，所以不透明度渐变不会每帧留下一份新图。
+  - `dom_view.rs`：`DomView` 现在只放列表、预测偏移、计划缓存、图片缓存与背景色，替换了只画文字的占位；`show` 返回 `Shown`（`New`/`Redraw`/`Unchanged`），`window.rs` 的 `show_list` 对没变的列表不再算 `regions_of`、不 `notify`；`window.rs`/`shell.rs` 改读 `RendererView.display_list`，`app_region::regions_of` 把列表里带 `-webkit-app-region` 的命中盒（窗口坐标）变成 P34 的 `AppRegion { rect, drag }`，只在它变了时交给 `set_app_regions`（`Control::set_app_regions` 仍可用）。
+  - `screenshot.rs`/`capture.rs`：`electron --screenshot <path> [app]`（也接受 `--screenshot=<path>`）等第一个窗口的页面 600 ms 不变后，用同一份 `plan` 经 tiny-skia 画成 PNG（页面最后一次绘制的 CSS 像素尺寸，缩放 1），写出后退出；
+    画不出来 30 s 后退出码为 1，并且盖过 Hub 的退出码。PNG 用 `image 0.25` 的 `PngEncoder` 编码（`webContents.capturePage()` 之后要用软件绘制，所以留在默认构建里），`gpui` 不再开 tiny-skia 的 `png-format`（那会多带一份 png 0.17 的编码器）。
+    阴影的模糊用 verve-dom 导出的 `canvas::blur_pixels`，渐变线的公式在 `verve_layout::gradient_line`（布局、栅格、软件绘制共用）。
+    **`--screenshot` 是用第二个、软件的绘制器重画显示列表，不是窗口本身：GPUI 路径（`DomElement` / `pictures.rs`）没有像素测试。**
+  - `VERVE_FRAME_STATS=1`（`frame_stats.rs`）：窗口连续出帧，每 240 帧在标准错误打印一行 `frames: … built p50 … p95 … , apart p50 … p95 …`（一帧的构建耗时与帧间隔；计时从 `prepaint` 开始，到 `paint` 结束，命中盒的遍历算在内）。
+- **夹具**：`tests/electron/apps/boxes/`（400×300、无文字：实色、边框、圆角、线性渐变、不透明度、`z-index`、阴影、flex、grid、`overflow: hidden`、径向渐变）和 `expected-chromium.png`
+  （真 Electron 39.8.10，Windows，`capturePage()`，`--force-device-scale-factor=1`，隐藏窗口 `frame: false` 400×300；`VERVE_BOXES_PNG=<path> electron tests/electron/apps/boxes` 重采）。
+  `tests/electron/apps/boxes-2000/`：2000 个绝对定位盒，800×600。
+- **测试**：`crates/verve-gpui/tests/boxes.rs`：`the_boxes_page_is_where_and_what_color_chromium_drew_it`（不开窗：布局 + 软件绘制，探针点 ±8，整图差异超过 48 的像素 < 3%，与验收一致；
+  探针包括 `z-index` 重叠处（标记的顺序与叠放顺序不同：`high`、`behind`、`low`，z-index 2、0、1）、线性和径向渐变）；两条 `#[ignore = "opens real windows"]`：
+  `the_picture_the_electron_binary_writes_of_the_boxes_page_is_close_to_chromiums`（真窗口 + `--screenshot`，同样的比较；比较的是软件绘制器的图，不是窗口的像素）和
+  `two_thousand_boxes_are_replayed_within_a_frame`（读 `VERVE_FRAME_STATS` 的 p95 < 4 ms，应在 release 下跑；`taskkill` 只在 Windows，别处用 `kill -9`）。
+  `expected-chromium.png` 用真 Electron 39.8.10 重采（标记换了顺序，视觉不变；边缘的抗锯齿与旧图差最多 36）。`plan.rs`、`raster.rs`（含 2048 的上限）、`pictures.rs`（straight alpha、淡出副本、放弃没画的图）、
+  `dom_view.rs`（列表号、预测被每张列表清掉、计划缓存）、`frame_stats.rs`、`screenshot.rs`、`app_region.rs` 有单元测试。
+
+**已知偏差**（v1）：
+
+- 裁剪是矩形：`overflow: hidden` 的圆角不会裁圆内容。不透明度逐形状相乘（同一组里重叠的后代各自混合），GPUI fork 的 `with_element_opacity` 补丁帮不了分组，见第一阶段。
+- 多色边框画成四条矩形（没有斜接）；`dotted` 画成 `dashed`；`double/groove/ridge/inset/outset` 画成实线。软件绘制（截图）里 `dashed` 也是实线、内阴影不画。
+- 命中盒每个都插入 GPUI（`auto` 映射成箭头）；`cursor: none` 和 `wait`、`help` 等没有对应图案的显示箭头。拖拽区域只在新列表到来时重算，用列表自己的偏移，不含 Shell 的滚动预测。
+- 滚动条是覆盖式细拇指（6 px，圆角，半透明灰），不接受点击或拖拽；经典滚动条的 15 px 占位同第一阶段。
+- 滚轮：一格 = 3 行 = 100 px（Windows 的 Chromium；macOS 的 Chromium 是一行 40 px，代码里按平台取，别的平台暂用 40，只有 Windows 观察过）；只做 `Lines` 与触摸板的 `Pixels`。预测期间渲染器的新列表一到就覆盖预测（连续快速滚动时可能回跳一下）。
+  `ToRendererInput::Wheel.dy` 为正向下；`sendInputEvent` 的符号见上（已观察）。
+- 渲染没有观察到 Chromium 之外的行为；探针点的颜色来自上面的 Chromium 图。截图与真窗口的比较没有在本机跑（见下面的命令）。
+- **绘制规则里没做到的**（也列在 `plan.rs` 的模块文档里）：圆角盒的多色边框画成方形条（规则是用上边颜色画一个 quad）；多于两个色标的渐变（沿轴的条带）丢掉圆角；
+  外阴影整个画出，没有从盒子里挖掉，所以半透明的盒子会透出阴影；斜向的两色渐变与 Chromium 有差别，因为 GPUI 的线性渐变着色器按长边归一化（可以考虑改成栅格化）；
+  `dashed` 在软件绘制里是实线、内阴影不画。
+- **给 P32**：滚轮的行长度按平台取（见上）；GPUI 断言 `set_cursor_style` 在 paint 里调用，不是 P32 文档说的 prepaint；Chromium 里 window/document/html/body 上的 `wheel` 监听器默认是 passive
+  （自 73 起），`src/dom_events.rs` 的 `listener_options` 还没这样做（内核的事，这里没改，记给内核和 P32）；命中盒现在每个都进了 GPUI 的帧。
+
+**给其他包**：P31 的 `Glyphs`/`Decoration`、P35 的 `Image`、P32 的 `Control` 在 `plan.rs` 的 `plan()` 里都是 `_ => {}`：在那里加形状，两个后端各加一个分支；P33 的块缓存可直接按 `DisplayList::placed` 的顺序切。P34：`app_region::regions_of` 已接好。
+
+**要跑的测试**（一次一条，窗口测试在有桌面的机器上）：
+
+```
+cargo test --locked -p verve-layout
+cargo test --locked -p verve-electron --test geometry
+cargo test --locked -p verve-electron
+cargo test --locked -p verve-gpui --features jit --lib
+cargo test --locked -p verve-gpui --features jit --test boxes
+cargo test --locked -p verve-gpui --features jit --test boxes -- --ignored --test-threads=1
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo build --release --features jit -p verve-gpui --bin electron      # 量体积；2000 盒的帧时间用 release 跑上面的 ignored 测试
+```
+
