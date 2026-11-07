@@ -39,6 +39,16 @@ impl PageLayout {
                 fragments: engine.fragments().collect(),
             }
         })));
+        // A range's boxes come from the same lines. The provider is asked after the layout is up
+        // to date, and is not called while the engine is being updated.
+        let ranges = Rc::clone(&engine);
+        document.set_range_provider(Some(Box::new(move |start, end| {
+            ranges.borrow().range_rects(start, end)
+        })));
+        let positions = Rc::clone(&engine);
+        document.set_position_provider(Some(Box::new(move |x, y| {
+            positions.borrow().text_position_at(x, y)
+        })));
         Self {
             engine,
             published: 0,
