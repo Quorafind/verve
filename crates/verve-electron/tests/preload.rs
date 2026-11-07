@@ -464,11 +464,6 @@ fn web_utils_answers_no_path_for_a_file_the_page_made() {
 /// Cells of the matrix that Verve does not reproduce yet, with why. Each is a line of the
 /// recording; the rest must match.
 const KNOWN_DIFFERENCES: &[(&str, &str)] = &[
-    // The kernel words an unhandled rejection with the stack after it.
-    (
-        "Uncaught (in promise) Error: nope",
-        "the kernel's unhandled rejection line has the stack",
-    ),
     // An `Event` keeps its state in Rust, so it has no own `isTrusted`.
     ("returned event ", "an Event has no own isTrusted"),
     ("received event ", "an Event has no own isTrusted"),

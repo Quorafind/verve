@@ -6,6 +6,7 @@ pub(crate) mod app;
 pub(crate) mod browser_window;
 pub(crate) mod clipboard;
 pub(crate) mod command_line;
+pub(crate) mod console_message;
 pub(crate) mod contents_history;
 pub(crate) mod contents_ipc;
 pub(crate) mod contents_page;

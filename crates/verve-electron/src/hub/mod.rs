@@ -7,10 +7,10 @@
 //! JavaScript they end up in — never a borrow of it, and never a wait on it: the rule that only a
 //! page may wait for the main process is what keeps the whole thing from deadlocking.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use verve::isolate::{Health, Isolate, Options as IsolateOptions};
@@ -18,9 +18,11 @@ use verve::vfs::Overlay;
 
 use crate::ids::{ContentsId, Ids, WindowId};
 use crate::launcher::Start;
+use crate::log::Log;
 use crate::msg::{AppEvent, Display, FromShell, PageEvent, ToShell};
 use crate::{ElectronOptions, MainGuest};
 
+mod diagnostics;
 mod records;
 mod renderers;
 mod shell;
@@ -97,6 +99,12 @@ pub struct Hub {
     /// process is up is still there when `screen` is first asked.
     displays: Mutex<Vec<Display>>,
     theme: Mutex<Theme>,
+    /// The terminal output of the app: this process's, unless a test gave the Hub its own.
+    log: OnceLock<Arc<Log>>,
+    /// The pages whose DevTools are open: their console goes to the terminal.
+    devtools: Mutex<BTreeSet<ContentsId>>,
+    /// Whether `devtools` has a page, so that a console line asks the set only when it might.
+    any_devtools: AtomicBool,
 }
 
 impl Hub {
@@ -122,6 +130,9 @@ impl Hub {
             observer: Mutex::new(None),
             displays: Mutex::new(Vec::new()),
             theme: Mutex::new(theme),
+            log: OnceLock::new(),
+            devtools: Mutex::new(BTreeSet::new()),
+            any_devtools: AtomicBool::new(false),
         })
     }
 

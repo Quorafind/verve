@@ -293,6 +293,18 @@ impl MainGuest {
             FromRenderer::ContextMenu(params) => {
                 input_events::context_menu(context, contents, params)
             }
+            FromRenderer::Console {
+                level,
+                message,
+                line,
+                source,
+            } => api::console_message::console_message(
+                context,
+                contents,
+                level,
+                message,
+                (line, source),
+            ),
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
                 page_events::render_process_gone(context, contents, &reason);

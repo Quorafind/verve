@@ -215,8 +215,15 @@ impl Hub {
             return;
         }
         for event in &events {
-            if let FromRenderer::Console { message, .. } = event {
+            if let FromRenderer::Console {
+                level,
+                message,
+                line,
+                source,
+            } = event
+            {
                 self.log_console(Some(contents), message);
+                self.forward_console(contents, *level, (source, *line), message);
             }
             if let FromRenderer::Lifecycle(page_event) = event {
                 self.log_page_event(contents, page_event);
