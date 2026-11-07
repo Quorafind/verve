@@ -118,6 +118,7 @@ impl LayoutEngine {
         let selection = self.selection_boxes(snapshot, &blocks, &ranks);
         let text = Text {
             measurer: &*self.measurer,
+            snapshot,
             selection: &selection,
         };
         let drawings = svg::drawings(snapshot, &tree, &laid, &placed, &mut self.svg_cache);
@@ -152,6 +153,7 @@ impl LayoutEngine {
         let selection = self.selection_boxes(&state.snapshot, &blocks, &state.ranks);
         let text = Text {
             measurer: &*self.measurer,
+            snapshot: &state.snapshot,
             selection: &selection,
         };
         let built = list_for(&state.tree, &state.laid, &placed, &text, &state.drawings);

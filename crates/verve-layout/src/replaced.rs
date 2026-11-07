@@ -61,6 +61,7 @@ pub(crate) fn read_picture(
 pub(crate) fn has_no_inner_boxes(snapshot: &Snapshot, node: NodeId) -> bool {
     crate::svg::is_root(snapshot, node)
         || snapshot.dom.get(node).and_then(|n| n.tag()) == Some("canvas")
+        || crate::controls::draws_itself(snapshot, node)
 }
 
 /// The surface a `<canvas>` has painted: its pixels at the generation the document last

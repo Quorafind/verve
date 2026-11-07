@@ -16,6 +16,7 @@ use taffy::{
 };
 
 use crate::inline::{Atom, Fragment};
+use crate::props::BaselineRule;
 use crate::tree::BoxTree;
 
 /// Whether a box takes the width it is offered rather than the width its content wants: it has a
@@ -277,19 +278,38 @@ impl BoxTree {
     /// atomic inline sits on it. `None` for a box with no line in flow, and for one that clips
     /// (its bottom margin edge is its baseline then).
     fn baseline_of(&mut self, index: usize) -> Option<f32> {
-        if self.boxes[index].props.clips() {
+        let rule = self.boxes[index].props.baseline;
+        if let BaselineRule::FromBottom(up) = rule {
+            return self
+                .taffy
+                .layout(self.boxes[index].taffy)
+                .ok()
+                .map(|layout| layout.size.height - up);
+        }
+        if rule == BaselineRule::BorderBottom {
+            return self
+                .taffy
+                .layout(self.boxes[index].taffy)
+                .ok()
+                .map(|layout| layout.size.height);
+        }
+        if rule == BaselineRule::Last && self.boxes[index].props.clips() {
             return None;
         }
         let node = self.boxes[index].taffy;
         let width = self.content_width(index);
         if let Some(ifc) = self.taffy.get_node_context_mut(node) {
             let layout = ifc.layout(width);
-            let line = layout.lines.last()?;
+            // A field with no text stands on the baseline its text would have.
+            let baseline = match layout.lines.last() {
+                Some(line) => line.baseline,
+                None => ifc.empty_baseline()?,
+            };
             let offset = self
                 .taffy
                 .layout(node)
                 .map_or(0., |l| l.border.top + l.padding.top);
-            return Some(offset + line.baseline);
+            return Some(offset + baseline);
         }
         let children: Vec<usize> = self.boxes[index].children.clone();
         for child in children.into_iter().rev() {

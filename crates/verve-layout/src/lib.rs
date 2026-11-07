@@ -8,6 +8,7 @@
 
 mod atoms;
 mod background;
+mod controls;
 mod display_list;
 mod engine;
 mod flow;
@@ -29,10 +30,11 @@ mod transform;
 mod tree;
 mod value;
 
+pub use controls::{ControlKind, ControlLook, DateKind, SelectOption};
 pub use display_list::{
-    AppRegionKind, Border, BorderLine, ControlKind, Cursor, DecorationKind, DisplayList, Fill,
-    ImageKey, ObjectFit, PaintItem, Placed, RasterSpec, ResolvedHitbox, ResolvedScroller, Rgba,
-    Shadow, VectorSpec,
+    AppRegionKind, Border, BorderLine, Cursor, DecorationKind, DisplayList, Fill, ImageKey,
+    ObjectFit, PaintItem, Placed, RasterSpec, ResolvedHitbox, ResolvedScroller, Rgba, Shadow,
+    VectorSpec,
 };
 pub use engine::LayoutEngine;
 pub use fonts::{FontRegistry, Platform};

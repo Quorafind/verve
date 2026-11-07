@@ -10,6 +10,7 @@ use std::sync::Arc;
 use verve_dom::Rect;
 
 use super::{Effect, Painter};
+use crate::controls;
 use crate::display_list::{Border, DecorationKind, Fill, PaintItem, Rgba};
 use crate::inline::{DecorationStyle, Fragment, LineBox, SpanBox, SpanPaint, TextFragment};
 use crate::measure::TextMeasurer;
@@ -18,6 +19,8 @@ use crate::place::{Around, clips_in_frame, padding_box};
 /// What painting text needs besides the boxes.
 pub(crate) struct Text<'a> {
     pub measurer: &'a dyn TextMeasurer,
+    /// The document being painted, which the form controls are read from.
+    pub snapshot: &'a verve_dom::Snapshot,
     /// The selected parts of each block's lines, by box, from the block's content origin.
     pub selection: &'a HashMap<usize, Vec<Rect>>,
 }
@@ -47,7 +50,10 @@ impl Painter<'_> {
         let [pad_top, _, _, pad_left] = self.laid.padding[index];
         let origin = [paint.x + left + pad_left, paint.y + top + pad_top];
         let wanted = self.wanted(&around);
-        let selected = self.text.selection.get(&index);
+        let own = controls::draws_itself(self.text.snapshot, tree.boxes[owner].node).then(|| {
+            controls::field_selection(self.text.snapshot, tree.boxes[owner].node, &layout)
+        });
+        let selected = own.as_ref().or_else(|| self.text.selection.get(&index));
         let mut opened = false;
         let clipped = clips_in_frame(&around).next().is_some();
         for line in &layout.lines {
@@ -75,6 +81,7 @@ impl Painter<'_> {
                 }
             }
         }
+        self.text_field(index, &wanted);
     }
 
     /// What the content of box `index` is painted inside: what the box itself is, and its own

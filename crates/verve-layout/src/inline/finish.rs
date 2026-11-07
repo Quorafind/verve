@@ -559,7 +559,7 @@ fn text_fragment(
     let width = text.width(a, b) + align.extra * prefix[b - a] as f32;
     let stops = (a..=b)
         .map(|at| Stop {
-            byte: if text.generated { 0 } else { text.source(at) },
+            byte: text.source(at),
             x: text.stops[at] - base + grown(at),
         })
         .collect();

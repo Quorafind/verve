@@ -207,6 +207,26 @@ pub(crate) struct BoxProps {
     pub picture: Option<Replaced>,
     /// How a picture's size follows its ratio, which layout works out after the first pass.
     pub follow: Follow,
+    /// The content size of a form control (P32). In a flex or grid container the style keeps
+    /// `auto` and the box measures as this wide and high, so the control can stretch there.
+    pub intrinsic: [Option<f32>; 2],
+    /// Where the box's baseline is, for the boxes that do not follow the usual rule.
+    pub baseline: BaselineRule,
+}
+
+/// Where an atomic inline's baseline is.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+pub(crate) enum BaselineRule {
+    /// This far above the bottom of the border box (a colour well, a list box's last row).
+    FromBottom(f32),
+    /// The last line in flow, or the bottom margin edge for a box that clips or has none.
+    #[default]
+    Last,
+    /// The last line, even if the box clips: a text input cuts what is too long, and its
+    /// baseline is still its text's.
+    Text,
+    /// The bottom of the border box: a check box, a radio button, a slider.
+    BorderBottom,
 }
 
 /// How the size of a replaced element with a picture follows the picture's ratio (CSS 2.1,
@@ -254,6 +274,8 @@ impl BoxProps {
             grid_areas: grid::Areas::default(),
             picture: None,
             follow: Follow::Nothing,
+            intrinsic: [None; 2],
+            baseline: BaselineRule::Last,
         }
     }
 
@@ -424,6 +446,8 @@ pub(crate) fn read(context: &ReadContext, node: NodeId) -> BoxProps {
         grid_areas: grid::areas(reader.text_or("grid-template-areas", "none")),
         picture,
         follow,
+        intrinsic: [None; 2],
+        baseline: BaselineRule::Last,
     }
 }
 

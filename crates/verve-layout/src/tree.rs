@@ -159,6 +159,8 @@ impl Builder<'_> {
             blockify: parent.is_some_and(|p| self.boxes[p].props.display.is_flex_or_grid()),
         };
         let mut props = read(&context, node);
+        let grows = parent.is_some_and(|p| self.boxes[p].props.display.is_flex_or_grid());
+        crate::controls::adjust(self.snapshot, &*self.measurer, node, &mut props, grows);
         if found.tag() == Some("slot") && self.snapshot.style(node, "display").is_none() {
             props.display = Display::Contents;
         }
@@ -467,7 +469,8 @@ impl Builder<'_> {
                         });
                     }
                     holders.push(index);
-                    let ifc = Ifc::new(self.measurer.clone(), parts);
+                    let mut ifc = Ifc::new(self.measurer.clone(), parts);
+                    ifc.intrinsic = self.boxes[index].props.intrinsic;
                     taffy.new_leaf_with_context(style, ifc)
                 }
                 None => taffy.new_leaf(style),

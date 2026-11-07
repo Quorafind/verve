@@ -1466,6 +1466,25 @@ impl Dom {
         out
     }
 
+    /// The options a list shows: all of them but the ones with the `hidden` attribute.
+    pub fn listed_options(&self, select: NodeId) -> Vec<NodeId> {
+        let mut options = self.options(select);
+        options.retain(|option| {
+            self.get(*option)
+                .is_some_and(|n| n.attr("hidden").is_none())
+        });
+        options
+    }
+
+    /// Whether an option cannot be chosen: it is disabled, or its `<optgroup>` is.
+    pub fn option_disabled(&self, option: NodeId) -> bool {
+        let has = |id: NodeId| self.get(id).is_some_and(|n| n.attr("disabled").is_some());
+        has(option)
+            || self.parent(option).is_some_and(|parent| {
+                self.get(parent).and_then(Node::tag) == Some("optgroup") && has(parent)
+            })
+    }
+
     /// An option's value: its `value` attribute, or its text.
     pub fn option_value(&self, option: NodeId) -> String {
         self.get(option).and_then(|n| n.attr("value")).map_or_else(

@@ -13,6 +13,7 @@
 
 mod app_region;
 mod capture;
+mod controls;
 mod cursor;
 mod dialog;
 mod dom_element;

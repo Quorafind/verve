@@ -34,6 +34,7 @@ pub mod dom;
 mod drag;
 mod editing;
 pub mod field;
+mod field_undo;
 pub mod html;
 mod ime;
 mod inner_text;
@@ -1173,6 +1174,11 @@ impl Document {
                     }
                 });
             }
+            "z" | "Z" | "y" | "Y" if field && chord && !key.modifiers.alt => {
+                let redo = key.key.eq_ignore_ascii_case("y") || key.modifiers.shift;
+                let did = self.undo_field(runtime, target, redo);
+                self.acted(did);
+            }
             "a" | "A" if field && chord => {
                 bind::node::with_dom(runtime.context(), |dom| {
                     bind::element::ensure_draft(dom, target);
@@ -1307,6 +1313,7 @@ impl Document {
         if !allowed {
             return;
         }
+        let before = self.draft_before(field);
         let changed = bind::node::with_dom(runtime.context(), |dom| {
             bind::element::ensure_draft(dom, field);
             let max = dom
@@ -1345,6 +1352,12 @@ impl Document {
             true
         });
         if changed {
+            let kind = if input_type == "insertText" {
+                field_undo::Edit::Typing
+            } else {
+                field_undo::Edit::Other
+            };
+            self.edited(field, before, kind);
             self.fire(runtime, field, "InputEvent", "input", &init);
         }
     }
@@ -1363,6 +1376,7 @@ impl Document {
         if !self.fire(runtime, field, "InputEvent", "beforeinput", &init) {
             return;
         }
+        let before = self.draft_before(field);
         let changed = bind::node::with_dom(runtime.context(), |dom| {
             bind::element::ensure_draft(dom, field);
             let Some(draft) = dom.get_mut(field).and_then(|n| n.draft.as_mut()) else {
@@ -1375,6 +1389,13 @@ impl Document {
             }
         });
         if changed {
+            // Backspace and Delete join each other; a word deletion is a step of its own.
+            let kind = if word {
+                field_undo::Edit::Other
+            } else {
+                field_undo::Edit::Delete
+            };
+            self.edited(field, before, kind);
             self.fire(runtime, field, "InputEvent", "input", &init);
         }
     }
@@ -1457,6 +1478,32 @@ impl Document {
     pub fn choose(&self, runtime: &mut verve::Runtime, select: NodeId, value: &str) {
         let changed = bind::node::with_dom(runtime.context(), |dom| dom.set_value(select, value));
         if changed {
+            self.fire(runtime, select, "Event", "input", &[]);
+            self.fire(runtime, select, "Event", "change", &[]);
+        }
+        runtime.run_microtasks();
+    }
+
+    /// One of a `<select>`'s listed options chosen, by its index among the ones the list shows
+    /// (hidden options are not counted): `input` and `change`. An option that cannot be chosen,
+    /// or one that is already the chosen, is ignored.
+    pub fn choose_option(&self, runtime: &mut verve::Runtime, select: NodeId, index: usize) {
+        let changed = bind::node::with_dom(runtime.context(), |dom| {
+            let option = *dom.listed_options(select).get(index)?;
+            let select_off = dom
+                .get(select)
+                .is_some_and(|n| n.attr("disabled").is_some());
+            if select_off
+                || dom.option_disabled(option)
+                || dom.selected_option(select) == Some(option)
+            {
+                return None;
+            }
+            let at = dom.options(select).iter().position(|o| *o == option)?;
+            dom.select_index(select, Some(at));
+            Some(())
+        });
+        if changed.is_some() {
             self.fire(runtime, select, "Event", "input", &[]);
             self.fire(runtime, select, "Event", "change", &[]);
         }

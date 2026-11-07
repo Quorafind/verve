@@ -145,7 +145,7 @@ pub enum PaintItem {
     Glyphs { node: NodeId, origin: [f32; 2], font: FontKey, size: f32, color: [f32; 4], glyphs: Arc<[PlacedGlyph]> },   // P31
     Decoration { kind: DecorationKind, bounds: Rect, color: [f32; 4], wavy: bool },                                    // P31
     Image { node: NodeId, bounds: Rect, clip: Rect, image: ImageKey, fit: ObjectFit, frame: u32 },                 // P35：bounds 是整张图画进的矩形（已按 object-fit 算好），clip 是可见范围
-    Control { node: NodeId, bounds: Rect, kind: ControlKind },                                                         // P32
+    Control { node: NodeId, bounds: Rect, kind: ControlKind, look: ControlLook },                                                       // P32
     PushClip { bounds: Rect, radii: [f32; 4] }, PopClip,
     PushOpacity(f32), PopOpacity,
     PushScroll { node: NodeId }, PopScroll,          // 滚动帧：其中的项按“该容器及外层帧偏移为 0”摆放，回放时平移 −offset(node)

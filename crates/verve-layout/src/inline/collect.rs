@@ -252,11 +252,17 @@ impl<'a> Collector<'a> {
             style.tab_size,
             &mut self.flow,
         );
-        for segment in segments {
+        // Where a piece of the text ends in `text`: at the newline after it, or at the end.
+        let mut segments = segments.into_iter().peekable();
+        while let Some(segment) = segments.next() {
             match segment {
                 Segment::Newline(_) => self.items.push(Item::Break),
                 Segment::Text(processed) => {
-                    self.push_text(owner, &style, processed, 0, true);
+                    let end = match segments.peek() {
+                        Some(Segment::Newline(byte)) => *byte,
+                        _ => text.len() as u32,
+                    };
+                    self.push_text(owner, &style, processed, end, true);
                 }
             }
         }

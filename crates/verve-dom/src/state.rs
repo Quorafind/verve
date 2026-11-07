@@ -231,6 +231,8 @@ pub struct State {
     pub activation: Option<std::time::Instant>,
     /// Whether the keydown being handled did something besides type (see `Document::key_down_unhandled`).
     pub key_acted: bool,
+    /// What each text field can be taken back to (Ctrl+Z).
+    pub field_history: HashMap<crate::NodeId, crate::field_undo::FieldHistory>,
     /// The rectangles of the lines an inline box is broken over, as the drawer reported them;
     /// `getClientRects` answers these over the one border box.
     pub fragments: HashMap<NodeId, Vec<crate::Rect>>,
@@ -318,6 +320,7 @@ impl State {
             window_focused: true,
             activation: None,
             key_acted: false,
+            field_history: HashMap::new(),
             fragments: HashMap::new(),
             svg_boxes: HashMap::new(),
             history_at: 0,
@@ -638,6 +641,7 @@ impl State {
             self.svg_boxes.remove(id);
             self.scroll_offsets.remove(id);
             self.custom.forget(*id);
+            self.field_history.remove(id);
         }
         crate::canvas::forget(self, gone);
         self.load.forget(gone);

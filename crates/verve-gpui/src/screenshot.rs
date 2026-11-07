@@ -162,6 +162,11 @@ impl Painter<'_> {
                 }
             }
             Shape::Glyphs { .. } => {}
+            Shape::Caret { bounds, color } => {
+                if let Some(path) = rounded(*bounds, [0.; 4]) {
+                    self.fill(&path, *bounds, &Fill::Solid(*color), mask.as_ref());
+                }
+            }
             Shape::Picture {
                 bounds,
                 visible,

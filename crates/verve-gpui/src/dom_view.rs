@@ -75,6 +75,8 @@ pub(crate) struct DomState {
     pub ime_pause: bool,
     /// The parts of the window that drag it (`-webkit-app-region: drag`, minus the `no-drag` holes).
     pub drag_area: Vec<verve_electron::msg::Rect>,
+    /// When the caret of the focused field last moved.
+    pub blink: crate::controls::Blink,
 }
 
 impl DomState {

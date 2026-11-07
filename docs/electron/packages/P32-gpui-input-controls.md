@@ -160,16 +160,72 @@ pub enum ControlKind {
 }
 ```
 
-- 页面写了 `appearance: none` 或给控件设置了背景/边框时，按普通盒子画（P30），只保留文字、光标、选区。
-- 外观：v1 用一套与 Windows 11 Chromium 默认相近的平面风格（不追求平台原生），配色随 `prefers-color-scheme` 和 `accent-color`。
-- 文本字段：文字按 P31 规则单行/多行排版，光标闪烁（530 ms，失焦停止），选区用 `::selection` 颜色，水平/垂直滚动保持光标可见，
+- 页面写了 `appearance: none` 或给控件设置了背景/边框时，按普通盒子画（P30），只保留文字、光标、选区（文本字段仍出 `TextField`；只有勾、三角、滑块等不画）。
+- 外观：v1 用一套与 Windows 11 Chromium 默认相近的平面风格（不追求平台原生），配色随 `color-scheme` 和 `accent-color`（`color-scheme` 还没有支持，见阶段 2 的 「状态」；控件不跟系统暗色，这是 Electron 39.8.10 观察到的）。
+- 文本字段：文字按 P31 规则单行/多行排版，光标闪烁（530 ms，窗口不活动时停止），选区用固定的高亮色（`::selection` 还没有支持），水平/垂直滚动保持光标可见，
   `password` 显示 `•`。
 - `<select>` 下拉：Shell 用 GPUI `deferred(...).with_priority(..)` 在窗口内画弹层（选项列表来自快照），选择后发
-  `ToRendererInput` 的新变体 `Choose { select: NodeId, value: String }`（**追加到 P02 契约**）→ `Document::choose`。
+  `ToRendererInput` 的新变体 `Choose { select: NodeId, index: usize }`（**追加到 P02 契约**；`index` 是选项在 `SelectOption` 里的序号，不是值）→ `Document::choose_option`。
   超出窗口时 v1 夹在窗口内（不开新系统窗口）。
 - `type=date/time/color/file`：点击时分别交给 P14 的系统对话框（`file` 用打开对话框；`color`/`date` v1 用窗口内简单弹层）。
 - `range`：拖动滑块直接 `edit_field` 写 `value` 并发 `input`，松开发 `change`。
 - 焦点环：`:focus-visible` 匹配（键盘导航后）时画 2px `outline`（颜色 `accent-color` 或系统强调色），由 P22 的 UA 样式表给出，本包只保证 Tab 导航能触发 `:focus-visible`。
+
+### 第二阶段契约变更（控件；数值取自 Electron 39.8.10 的实测）
+
+下面几条改动上文“表单控件”一节的 `ControlKind`，以这里为准。
+
+- **`PaintItem::Control { node, bounds, kind }`**（`display_list.rs` 里已有这个变体和空的 `ControlKind`，这里给它变体）。
+  与任务书的草案相比有三处改动，理由相同：文字已经由 P31 排好了，壳不该再排一次。
+  1. **文字字段的文字不在 `ControlKind` 里**。`<input>`/`<textarea>` 的内容（密码框是 `•`，空时是 placeholder，`<select>` 是选中项的标签）由
+     verve-layout 当作盒子里的生成文字排版（`Plan::Generated`），出普通的 `PaintItem::Glyphs`；`Control` 只带它旁边的东西。所以没有 `draft`、`placeholder`、`label`。
+  2. **几何由布局给出**：`TextField { caret, marked, .. }` 的矩形在**字段文字所在的框架里**（盒子自己的裁剪和滚动之内，不是窗口坐标；光标是零宽矩形），
+     壳只管画和闪烁，不需要字体。选区不在 `TextField` 里：布局把它当作和页面选区同色的 `Box`，画在字段文字之下（`Painter::selection`），没有焦点的字段不画选区。
+     候选框位置用 `caret`（`RendererView.ime_rect` 取 `DisplayList::caret_of`，经滚动帧换算）。有选区时不给光标。
+  3. **`Select` 带选项**，因为弹层在壳里画：`options: Arc<[SelectOption]>`；弹层是否展开是壳的本地状态，不在显示列表里。
+  ```rust
+  pub enum ControlKind {
+      TextField { caret: Option<Rect>, marked: Vec<Rect>, multiline: bool, focused: bool },
+      Checkbox { checked: bool, indeterminate: bool }, Radio { checked: bool },
+      Select { options: Arc<[SelectOption]>, multiple: bool },
+      Range { min: f64, max: f64, value: f64 },
+      Progress { value: Option<f64> }, Meter { value: f64, min: f64, max: f64, low: f64, high: f64, optimum: f64 },
+      Color { value: Rgba }, Date { kind: DateKind }, File { multiple: bool },
+  }
+  pub struct SelectOption { pub value: String, pub label: String, pub selected: bool, pub disabled: bool, pub group: Option<String> }
+  ```
+  `SelectOption` 不含 `hidden` 的选项；`<optgroup disabled>` 里的选项算 `disabled`。`PaintItem::Control` 另带 `look: ControlLook { accent, color, disabled }`（`accent-color`、文字色、是否禁用；矩形都在盒子的框架里）。
+  `<button>` 和 `<input type=button|submit|reset>` 不是 `Control`：它们是带 UA 边框和背景的普通盒子，内容是普通行内文字（`value` 当作生成文字）。
+  `disabled`、`:hover`、`:active` 由壳按 `Hitbox` 和 `Control` 的节点画；`disabled` 在 `look` 里，不进 `ControlKind`（壳画勾、滑块时要降低对比；文字和边框的颜色取自 UA 样式表的 `:disabled`）。
+  `appearance: none` 的控件只出普通的 `Box` 和 `Glyphs`，不出勾、三角、滑块的 `Control`；**文本字段照样出 `TextField`**，所以文字、光标、组字下划线和选区都在。
+- **固有尺寸**（隐藏窗口，`getBoundingClientRect`，DPR 1 和 1.25；探针 `SCRATCH\p32b\size`）：border-box 尺寸，默认字体。DPR 1.25 只改变文字相关的尺寸（Chromium 按物理像素取整字体度量），
+  表中不随 DPR 变的用常量，文字相关的用公式：
+
+  | 控件 | 宽 × 高 | 备注 |
+  |---|---|---|
+  | 文本类 `<input>`（text/password/email/url/tel/number，search 是 border-box） | `size × 7 + 29 + 8` × 21 | 13.3333px Arial，padding 1/2，边框 2 inset；`size` 默认 20，所以 177 × 21 |
+  | `<textarea>` | `round(cols × "0" 的宽) + 15 + 6` × `rows × 行高 + 6` | 13.3333px monospace，边框 1，padding 2，默认 20 × 2；en-US 下 168 × 36（Consolas，"0" 宽 7.33）；15 是滚动条宽 |
+  | checkbox / radio | 13 × 13 | 外边距 3px 3px 3px 4px / 5px |
+  | range | 129 × 16 | 外边距 2px |
+  | color | 50 × 27 | 边框 1，padding 1/2 |
+  | date / time / datetime-local | en-US：116.33 × 21.33 / 98 × 24 / 188.33 × 21.33（13.3333px）；date 在 20px 下是 167 × 29 | monospace 的字段，内容宽随字号变：按两个实测点拟合成 `15 + 7.6·字号`（date）等，**不是固定像素** |
+  | file | 253 × 21（13.3333px），379 × 29（20px） | 按钮加 “No file chosen”，同样按字号拟合 `1 + 18.9·字号` |
+  | button / submit | 文字宽 + 12 + 4 × 文字高 + 2 + 4 | padding 1/6，边框 2 outset；空按钮 16 × 6 |
+  | `<select>` | `ceil(最宽选项文字) + 20 + 边框` × 19 | 边框 1 solid，border-box（观察：48、204；20px 下 60 × 26）；`<optgroup>` 里的选项缩进 4 个空格宽 |
+  | `<select multiple>`/`size=n` | `最宽选项文字 + 19 + 边框`（不取整）× `n × (行高 + 2) + 2` | `size` 默认 4（55.83 × 70；20px 下 73.25 × 102） |
+  | progress / meter | `10em × 1em` / `5em × 1em`（16px 字体下 160 × 16 / 80 × 16；13.3333px 下 133.33 × 13.33 / 66.66 × 13.33） | |
+
+  `font: 13.3333px Arial`（`textarea` 为 monospace）、上面的 padding 和边框进 UA 样式表，作者的 CSS 照常覆盖。
+- **`ToRendererInput::Choose { select: NodeId, index: usize }`**，追加在枚举末尾（P02 汇总表那一行早已写了它，这次才有变体）。渲染器收到后调
+  `Document::choose_option`（`index` 按 `SelectOption` 的顺序、不含隐藏选项；选项禁用、序号越界或本来就是选中的则什么都不发，否则 `input` + `change`）；节点已不在文档里则丢掉。
+- **乐观回显**：Shell 给每个发往渲染器的输入记下 `Isolate::send` 返回的任务号（`Hub::input` 改为返回它）。焦点字段的编辑键、文字和组字会在 Shell
+  的本地副本 `Echo { node, text, caret, anchor, marked, from }` 上同样应用，`from` 是最后一个未被看到的输入号；每个快照到达时：`RendererView.applied >= from`
+  则丢掉副本，用快照里的字段；否则重画时把副本叠在快照上（只改这个字段的文字和光标矩形，用 `Draft` 的编辑方法），并且仍在忙。
+  不追的情况：焦点变了、页面取消了 `keydown`（在追上后被纠正，可接受）、`maxlength`/`input` 事件改写值（追上后被纠正）、密码框以外的组字：
+  忙的时候组字只更新 `Echo.marked`，提交时把文字写进副本；渲染器追上后以快照为准。一次只回显一个字段；不回显的键（方向键以外的导航键、`Tab`）立刻丢掉副本以免失真。
+- **文件拖入**：GPUI 的 `FileDropEvent::Entered { position, paths }` → `DragInput::Enter { data: ExternalDrag { files: paths, .. }, pointer }`；`Pending { position }`
+  → `DragInput::Over`；`Submit { position }` → `DragInput::Drop`；`Exited` → `DragInput::Leave`。`pointer` 的 `x,y` 经与指针相同的 `input::local`
+  换算，不带按键；目标节点由渲染器命中。`RendererView.drop_effect` 决定壳显示的拖放光标。`File` 对象的路径由 P24 的 `ExternalDrag` 给出。
 
 ### 文件拖入
 
@@ -322,3 +378,88 @@ pub enum ControlKind {
 7d. 微软拼音输入“jia”后不选词，直接用鼠标点另一个输入框、按钮或空白处：已输入的拼音留在原来的框里、不再变化，之后键盘照常（Tab、空格、字母都有效）。7e. “´”再按空格：得到一个“´”（不是“ ´”）；“´”再按“x”：得到“´x”。7f. 候选框：`<textarea>` 里它在文本框左侧的垂直中间，空的 contenteditable 行里在整个编辑区的位置（不在插入符处，已知）。7g. 密码框里微软拼音不弹候选框（输入法被关掉）。10. 无边框窗口（`-webkit-app-region: drag` 的标题栏）：拖动窗口，松开后在文字上移动鼠标，什么也不会被选中；标题栏上的 `no-drag` 按钮仍可点击。
 8. 窗口失焦再回来：`document.hasFocus()` 先假后真，`window` 的 `blur`/`focus` 事件各一次。
 9. 打开检查器的元素拾取：拾取期间页面收不到鼠标事件，退出后恢复。
+
+### 阶段 2：控件、字段里的撤销、候选框（做了一半；第二部分接着做）
+
+**做了什么**
+
+- **契约**（见上“第二阶段契约变更”）：`ControlKind`/`SelectOption`/`DateKind`/`ControlLook`、`ToRendererInput::Choose`、回显与文件拖入的映射。
+  与草案不同处：文字不进 `ControlKind`（布局把字段的值当盒子里的生成文字排版），几何由布局给出；`PaintItem::Control` 另带 `look: ControlLook { accent, color, disabled }`
+  （契约文字里写的是“`disabled` 不进 `ControlKind`”，实现把它放进 `look`，因为壳画勾、滑块时要降低对比）。
+- **尺寸**：Electron 39.8.10 的实测在 `SCRATCH\p32b\size-1.json`/`size-1.25.json`（探针 `p32b\size`），边距、边框、字体进 `USER_AGENT_SHEET`，尺寸（复选框、range、date 等也是）随字体和属性变的在 `verve-layout/src/controls.rs`
+  （`size`、`cols`、`rows`、`<select>` 最宽的选项）。文字字段的字符宽 7px、加 29px、行高 15px 都是 13.3333px Arial 下的测得值，按字号等比。
+  DPR 1.25 下文字相关的尺寸会差一点（Chromium 对物理像素取整），没有复现。
+- **绘制**：`verve-gpui/src/controls.rs` 把 `Control` 降为 `Fill`/`Border`/新的 `Shape::Caret`，窗口和软件绘制器（`screenshot.rs`）用同一份：勾、箭头、滑块、进度条、仪表（颜色按 HTML 标准）、
+  色块、选区（固定的高亮色，和页面选区同值；`::selection` 没有支持）、组字下划线（1px，字段文字色，`<input>` 和 `<textarea>` 都有）、光标（530 ms 闪烁，移动后先常亮；失焦时布局不给光标，所以停止）。
+- **候选框**：`RendererView.ime_rect` 现在是焦点字段的光标矩形（`DisplayList::caret_of`，经滚动帧换算），`bounds_for_range` 把候选窗放在光标正下方
+  （单行输入框和 `<textarea>` 一样，水平跟着光标）。
+- **字段撤销**：`field_undo.rs`：每个字段一份历史（上限 1000），连续输入合成一步（在上一个字符停下的地方继续打），删除和选区替换单独成步；Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y，
+  发 `beforeinput`/`input`（`historyUndo`/`historyRedo`）；有可撤销的才算“已处理”（没有则仍交给菜单，与 `keys2` 的观察一致）。
+- **`Choose`**：带选项的序号（两个选项可以同值）；渲染器收到后调 `Document::choose_option`（`input` 然后 `change`；禁用的、已选中的什么都不发）。
+- 测试：`cargo test -p verve-electron --test forms`（复选框点击、`<select>` 选择、字段撤销、`forms` 夹具的几何）；`field_undo`、`controls`（两处）的单测。
+- 夹具 `tests/electron/apps/forms/`：`expected-geometry.json` 和 `expected-chromium.png` 取自 Electron 39.8.10（隐藏窗口，临时 profile，480×270，DPR 1）。几何逐项比较：
+  比较见第二轮：随文字变的控件和孪生 `<span>` 比差值，其余精确到 0.02px，y 用每行的零尺寸标记量。
+
+**没做（留给第二部分）**
+
+- 步骤 4 的交互：`<select>` 弹层（`deferred`，方向键/Enter/Esc，夹在窗口内；`Choose` 的发送端）、`range` 拖动、`type=file` 经 P14 的打开对话框（`VERVE_NO_SYSTEM_DIALOGS` 下的答复）、
+  `color`/`date` 的窗口内弹层。复选框/单选框在 verve-dom 里已经会切换（测试覆盖）。
+- 步骤 5 的 `character_index_for_point`（仍是 `None`）；
+- 步骤 6 文件拖入（GPUI `FileDropEvent` → `DragInput`；映射已写进契约）；
+- 步骤 7 乐观回显（`Isolate::send` 的任务号要从 `Hub::input` 返回，壳里的 `Echo`；契约已写）；
+- 步骤 8：文字上的 I-beam（先观察 Chromium）、三份“能输入文字”判断合并、GPUI `test-support` 测试文件；
+- 步骤 9 的像素比较（夹具和 `expected-chromium.png` 在，比较没写）；
+- 文字字段的横向/纵向滚动（光标出界时不会滚进来：`<input>` 是 `overflow:hidden`，长文字的光标矩形在盒外）；
+- `type=file` 的内部文字（“Choose File / No file chosen”）和日历图标：布局没有为它们生成文字（`date` 显示 `mm/dd/yyyy` 或值）；
+- `<select multiple>`/`size>1` 的列表框不画选项（只画一个空盒子）；`<button>`/`submit` 用 UA 的 `2px outset` 边框，不是 Chromium 的圆角平面外观；
+- “作者给了背景或边框就按普通盒子画”：只实现了 `appearance: none`；
+- 组字时的回显；
+- 暗色：`color-scheme` 没有支持。Electron 39.8.10 里没有 `color-scheme` 时控件在暗色系统主题下仍是白底黑字，所以 UA 样式表**没有**暗色规则（第一部分误加了，已删）。
+
+### 阶段 2 第一部分，第二轮修正（审查的 9 条 MUST、集中测试的两项和多数 SHOULD）
+
+**做了**
+
+- **尺寸模型（MUST 3）**：`adjust` 不再把固有尺寸写进 `width`/`height`。在 flex/grid 容器里样式保持 `auto`，固有内容尺寸放在 `BoxProps.intrinsic`，由该盒的 `Ifc::measure`
+  当作内容尺寸给 taffy，所以输入框、textarea、select、按钮（和复选框）又会拉伸，在窄的行里仍保持自己的宽度；在普通流里仍写进样式。有固有尺寸的控件即使没有文字也持有一个 `Ifc`。
+  固定尺寸（复选框 13、range 129×16、color、date/time/file 随字号）从 UA 样式表移到 `adjust`；`select` 的 19px 高、列表行（行高 + 2）、`<textarea>` 的列宽（"0" 的宽）也在这里；`line-height` 进高度（`line-height: 30px` 的输入框 36 高）；`appearance: none` 的复选框是 0 × 0。
+- **光标与选区的框架（MUST 5）**：`TextField` 的 `Control` 项现在从 `inline_content` 里字段自己的裁剪与滚动帧内发出（`Painter::text_field`），所以长值的光标被裁剪，滚动后的 `<textarea>` 里光标和 `ime_rect` 跟着滚动。
+  选区改为布局画的 `Box`（`Painter::selection`，在文字之下），`TextField` 不再带 `selection`；没有焦点的字段不画选区；有选区时不给光标；窗口不活动时不闪烁；下一次翻转安排在 `BLINK − 已过 % BLINK`。
+- **按字节的位置（MUST 6）**：生成文字的 `Stop.byte` 现在是生成串里的字节（原来是 0），`Segment` 的末尾字节也补上了；字段用 `inline/query.rs` 的 `x_at`（现为 `pub(crate)`）找光标、选区和组字的横坐标。
+  密码框把值的第 n 个字符映射到第 3n 个字节（`•` 三字节）。`\n` 之后的光标在下一行（空行，或结尾换行下面的一行）。
+- **基线（MUST 7）**：`BoxProps.baseline`：文本输入、按钮、select、date 取文字基线（即使 `overflow: hidden` 裁剪），空字段取文字放在控件高度正中的基线；复选框、单选框、range 取边框盒的下沿。
+- **`appearance: none`（MUST 8）**：文本字段总是出 `TextField`。契约文字已恢复。
+- **暗色（MUST 4）**：删去 UA 样式表里的暗色块；`color-scheme` 未支持。
+- **UA 样式表**：`line-height`/`font-weight`/`font-style`/`text-transform`/`text-indent`/`word-spacing` 在控件上复位；`input[type=image]` 无 padding 和边框；按钮背景 `#f0f0f0`；禁用的输入框和 textarea 用 Chromium 的颜色。
+- **撤销（MUST 9）**：(a) 脚本改过值之后（字段文字与历史末尾的文字不同）历史作废，之后键入从新值开始；(b) 输入法提交记为一步，第一次提交并入之前的键入，之后每次提交单独一步（"ab"、加、载：Ctrl+Z → "ab加" → ""）。
+  另：连续的退格/Delete 合成一步；字段被释放时历史随 `forget_nodes` 清掉。
+- **第二部分的接口**：`Choose` 带选项序号；`SelectOption` 不含隐藏选项，`<optgroup disabled>` 里的选项禁用；`Document::choose_option`（原来的 `choose` 按值，留给 React 测试）。
+- **夹具（MUST 1、2）**：用 `appendSwitch('lang', 'en-US')` 重录 `expected-geometry.json` 和 PNG（隐藏窗口，Electron 39.8.10）；测试用孪生 `<span>`（按钮、submit、select、列表框、textarea）比较“控件 − 孪生”，其余按字号定的尺寸精确比较（1/64 容差），y 在 2px 内。
+  观察到：submit 57.5 × 21，textarea 168 × 36，date 116.33 × 21.33，time 98 × 24，file 253 × 21（zh-CN 下 submit 是“提交”）。
+- **中心的两项**：选区跨两行的单测改成 `tests/controls.rs` 里的布局测试（第二行 13.33 宽是对的：两个字符，旧期望 7 是错的）；两处 clippy（`is_multiple_of`，`Caret` 分支拆成 `caret`）。
+
+**没做 / 偏差**（原因）
+
+- **文本字段的宽度按字体算**（SHOULD）：仍是 13.3333px Arial 的常量按字号等比。Chromium 的 `20·round(avg) + round(max) − round(avg)` 要字体的平均与最大字符宽，`TextMeasurer` 没有；Arial 16px 的 Verve 值 211 对 203，等宽字体 177 对 163。需要给 `TextMeasurer` 加这两个度量，另做。
+- **文字在高输入框、select、按钮里垂直居中**（SHOULD）：没做（行仍在顶部）。
+- **按钮背景/边框的计算值**：背景改成 `rgb(240,240,240)`，边框颜色仍是 `#767676`（Chromium 的计算值是黑色，但它是主题绘制的；Verve 按 CSS 画边框，黑色的 outset 边框会明显变丑）。color 输入的边框同。
+- **`webContents.undo()`、Undo 菜单角色、`execCommand('undo')` 触及焦点字段**：没做（它们走 `editing.rs` 的 `travel`，只服务 contenteditable）。
+- **撤销历史存差量**（SHOULD）：没做，每步仍是整份 `Draft`（上限 1000）。
+- **与 Chromium 有意的差别**：Chromium 的历史是每个文档一份（在字段 B 或 body 上 Ctrl+Z 会撤销 A 并把焦点移回 A）；这里每个字段一份，Ctrl+Z 只作用于有焦点的字段。
+- **`<fieldset disabled>`、`indeterminate` 的绘制、下划线用 `caret-color`**：没做。`look.color` 仍先取 `caret-color`。
+- **文本字段宽度、监测的 20px 下的 select 高**：select 单行高在 20px 下 Verve 给 27，Chromium 26（行高 + 4 的公式差 1）。
+- **提交的历史**：把 `ControlLook.color` 并入 3010fb3d8 的修正单（fixup）已做，但“把 Choose 和撤销的测试移进各自的提交”没做（它们在 309fddcae 里一并加入）；`forms.rs` 复制自 `input.rs` 的 `Page`/`launch`/`send`/`key`/`eval` 没有移到 `tests/support`。
+
+**第四轮补充**（审查 2 的 MUST A–D 和中心的两项）
+
+- date/time/datetime-local 的尺寸是**内容盒**：边框盒 116.33 × 21.33 减去 padding 1 和边框 4 → 内容 `10 + 7.6·字号` × `2 + 1.15·字号`（time `6.975·字号` × `1.5·字号`，datetime-local `13.75·字号`）。
+- 基线：color 在边框盒下沿上 6px，`<select multiple>`/`size>1` 在最后一行（下沿上 3px），file 取文字基线（`BaselineRule::FromBottom` 和 `Text`）。
+- 光标跨换行：取最后一个在光标之前结束的文字片段，再按其间的 `\n` 个数往下数行（空行、结尾换行下面的一行）。
+- 字段文字取字段自己的字体、颜色、字距、大小写、`line-height`、`white-space`（生成文字只读交给它的样式）；单行字段总是 `pre`，`<textarea>` 的 `normal` 当 `pre-wrap`、`nowrap` 当 `pre`。
+- flex/grid 里的字段 `min-width/min-height: auto` = 固有尺寸，所以窄行里不收缩；`<input>` 的 `overflow` 为 `clip !important`；`<textarea>` 列数取 ceil。
+- 夹具 y 用每行的零尺寸标记（它的上沿是基线）比较控件到标记的距离。
+- 撤销：Ctrl+Backspace 单独成步。**没做**：脚本把值改回同样文字时清空历史（要节点上的值版本号，现在只比文字）；`choose_option` 之外的 `Choose` 路径无变化。
+
+**手测清单（第二部分做完后一起）**：复选框切换；`<select>` 鼠标和键盘；`range` 拖动；Tab 在控件间移动并出现焦点环；文件输入打开系统对话框；
+微软拼音在 `<input>` 和 `<textarea>` 里带下划线、候选框在光标下；字段里 Ctrl+Z；页面忙时输入。
+目前已可手测：光标闪烁、选区、组字下划线与候选框位置、Ctrl+Z/Ctrl+Y、复选框/单选框/滑块/进度条/仪表/色块的外观。
