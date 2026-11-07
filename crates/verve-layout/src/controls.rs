@@ -123,6 +123,8 @@ pub enum DateKind {
 pub struct ControlLook {
     /// `accent-color`, or the default blue.
     pub accent: Rgba,
+    /// The text colour, which a caret and a composition's underline take (`caret-color` if set).
+    pub color: Rgba,
     pub disabled: bool,
 }
 
@@ -550,6 +552,10 @@ pub(crate) fn look(snapshot: &Snapshot, node: NodeId) -> ControlLook {
             .style(node, "accent-color")
             .and_then(|text| color_with(text, [0., 0., 0., 1.]))
             .unwrap_or(ACCENT),
+        color: ["caret-color", "color"]
+            .iter()
+            .find_map(|property| color_with(snapshot.style(node, property)?, [0., 0., 0., 1.]))
+            .unwrap_or([0., 0., 0., 1.]),
         disabled: snapshot
             .dom
             .get(node)

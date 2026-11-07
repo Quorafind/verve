@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{
     App, Background, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Edges, Element,
@@ -174,6 +175,7 @@ impl Element for DomElement {
                 self.paint_command(command, &list, bounds.origin, window);
             }
             self.state.borrow_mut().pictures.end_frame();
+            self.blink(&plan, window, cx);
         }
         self.listen(bounds, window, cx);
         if let Some(stats) = self.state.borrow_mut().stats.as_mut() {
@@ -185,6 +187,45 @@ impl Element for DomElement {
 }
 
 impl DomElement {
+    /// Paints again when the caret is due to flip, if the plan has one.
+    fn blink(&self, plan: &crate::plan::Plan, window: &mut Window, cx: &mut App) {
+        let has_caret = plan
+            .commands
+            .iter()
+            .any(|command| matches!(command.shape, Shape::Caret { .. }));
+        // A window that is not the active one does not blink: it would only repaint for nothing.
+        if !has_caret
+            || !window.is_window_active()
+            || std::mem::replace(&mut self.state.borrow_mut().blink.waiting, true)
+        {
+            return;
+        }
+        let state = Rc::clone(&self.state);
+        let wait = state.borrow().blink.until_flip(Instant::now());
+        window
+            .spawn(cx, async move |cx| {
+                cx.background_executor().timer(wait).await;
+                state.borrow_mut().blink.waiting = false;
+                cx.update(|window, _| window.refresh()).ok();
+            })
+            .detach();
+    }
+
+    /// A caret, when it is in the shown half of its blink.
+    fn caret(
+        &self,
+        bounds: Rect,
+        color: Rgba,
+        list: &DisplayList,
+        origin: gpui::Point<Pixels>,
+        window: &mut Window,
+    ) {
+        let shown = (self.state.borrow_mut().blink).visible(bounds, Instant::now());
+        if shown {
+            self.fill(bounds, [0.; 4], &Paint::Solid(color), list, origin, window);
+        }
+    }
+
     /// Gives the pictures that no list asks for any more back to GPUI's atlas.
     fn give_back_pictures(&self, window: &mut Window) {
         let retired = self.state.borrow_mut().pictures.take_retired();
@@ -252,6 +293,7 @@ impl DomElement {
                 origin,
                 window,
             ),
+            Shape::Caret { bounds, color } => self.caret(*bounds, *color, list, origin, window),
             Shape::Border {
                 bounds,
                 radii,

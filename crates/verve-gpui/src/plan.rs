@@ -102,6 +102,9 @@ pub enum Shape {
         frame: u32,
         alpha: f32,
     },
+    /// A text field's caret, `bounds` wide as the caret is: the window blinks it, a screenshot
+    /// shows it.
+    Caret { bounds: Rect, color: Rgba },
     /// The border of a box that has one color all round, drawn in the box's own edge.
     Border {
         bounds: Rect,
@@ -147,6 +150,7 @@ pub fn plan(list: &DisplayList, offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>) 
             PaintItem::Image { .. } => lower_image(&placed, &mut out.commands),
             PaintItem::Decoration { .. } => lower_decoration(&placed, &mut out.commands),
             PaintItem::Hitbox { .. } => out.hitboxes.extend(placed.hitbox()),
+            PaintItem::Control { .. } => crate::controls::lower(&placed, &mut out.commands),
             _ => {}
         }
     }
@@ -614,6 +618,7 @@ mod tests {
                 Shape::Border { .. } => "border",
                 Shape::Glyphs { .. } | Shape::Decoration { .. } => "text",
                 Shape::Picture { .. } => "picture",
+                Shape::Caret { .. } => "caret",
             })
             .collect();
         assert_eq!(kinds, ["drop", "fill", "inset", "border"]);
