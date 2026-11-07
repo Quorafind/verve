@@ -112,6 +112,9 @@ fn run_inner(
     if native::touches_desktop() {
         hub.allow_system_boxes();
     }
+    // The inspector is a window of the shell's: `openDevTools()` writes no element tree or console
+    // to the terminal (`inspectElement` still writes its one line).
+    hub.show_inspector_in_window();
     hub.set_shell(Arc::new(Port {
         inbox: inbox.clone(),
     }));

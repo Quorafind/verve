@@ -12,3 +12,5 @@ pub mod model;
 pub mod overlay;
 pub mod styles;
 pub mod tree;
+pub(crate) mod view;
+pub(crate) mod windows;
