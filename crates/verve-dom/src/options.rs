@@ -29,6 +29,12 @@ pub struct Options {
     pub title: String,
     /// What the page loads its scripts, sheets and images through; `None` loads nothing.
     pub loader: Option<Box<dyn Loader>>,
+    /// The custom schemes that are "standard" (`registerSchemesAsPrivileged`): their addresses
+    /// have an origin of `scheme://host`, so `location.origin`, `a.origin` and `history`'s
+    /// same-origin check take one, where any other custom scheme's origin is opaque (`"null"`).
+    pub standard_schemes: Vec<String>,
+    /// The custom schemes whose pages are secure contexts (`window.isSecureContext`).
+    pub secure_schemes: Vec<String>,
 }
 
 impl Default for Options {
@@ -46,6 +52,8 @@ impl Default for Options {
             storage: None,
             title: String::new(),
             loader: None,
+            standard_schemes: Vec::new(),
+            secure_schemes: Vec::new(),
         }
     }
 }

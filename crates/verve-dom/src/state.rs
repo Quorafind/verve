@@ -130,6 +130,8 @@ pub struct State {
     pub dom: Dom,
     pub url: url::Url,
     pub title_fallback: String,
+    /// The embedder's custom schemes: which have an origin and which are secure.
+    pub schemes: crate::schemes::Schemes,
     /// What the window's `navigator` was given (user agent, language), for a world made later.
     pub navigator: (Option<String>, Option<String>),
     /// Each node's object in each world, held without keeping it alive.
@@ -216,6 +218,7 @@ impl State {
             history: vec![(JsValue::null(), url.to_string())],
             url,
             title_fallback: String::new(),
+            schemes: crate::schemes::Schemes::default(),
             navigator: (None, None),
             wrappers: HashMap::new(),
             links: HashMap::new(),

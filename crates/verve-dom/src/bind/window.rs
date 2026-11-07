@@ -140,6 +140,9 @@ pub fn navigate(context: &mut Context, href: &str, replace: bool) -> JsResult<()
 
 fn location_part(part: &str, context: &Context) -> String {
     let url = shared(context).borrow().url.clone();
+    if part == "origin" {
+        return shared(context).borrow().schemes.origin_of(&url);
+    }
     super::element::url_parts()
         .iter()
         .find(|(name, _)| *name == part)
@@ -237,7 +240,7 @@ fn change_history(context: &mut Context, args: &[JsValue], replace: bool) -> JsR
     let mut state = state.borrow_mut();
     let new = match url {
         Some(url) => match state.base_url().join(&url) {
-            Ok(new) if new.origin() == state.url.origin() => new,
+            Ok(new) if state.schemes.same_origin(&new, &state.url) => new,
             _ => {
                 drop(state);
                 return Err(dom_error(
@@ -1163,7 +1166,6 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
         ("frameElement", JsValue::null()),
         ("length", 0.into()),
         ("closed", false.into()),
-        ("isSecureContext", true.into()),
         ("crossOriginIsolated", false.into()),
         ("name", js_text("")),
         ("status", js_text("")),
@@ -1179,6 +1181,7 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
             context,
         )?;
     }
+    define_secure_context(context, &global)?;
     webidl_class(
         context,
         WebIdlClass {
@@ -1250,5 +1253,24 @@ pub fn install(context: &mut Context, options: &crate::Options) -> JsResult<()> 
     install_form_data(context)?;
     let _ = node_of;
     let _ = wrap;
+    Ok(())
+}
+
+/// `isSecureContext`, a getter: the document's address, and with it whether it is a secure
+/// context, changes.
+fn define_secure_context(context: &mut Context, global: &JsObject) -> JsResult<()> {
+    let secure = native::function(context, "get isSecureContext", 0, |_, _, cx| {
+        let state = shared(cx);
+        let state = state.borrow();
+        Ok(state.schemes.is_secure(&state.url).into())
+    });
+    global.define_property_or_throw(
+        js_string!("isSecureContext"),
+        PropertyDescriptor::builder()
+            .get(secure)
+            .enumerable(true)
+            .configurable(true),
+        context,
+    )?;
     Ok(())
 }

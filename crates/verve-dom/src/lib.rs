@@ -37,6 +37,7 @@ mod load;
 mod media;
 mod options;
 mod rect;
+mod schemes;
 mod snapshot;
 mod state;
 mod storage;
@@ -141,6 +142,7 @@ pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Doc
         s.frame_clock = options.frames;
         s.title_fallback = options.title.clone();
         s.navigator = (options.user_agent.clone(), options.language.clone());
+        s.schemes = schemes::Schemes::new(&options.standard_schemes, &options.secure_schemes);
         s.load.loader = options.loader.take().map(Rc::from);
         s.load.active = s.load.loader.is_some();
         let document = s.dom.document;
