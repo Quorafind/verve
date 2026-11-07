@@ -6,7 +6,7 @@
 
 你在 Verve 仓库（`F:\dev\sandbox-v2\verve`，Rust，Boa 引擎上的 JS 运行时）里实现一个工作包。
 项目目标：让 Verve 能直接替换 Electron——一切 Electron/Node/Web API 都是 Rust 原生函数，DOM 由
-`crates/verve-dom` 持有，GPUI 负责布局绘制；最终二进制约 32 MB（含 JIT，硬上限 36 MB，2026-11-07 起）。
+`crates/verve-dom` 持有，GPUI 负责布局绘制；最终二进制约 32 MB（含 JIT，硬上限 40 MB，2026-11-07 起）。
 
 请按顺序阅读：
 1. `docs/electron/README.md`（总体方案、原则、架构、里程碑）

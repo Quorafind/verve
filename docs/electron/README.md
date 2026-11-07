@@ -12,7 +12,7 @@ electron-builder / electron-forge 打包出来的应用照常运行。
 
 | 指标 | 目标（Windows x64 release，strip 后） | 说明 |
 |---|---|---|
-| 运行时二进制 `electron.exe` | **≈ 32 MB，含 JIT**（硬上限 **36 MB**，2026-11-07 定，见下注） | Electron 本身约 180 MB |
+| 运行时二进制 `electron.exe` | **≈ 32 MB，含 JIT**（硬上限 **40 MB**，2026-11-07 定，见下注） | Electron 本身约 180 MB |
 | JavaScript 层 | **≈ 10 MB** | 应用自己的 `app.asar` + 代码缓存；**Verve 不内置任何 JS 垫片** |
 | 冷启动到首帧（electron-quick-start，热代码缓存） | ≤ 250 ms | |
 | 单窗口空闲内存 | ≤ 60 MB | Electron 约 150 MB |
@@ -31,6 +31,7 @@ electron-builder / electron-forge 打包出来的应用照常运行。
 
 **决定（2026-11-02，用户）：硬上限 34 MB，JIT 默认开启**——性能优先，约 32 MB，仍约为 Electron 的 1/5。原 20/24 MB 目标作废。
 **决定（2026-11-07，用户）：硬上限提到 36 MB（`--max-bytes 37748736`）**，同时在 GPUI fork 里关掉 Verve 用不到的图片解码器（dds/exr/ff/hdr/pnm/qoi/tga/tiff/rayon，估计省 250–350 KB）。原因：布局批次（P15/P16/P30，之后 P31–P35）开工时只剩 1.03 MB。
+**决定（2026-11-07 晚，用户）：硬上限再提到 40 MB（`--max-bytes 41943040`）**。原因：P15、P30、P43、P31、P16 合并后 `electron.exe` 为 36,822,016 字节，36 MB 下只剩 0.93 MB，而剩下的 P24、P32、P33、P35 与 P43 第二阶段估计要 2–3 MB（近几个包各 +0.46–0.72 MB）。压缩放到 R3/R4 重构关卡；GPUI fork 关解码器的计划不变。
 继续压缩仍然是 P42 的工作（腾出余量）：`wasm` 关闭（−0.7 MB）、
 依赖试 `opt-level = "z"`、归属 4.4 MiB 未归属的 `.rdata`。详见 [`size.md`](size.md)（P01 合并后可见）。
 
