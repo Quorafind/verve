@@ -1,9 +1,10 @@
 //! Running a scheme's handler for a request and handing its answer on, a chunk at a time.
 //!
-//! The same engine answers every kind of asker: a page's own load of a script or sheet (the
-//! whole answer is collected and sent once, as P20's loader wants it) and the main process's
-//! `net.fetch` (the answer goes through a kernel `Responder`). What differs is the [`Sink`] the
-//! answer is written to and whether the engine reads on its own or on demand.
+//! The same engine answers every kind of asker: a page's `fetch` (the answer goes back to the
+//! page's thread in messages, one body chunk for each pull the page makes), a page's own load of
+//! a script or sheet (the whole answer is collected and sent once, as P20's loader wants it), and
+//! the main process's `net.fetch` (the answer goes through a kernel `Responder`). What differs is
+//! the [`Sink`] the answer is written to and whether the engine reads on its own or on demand.
 //!
 //! A handler answers with a web `Response`, whose body is a `ReadableStream` read here with
 //! `reader.read()` — one read for each pull, which is how a reader that stops reading stops the
@@ -39,6 +40,8 @@ pub(crate) trait Sink {
 pub(crate) enum Asker {
     /// The main process's own `net.fetch`.
     Main,
+    /// A page's `fetch`.
+    Page(ContentsId),
 }
 
 /// One request being answered.
@@ -135,6 +138,24 @@ pub(crate) fn cancel(context: &mut Context, who: Asker, call: u64) {
     if let Some(reader) = served.and_then(|served| served.reader) {
         // The producer is told to stop; whether it minds does not matter.
         let _ = invoke(&reader.into(), "cancel", &[], context);
+    }
+}
+
+/// Page `contents` is gone (closed, or its process died): every request it asked for is given up,
+/// so no handler goes on producing a body nobody will read.
+pub(crate) fn cancel_all(context: &mut Context, contents: ContentsId) {
+    let who = Asker::Page(contents);
+    let calls: Vec<u64> = super::shared(context)
+        .net
+        .serving
+        .calls
+        .borrow()
+        .keys()
+        .filter(|(asker, _)| *asker == who)
+        .map(|(_, call)| *call)
+        .collect();
+    for call in calls {
+        cancel(context, who, call);
     }
 }
 
@@ -449,6 +470,46 @@ impl Sink for ToResponder {
     }
 }
 
+/// A page's `fetch`: the answer goes to the page's thread in messages.
+struct ToPage {
+    hub: Arc<Hub>,
+    contents: ContentsId,
+    call: u64,
+}
+
+impl ToPage {
+    fn send(&self, msg: ToRenderer) {
+        self.hub.to_renderer(self.contents, msg);
+    }
+}
+
+impl Sink for ToPage {
+    fn head(&mut self, status: u16, status_text: String, headers: Vec<(String, String)>) {
+        let call = self.call;
+        self.send(ToRenderer::ProtocolHead {
+            call,
+            status,
+            status_text,
+            headers,
+        });
+    }
+    fn chunk(&mut self, bytes: Vec<u8>) {
+        let call = self.call;
+        self.send(ToRenderer::ProtocolChunk { call, bytes });
+    }
+    fn end(&mut self) {
+        let call = self.call;
+        self.send(ToRenderer::ProtocolEnd { call, error: None });
+    }
+    fn fail(&mut self, error: NetError) {
+        let call = self.call;
+        self.send(ToRenderer::ProtocolEnd {
+            call,
+            error: Some(error),
+        });
+    }
+}
+
 /// A page's load of a script, sheet or document: the whole answer, sent once.
 struct ToLoader {
     hub: Arc<Hub>,
@@ -502,6 +563,29 @@ impl Sink for ToLoader {
             },
         );
     }
+}
+
+/// A page's `fetch` of a scheme the main process answers.
+pub(crate) fn from_page(
+    context: &mut Context,
+    contents: ContentsId,
+    call: u64,
+    session: SessionId,
+    request: ProtoRequest,
+) {
+    let hub = Arc::clone(&super::shared(context).hub);
+    let sink = Box::new(ToPage {
+        hub,
+        contents,
+        call,
+    });
+    let job = Job {
+        session,
+        request,
+        call: Some((Asker::Page(contents), call)),
+        auto: false,
+    };
+    start(context, job, sink);
 }
 
 /// A page's load of a resource (P20's `ProtocolRequest`).

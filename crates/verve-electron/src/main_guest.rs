@@ -254,11 +254,23 @@ impl MainGuest {
             FromRenderer::ContextMenu(params) => {
                 input_events::context_menu(context, contents, params)
             }
+            FromRenderer::Protocol {
+                call,
+                session,
+                request,
+            } => protocol_serve::from_page(context, contents, call, session, request),
+            FromRenderer::ProtocolPull { call } => {
+                protocol_serve::pull(context, protocol_serve::Asker::Page(contents), call);
+            }
+            FromRenderer::ProtocolCancel { call } => {
+                protocol_serve::cancel(context, protocol_serve::Asker::Page(contents), call);
+            }
             FromRenderer::ProtocolRequest { call, request } => {
                 protocol_serve::from_loader(context, contents, call, request);
             }
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
+                protocol_serve::cancel_all(context, contents);
                 page_events::render_process_gone(context, contents, &reason);
             }
             _ => return,

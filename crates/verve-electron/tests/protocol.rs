@@ -1,12 +1,14 @@
-//! `protocol`: what a session says about itself, `protocol.handle` and the older calls with
-//! `net.fetch`, a page loaded from a handler, what `registerSchemesAsPrivileged` gives a scheme
-//! (an origin, a secure context) and the errors of the module. The expected values are frozen from
-//! Electron 39.8.10 (probes in the P16 scratch folder; the source of each is named where it is
-//! not obvious).
+//! `protocol`: a site served from a custom scheme (`protocol.handle` with `net.fetch` of files, the
+//! older `registerFileProtocol`), what `registerSchemesAsPrivileged` gives a scheme (an origin,
+//! a secure context, `fetch`), an answer streamed to a page a chunk at a time and the
+//! errors of the module. The expected values are frozen from Electron 39.8.10 (probes in the
+//! P16 scratch folder; the source of each is named where it is not obvious).
 
 #![allow(clippy::unwrap_used)]
 
 mod support;
+
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use support::{App, TIMEOUT};
@@ -41,6 +43,8 @@ fn site_app(privileges: &str, setup: &str) -> App {
     App::launch_script(&main, &site())
 }
 
+const FULL: &str = "{ standard: true, secure: true, supportFetchAPI: true }";
+
 /// Waits for the page titled `Bundle`: its contents id.
 fn bundle(app: &App) -> u32 {
     app.window("Bundle")
@@ -50,6 +54,153 @@ fn bundle(app: &App) -> u32 {
 
 fn page(app: &App, contents: u32, js: &str) -> Value {
     serde_json::from_str(&app.eval_renderer(contents, js)).unwrap()
+}
+
+#[test]
+fn a_site_is_served_from_a_custom_scheme_by_a_handler_that_fetches_files() {
+    let app = site_app(FULL, "protocol.handle('app', globalThis.served);");
+    let contents = bundle(&app);
+    let done = |app: &App| app.eval_renderer(contents, "document.readyState") == r#""complete""#;
+    assert!(app.run_until(done, TIMEOUT), "console: {:?}", app.console());
+    let facts = page(
+        &app,
+        contents,
+        "[location.origin, isSecureContext, window.fromScript, getComputedStyle(document.body).color]",
+    );
+    // `std://bundle` and `true`: a standard, secure scheme's page (probe3, scheme `std`).
+    assert_eq!(
+        facts,
+        json!(["app://bundle", true, "ran", "rgb(255, 0, 0)"])
+    );
+    let fetched = app.run_page(
+        contents,
+        "const r = await fetch('./data.json'); return [r.url, r.type, await r.json()];",
+        TIMEOUT,
+    );
+    assert_eq!(
+        fetched["value"],
+        json!(["app://bundle/data.json", "basic", {"x": 1}])
+    );
+}
+
+#[test]
+fn the_older_registerfileprotocol_serves_the_same_site_and_warns_of_nothing() {
+    let setup = "globalThis.warned = [];
+        process.on('warning', (w) => warned.push(w.name + ': ' + w.message));
+        protocol.registerFileProtocol('app', (req, callback) =>
+        callback(path.join(__dirname, 'site', new URL(req.url).pathname)));";
+    let app = site_app(FULL, setup);
+    let contents = bundle(&app);
+    let done = |app: &App| app.eval_renderer(contents, "window.fromScript") == r#""ran""#;
+    assert!(app.run_until(done, TIMEOUT), "console: {:?}", app.console());
+    let fetched = app.run_page(
+        contents,
+        "return await (await fetch('./data.json')).text();",
+        TIMEOUT,
+    );
+    assert_eq!(fetched["value"], json!(r#"{"x":1}"#));
+    // Electron 39.8.10 emits no deprecation warning for these calls (observed with
+    // `process.on('warning')`; `protocol.ts` has none).
+    assert_eq!(app.eval_main("globalThis.warned"), "[]");
+}
+
+#[test]
+fn a_file_handler_does_not_let_a_page_without_node_read_files() {
+    let app = site_app(
+        FULL,
+        "protocol.handle('app', globalThis.served);
+         protocol.handle('file', (req) => net.fetch(req, { bypassCustomProtocolHandlers: true }));
+         globalThis.target = require('url').pathToFileURL(path.join(__dirname, 'site', 'data.json')).toString();",
+    );
+    let contents = bundle(&app);
+    let target: Value = serde_json::from_str(&app.eval_main("globalThis.target")).unwrap();
+    let target = target.as_str().unwrap();
+    // Electron 39.8.10 (probe5): with a `file` handler that passes over the handlers, an `app://`
+    // page still fails to `fetch`, `XMLHttpRequest` and load a script of a `file:` address.
+    let asked = format!(
+        "const out = {{}};
+         try {{ await fetch({target:?}); out.fetch = 'read'; }} catch (e) {{ out.fetch = e.name; }}
+         out.xhr = await new Promise((done) => {{
+           const q = new XMLHttpRequest(); q.open('GET', {target:?});
+           q.onload = () => done('read'); q.onerror = () => done('error'); q.send();
+         }});
+         out.script = await new Promise((done) => {{
+           const s = document.createElement('script'); s.src = {target:?};
+           s.onload = () => done('load'); s.onerror = () => done('error'); document.head.appendChild(s);
+         }});
+         return out;"
+    );
+    assert_eq!(
+        app.run_page(contents, &asked, TIMEOUT)["value"],
+        json!({"fetch": "TypeError", "xhr": "error", "script": "error"}),
+        "console: {:?}",
+        app.console()
+    );
+}
+
+#[test]
+fn a_handler_streams_a_megabyte_and_a_reader_that_pauses_stops_its_producer() {
+    let setup = "globalThis.pulls = 0;
+        protocol.handle('app', (req) => {
+          if (new URL(req.url).pathname !== '/big') return globalThis.served(req);
+          let sent = 0;
+          const body = new ReadableStream({ pull(controller) {
+            pulls++;
+            if (sent === 16) return controller.close();
+            controller.enqueue(new Uint8Array(65536).fill(++sent));
+          } });
+          return new Response(body, { headers: { 'content-type': 'application/octet-stream' } });
+        });";
+    let app = site_app(FULL, setup);
+    let contents = bundle(&app);
+    // Read the first chunk and stop: the handler's stream was pulled when it was made, and once
+    // for each of the two chunks the page's stream asked for (it pulls when it is made and again
+    // when the one read empties it), so three times and not sixteen.
+    let first = app.run_page(
+        contents,
+        "globalThis.reader = (await fetch('app://bundle/big')).body.getReader();
+         const first = await reader.read(); return [first.value.length, first.value[0]];",
+        TIMEOUT,
+    );
+    assert_eq!(first["value"], json!([65536, 1]));
+    std::thread::sleep(Duration::from_millis(400));
+    let paused: u32 = app.eval_main("globalThis.pulls").parse().unwrap();
+    assert_eq!(paused, 3, "pulls while the reader waited");
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(app.eval_main("globalThis.pulls"), paused.to_string());
+    // Reading on gets all of it, in order.
+    let rest = app.run_page(
+        contents,
+        "let total = 65536, last = 1;
+         for (;;) { const { value, done } = await reader.read(); if (done) break; total += value.length; last = value[0]; }
+         return [total, last];",
+        TIMEOUT,
+    );
+    assert_eq!(rest["value"], json!([1_048_576, 16]));
+}
+
+#[test]
+fn fetch_of_a_scheme_without_supportfetchapi_rejects_but_xhr_and_page_loads_do_not() {
+    let app = site_app(
+        "{ standard: true, secure: true }",
+        "protocol.handle('app', globalThis.served);",
+    );
+    let contents = bundle(&app);
+    let done = |app: &App| app.eval_renderer(contents, "window.fromScript") == r#""ran""#;
+    assert!(app.run_until(done, TIMEOUT), "console: {:?}", app.console());
+    let tried = app.run_page(
+        contents,
+        "let fetched; try { await fetch('./data.json'); fetched = 'ok'; } catch (e) { fetched = String(e); }
+         const xhr = await new Promise((resolve) => { const q = new XMLHttpRequest(); q.open('GET', './data.json');
+           q.onload = () => resolve(q.responseText); q.onerror = () => resolve('xhr error'); q.send(); });
+         return [fetched, xhr];",
+        TIMEOUT,
+    );
+    // `TypeError: Failed to fetch` for `fetch`, the body for XHR (probe3, scheme `nofetch`).
+    assert_eq!(
+        tried["value"],
+        json!(["TypeError: Failed to fetch", r#"{"x":1}"#])
+    );
 }
 
 #[test]
@@ -252,4 +403,26 @@ fn net_fetch_reads_a_file_inside_app_asar_through_the_apps_filesystem() {
         json!([200, "application/json", r#"{"x":1}"#])
     );
     assert_eq!(out["missing"], "net::ERR_FILE_NOT_FOUND");
+}
+
+#[test]
+fn an_xhr_to_a_custom_scheme_works_from_a_standard_page_and_fails_from_one_without_an_origin() {
+    // Electron 39.8.10 (probe3): `std` and `plain` pages read their own scheme with an
+    // XMLHttpRequest; a page of `bare` (not standard, origin `null`) gets an error.
+    let xhr = "return await new Promise((resolve) => { const q = new XMLHttpRequest();
+        q.open('GET', './data.json'); q.onload = () => resolve(q.responseText);
+        q.onerror = () => resolve('error'); q.send(); });";
+    for (privileges, wanted) in [(FULL, r#"{"x":1}"#), ("{ supportFetchAPI: true }", "error")] {
+        let app = site_app(privileges, "protocol.handle('app', globalThis.served);");
+        let contents = bundle(&app);
+        let loaded =
+            |app: &App| app.eval_renderer(contents, "document.readyState") == r#""complete""#;
+        assert!(
+            app.run_until(loaded, TIMEOUT),
+            "console: {:?}",
+            app.console()
+        );
+        let answer = app.run_page(contents, xhr, TIMEOUT);
+        assert_eq!(answer["value"], json!(wanted), "{privileges}");
+    }
 }

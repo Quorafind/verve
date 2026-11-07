@@ -21,7 +21,7 @@ use crate::loader::ElectronLoader;
 use crate::msg::{
     FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
-use crate::renderer_net;
+use crate::renderer_net::{self, RendererNet};
 use crate::{page_script, preload, probe};
 
 /// One page: the runtime its scripts run in, its document, and what it has yet to tell the main
@@ -38,6 +38,8 @@ pub struct RendererGuest {
     prefs: WebPreferences,
     /// What the page's document is loaded through; the other half is the document's.
     loader: ElectronLoader,
+    /// The page's `fetch` of the schemes its session's main process answers.
+    net: Rc<RendererNet>,
     /// The address the page last told the main process of, to see when the page moved within
     /// itself (`location.hash`, `pushState`).
     url: String,
@@ -66,13 +68,12 @@ impl RendererGuest {
         .expect("a page's electron module installs");
         let outbox = api::ipc_renderer::outbox(runtime.context());
         set_up_process(&mut runtime, &outbox);
-        let session = hub.session_for(prefs.partition.as_deref());
-        let privileged = hub.privileged();
+        let network = renderer_net::install(&mut runtime, hub, &prefs, &outbox);
         let loader = ElectronLoader::new(
             hub.overlay(),
             hub.protocol_calls(),
-            session,
-            privileged.clone(),
+            network.session,
+            network.privileged.clone(),
         );
         let document = verve_dom::install(
             &mut runtime,
@@ -82,8 +83,8 @@ impl RendererGuest {
                 // `requestAnimationFrame` on a page nobody draws.
                 frames: FrameClock::Host,
                 dark,
-                standard_schemes: renderer_net::scheme_names(&privileged, |p| p.standard),
-                secure_schemes: renderer_net::scheme_names(&privileged, |p| p.secure),
+                standard_schemes: renderer_net::scheme_names(&network.privileged, |p| p.standard),
+                secure_schemes: renderer_net::scheme_names(&network.privileged, |p| p.secure),
                 ..Options::default()
             },
         )
@@ -96,6 +97,7 @@ impl RendererGuest {
             contents,
             prefs,
             loader,
+            net: network.net,
             url: String::new(),
         }
     }
@@ -128,6 +130,14 @@ impl RendererGuest {
                 self.loader.answer(call, response);
                 self.pump();
             }
+            ToRenderer::ProtocolHead {
+                call,
+                status,
+                status_text,
+                headers,
+            } => self.net.head(call, status, status_text, headers),
+            ToRenderer::ProtocolChunk { call, bytes } => self.net.chunk(call, bytes),
+            ToRenderer::ProtocolEnd { call, error } => self.net.end(call, error),
             ToRenderer::ExecuteJavaScript {
                 call, code, world, ..
             } => {

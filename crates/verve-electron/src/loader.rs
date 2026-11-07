@@ -185,6 +185,11 @@ impl Loader for ElectronLoader {
         matches!(scheme, "file" | "data") || self.session.handles(scheme)
     }
 
+    fn forwards(&self, scheme: &str) -> bool {
+        // A page's `file:` request is checked by `fetch` like a load's, whoever answers it.
+        !matches!(scheme, "data" | "file") && self.session.handles(scheme)
+    }
+
     fn allows_fetch(&self, scheme: &str) -> bool {
         let privileged = self.privileged.iter().find(|p| p.scheme == scheme);
         privileged.map_or(
@@ -285,8 +290,8 @@ mod tests {
         let loader = loader_for(&[], Arc::default());
         assert!(!loader.handles("app"));
         let loader = loader_for(&["app"], Arc::default());
-        assert!(loader.handles("app"));
-        assert!(!loader.allows_fetch("app"));
+        assert!(loader.handles("app") && loader.forwards("app"));
+        assert!(!loader.forwards("file") && !loader.allows_fetch("app"));
         let slot = Rc::new(RefCell::new(None));
         let sink = Rc::clone(&slot);
         let request = LoadRequest {

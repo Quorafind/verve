@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::{SyncSender, TrySendError};
 
-use super::{Cloned, ContentsId};
+use super::{Cloned, ContentsId, NetError, ProtoRequest, SessionId};
 
 /// What the main process asks of a page.
 #[derive(Debug)]
@@ -76,6 +76,25 @@ pub enum ToRenderer {
     },
     /// One of `webContents`' editing methods, done to what the page has selected or focused.
     EditCommand(EditCommand),
+    /// The head of the main process's answer to a [`FromRenderer::Protocol`].
+    ProtocolHead {
+        call: u64,
+        status: u16,
+        status_text: String,
+        headers: Vec<(String, String)>,
+    },
+    /// A piece (at most 64 KiB) of the body of the answer to [`FromRenderer::Protocol`] `call`,
+    /// sent when the page pulled: one read of the handler's body answers a pull, and a read
+    /// longer than 64 KiB is several pieces.
+    ProtocolChunk {
+        call: u64,
+        bytes: Vec<u8>,
+    },
+    /// The end of the answer to [`FromRenderer::Protocol`] `call`: complete, or failed with `error`.
+    ProtocolEnd {
+        call: u64,
+        error: Option<NetError>,
+    },
 }
 
 /// What `webContents` does to the text a page has selected or focused.
@@ -227,6 +246,22 @@ pub enum FromRenderer {
     ZoomChanged(f64),
     /// The page's `contextmenu` event was not prevented: the main process says `'context-menu'`.
     ContextMenu(ContextMenuParams),
+    /// A request of the page's `fetch` for an address the main process answers (a scheme
+    /// `protocol.handle` took, P16). `call` is the kernel's request id; the answer is
+    /// [`ToRenderer::ProtocolHead`], then chunks the page pulls, then [`ToRenderer::ProtocolEnd`].
+    Protocol {
+        call: u64,
+        session: SessionId,
+        request: ProtoRequest,
+    },
+    /// The reader of the answer to [`FromRenderer::Protocol`] `call` wants a chunk.
+    ProtocolPull {
+        call: u64,
+    },
+    /// The page gave up on the answer to [`FromRenderer::Protocol`] `call`.
+    ProtocolCancel {
+        call: u64,
+    },
 }
 
 /// The page's life, in the order `webContents` reports it.
