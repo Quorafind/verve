@@ -378,6 +378,9 @@ fn set_path(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<Js
         return Err(define::error("Failed to set path"));
     }
     state.app.paths.borrow_mut().set(&name, path);
+    if name == "userData" {
+        state.hub.set_user_data(state.app.user_data());
+    }
     Ok(JsValue::undefined())
 }
 

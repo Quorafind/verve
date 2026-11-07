@@ -28,6 +28,8 @@ image = { workspace = true }
 getrandom = "0.3"
 # The single-instance lock's key: a digest of the profile directory.
 sha2 = "0.10"
+# `Set-Cookie` lines read as RFC 6265 says; the jar that stores them is this crate's own.
+cookie = { version = "0.18", default-features = false }
 
 # The Windows API the app object answers from: known folders, the registry, the single-instance
 # mutex and pipe, memory and CPU figures, the user's languages.

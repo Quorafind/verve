@@ -8,10 +8,12 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use super::cookies::CookieStore;
 use super::{Hub, lock};
-use crate::msg::SessionId;
+use crate::api::match_pattern::Patterns;
+use crate::msg::{SessionId, WebRequestStage};
 
 /// What `registerSchemesAsPrivileged` grants a scheme.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,6 +42,11 @@ pub struct Session {
     /// The folder `session.fromPath` named.
     path: Option<PathBuf>,
     state: Mutex<State>,
+    /// The session's cookies, made the first time they are used: where the file is depends on
+    /// `userData`, which the app may still move until then.
+    cookies: OnceLock<Arc<CookieStore>>,
+    /// The filter of the listener each `webRequest` stage has, if it has one.
+    web_request: Mutex<[Option<Patterns>; 8]>,
 }
 
 #[derive(Default)]
@@ -58,6 +65,8 @@ impl Session {
             partition: partition.to_owned(),
             path: None,
             state: Mutex::default(),
+            cookies: OnceLock::new(),
+            web_request: Mutex::default(),
         }
     }
 
@@ -111,6 +120,20 @@ impl Session {
         }
     }
 
+    /// Whether a listener of `stage` wants a request for `url` of the type `kind` (a
+    /// `resourceType` name): the question every request asks, which costs one lock and no message.
+    pub fn web_request_wants(&self, stage: WebRequestStage, url: &url::Url, kind: &str) -> bool {
+        let filters = lock(&self.web_request);
+        filters[stage.index()]
+            .as_ref()
+            .is_some_and(|filter| filter.wants(url, kind))
+    }
+
+    /// Puts a listener's filter in place of the stage's last, or takes it away with `None`.
+    pub fn set_web_request(&self, stage: WebRequestStage, filter: Option<Patterns>) {
+        lock(&self.web_request)[stage.index()] = filter;
+    }
+
     /// The user agent `setUserAgent` gave, if any.
     pub fn user_agent(&self) -> Option<String> {
         lock(&self.state).user_agent.clone()
@@ -130,6 +153,7 @@ pub(super) struct Registry {
     by_path: HashMap<PathBuf, Arc<Session>>,
     next: SessionId,
     privileged: Vec<Privileged>,
+    user_data: Option<PathBuf>,
 }
 
 impl Registry {
@@ -189,6 +213,36 @@ impl Hub {
     /// The schemes `registerSchemesAsPrivileged` named.
     pub fn privileged(&self) -> Vec<Privileged> {
         lock(&self.sessions).privileged.clone()
+    }
+
+    /// Where the app keeps its profile (`userData`), which the sessions' files hang off. The
+    /// main process tells it when the app starts and whenever `app.setPath` moves it.
+    pub fn set_user_data(&self, path: PathBuf) {
+        lock(&self.sessions).user_data = Some(path);
+    }
+
+    /// The cookies of `session`, read from its file the first time.
+    pub fn cookies_of(&self, session: &Session) -> Arc<CookieStore> {
+        let user_data = lock(&self.sessions).user_data.clone();
+        let store = session.cookies.get_or_init(|| {
+            let folder = user_data.and_then(|dir| session.storage_path(&dir));
+            Arc::new(CookieStore::open(
+                folder.map(|dir| dir.join("Cookies.json")),
+            ))
+        });
+        Arc::clone(store)
+    }
+
+    /// The app is ending: the cookies of every session are written if the profile is the app's
+    /// to keep (`keep`), and not touched again either way. An app nobody launched has a scratch
+    /// profile that is removed with it.
+    pub(super) fn end_cookies(&self, keep: bool) {
+        let sessions: Vec<_> = lock(&self.sessions).all().cloned().collect();
+        for session in sessions {
+            if let Some(store) = session.cookies.get() {
+                store.close(keep);
+            }
+        }
     }
 }
 

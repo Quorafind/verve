@@ -52,3 +52,102 @@ pub struct ProtoRequest {
     pub body: Option<Vec<u8>>,
     pub resource_type: ResourceType,
 }
+
+/// The stages of a request `webRequest` has a listener for, in the order a request goes through
+/// them (`onBeforeRequest` … `onErrorOccurred`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WebRequestStage {
+    BeforeRequest,
+    BeforeSendHeaders,
+    SendHeaders,
+    HeadersReceived,
+    ResponseStarted,
+    BeforeRedirect,
+    Completed,
+    ErrorOccurred,
+}
+
+impl WebRequestStage {
+    /// Every stage, in order.
+    pub const ALL: [Self; 8] = [
+        Self::BeforeRequest,
+        Self::BeforeSendHeaders,
+        Self::SendHeaders,
+        Self::HeadersReceived,
+        Self::ResponseStarted,
+        Self::BeforeRedirect,
+        Self::Completed,
+        Self::ErrorOccurred,
+    ];
+
+    /// The stage's place in [`WebRequestStage::ALL`].
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The name of the method that sets its listener.
+    pub fn method(self) -> &'static str {
+        match self {
+            Self::BeforeRequest => "onBeforeRequest",
+            Self::BeforeSendHeaders => "onBeforeSendHeaders",
+            Self::SendHeaders => "onSendHeaders",
+            Self::HeadersReceived => "onHeadersReceived",
+            Self::ResponseStarted => "onResponseStarted",
+            Self::BeforeRedirect => "onBeforeRedirect",
+            Self::Completed => "onCompleted",
+            Self::ErrorOccurred => "onErrorOccurred",
+        }
+    }
+
+    /// Whether the request waits for the listener's callback.
+    pub fn blocks(self) -> bool {
+        matches!(
+            self,
+            Self::BeforeRequest | Self::BeforeSendHeaders | Self::HeadersReceived
+        )
+    }
+}
+
+/// A response as a listener is told of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WebResponse {
+    pub status: u16,
+    /// `HTTP/1.1 200 OK`.
+    pub status_line: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// What a `webRequest` listener is told of a request: the fields of `details`, which the main
+/// process turns into the object the listener gets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WebRequestDetails {
+    pub id: u64,
+    pub url: String,
+    pub method: String,
+    pub resource_type: ResourceType,
+    /// The page the request is made from; empty for the main process's own.
+    pub referrer: String,
+    /// Milliseconds since the Unix epoch.
+    pub timestamp: f64,
+    /// The request's body.
+    pub upload: Option<Vec<u8>>,
+    /// `requestHeaders`, for the stages that have them.
+    pub request_headers: Option<Vec<(String, String)>>,
+    pub response: Option<WebResponse>,
+    /// `ip`, when the address is one the request names.
+    pub ip: Option<String>,
+    /// `redirectURL`, for the stages that have it.
+    pub redirect_url: Option<String>,
+    /// `error`, for `onCompleted` (`net::OK`) and `onErrorOccurred`.
+    pub error: Option<String>,
+}
+
+/// What a listener's callback said: the fields of `callback({ ... })`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WebRequestReply {
+    pub cancel: bool,
+    pub redirect_url: Option<String>,
+    pub request_headers: Option<Vec<(String, String)>>,
+    pub response_headers: Option<Vec<(String, String)>>,
+    pub status_line: Option<String>,
+}

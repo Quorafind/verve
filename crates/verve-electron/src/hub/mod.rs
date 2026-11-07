@@ -21,6 +21,7 @@ use crate::launcher::Start;
 use crate::msg::{AppEvent, Display, FromShell, PageEvent, ToShell};
 use crate::{ElectronOptions, MainGuest};
 
+pub mod cookies;
 mod records;
 mod renderers;
 mod sessions;
@@ -271,6 +272,7 @@ impl Hub {
         for page in pages {
             stop(&page);
         }
+        self.end_cookies(self.told.load(Ordering::SeqCst));
         self.to_shell(ToShell::Quit { exit_code });
     }
 

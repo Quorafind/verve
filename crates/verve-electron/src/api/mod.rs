@@ -132,6 +132,7 @@ pub fn install(runtime: &mut verve::Runtime, hub: Arc<Hub>) {
 /// [`install`], answering what the API keeps.
 pub(crate) fn install_state(runtime: &mut verve::Runtime, hub: Arc<Hub>) -> Rc<MainState> {
     let state = MainState::new(Arc::clone(&hub), app::AppState::new(&hub.launch()));
+    hub.set_user_data(state.app.user_data());
     runtime.context().insert_data(Rc::clone(&state));
     runtime.define_builtin_lazy("electron", main_module);
     state

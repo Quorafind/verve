@@ -3,7 +3,10 @@
 
 use std::sync::mpsc::{SyncSender, TrySendError};
 
-use super::{Cloned, ContentsId, NetError, ProtoRequest, SessionId};
+use super::{
+    Cloned, ContentsId, CookieChange, NetError, ProtoRequest, SessionId, WebRequestDetails,
+    WebRequestReply, WebRequestStage,
+};
 
 /// What the main process asks of a page.
 #[derive(Debug)]
@@ -94,6 +97,11 @@ pub enum ToRenderer {
     ProtocolEnd {
         call: u64,
         error: Option<NetError>,
+    },
+    /// What the listener of a [`FromRenderer::WebRequest`] `call` answered (P16).
+    WebRequestReply {
+        call: u64,
+        reply: WebRequestReply,
     },
 }
 
@@ -261,6 +269,26 @@ pub enum FromRenderer {
     /// The page gave up on the answer to [`FromRenderer::Protocol`] `call`.
     ProtocolCancel {
         call: u64,
+    },
+    /// The page is about to load another document: whatever it asked of the main process for the
+    /// last one is of no use now, and the main process stops producing it.
+    Navigating,
+    /// Cookies of the session changed in the page's thread (a `Set-Cookie` of a response, a
+    /// `document.cookie`), for `cookies.on('changed')`. Sent only once a script has asked for
+    /// the session's `cookies`.
+    Cookies {
+        session: SessionId,
+        changes: Vec<CookieChange>,
+    },
+    /// A request of the page that a `webRequest` listener of its session wants to see (P16).
+    /// For a stage that blocks (`BeforeRequest`, `BeforeSendHeaders`, `HeadersReceived`) the
+    /// request waits for [`ToRenderer::WebRequestReply`] `call`; the other stages have `call`
+    /// `0` and are not answered.
+    WebRequest {
+        call: u64,
+        session: SessionId,
+        stage: WebRequestStage,
+        details: Box<WebRequestDetails>,
     },
 }
 
