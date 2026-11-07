@@ -522,6 +522,19 @@ impl Document {
     }
 
     fn document_arrived(&self, result: LoadResult) {
+        if is_attachment(&result.headers) && result.body.is_ok() {
+            // The browser saves what it is told to save and shows nothing: the load fails, and
+            // the embedder is asked to download the address.
+            let url = result.url.to_string();
+            self.state
+                .borrow_mut()
+                .requests
+                .push(crate::Request::Download {
+                    url: url.clone(),
+                    filename: None,
+                });
+            return self.fail(&url, -2, "ERR_FAILED");
+        }
         match result.body {
             Err(error) => self.fail(result.url.as_str(), error.code, &error.description),
             Ok(bytes) => {
@@ -701,5 +714,30 @@ impl Document {
         script::fire_on_window(context, "pageshow");
         self.state.borrow_mut().load.events.push(LoadEvent::Loaded);
         true
+    }
+}
+
+/// Whether a response says it is to be saved, not shown (`Content-Disposition: attachment`).
+pub(crate) fn is_attachment(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-disposition")
+            && value
+                .trim_start()
+                .get(..10)
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("attachment"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_attachment;
+
+    #[test]
+    fn only_an_attachment_disposition_is_saved() {
+        let header = |value: &str| vec![("Content-Disposition".to_owned(), value.to_owned())];
+        assert!(is_attachment(&header("attachment; filename=\"a.txt\"")));
+        assert!(is_attachment(&header("Attachment")));
+        assert!(!is_attachment(&header("inline")));
+        assert!(!is_attachment(&[]));
     }
 }

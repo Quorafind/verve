@@ -89,6 +89,13 @@ pub enum Request {
     },
     /// `location.reload()`.
     Reload,
+    /// Save what is at `url` instead of showing it: a link with a `download` attribute was
+    /// pressed (`filename` is the attribute's value, if it has one), or a document came with
+    /// `Content-Disposition: attachment`, in which case the load failed with `ERR_FAILED`.
+    Download {
+        url: String,
+        filename: Option<String>,
+    },
     /// `window.open(url, name, features)`, the address resolved.
     Open {
         url: String,

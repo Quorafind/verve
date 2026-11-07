@@ -878,7 +878,15 @@ pub fn click(
                 .unwrap_or(href);
             let target =
                 read_dom(context, |dom| dom.get_attr(activator, "target")).unwrap_or_default();
-            if super::window::opens_elsewhere(&target) {
+            let download = read_dom(context, |dom| dom.get_attr(activator, "download"));
+            if let Some(name) = download {
+                let filename = (!name.is_empty()).then_some(name);
+                let request = crate::Request::Download {
+                    url: resolved,
+                    filename,
+                };
+                shared(context).borrow_mut().requests.push(request);
+            } else if super::window::opens_elsewhere(&target) {
                 super::window::open_window(context, &resolved, &target)?;
             } else {
                 super::window::navigate(context, &resolved, false)?;
