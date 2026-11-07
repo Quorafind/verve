@@ -10,14 +10,22 @@ use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use verve_dom::canvas::{ImageBytes, decode, unpremultiply};
-use verve_layout::{DisplayList, Fill, ImageFrames, ImageKey, ImageTable, PaintItem, key_for_url};
+use verve_dom::canvas::{CanvasFrame, ImageBytes, decode, is_svg, unpremultiply};
+use verve_dom::{NodeId, Rect};
+use verve_layout::{
+    DisplayList, Fill, ImageFrames, ImageKey, ImageTable, PaintItem, canvas_key, key_for_url,
+};
+
+use crate::page_frames::{animated, frame_at};
 
 /// Pictures with more pixels than this are not decoded: their pixels alone would take 256 MiB
 /// of RAM as BGRA.
 const MOST_PIXELS: u64 = 64 << 20;
+
+/// How long the list is still before the pictures far from the window are let go of.
+const RELEASE_AFTER: Duration = Duration::from_secs(1);
 
 /// How many bytes of decoded pixels are kept for pictures the display list does not name now
 /// (hidden, or swapped by a `:hover`), so that showing them again is not blank. The least
@@ -61,6 +69,22 @@ pub(crate) struct PageImages {
     sent: HashMap<ImageKey, usize>,
     inflight: HashSet<ImageKey>,
     decoded: HashMap<ImageKey, Arc<ImageFrames>>,
+    /// The SVG pictures the document holds, as text for the shell to draw at its own scale.
+    vectors: HashMap<ImageKey, Arc<[u8]>>,
+    /// The surfaces of the canvases the list names, at the generation it names.
+    surfaces: HashMap<ImageKey, Arc<ImageFrames>>,
+    /// When each animated picture the list names first appeared.
+    clocks: HashMap<ImageKey, Instant>,
+    /// Since when the window has not been drawn: animations stand still, and pick up where
+    /// they were when it is.
+    hidden: Option<Instant>,
+    /// The list the frames were written into, the list it was made from and the frames.
+    patched: Option<Patched>,
+    /// Every picture the current list draws, near the window or not.
+    listed: HashSet<ImageKey>,
+    /// When the list last changed: the pictures it draws far from the window are let go of once it
+    /// has been still for [`RELEASE_AFTER`].
+    list_changed: Instant,
     /// When (by `clock`) each decoded key stopped being named.
     idle: HashMap<ImageKey, u64>,
     clock: u64,
@@ -79,6 +103,13 @@ impl PageImages {
             sent: HashMap::new(),
             inflight: HashSet::new(),
             decoded: HashMap::new(),
+            vectors: HashMap::new(),
+            surfaces: HashMap::new(),
+            clocks: HashMap::new(),
+            patched: None,
+            hidden: None,
+            listed: HashSet::new(),
+            list_changed: Instant::now(),
             idle: HashMap::new(),
             clock: 0,
             published: Arc::new(ImageTable::default()),
@@ -101,10 +132,18 @@ impl PageImages {
     /// Takes in what the decoder finished, hands it the pictures of `held` that `list` names and
     /// it has not seen (or has seen other bytes of), and drops the ones nothing names or holds.
     /// `list` is given when it is not the one last given.
-    pub(crate) fn sync(&mut self, held: &HashMap<String, ImageBytes>, list: Option<&DisplayList>) {
+    pub(crate) fn sync(
+        &mut self,
+        held: &HashMap<String, ImageBytes>,
+        canvases: &HashMap<NodeId, CanvasFrame>,
+        (list, viewport): (Option<&DisplayList>, (f32, f32)),
+    ) {
         if let Some(list) = list {
-            self.named = names_in(list);
+            self.named = names_in(list, viewport);
+            self.listed = names_in(list, (0., 0.));
+            self.list_changed = Instant::now();
         }
+        self.sync_surfaces(canvases);
         self.receive();
         let mut live = HashSet::with_capacity(held.len());
         let mut keys = HashSet::with_capacity(held.len());
@@ -117,7 +156,15 @@ impl PageImages {
             });
             let key = known.key;
             keys.insert(key);
-            if self.named.contains(&key) && self.sent.get(&key) != Some(&version) {
+            if self.named.contains(&key)
+                && self.sent.get(&key) != Some(&version)
+                && is_svg(&image.bytes)
+            {
+                // A drawing is rasterised by the shell, at the size it draws it.
+                self.vectors.insert(key, Arc::clone(&image.bytes));
+                self.sent.insert(key, version);
+                self.changed = true;
+            } else if self.named.contains(&key) && self.sent.get(&key) != Some(&version) {
                 let job = Job {
                     key,
                     version,
@@ -134,8 +181,9 @@ impl PageImages {
         // What the document no longer holds goes; what it holds but nothing names stays, within
         // a budget, for the next time a list names it.
         self.sent.retain(|key, _| keys.contains(key));
-        let before = self.decoded.len();
+        let before = self.decoded.len() + self.vectors.len();
         self.decoded.retain(|key, _| keys.contains(key));
+        self.vectors.retain(|key, _| keys.contains(key));
         self.clock += 1;
         for key in self.decoded.keys() {
             if self.named.contains(key) {
@@ -145,8 +193,64 @@ impl PageImages {
             }
         }
         self.idle.retain(|key, _| self.decoded.contains_key(key));
+        self.release_far();
         self.trim_idle();
-        self.changed |= self.decoded.len() != before;
+        self.changed |= self.decoded.len() + self.vectors.len() != before;
+    }
+
+    /// Gives the table the pixels of the canvases the list names, at the generation it names, and
+    /// lets go of every other generation.
+    fn sync_surfaces(&mut self, canvases: &HashMap<NodeId, CanvasFrame>) {
+        let mut live = HashSet::new();
+        for (node, frame) in canvases {
+            let key = canvas_key(*node, frame.generation);
+            if !self.named.contains(&key) {
+                continue;
+            }
+            live.insert(key);
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.surfaces.entry(key) {
+                slot.insert(Arc::new(surface(frame)));
+                self.changed = true;
+            }
+        }
+        let before = self.surfaces.len();
+        self.surfaces.retain(|key, _| live.contains(key));
+        self.changed |= self.surfaces.len() != before;
+    }
+
+    /// Lets go of the pixels of the pictures the list draws but not near the window, once the list
+    /// has been still for [`RELEASE_AFTER`]: a page that was scrolled away from its pictures gives
+    /// their memory back. (A picture the list does not draw at all, hidden or swapped by a
+    /// `:hover`, is kept in the idle budget instead.)
+    fn release_far(&mut self) {
+        if self.list_changed.elapsed() < RELEASE_AFTER {
+            return;
+        }
+        let far: Vec<ImageKey> = self
+            .decoded
+            .keys()
+            .filter(|key| self.listed.contains(key) && !self.named.contains(key))
+            .copied()
+            .collect();
+        for key in far {
+            self.decoded.remove(&key);
+            self.sent.remove(&key);
+            self.idle.remove(&key);
+            self.changed = true;
+        }
+    }
+
+    /// How long until the far pictures are let go of, if there are any to be.
+    pub(crate) fn next_release(&self) -> Option<Duration> {
+        let any = self
+            .decoded
+            .keys()
+            .any(|key| self.listed.contains(key) && !self.named.contains(key));
+        any.then(|| {
+            RELEASE_AFTER
+                .saturating_sub(self.list_changed.elapsed())
+                .max(Duration::from_millis(1))
+        })
     }
 
     /// Drops the pixels of the longest unnamed pictures until the unnamed ones fit the budget.
@@ -267,24 +371,135 @@ impl PageImages {
     pub(crate) fn table(&mut self) -> (Arc<ImageTable>, bool) {
         let changed = std::mem::take(&mut self.changed);
         if changed {
-            self.published = Arc::new(ImageTable::new(self.decoded.clone()));
+            let mut pictures = self.decoded.clone();
+            pictures.extend(self.surfaces.iter().map(|(key, s)| (*key, Arc::clone(s))));
+            self.published = Arc::new(ImageTable::new(pictures).with_vectors(self.vectors.clone()));
         }
         (Arc::clone(&self.published), changed)
     }
 }
 
-/// The keys of the pictures `list` draws.
-fn names_in(list: &DisplayList) -> HashSet<ImageKey> {
-    let mut named = HashSet::new();
-    for item in &list.items {
-        match item {
-            PaintItem::Image { image, .. } => {
-                named.insert(*image);
-            }
-            PaintItem::Box { background, .. } => {
-                named.extend(background.iter().filter_map(picture_of));
+/// The frames of the animated pictures the list names, written into it, and whether that is not
+/// the list handed out last. `base` is the list the layout made.
+struct Patched {
+    base: u64,
+    frames: HashMap<ImageKey, u32>,
+    list: Arc<DisplayList>,
+}
+
+impl PageImages {
+    /// The list to show at `now`: `base` with the frame of every animated picture in it set to
+    /// the one that is on show, and whether it is another list than the last one handed out. A
+    /// picture that is not named is not timed, and starts again from its first frame when it is.
+    pub(crate) fn animate(
+        &mut self,
+        base: &Arc<DisplayList>,
+        now: Instant,
+    ) -> (Arc<DisplayList>, bool) {
+        let now = self.hidden.unwrap_or(now);
+        let mut frames = HashMap::new();
+        let table = &self.decoded;
+        let named = &self.named;
+        // A clock outlives the picture's being near the window: a finite animation scrolled away
+        // and back is where it was, not at its first frame again.
+        let listed = &self.listed;
+        self.clocks.retain(|key, _| listed.contains(key));
+        for key in named {
+            let Some(picture) = table.get(key).filter(|p| p.frames.len() > 1) else {
+                continue;
+            };
+            let start = *self.clocks.entry(*key).or_insert(now);
+            frames.insert(*key, frame_at(picture, now - start).0);
+        }
+        if frames.is_empty() {
+            let was = self.patched.take().is_some();
+            return (Arc::clone(base), was);
+        }
+        if let Some(last) = &self.patched
+            && last.base == base.revision
+            && last.frames == frames
+        {
+            return (Arc::clone(&last.list), false);
+        }
+        let list = Arc::new(base.with_frames(&frames));
+        self.patched = Some(Patched {
+            base: base.revision,
+            frames,
+            list: Arc::clone(&list),
+        });
+        (list, true)
+    }
+
+    /// The window is not drawn (`hidden`) or is again: the animations do not move while it is
+    /// not, and go on from the frame they stopped on.
+    pub(crate) fn set_hidden(&mut self, hidden: bool, now: Instant) {
+        match (hidden, self.hidden) {
+            (true, None) => self.hidden = Some(now),
+            (false, Some(since)) => {
+                for start in self.clocks.values_mut() {
+                    *start += now - since;
+                }
+                self.hidden = None;
             }
             _ => {}
+        }
+    }
+
+    /// How long until an animated picture on show changes its frame; nothing while the window is
+    /// not drawn.
+    pub(crate) fn next_frame(&self, now: Instant) -> Option<Duration> {
+        if self.hidden.is_some() {
+            return None;
+        }
+        self.clocks
+            .iter()
+            .filter(|(key, _)| self.named.contains(key))
+            .filter_map(|(key, start)| {
+                let picture = self.decoded.get(key)?;
+                frame_at(picture, now - *start).1
+            })
+            .min()
+    }
+}
+
+/// The pixels of a canvas as the shell draws them: straight-alpha BGRA.
+fn surface(frame: &CanvasFrame) -> ImageFrames {
+    let mut pixels = frame.pixels.to_vec();
+    unpremultiply(&mut pixels);
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    ImageFrames {
+        width: frame.width,
+        height: frame.height,
+        frames: vec![(Arc::from(pixels), Duration::ZERO)],
+        loops: 1,
+    }
+}
+
+/// The keys of the pictures `list` draws within a viewport of `viewport` of the window (a viewport
+/// above it and one below, as many to either side): a page of hundreds of pictures decodes the
+/// few that are in or about to come into view. A viewport of nothing names them all.
+fn names_in(list: &DisplayList, viewport: (f32, f32)) -> HashSet<ImageKey> {
+    let mut named = HashSet::new();
+    let near = (viewport.0 > 0. && viewport.1 > 0.)
+        .then(|| Rect::new(-viewport.0, -viewport.1, viewport.0 * 3., viewport.1 * 3.));
+    for placed in list.placed(&|_| None) {
+        let (bounds, keys): (Rect, Vec<ImageKey>) = match placed.item {
+            PaintItem::Image { image, bounds, .. } => (*bounds, vec![*image]),
+            PaintItem::Box {
+                background, bounds, ..
+            } => (*bounds, background.iter().filter_map(picture_of).collect()),
+            _ => continue,
+        };
+        let at = Rect::new(
+            bounds.x - placed.shift[0],
+            bounds.y - placed.shift[1],
+            bounds.width,
+            bounds.height,
+        );
+        if near.is_none_or(|near| near.intersection(&at).is_some()) {
+            named.extend(keys);
         }
     }
     named
@@ -301,6 +516,9 @@ fn picture_of(fill: &Fill) -> Option<ImageKey> {
 fn still(job: &Job) -> Option<ImageFrames> {
     if u64::from(job.natural.0) * u64::from(job.natural.1) > MOST_PIXELS {
         return None;
+    }
+    if let Some(frames) = animated(&job.bytes) {
+        return Some(frames);
     }
     let image = decode(&job.bytes, job.mime.as_deref()).ok()?;
     let mut pixels = image.pixels.to_vec();
@@ -357,13 +575,13 @@ mod tests {
     }
 
     fn settle(images: &mut PageImages, page: &HashMap<String, ImageBytes>, list: &DisplayList) {
-        images.sync(page, Some(list));
+        images.sync(page, &HashMap::new(), (Some(list), (0., 0.)));
         for _ in 0..500 {
             if images.pending() == 0 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
-            images.sync(page, None);
+            images.sync(page, &HashMap::new(), (None, (0., 0.)));
         }
     }
 
@@ -379,7 +597,7 @@ mod tests {
         // Red and opaque, as BGRA.
         assert_eq!(&*frames.frames[0].0, &[0, 0, 255, 255]);
         assert!(!images.table().1);
-        images.sync(&HashMap::new(), None);
+        images.sync(&HashMap::new(), &HashMap::new(), (None, (0., 0.)));
         let (table, changed) = images.table();
         assert!(changed && table.is_empty());
     }
@@ -395,13 +613,17 @@ mod tests {
         assert!(table.get(key_for_url("http://h/unused.png")).is_none());
         // A list that names nothing keeps the pixels the document still holds bytes for (the
         // picture may be shown again); naming it again needs no new decoding.
-        images.sync(&page, Some(&list_naming(&[])));
+        images.sync(&page, &HashMap::new(), (Some(&list_naming(&[])), (0., 0.)));
         assert_eq!(images.table().0.len(), 1);
-        images.sync(&page, Some(&list_naming(&["http://h/red.png"])));
+        images.sync(
+            &page,
+            &HashMap::new(),
+            (Some(&list_naming(&["http://h/red.png"])), (0., 0.)),
+        );
         assert_eq!(images.pending(), 0);
         assert_eq!(images.table().0.len(), 1);
         // What the document lets go of leaves the table.
-        images.sync(&HashMap::new(), None);
+        images.sync(&HashMap::new(), &HashMap::new(), (None, (0., 0.)));
         assert!(images.table().0.is_empty());
     }
 
@@ -412,15 +634,19 @@ mod tests {
         settle(&mut images, &page, &list_naming(&["http://h/a.png"]));
         images.table();
         // Not named for a while: the pixels stay, as long as the document holds the bytes.
-        images.sync(&page, Some(&list_naming(&[])));
+        images.sync(&page, &HashMap::new(), (Some(&list_naming(&[])), (0., 0.)));
         let (table, changed) = images.table();
         assert!(!changed && table.len() == 1);
         // Named again: it is there at once, with nothing decoded again.
-        images.sync(&page, Some(&list_naming(&["http://h/a.png"])));
+        images.sync(
+            &page,
+            &HashMap::new(),
+            (Some(&list_naming(&["http://h/a.png"])), (0., 0.)),
+        );
         assert_eq!(images.pending(), 0);
         assert_eq!(images.table().0.len(), 1);
         // The document letting go of the bytes is what frees them.
-        images.sync(&HashMap::new(), None);
+        images.sync(&HashMap::new(), &HashMap::new(), (None, (0., 0.)));
         assert!(images.table().0.is_empty());
     }
 
@@ -435,7 +661,11 @@ mod tests {
         images.done = Some(done);
         images.inflight.insert(key);
         images.sent.insert(key, 1);
-        images.sync(&page, Some(&list_naming(&["http://h/a.png"])));
+        images.sync(
+            &page,
+            &HashMap::new(),
+            (Some(&list_naming(&["http://h/a.png"])), (0., 0.)),
+        );
         // The picture is asked again of a new thread, and decoded.
         settle(&mut images, &page, &list_naming(&["http://h/a.png"]));
         assert_eq!(images.pending(), 0);
@@ -470,5 +700,65 @@ mod tests {
         let page = held("http://h/bad.png", b"not a picture");
         settle(&mut images, &page, &list_naming(&["http://h/bad.png"]));
         assert!(images.table().0.is_empty());
+    }
+
+    #[test]
+    fn only_the_pictures_within_a_viewport_of_the_window_are_named() {
+        let mut list = list_naming(&["http://h/near.png", "http://h/far.png"]);
+        if let PaintItem::Image { bounds, .. } = &mut list.items[1] {
+            *bounds = verve_dom::Rect::new(0., 10_000., 1., 1.);
+        }
+        let named = names_in(&list, (100., 100.));
+        assert!(named.contains(&key_for_url("http://h/near.png")));
+        assert!(!named.contains(&key_for_url("http://h/far.png")));
+        assert_eq!(names_in(&list, (0., 0.)).len(), 2);
+    }
+
+    #[test]
+    fn an_animation_stands_still_while_the_window_is_not_drawn_and_goes_on_after() {
+        let mut images = PageImages::new();
+        let key = ImageKey(1);
+        let frame = |ms| (Arc::<[u8]>::from(vec![0u8; 4]), Duration::from_millis(ms));
+        images.decoded.insert(
+            key,
+            Arc::new(ImageFrames {
+                width: 1,
+                height: 1,
+                frames: vec![frame(100), frame(100)],
+                loops: 0,
+            }),
+        );
+        let start = Instant::now();
+        images.clocks.insert(key, start);
+        images.named.insert(key);
+        assert!(images.next_frame(start).is_some());
+        images.set_hidden(true, start + Duration::from_millis(50));
+        assert!(images.next_frame(start + Duration::from_secs(9)).is_none());
+        // Shown again nine seconds on: it is 50 ms into its first frame still.
+        let later = start + Duration::from_secs(9);
+        images.set_hidden(false, later);
+        assert_eq!(images.next_frame(later), Some(Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn pictures_far_from_the_window_are_let_go_of_once_the_list_is_still() {
+        let mut images = PageImages::new();
+        let page = held("http://h/far.png", RED);
+        let mut list = list_naming(&["http://h/far.png"]);
+        // Near the window while it is named, and decoded.
+        settle(&mut images, &page, &list);
+        assert_eq!(images.table().0.len(), 1);
+        // Scrolled away: in the list, not named. Kept while the list is changing, then let go.
+        if let PaintItem::Image { bounds, .. } = &mut list.items[0] {
+            *bounds = verve_dom::Rect::new(0., 10_000., 1., 1.);
+        }
+        images.sync(&page, &HashMap::new(), (Some(&list), (100., 100.)));
+        assert_eq!(images.table().0.len(), 1);
+        assert!(images.next_release().is_some());
+        images.list_changed = Instant::now() - RELEASE_AFTER;
+        images.sync(&page, &HashMap::new(), (None, (100., 100.)));
+        let (table, changed) = images.table();
+        assert!(changed && table.is_empty());
+        assert!(images.next_release().is_none());
     }
 }

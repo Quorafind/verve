@@ -59,8 +59,10 @@ impl Document {
         state.images.retain_referenced();
     }
 
-    /// Hands the drawer the canvases painted since the last frame, as changes of their nodes.
-    pub(crate) fn commit_canvases(&self) {
+    /// Hands the drawer the canvases painted since the last frame, as changes of their nodes. A
+    /// drawer that lays the page out itself calls it before the layout, so that a canvas redrawn
+    /// by a task is laid out with its new surface.
+    pub fn commit_canvases(&self) {
         let committed = crate::canvas::commit(&mut self.state.borrow_mut());
         let state = self.state.borrow();
         let mut view = self.view.borrow_mut();
