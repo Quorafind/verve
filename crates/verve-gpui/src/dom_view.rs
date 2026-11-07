@@ -15,7 +15,7 @@ use std::sync::Arc;
 use gpui::{Context, IntoElement, ParentElement, Render, Rgba, Styled, Window, div, rgb};
 use verve_dom::NodeId;
 use verve_electron::msg::ToRendererInput;
-use verve_layout::DisplayList;
+use verve_layout::{DisplayList, ImageTable};
 
 use crate::app_region::{self, AppRegion};
 use crate::dom_element::DomElement;
@@ -41,6 +41,8 @@ pub(crate) struct DomState {
     /// made for.
     plan: Option<(Arc<DisplayList>, u64, Rc<Plan>)>,
     pub pictures: Pictures,
+    /// What the page has decoded.
+    pub images: Arc<ImageTable>,
     /// How big the page was drawn, in CSS pixels.
     pub viewport: (f32, f32),
     pub tell: Option<Tell>,
@@ -151,6 +153,23 @@ impl DomView {
         }
         state.list = Some(list);
         Shown::New
+    }
+
+    /// Draws the pictures in `table` from the next frame on. Answers whether it is not the table
+    /// already shown.
+    pub fn show_images(&mut self, table: Arc<ImageTable>) -> bool {
+        let mut state = self.state.borrow_mut();
+        if Arc::ptr_eq(&state.images, &table) {
+            return false;
+        }
+        state.images = Arc::clone(&table);
+        state.pictures.set_table(table);
+        true
+    }
+
+    /// The pictures the window draws.
+    pub fn images(&self) -> Arc<ImageTable> {
+        Arc::clone(&self.state.borrow().images)
     }
 
     /// The list the window draws.

@@ -293,14 +293,14 @@ impl Shell {
     /// Hands each window what its page published since the last turn.
     fn draw(&mut self, cx: &mut AsyncApp) {
         for window in self.windows.values() {
-            let Some(list) = self
-                .hub
-                .renderer_view(window.contents)
-                .and_then(|view| view.display_list)
-            else {
+            let Some(view) = self.hub.renderer_view(window.contents) else {
                 continue;
             };
-            window.show_list(list, cx);
+            // The pictures first: the list that names them is drawn with them.
+            window.show_images(view.images, cx);
+            if let Some(list) = view.display_list {
+                window.show_list(list, cx);
+            }
         }
     }
 }

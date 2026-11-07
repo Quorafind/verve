@@ -7,6 +7,7 @@
 //! left out and a dashed border is solid.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
@@ -16,7 +17,7 @@ use tiny_skia::{
 };
 use verve_dom::canvas::{blur_pixels, unpremultiply};
 use verve_dom::{NodeId, Rect};
-use verve_layout::{DisplayList, ImageKey, Rgba, gradient_line};
+use verve_layout::{DisplayList, ImageKey, ImageTable, Rgba, gradient_line};
 
 use crate::plan::{self, Command, Paint as Fill, Shape};
 use crate::raster;
@@ -25,6 +26,17 @@ use crate::raster;
 /// the containers scrolled to the offsets the list holds except where `offset_of` says otherwise.
 pub fn render(
     list: &DisplayList,
+    size: (u32, u32),
+    background: Option<Rgba>,
+    offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>,
+) -> Option<Pixmap> {
+    render_with(list, &ImageTable::default(), size, background, offset_of)
+}
+
+/// [`render`] with the pictures the page has decoded.
+pub fn render_with(
+    list: &DisplayList,
+    images: &ImageTable,
     (width, height): (u32, u32),
     background: Option<Rgba>,
     offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>,
@@ -36,6 +48,8 @@ pub fn render(
     let mut painter = Painter {
         picture,
         list,
+        images,
+        pages: Vec::new(),
         rasters: Vec::new(),
         mask: None,
     };
@@ -48,10 +62,12 @@ pub fn render(
 /// [`render`] as PNG bytes, with the list's own scroll offsets.
 pub fn png(
     list: &DisplayList,
+    images: &ImageTable,
     size: (u32, u32),
     background: Option<Rgba>,
 ) -> Result<Vec<u8>, String> {
-    let picture = render(list, size, background, &|_| None).ok_or("the picture has no size")?;
+    let picture =
+        render_with(list, images, size, background, &|_| None).ok_or("the picture has no size")?;
     let (width, height) = (picture.width(), picture.height());
     // The picture is premultiplied; a PNG is straight.
     let mut pixels = picture.take();
@@ -67,16 +83,20 @@ pub fn png(
 pub fn write(
     path: &Path,
     list: &DisplayList,
+    images: &ImageTable,
     size: (u32, u32),
     background: Option<Rgba>,
 ) -> Result<(), String> {
-    let bytes = png(list, size, background)?;
+    let bytes = png(list, images, size, background)?;
     std::fs::write(path, bytes).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 struct Painter<'a> {
     picture: Pixmap,
     list: &'a DisplayList,
+    images: &'a ImageTable,
+    /// The page's pictures made into pixmaps so far, by key and frame.
+    pages: Vec<((ImageKey, u32), Arc<Pixmap>)>,
     /// The gradients rasterised so far.
     rasters: Vec<(ImageKey, Pixmap)>,
     /// The mask of the clip the last shape was drawn under.
@@ -139,7 +159,87 @@ impl Painter<'_> {
                 }
             }
             Shape::Glyphs { .. } => {}
+            Shape::Picture {
+                bounds,
+                visible,
+                radii,
+                image,
+                frame,
+                alpha,
+            } => self.page_picture(
+                *bounds,
+                *visible,
+                *radii,
+                (*image, *frame, *alpha),
+                mask.as_ref(),
+            ),
         }
+    }
+
+    /// A picture the page loaded, the whole of it stretched over `bounds` and cut to `visible`.
+    fn page_picture(
+        &mut self,
+        bounds: Rect,
+        visible: Rect,
+        radii: [f32; 4],
+        (key, frame, alpha): (ImageKey, u32, f32),
+        mask: Option<&Mask>,
+    ) {
+        let Some(pixmap) = self.page_pixmap(key, frame) else {
+            return;
+        };
+        // Only where the picture is: GPUI draws the part of `visible` inside `bounds`, and the
+        // pad of the pattern must not stretch the picture's edge pixels into the rest.
+        let Some(shown) = visible.intersection(&bounds) else {
+            return;
+        };
+        let (Some(path), true) = (rounded(shown, radii), pixmap.width() > 0) else {
+            return;
+        };
+        let paint = Paint {
+            shader: Pattern::new(
+                Pixmap::as_ref(&pixmap),
+                SpreadMode::Pad,
+                FilterQuality::Bilinear,
+                alpha,
+                Transform::from_row(
+                    bounds.width / pixmap.width() as f32,
+                    0.,
+                    0.,
+                    bounds.height / pixmap.height() as f32,
+                    bounds.x,
+                    bounds.y,
+                ),
+            ),
+            anti_alias: true,
+            ..Paint::default()
+        };
+        self.picture.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            mask,
+        );
+    }
+
+    /// The frame of a page picture as a premultiplied pixmap, made once.
+    fn page_pixmap(&mut self, key: ImageKey, frame: u32) -> Option<Arc<Pixmap>> {
+        if let Some((_, pixmap)) = self.pages.iter().find(|(seen, _)| *seen == (key, frame)) {
+            return Some(Arc::clone(pixmap));
+        }
+        let frames = self.images.get(key)?;
+        let (bytes, _) = frames.frames.get(frame as usize)?;
+        // The table is straight-alpha BGRA; tiny-skia wants premultiplied RGBA.
+        let mut rgba = bytes.to_vec();
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        verve_dom::canvas::premultiply(&mut rgba);
+        let size = tiny_skia::IntSize::from_wh(frames.width, frames.height)?;
+        let pixmap = Arc::new(Pixmap::from_vec(rgba, size)?);
+        self.pages.push(((key, frame), Arc::clone(&pixmap)));
+        Some(pixmap)
     }
 
     fn mask_of(&mut self, clip: Rect) -> Option<Mask> {

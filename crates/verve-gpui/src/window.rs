@@ -20,7 +20,7 @@ use verve_electron::ids::{ContentsId, WindowId};
 use verve_electron::msg::{
     Display, Rect, TitleBarStyle, ToRendererInput, ToShell, WindowEvent, WindowOp, WindowOptions,
 };
-use verve_layout::DisplayList;
+use verve_layout::{DisplayList, ImageTable};
 
 use crate::app_region::AppRegion;
 use crate::dom_view::{DomView, Shown, white};
@@ -32,8 +32,9 @@ use crate::shell::{Inbox, Item};
 /// without it: the page is not responding.
 const UNRESPONSIVE: Duration = Duration::from_secs(5);
 
-/// What a window draws: its display list, the size its page was drawn at, and the color under it.
-pub type Look = (Arc<DisplayList>, (f32, f32), Option<Rgba>);
+/// What a window draws: its display list, the size its page was drawn at, the color under it, and
+/// the pictures the page has decoded.
+pub type Look = (Arc<DisplayList>, (f32, f32), Option<Rgba>, Arc<ImageTable>);
 
 /// A window the shell has open.
 pub(crate) struct Window {
@@ -383,12 +384,26 @@ impl Window {
         }
     }
 
-    /// What the window draws now: its display list, how big the page was drawn and the color
-    /// under it. `None` for a window that is gone.
+    /// Hands the window the pictures its page has decoded.
+    pub fn show_images(&self, table: Arc<ImageTable>, cx: &mut AsyncApp) {
+        let _ = self.handle.update(cx, |view, _, cx| {
+            if view.show_images(table) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// What the window draws now: its display list, how big the page was drawn, the color under
+    /// it and the pictures the list names. `None` for a window that is gone.
     pub fn look(&self, cx: &mut AsyncApp) -> Option<Look> {
         self.handle
             .update(cx, |view, _, _| {
-                Some((view.list()?, view.viewport(), view.background()))
+                Some((
+                    view.list()?,
+                    view.viewport(),
+                    view.background(),
+                    view.images(),
+                ))
             })
             .ok()
             .flatten()
