@@ -33,6 +33,9 @@ pub struct Layout {
     /// has content on, in viewport coordinates: what `Element.getClientRects` answers for it
     /// (`Document::set_fragments` sets the same for a drawer that lays the page out itself).
     pub fragments: Vec<(NodeId, Vec<Rect>)>,
+    /// The box of each element inside an inline `<svg>` in the drawing's own pixels (its content
+    /// box's top left is the origin): what `getBBox` answers.
+    pub svg_boxes: Vec<(NodeId, Rect)>,
 }
 
 /// Lays the document out for an [`Update`].
@@ -134,6 +137,7 @@ impl Document {
             state.scroll_offsets = layout.scroll_offsets.into_iter().collect();
             state.scroll_extents = layout.scroll_extents.into_iter().collect();
             state.fragments = layout.fragments.into_iter().collect();
+            state.svg_boxes = layout.svg_boxes.into_iter().collect();
             state.laid = Some(key);
         }
         // The drawer has yet to hear what changed.

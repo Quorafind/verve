@@ -254,6 +254,7 @@ mod tests {
             width: 1,
             height: 1,
             frames: vec![(bytes, std::time::Duration::ZERO)],
+            loops: 1,
         };
         Arc::new(ImageTable::new([(ImageKey(3), Arc::new(frames))].into()))
     }

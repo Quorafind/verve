@@ -38,6 +38,15 @@ pub const SVG_ACCESSORS: &[Accessor] = &[
 pub const SVG_GRAPHICS_METHODS: &[Method] = &[
     ("getBBox", 0, |this, _, cx| {
         let id = node_of(this)?;
+        // The layout measured the drawing: the element's box in the drawing's own pixels.
+        let measured = crate::layout_provider::fresh(cx)
+            .borrow()
+            .svg_boxes
+            .get(&id)
+            .copied();
+        if let Some(rect) = measured {
+            return rect_object(cx, rect);
+        }
         let rect = painted(cx, id);
         rect_object(
             cx,

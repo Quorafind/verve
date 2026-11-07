@@ -483,6 +483,7 @@ mod tests {
             revision: 1,
             items,
             rasters: Vec::new(),
+            vectors: Vec::new(),
             root: None,
         }
     }
@@ -501,6 +502,7 @@ mod tests {
             width: 2,
             height: 1,
             frames: vec![(bytes, std::time::Duration::ZERO)],
+            loops: 1,
         };
         let key = ImageKey(5);
         let table = ImageTable::new([(key, std::sync::Arc::new(frames))].into());
@@ -526,6 +528,7 @@ mod tests {
             width,
             height: (bgra.len() / 4) as u32 / width,
             frames: vec![(std::sync::Arc::from(bgra), std::time::Duration::ZERO)],
+            loops: 1,
         };
         ImageTable::new([(key, std::sync::Arc::new(frames))].into())
     }

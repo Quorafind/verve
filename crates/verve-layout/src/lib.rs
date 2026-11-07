@@ -24,6 +24,7 @@ mod place;
 mod props;
 mod replaced;
 mod shadow;
+mod svg;
 mod transform;
 mod tree;
 mod value;
@@ -31,7 +32,7 @@ mod value;
 pub use display_list::{
     AppRegionKind, Border, BorderLine, ControlKind, Cursor, DecorationKind, DisplayList, Fill,
     ImageKey, ObjectFit, PaintItem, Placed, RasterSpec, ResolvedHitbox, ResolvedScroller, Rgba,
-    Shadow,
+    Shadow, VectorSpec,
 };
 pub use engine::LayoutEngine;
 pub use fonts::{FontRegistry, Platform};
@@ -39,9 +40,10 @@ pub use gradient::{
     ColorStop, EllipseSize, Extent, Gradient, GradientPosition, LinearDirection, RadialShape,
     gradient_line, is_gradient,
 };
-pub use images::{ImageFrames, ImageTable, key_for_url};
+pub use images::{ImageFrames, ImageTable, canvas_key, canvas_slot, key_for_url};
 pub use inline::{
     DecorationStyle, Fragment, InlineLayout, LineBox, SpanBox, SpanPaint, Stop, TextDecoration,
     TextFragment, TextPaint, TextShadow,
 };
 pub use measure::{FontKey, FontMetrics, HeadlessMeasurer, PlacedGlyph, ShapedRun, TextMeasurer};
+pub use svg::rasterize as rasterize_svg;

@@ -92,6 +92,7 @@ fn the_text_page_has_chromiums_lines_where_chromium_has_them() {
             verve_dom::Layout {
                 rects: engine.rects().collect(),
                 fragments: engine.fragments().collect(),
+                svg_boxes: engine.svg_boxes().collect(),
                 ..verve_dom::Layout::default()
             }
         })));

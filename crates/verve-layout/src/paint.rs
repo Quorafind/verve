@@ -18,11 +18,12 @@ mod text;
 
 pub(crate) use text::Text;
 
-use crate::display_list::{Border, Fill, PaintItem, RasterSpec};
+use crate::display_list::{Border, Fill, ObjectFit, PaintItem, RasterSpec, VectorSpec};
 use crate::layout::Laid;
 use crate::place::{Around, Placed, around, clips_in_frame, padding_box};
 use crate::props::Position;
 use crate::replaced::fit_rect;
+use crate::svg::{Drawing, content_box};
 use crate::tree::BoxTree;
 
 /// What is open around the items being painted.
@@ -59,6 +60,9 @@ struct Painter<'a> {
     placed: &'a Placed,
     items: Vec<PaintItem>,
     rasters: Vec<RasterSpec>,
+    /// The inline SVGs, by box.
+    drawings: &'a std::collections::HashMap<usize, Drawing>,
+    vectors: Vec<VectorSpec>,
     open: Vec<Effect>,
     groups: Vec<(f32, usize)>,
     outlines: Vec<usize>,
@@ -66,15 +70,28 @@ struct Painter<'a> {
     canvas_from: Option<usize>,
 }
 
-/// The items for the page, back to front, and the gradients they ask the renderer to rasterise.
+/// What a page paints: the items back to front, the gradients they ask the renderer to
+/// rasterise and the SVG text the shell draws.
+pub(crate) struct Painted {
+    pub items: Vec<PaintItem>,
+    pub rasters: Vec<RasterSpec>,
+    pub vectors: Vec<VectorSpec>,
+}
+
+/// The items for the page, back to front, and what they ask of the shell.
 pub(crate) fn build(
     tree: &BoxTree,
     laid: &Laid,
     placed: &Placed,
     text: &Text,
-) -> (Vec<PaintItem>, Vec<RasterSpec>) {
+    drawings: &std::collections::HashMap<usize, Drawing>,
+) -> Painted {
     let Some(html) = tree.html else {
-        return (Vec::new(), Vec::new());
+        return Painted {
+            items: Vec::new(),
+            rasters: Vec::new(),
+            vectors: Vec::new(),
+        };
     };
     let mut painter = Painter {
         text,
@@ -83,6 +100,8 @@ pub(crate) fn build(
         placed,
         items: Vec::new(),
         rasters: Vec::new(),
+        drawings,
+        vectors: Vec::new(),
         open: Vec::new(),
         groups: Vec::new(),
         outlines: Vec::new(),
@@ -91,7 +110,11 @@ pub(crate) fn build(
     painter.canvas(html);
     painter.context(html);
     painter.enter(&[]);
-    (painter.items, painter.rasters)
+    Painted {
+        items: painter.items,
+        rasters: painter.rasters,
+        vectors: painter.vectors,
+    }
 }
 
 impl Painter<'_> {
@@ -284,18 +307,32 @@ impl Painter<'_> {
     /// The picture of a replaced element, fitted into its content box.
     fn picture(&mut self, index: usize, rect: Rect) {
         let node = &self.tree.boxes[index];
+        let content = content_box(rect, self.laid, index);
+        if content.width <= 0. || content.height <= 0. {
+            return;
+        }
+        if let Some(drawing) = self.drawings.get(&index) {
+            // Two copies of one icon are one drawing.
+            if !self.vectors.iter().any(|spec| spec.key == drawing.key) {
+                self.vectors.push(VectorSpec {
+                    key: drawing.key,
+                    source: std::sync::Arc::clone(&drawing.source),
+                });
+            }
+            self.items.push(PaintItem::Image {
+                node: node.node,
+                bounds: content,
+                clip: content,
+                image: drawing.key,
+                fit: ObjectFit::Fill,
+                frame: 0,
+            });
+            return;
+        }
         let Some(picture) = &node.props.picture else {
             return;
         };
-        let [top, right, bottom, left] = self.laid.border[index];
-        let [pad_top, pad_right, pad_bottom, pad_left] = self.laid.padding[index];
-        let content = Rect::new(
-            rect.x + left + pad_left,
-            rect.y + top + pad_top,
-            rect.width - left - right - pad_left - pad_right,
-            rect.height - top - bottom - pad_top - pad_bottom,
-        );
-        if content.width <= 0. || content.height <= 0. || picture.natural.contains(&0.) {
+        if picture.natural.contains(&0.) {
             return;
         }
         self.items.push(PaintItem::Image {

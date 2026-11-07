@@ -7,7 +7,7 @@
 use verve_dom::{NodeId, Rect, Snapshot};
 
 use crate::display_list::{ImageKey, ObjectFit};
-use crate::images::key_for_url;
+use crate::images::{canvas_key, key_for_url};
 use crate::value::{Dim, Units, length_percent, words};
 
 /// The picture a replaced element shows: an `<img>`'s, or a `<video>`'s poster.
@@ -39,6 +39,7 @@ pub(crate) fn read_picture(
             poster = verve_dom::canvas::sources::resolve_against(&snapshot.base_url, source)?;
             (poster.as_str(), 1.)
         }
+        "canvas" => return read_surface(snapshot, node, units),
         _ => return None,
     };
     let (width, height) = snapshot.images.get(url)?.natural;
@@ -47,6 +48,29 @@ pub(crate) fn read_picture(
     Some(Replaced {
         key: key_for_url(url),
         natural: [width as f32 / density, height as f32 / density],
+        fit: object_fit(style("object-fit").unwrap_or("fill")),
+        position: style("object-position")
+            .and_then(|text| position(text, units))
+            .unwrap_or([Pos::CENTER; 2]),
+    })
+}
+
+/// Whether `node` shows a picture and nothing of what is inside it: a drawing, or a canvas (its
+/// children are the fallback of a browser with no canvas). Elements that draw their own content
+/// (P32's form controls) are added here, not beside the caller.
+pub(crate) fn has_no_inner_boxes(snapshot: &Snapshot, node: NodeId) -> bool {
+    crate::svg::is_root(snapshot, node)
+        || snapshot.dom.get(node).and_then(|n| n.tag()) == Some("canvas")
+}
+
+/// The surface a `<canvas>` has painted: its pixels at the generation the document last
+/// committed, as big in CSS pixels as the canvas has pixels.
+fn read_surface(snapshot: &Snapshot, node: NodeId, units: &Units) -> Option<Replaced> {
+    let frame = snapshot.canvases.get(&node)?;
+    let style = |property: &str| snapshot.style(node, property);
+    Some(Replaced {
+        key: canvas_key(node, frame.generation),
+        natural: [frame.width as f32, frame.height as f32],
         fit: object_fit(style("object-fit").unwrap_or("fill")),
         position: style("object-position")
             .and_then(|text| position(text, units))

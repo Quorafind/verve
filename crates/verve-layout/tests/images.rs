@@ -217,3 +217,185 @@ fn a_percentage_padding_sets_where_a_background_starts_with_content_box_origin()
         assert_eq!(rounded(tile), [80, 80, 40, 20]);
     });
 }
+
+#[test]
+fn an_inline_svg_is_a_vector_picture_and_two_copies_are_one_drawing() {
+    on_page(|| {
+        let page = page(
+            r#"<div style="color:green">
+                 <svg width="40" height="20" viewBox="0 0 20 10"><path d="M0 0h10v5z" fill="currentColor"/></svg>
+                 <svg width="40" height="20" viewBox="0 0 20 10"><path d="M0 0h10v5z" fill="currentColor"/></svg>
+               </div>"#,
+        );
+        let list = page.list();
+        let keys: Vec<_> = list
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                PaintItem::Image { image, bounds, .. } => Some((*image, rounded(*bounds))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].0, keys[1].0, "the same text is the same key");
+        assert_eq!(keys[0].1[2..], [40, 20]);
+        assert_eq!(list.vectors.len(), 1);
+        let text = String::from_utf8(list.vectors[0].source.to_vec()).expect("text");
+        // The size is the laid-out one, `currentColor` has the computed `color` to resolve against.
+        assert!(
+            text.contains("width=\"40\"") && text.contains("height=\"20\""),
+            "{text}"
+        );
+        assert!(text.contains("color:rgb(0, 128, 0)"), "{text}");
+        assert_eq!(list.vectors[0].key, keys[0].0);
+    });
+}
+
+#[test]
+fn the_elements_inside_a_drawing_have_the_boxes_the_drawing_gives_them() {
+    on_page(|| {
+        let page = page(
+            r#"<svg id="s" width="200" height="100" viewBox="0 0 100 50" style="position:absolute;left:10px;top:20px">
+                 <rect id="r" x="10" y="5" width="30" height="20" fill="red" stroke="blue" stroke-width="4"/>
+                 <g id="g" transform="translate(50,10)"><circle id="c" cx="10" cy="10" r="8"/></g>
+               </svg>"#,
+        );
+        // The same numbers Electron 39.8.10 gave for this markup: `getBoundingClientRect` has the
+        // viewBox scale, the transform and the page offset in it and leaves out the stroke.
+        assert_eq!(page.rect("r"), [30., 30., 60., 40.]);
+        assert_eq!(page.rect("g"), [114., 44., 32., 32.]);
+        assert_eq!(page.rect("c"), [114., 44., 32., 32.]);
+        let boxes: std::collections::HashMap<_, _> = page.engine.svg_boxes().collect();
+        // `getBBox` is in the units of the drawing and leaves out the element's own transform.
+        assert_eq!(
+            boxes[&page.node("r")],
+            verve_dom::Rect::new(10., 5., 30., 20.)
+        );
+        assert_eq!(
+            boxes[&page.node("g")],
+            verve_dom::Rect::new(2., 2., 16., 16.)
+        );
+        assert_eq!(
+            boxes[&page.node("s")],
+            verve_dom::Rect::new(10., 5., 58., 23.)
+        );
+        // No box of its own for anything in a drawing, and the drawing itself is where it is.
+        assert_eq!(page.rect("s"), [10., 20., 200., 100.]);
+    });
+}
+
+fn vector_text(page: &Laid) -> String {
+    let list = page.list();
+    String::from_utf8(list.vectors[0].source.to_vec()).expect("text")
+}
+
+#[test]
+fn a_use_of_a_symbol_outside_the_drawing_is_copied_in() {
+    on_page(|| {
+        let page = page(
+            r##"<svg style="display:none"><symbol id="sym" viewBox="0 0 10 10"><rect width="10" height="10" fill="#0f0"/></symbol></svg>
+                <svg width="10" height="10"><use href="#sym" width="10" height="10"/></svg>"##,
+        );
+        let text = vector_text(&page);
+        assert!(text.contains("<defs><symbol"), "{text}");
+        assert_eq!(first_pixel(&text), [0, 255, 0, 255], "{text}");
+    });
+}
+
+#[test]
+fn attributes_without_a_namespace_or_a_valid_name_do_not_blank_the_drawing() {
+    on_page(|| {
+        let page = page(
+            r##"<svg width="10" height="10" xmlns:sketch="http://x" sketch:type="a" @click="f" :class="c" x-on:click="g"><rect width="10" height="10" fill="red"/></svg>"##,
+        );
+        let text = vector_text(&page);
+        assert!(
+            !text.contains("sketch") && !text.contains("@click"),
+            "{text}"
+        );
+        let bytes = verve_layout::rasterize_svg(text.as_bytes(), 10, 10).expect("it parses");
+        assert_eq!(&bytes[..4], &[0, 0, 255, 255]);
+    });
+}
+
+#[test]
+fn the_opacity_of_the_svg_box_is_applied_once() {
+    on_page(|| {
+        let page = page(
+            r#"<svg width="10" height="10" style="opacity:.5"><rect width="10" height="10"/></svg>"#,
+        );
+        assert!(!vector_text(&page).contains("opacity"));
+    });
+}
+
+#[test]
+fn fill_and_stroke_set_on_an_html_ancestor_reach_the_drawing() {
+    on_page(|| {
+        let page = page(
+            r#"<style>.btn{fill:red;stroke:blue;stroke-width:3}</style>
+               <div class="btn"><svg width="10" height="10"><rect width="10" height="10"/></svg></div>"#,
+        );
+        let text = vector_text(&page);
+        assert!(text.contains("fill:rgb(255, 0, 0)"), "{text}");
+        assert!(
+            text.contains("stroke-width:3px") || text.contains("stroke-width:3"),
+            "{text}"
+        );
+    });
+}
+
+/// The first pixel of the drawing in `text`, 10 by 10, as BGRA.
+fn first_pixel(text: &str) -> [u8; 4] {
+    let bytes = verve_layout::rasterize_svg(text.as_bytes(), 10, 10).expect("it parses");
+    [bytes[0], bytes[1], bytes[2], bytes[3]]
+}
+
+// What Electron 39.8.10 painted for these (probe p35-review4\probe\out-svg.json).
+#[test]
+fn inherited_painting_properties_do_not_beat_the_attributes_of_the_elements() {
+    on_page(|| {
+        let blue = [255, 0, 0, 255];
+        let under_div = page(
+            r#"<div style="fill:red"><svg width="10" height="10"><rect width="10" height="10" fill="blue"/></svg></div>"#,
+        );
+        assert_eq!(first_pixel(&vector_text(&under_div)), blue);
+        let logo = page(
+            r##"<style>.logo{fill:currentColor;color:red}</style><svg class="logo" width="10" height="10"><rect width="10" height="10" fill="#00f"/></svg>"##,
+        );
+        assert_eq!(first_pixel(&vector_text(&logo)), blue);
+        let stroked = page(
+            r#"<div style="stroke:red;stroke-width:20px"><svg width="10" height="10"><rect width="10" height="10" fill="none" stroke-width="0"/></svg></div>"#,
+        );
+        assert_eq!(
+            first_pixel(&vector_text(&stroked))[3],
+            0,
+            "nothing is drawn"
+        );
+    });
+}
+
+#[test]
+fn a_filter_on_the_svg_root_is_applied_by_the_drawing() {
+    on_page(|| {
+        let page = page(
+            r#"<svg width="10" height="10" style="filter:invert(1)"><rect width="10" height="10" fill="red"/></svg>"#,
+        );
+        // Cyan, as BGRA.
+        assert_eq!(first_pixel(&vector_text(&page)), [255, 255, 0, 255]);
+    });
+}
+
+#[test]
+fn elements_of_another_vocabulary_are_left_out_and_the_drawing_still_draws() {
+    on_page(|| {
+        let page = page(
+            r#"<svg width="10" height="10"><sodipodi:namedview id="base"/><metadata><rdf:RDF><cc:Work/></rdf:RDF></metadata><rect width="10" height="10" fill="lime"/></svg>"#,
+        );
+        let text = vector_text(&page);
+        assert!(
+            !text.contains("sodipodi") && !text.contains("rdf:"),
+            "{text}"
+        );
+        assert_eq!(first_pixel(&text), [0, 255, 0, 255]);
+    });
+}

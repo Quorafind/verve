@@ -234,6 +234,8 @@ pub struct State {
     /// The rectangles of the lines an inline box is broken over, as the drawer reported them;
     /// `getClientRects` answers these over the one border box.
     pub fragments: HashMap<NodeId, Vec<crate::Rect>>,
+    /// The boxes inside inline SVGs in the drawings' own pixels, as the layout reported them.
+    pub svg_boxes: HashMap<NodeId, crate::Rect>,
     /// The history's entries: `pushState`'s states and their addresses, and where it stands.
     pub history: Vec<(JsValue, String)>,
     pub history_at: usize,
@@ -317,6 +319,7 @@ impl State {
             activation: None,
             key_acted: false,
             fragments: HashMap::new(),
+            svg_boxes: HashMap::new(),
             history_at: 0,
             base_cache: Default::default(),
             next_id: 1,
@@ -632,6 +635,7 @@ impl State {
             }
             self.rects.remove(id);
             self.fragments.remove(id);
+            self.svg_boxes.remove(id);
             self.scroll_offsets.remove(id);
             self.custom.forget(*id);
         }

@@ -312,6 +312,7 @@ fn still(job: &Job) -> Option<ImageFrames> {
         width: image.width,
         height: image.height,
         frames: vec![(Arc::from(pixels), Duration::ZERO)],
+        loops: 1,
     })
 }
 
@@ -350,6 +351,7 @@ mod tests {
                 })
                 .collect(),
             rasters: Vec::new(),
+            vectors: Vec::new(),
             root: None,
         }
     }

@@ -39,6 +39,11 @@ pub fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
         .filter(|(width, height)| *width > 0 && *height > 0)
 }
 
+/// Whether `bytes` are an SVG drawing, which the drawer rasterises at the size it draws.
+pub fn is_svg(bytes: &[u8]) -> bool {
+    svg_size(bytes).is_some()
+}
+
 /// The pixels of `bytes`: premultiplied RGBA8, row-major, the first frame of an animation, turned
 /// as an EXIF orientation asks (`image-orientation: from-image`). `mime` is the type the loader
 /// saw: it settles the format only when the bytes do not name it.

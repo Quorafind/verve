@@ -32,9 +32,62 @@ pub struct DisplayList {
     /// The page's own scroll container, where a wheel ends when nothing under the pointer takes
     /// it. `None` when the page does not scroll.
     pub root: Option<NodeId>,
+    /// The SVG text that the pictures of vector images ([`PaintItem::Image`], [`Fill::Picture`])
+    /// are drawn from, for the shell to rasterise at its scale (P35, appended).
+    pub vectors: Vec<VectorSpec>,
+}
+
+/// Sets the frame a picture item shows to what `frame_of` says of its key.
+fn reframe(item: &mut PaintItem, frame_of: &dyn Fn(ImageKey) -> Option<u32>) {
+    match item {
+        PaintItem::Image { image, frame, .. } => {
+            if let Some(at) = frame_of(*image) {
+                *frame = at;
+            }
+        }
+        PaintItem::Box { background, .. } => background.iter_mut().for_each(|fill| {
+            if let Fill::Picture { image, frame, .. } = fill
+                && let Some(at) = frame_of(*image)
+            {
+                *frame = at;
+            }
+        }),
+        _ => {}
+    }
 }
 
 impl DisplayList {
+    /// The list with the pictures in `frames` showing the frame they are given, under a revision
+    /// of its own: what the renderer makes of a list when an animation moves on.
+    pub fn with_frames(&self, frames: &std::collections::HashMap<ImageKey, u32>) -> DisplayList {
+        let mut list = self.clone();
+        list.revision = crate::engine::next_revision();
+        for item in &mut list.items {
+            reframe(item, &|key| frames.get(&key).copied());
+        }
+        list
+    }
+
+    /// Whether `other` is this list but for the frames of animated pictures: what a screenshot
+    /// waits for to stop changing, a page with an animation that never ends never being still
+    /// otherwise.
+    pub fn same_but_frames(&self, other: &DisplayList) -> bool {
+        let still = |item: &PaintItem| {
+            let mut item = item.clone();
+            reframe(&mut item, &|_| Some(0));
+            item
+        };
+        self.items.len() == other.items.len()
+            && self.rasters == other.rasters
+            && self.vectors == other.vectors
+            && self.root == other.root
+            && self
+                .items
+                .iter()
+                .zip(&other.items)
+                .all(|(a, b)| a == b || still(a) == still(b))
+    }
+
     /// The node whose [`PaintItem::Hitbox`] is topmost at `(x, y)` in the window. `offset_of`
     /// answers the offset the shell has scrolled a container to, if it is not the list's.
     pub fn hit_test(
@@ -457,6 +510,13 @@ pub enum Fill {
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct ImageKey(pub u64);
 
+/// The text of an SVG picture, for the shell to rasterise at the size it draws it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorSpec {
+    pub key: ImageKey,
+    pub source: std::sync::Arc<[u8]>,
+}
+
 /// A gradient the renderer rasterises for a [`Fill::Raster`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct RasterSpec {
@@ -652,6 +712,7 @@ mod tests {
             revision: 1,
             items: vec![hitbox(1, 0.), hitbox(2, 5.), PaintItem::PopClip],
             rasters: Vec::new(),
+            vectors: Vec::new(),
             root: None,
         };
         let none = |_: NodeId| None;
@@ -684,6 +745,7 @@ mod tests {
                 },
             ],
             rasters: Vec::new(),
+            vectors: Vec::new(),
             root: None,
         };
         let own = |_: NodeId| None;
@@ -730,6 +792,7 @@ mod tests {
                 scroller(1, 100., [100., 400.], [0., 0.]),
             ],
             rasters: Vec::new(),
+            vectors: Vec::new(),
             root: None,
         };
         let own = |_: NodeId| None;
@@ -764,6 +827,7 @@ mod tests {
                 hitbox(3, 0.),
             ],
             rasters: Vec::new(),
+            vectors: Vec::new(),
             root: None,
         };
         let seen: Vec<f32> = list
@@ -783,5 +847,42 @@ mod tests {
         assert!(!border.is_visible());
         border.colors[1] = [0., 0., 0., 1.];
         assert!(border.is_visible());
+    }
+}
+
+#[cfg(test)]
+mod frames {
+    use super::*;
+
+    fn picture(frame: u32) -> DisplayList {
+        DisplayList {
+            items: vec![PaintItem::Image {
+                node: 1,
+                bounds: Rect::new(0., 0., 1., 1.),
+                clip: Rect::new(0., 0., 1., 1.),
+                image: ImageKey(3),
+                fit: ObjectFit::Fill,
+                frame,
+            }],
+            ..DisplayList::default()
+        }
+    }
+
+    #[test]
+    fn a_list_that_differs_only_in_frames_is_the_same_for_a_screenshot() {
+        let (first, next) = (picture(0), picture(1));
+        assert!(first.same_but_frames(&next));
+        let moved = with_bounds(&next);
+        assert!(!first.same_but_frames(&moved));
+        let frames = [(ImageKey(3), 1)].into();
+        assert_eq!(first.with_frames(&frames).items, next.items);
+    }
+
+    fn with_bounds(list: &DisplayList) -> DisplayList {
+        let mut list = list.clone();
+        if let PaintItem::Image { bounds, .. } = &mut list.items[0] {
+            bounds.x = 5.;
+        }
+        list
     }
 }
