@@ -142,7 +142,8 @@ fn choosing_an_option_gives_input_then_change_and_choosing_it_again_gives_nothin
 fn a_disabled_option_or_an_index_past_the_list_chooses_nothing() {
     let page = launch();
     page.eval(
-        "document.getElementById('s').insertAdjacentHTML('beforeend',          '<optgroup disabled><option value=c>C</option></optgroup><option value=d hidden>D</option>'); 0",
+        "document.getElementById('s').insertAdjacentHTML('beforeend', \
+         '<optgroup disabled><option value=c>C</option></optgroup><option value=d hidden>D</option>'); 0",
     );
     for index in [2, 3, 9] {
         page.send(ToRendererInput::Choose {
@@ -221,4 +222,120 @@ fn control_z_in_a_field_takes_back_the_typing() {
     // Ctrl+Y (redo) brings it back.
     page.key("y", ctrl);
     page.until("document.getElementById('t').value", "\"hi\"");
+}
+
+/// Control, its twin, and how the twin's width is taken: as it is, rounded or rounded up.
+const TWINS: [(&str, &str, &str); 5] = [
+    ("button", "t-button", "exact"),
+    ("submit", "t-submit", "exact"),
+    ("select", "t-select", "ceil"),
+    ("list", "t-list", "exact"),
+    ("textarea", "t-textarea", "ceil"),
+];
+/// The controls of each row of the fixture.
+const ROWS: [&[&str]; 5] = [
+    &["text", "password", "empty"],
+    &["checkbox", "checked", "radio", "radio-on", "range", "color"],
+    &["button", "submit", "select", "number"],
+    &["progress", "meter", "date", "file"],
+    &["textarea", "list"],
+];
+
+/// Every control of the fixture `tests/electron/apps/forms` is as big as Electron 39.8.10 made
+/// it (`expected-geometry.json`, written by that app's `main.js` at a device scale factor of 1
+/// and the language en-US).
+///
+/// A headless page measures text with `HeadlessMeasurer` (half an em a character), so a size
+/// that follows the width of text cannot equal Chromium's. Each of those controls has a twin
+/// `<span>` with its text beside it in the fixture, and what is compared is how much bigger the
+/// control is than its twin, which does not depend on the measurer. A size that follows the font
+/// size alone, and a position within 2px (the headless ascent is not Arial's), are compared
+/// directly. Chromium lays out in 1/64 of a pixel.
+#[test]
+fn the_forms_fixture_has_the_geometry_chromium_gave_it() {
+    const FIXTURE: &str = include_str!("../../../tests/electron/apps/forms/index.html");
+    const EXPECTED: &str =
+        include_str!("../../../tests/electron/apps/forms/expected-geometry.json");
+    const LINE_OF_TEXT: [&str; 2] = ["button", "submit"];
+    const STANDS_ON_TEXT: [&str; 2] = ["date", "select"];
+    const SLACK: f64 = 0.02;
+    let page = serde_json::to_string(FIXTURE).expect("the page is text");
+    let main = format!(
+        "const {{ BrowserWindow }} = require('electron');
+         const win = new BrowserWindow({{ title: 'forms', width: 480, height: 270, show: false }});
+         win.loadURL('data:text/html,' + encodeURIComponent({page}));"
+    );
+    let app = App::launch_script(&main, &[]);
+    let contents = app.window("forms").expect("the window was made").contents;
+    let ask = "JSON.stringify(Object.fromEntries([...document.querySelectorAll('[id]')].map((e) => { const r = e.getBoundingClientRect(); return [e.id, [r.x, r.y, r.width, r.height]]; })))";
+    let ready = |app: &App| app.eval_renderer(contents, ask).len() > 100;
+    assert!(app.run_until(ready, TIMEOUT), "the page was laid out");
+    let ours: String = serde_json::from_str(&app.eval_renderer(contents, ask)).expect("a string");
+    let rects = |text: &str| -> std::collections::BTreeMap<String, [f64; 4]> {
+        serde_json::from_str(text).expect("rectangles")
+    };
+    let (ours, theirs) = (rects(&ours), rects(EXPECTED));
+    // The top of a row's empty marker is the baseline of the row: how far a control is from it
+    // does not depend on where the row is. It is exact for a box that stands on its edge. For one
+    // that stands on its text it is off by the difference between the headless ascent (0.8em)
+    // and Arial's (about 0.905em, 1.4px at 13.33px) plus Chromium's rounding of the line: 1.83px
+    // for the date and the select, so those get 2.5px. A wrong baseline rule is off by 6px or
+    // more, which both bounds still catch.
+    let marker_gap = |boxes: &std::collections::BTreeMap<String, [f64; 4]>, id: &str, y: f64| {
+        let row = ROWS
+            .iter()
+            .position(|row| row.contains(&id))
+            .map_or(1, |at| at + 1);
+        (boxes[&format!("m{row}")][1] - y).abs()
+    };
+    let twin_of = |id: &str| TWINS.iter().find(|(control, ..)| *control == id);
+    let y_slack = |id: &str| {
+        if STANDS_ON_TEXT.contains(&id) {
+            2.5
+        } else {
+            2.
+        }
+    };
+    let mut wrong = Vec::new();
+    for (id, want) in &theirs {
+        if id.starts_with("t-") {
+            continue;
+        }
+        let got = ours.get(id).copied().unwrap_or_default();
+        let (mut width, mut height) = ((got[2], want[2]), (got[3], want[3]));
+        if let Some((_, twin, how)) = twin_of(id) {
+            let (Some(here), Some(there)) = (ours.get(*twin).copied(), theirs.get(*twin).copied())
+            else {
+                wrong.push(format!(
+                    "{id}: its twin {twin} is missing from {}",
+                    if ours.contains_key(*twin) {
+                        "expected-geometry.json"
+                    } else {
+                        "the page"
+                    }
+                ));
+                continue;
+            };
+            let take = |size: f64| match *how {
+                "ceil" => size.ceil(),
+                "round" => size.round(),
+                _ => size,
+            };
+            width = (got[2] - take(here[2]), want[2] - take(there[2]));
+            if LINE_OF_TEXT.contains(&id.as_str()) {
+                height = (got[3] - here[3], want[3] - there[3]);
+            }
+        }
+        if (width.0 - width.1).abs() > SLACK
+            || (height.0 - height.1).abs() > SLACK
+            || (marker_gap(&ours, id, got[1]) - marker_gap(&theirs, id, want[1])).abs()
+                > y_slack(id)
+        {
+            wrong.push(format!(
+                "{id}: width {:.3} height {:.3} y {:.3}, Chromium {:.3} {:.3} {:.3}",
+                width.0, height.0, got[1], width.1, height.1, want[1]
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
