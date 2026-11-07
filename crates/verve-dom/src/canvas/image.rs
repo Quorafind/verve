@@ -184,6 +184,16 @@ pub struct ElementImage {
     pub status: Status,
     /// `decode()`'s promises, held weakly: only JavaScript keeps them alive.
     pub waiting: Vec<WeakJsObject>,
+    /// The pixel density of the source `srcset` chose (`0` until one was chosen: read it with
+    /// [`ElementImage::density`]).
+    pub density: f32,
+}
+
+impl ElementImage {
+    /// How many image pixels make a CSS pixel.
+    pub fn density(&self) -> f32 {
+        if self.density > 0. { self.density } else { 1. }
+    }
 }
 
 /// How far an `<img>`'s load has got.
@@ -235,6 +245,8 @@ pub struct ImageStore {
     decoded_bytes: usize,
     /// Addresses whose bytes were not an image: asked for once, not once per frame.
     pub failed: HashSet<String>,
+    /// The addresses a stylesheet or a `poster` asked the embedder for: asked once.
+    pub asked: HashSet<String>,
     /// The addresses whose pixels taint a canvas.
     #[cfg(feature = "canvas")]
     tainted: HashSet<String>,
@@ -257,6 +269,12 @@ impl ImageStore {
         };
         self.entries.insert(url.to_owned(), entry);
         self.forget_decoded(url);
+    }
+
+    /// Keeps the image at `url` for as long as a stylesheet's `url()` or a `poster` may want it,
+    /// whichever `<img>` stops naming it.
+    pub fn keep_always(&mut self, url: &str) {
+        self.element_urls.remove(url);
     }
 
     /// Forgets the image at `url`.
@@ -367,6 +385,14 @@ impl ImageStore {
         for url in stale {
             self.remove(&url);
         }
+    }
+
+    /// The address each `<img>` shows now, with the density of the source.
+    pub fn sources(&self) -> HashMap<NodeId, (String, f32)> {
+        self.nodes
+            .iter()
+            .filter_map(|(node, img)| Some((*node, (img.url.clone()?, img.density()))))
+            .collect()
     }
 
     /// What the drawer is handed: every image's bytes and size.

@@ -575,6 +575,11 @@ fn apply<'a>(
                 // none did, as a property nothing set.
                 match history.revert(&longhand, rank.place()).map(str::to_owned) {
                     Some(before) => style.insert(longhand, before),
+                    // The shorthand's own key: `unset` on it would reach every longhand, and undo
+                    // the ones this loop has rolled back already (`longhands` comes in no order).
+                    None if longhand == name && expansion(name).is_some() => {
+                        style.remove(&longhand)
+                    }
                     None => {
                         set_declared(style, &longhand, "unset", inherited);
                         None
@@ -618,7 +623,7 @@ fn resolve_variables(style: &mut Style, inherited: &Style) {
             Some(value) => {
                 // What a `var()` stood for may be several words of a shorthand's, which can be
                 // told apart only now.
-                if varied && matches!(key.as_str(), "transition" | "animation") {
+                if varied && matches!(key.as_str(), "transition" | "animation" | "background") {
                     reopen.push((key.clone(), value.clone()));
                 }
                 style.insert(key, value);

@@ -96,18 +96,22 @@ fn set_source(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
 /// `data:` one decoded here, anything else asked of the embedder. Called for the nodes a frame
 /// found changed, so a page adds no cost for the images it does not touch.
 pub(crate) fn sync(state: &mut State, node: NodeId) {
-    let source = state.dom.get_attr(node, "src").unwrap_or_default();
-    let wanted = resolve(&state.base_url(), &source);
+    let chosen = super::sources::current(state, node);
+    let density = chosen.as_ref().map_or(1., |(_, density)| *density);
+    let wanted = chosen.and_then(|(source, _)| resolve(&state.base_url(), &source));
     let named = state
         .images
         .nodes
         .get(&node)
         .and_then(|img| img.url.as_deref());
     if named == wanted.as_deref() {
+        if let Some(img) = state.images.nodes.get_mut(&node) {
+            img.density = density;
+        }
         return;
     }
     let status = match &wanted {
-        Some(url) => start_load(state, url),
+        Some(url) => start_load(state, url, Keep::WhileNamed),
         None => Status::Idle,
     };
     if matches!(status, Status::Loaded | Status::Broken) {
@@ -117,13 +121,14 @@ pub(crate) fn sync(state: &mut State, node: NodeId) {
         url: wanted,
         status,
         waiting: Vec::new(),
+        density,
     };
     state.images.nodes.insert(node, img);
 }
 
 /// Where a load of `url` stands as it starts: already known, readable here, or asked of the
 /// embedder.
-fn start_load(state: &mut State, url: &str) -> Status {
+pub(crate) fn start_load(state: &mut State, url: &str, keep: Keep) -> Status {
     if state.images.has(url) {
         return Status::Loaded;
     }
@@ -136,9 +141,7 @@ fn start_load(state: &mut State, url: &str) -> Status {
         .map(|parsed| verve::encoding::data_url(&parsed));
     match data {
         Some(Ok((mime, bytes))) if image_size(&bytes).is_some() => {
-            state
-                .images
-                .insert(url, Some(mime), Arc::from(bytes), Keep::WhileNamed);
+            state.images.insert(url, Some(mime), Arc::from(bytes), keep);
             Status::Loaded
         }
         Some(_) => {
@@ -166,7 +169,7 @@ pub(crate) fn is_cross_origin(document: &url::Url, url: &str) -> bool {
 }
 
 /// The address an `<img src>` names, if it is one to fetch.
-fn resolve(document: &url::Url, source: &str) -> Option<String> {
+pub(crate) fn resolve(document: &url::Url, source: &str) -> Option<String> {
     let source = source.trim();
     if source.is_empty() {
         return None;
@@ -258,11 +261,14 @@ pub(crate) fn report(context: &mut Context, node: NodeId) -> Report {
         let img = state.images.nodes.get(&node);
         let url = img.and_then(|img| img.url.clone());
         let status = img.map_or(Status::Idle, |img| img.status);
+        let density = img.map_or(1., ElementImage::density);
         let natural = url
             .as_deref()
             .and_then(|url| state.images.natural(url))
             .filter(|_| status == Status::Loaded)
-            .unwrap_or((0, 0));
+            .map_or((0, 0), |(w, h)| {
+                ((w as f32 / density) as u32, (h as f32 / density) as u32)
+            });
         Report {
             url,
             status,

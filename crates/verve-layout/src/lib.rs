@@ -7,12 +7,14 @@
 //! through [`TextMeasurer`].
 
 mod atoms;
+mod background;
 mod display_list;
 mod engine;
 mod flow;
 pub mod fonts;
 mod gradient;
 mod grid;
+mod images;
 mod inline;
 mod layout;
 mod measure;
@@ -20,6 +22,7 @@ mod paint;
 mod paint_style;
 mod place;
 mod props;
+mod replaced;
 mod shadow;
 mod transform;
 mod tree;
@@ -36,6 +39,7 @@ pub use gradient::{
     ColorStop, EllipseSize, Extent, Gradient, GradientPosition, LinearDirection, RadialShape,
     gradient_line, is_gradient,
 };
+pub use images::{ImageFrames, ImageTable, key_for_url};
 pub use inline::{
     DecorationStyle, Fragment, InlineLayout, LineBox, SpanBox, SpanPaint, Stop, TextDecoration,
     TextFragment, TextPaint, TextShadow,

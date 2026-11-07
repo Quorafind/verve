@@ -92,6 +92,16 @@ pub enum Shape {
         /// A line through the text, which GPUI draws as a strikethrough.
         through: bool,
     },
+    /// A decoded picture, the whole of it drawn into `bounds` and only `visible` of that shown;
+    /// `alpha` is the opacity, and the corners of `visible` are rounded by `radii`.
+    Picture {
+        bounds: Rect,
+        visible: Rect,
+        radii: [f32; 4],
+        image: ImageKey,
+        frame: u32,
+        alpha: f32,
+    },
     /// The border of a box that has one color all round, drawn in the box's own edge.
     Border {
         bounds: Rect,
@@ -134,6 +144,7 @@ pub fn plan(list: &DisplayList, offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>) 
                 }
             }
             PaintItem::Glyphs { .. } => lower_glyphs(&placed, &mut out.commands),
+            PaintItem::Image { .. } => lower_image(&placed, &mut out.commands),
             PaintItem::Decoration { .. } => lower_decoration(&placed, &mut out.commands),
             PaintItem::Hitbox { .. } => out.hitboxes.extend(placed.hitbox()),
             _ => {}
@@ -182,6 +193,106 @@ fn lower_box(placed: &Placed, out: &mut Vec<Command>) {
     if border.is_visible() {
         lower_border(border, bounds, *radii, opacity, &mut push);
     }
+}
+
+fn lower_image(placed: &Placed, out: &mut Vec<Command>) {
+    let PaintItem::Image {
+        bounds,
+        clip,
+        image,
+        frame,
+        ..
+    } = placed.item
+    else {
+        return;
+    };
+    let visible = placed.in_window(*clip);
+    let bounds = placed.in_window(*bounds);
+    if visible.width <= 0. || visible.height <= 0. || bounds.width <= 0. || bounds.height <= 0. {
+        return;
+    }
+    out.push(Command {
+        clip: placed.clip,
+        shape: Shape::Picture {
+            bounds,
+            visible,
+            radii: [0.; 4],
+            image: *image,
+            frame: *frame,
+            alpha: placed.opacity,
+        },
+    });
+}
+
+/// The tiles of a background picture of the box at `bounds`.
+fn lower_tiles(
+    fill: &Fill,
+    bounds: Rect,
+    radii: [f32; 4],
+    opacity: f32,
+    push: &mut impl FnMut(Shape),
+) {
+    let Fill::Picture {
+        image,
+        area,
+        tile,
+        step,
+        count,
+        frame,
+    } = fill
+    else {
+        return;
+    };
+    let visible = Rect::new(
+        bounds.x + area.x,
+        bounds.y + area.y,
+        area.width,
+        area.height,
+    );
+    // The corners of the box round its background only when the picture covers the whole box,
+    // and a tile takes the radius of the corners of the area it touches, not its own.
+    let round = if area.width >= bounds.width && area.height >= bounds.height {
+        radii
+    } else {
+        [0.; 4]
+    };
+    for j in 0..count[1] {
+        for i in 0..count[0] {
+            let at = Rect::new(
+                bounds.x + tile.x + i as f32 * step[0],
+                bounds.y + tile.y + j as f32 * step[1],
+                tile.width,
+                tile.height,
+            );
+            if let Some(cut) = at.intersection(&visible) {
+                push(Shape::Picture {
+                    bounds: at,
+                    visible,
+                    radii: touched_corners(round, cut, visible),
+                    image: *image,
+                    frame: *frame,
+                    alpha: opacity,
+                });
+            }
+        }
+    }
+}
+
+/// The radii of the corners of `area` that the rectangle `cut` inside it touches, and nothing at
+/// the others: a tile in the middle of a rounded box is square.
+fn touched_corners(radii: [f32; 4], cut: Rect, area: Rect) -> [f32; 4] {
+    const NEAR: f32 = 0.01;
+    let left = (cut.x - area.x).abs() < NEAR;
+    let top = (cut.y - area.y).abs() < NEAR;
+    let right = (cut.x + cut.width - area.x - area.width).abs() < NEAR;
+    let bottom = (cut.y + cut.height - area.y - area.height).abs() < NEAR;
+    let [top_left, top_right, bottom_right, bottom_left] = radii;
+    [
+        if left && top { top_left } else { 0. },
+        if right && top { top_right } else { 0. },
+        if right && bottom { bottom_right } else { 0. },
+        if left && bottom { bottom_left } else { 0. },
+    ]
 }
 
 fn lower_glyphs(placed: &Placed, out: &mut Vec<Command>) {
@@ -261,6 +372,7 @@ fn lower_fill(
 ) {
     match fill {
         Fill::Color(color) => push(filled(bounds, radii, Paint::Solid(fade(*color, opacity)))),
+        Fill::Picture { .. } => lower_tiles(fill, bounds, radii, opacity, push),
         Fill::Raster(key) => push(filled(
             bounds,
             radii,
@@ -500,6 +612,7 @@ mod tests {
                 Shape::Fill { .. } => "fill",
                 Shape::Border { .. } => "border",
                 Shape::Glyphs { .. } | Shape::Decoration { .. } => "text",
+                Shape::Picture { .. } => "picture",
             })
             .collect();
         assert_eq!(kinds, ["drop", "fill", "inset", "border"]);
@@ -632,5 +745,23 @@ mod tests {
                 .iter()
                 .all(|shape| matches!(shape, Shape::Fill { .. }))
         );
+    }
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use super::*;
+
+    #[test]
+    fn a_tile_is_round_only_at_the_corners_of_the_area_it_touches() {
+        let area = Rect::new(0., 0., 100., 100.);
+        let radii = [10., 20., 30., 40.];
+        let tile = |x, y| touched_corners(radii, Rect::new(x, y, 20., 20.), area);
+        assert_eq!(tile(0., 0.), [10., 0., 0., 0.]);
+        assert_eq!(tile(80., 0.), [0., 20., 0., 0.]);
+        assert_eq!(tile(80., 80.), [0., 0., 30., 0.]);
+        assert_eq!(tile(0., 80.), [0., 0., 0., 40.]);
+        assert_eq!(tile(40., 40.), [0.; 4]);
+        assert_eq!(touched_corners(radii, area, area), radii);
     }
 }

@@ -354,6 +354,8 @@ impl Shell {
             let Some(view) = self.hub.renderer_view(window.contents) else {
                 continue;
             };
+            // The pictures first: the list that names them is drawn with them.
+            window.show_images(view.images, cx);
             let list = view.display_list;
             self.inspectors
                 .page(window.contents, generation, view.update, list.clone(), cx);

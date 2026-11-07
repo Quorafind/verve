@@ -416,3 +416,45 @@ fn cascading_five_thousand_nodes_under_a_tailwind_sheet() {
         );
     });
 }
+
+// Observed in Electron 39.8.10 (Chromium 142): a CSS-wide keyword on `background` is the keyword
+// on each longhand, and `background: var()` is read once the variable is.
+#[test]
+fn background_keywords_and_variables_reach_every_longhand() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        assert_eq!(
+            page.eval(
+                r#"
+            (() => {
+                document.head.innerHTML = '<style>'
+                    + '.u{background-image:url(x.png);background-size:10px 5px;background-repeat:no-repeat}'
+                    + '.i{background:initial} .k{background:unset}'
+                    + '.p{background-image:url(y.png);background-size:7px 3px} .c{background:inherit}'
+                    + '.v{--c:red;background:var(--c)}'
+                    + '.w{--bg:url(x.png) no-repeat center / 10px 5px;background:var(--bg)}</style>';
+                document.body.innerHTML = '<div class="u i" id="a"></div><div class="u k" id="k"></div>'
+                    + '<div class="p"><div class="c" id="c"></div></div><div class="v" id="v"></div><div class="w" id="w"></div>';
+                const names = ['background-image', 'background-size', 'background-position',
+                    'background-repeat', 'background-origin', 'background-clip'];
+                const look = (id) => {
+                    const style = getComputedStyle(document.getElementById(id));
+                    return names.map((name) => style.getPropertyValue(name));
+                };
+                const initial = 'none,auto,0% 0%,repeat,padding-box,border-box';
+                const w = look('w');
+                const c = look('c');
+                return [
+                    look('a').join() === initial, look('k').join() === initial,
+                    c[0].includes('y.png') && c[1] === '7px 3px',
+                    look('v').join() === initial,
+                    getComputedStyle(document.getElementById('v')).backgroundColor === 'rgb(255, 0, 0)',
+                    w[0].includes('x.png'), w[1] === '10px 5px', w[3] === 'no-repeat',
+                ].join();
+            })()
+        "#
+            ),
+            "true,true,true,true,true,true,true,true"
+        );
+    });
+}

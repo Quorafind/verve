@@ -10,10 +10,11 @@ use std::hash::{Hash, Hasher};
 use verve_dom::css::color_with;
 use verve_dom::{NodeId, Snapshot};
 
+use crate::background::{Layer, read_layers};
 use crate::display_list::{Border, BorderLine, Fill, ImageKey, RasterSpec, Rgba, Shadow};
-use crate::gradient::{self, Gradient, gradient_line};
+use crate::gradient::{Gradient, gradient_line};
 use crate::shadow;
-use crate::value::{Dim, Units, length_percent, pixels, split_outside, words};
+use crate::value::{Dim, Units, length_percent, pixels, words};
 
 /// Set in the `ImageKey` of a rasterised gradient.
 pub(crate) const RASTER_KEY_BIT: u64 = 1 << 63;
@@ -34,7 +35,7 @@ pub(crate) struct Outline {
 pub(crate) struct Paint {
     pub background_color: Rgba,
     /// The gradients of `background-image`, the first layer on top.
-    pub layers: Vec<Gradient>,
+    pub layers: Vec<Layer>,
     pub border: Border,
     /// Each corner's horizontal and vertical radius.
     radii: [(Dim, Dim); 4],
@@ -76,9 +77,7 @@ impl Paint {
         let background_color = text("background-color")
             .and_then(|value| color_with(value, color))
             .unwrap_or([0.; 4]);
-        let layers = text("background-image")
-            .map(|value| gradients(value, color, units))
-            .unwrap_or_default();
+        let layers = read_layers(snapshot, node, color, units);
         let radii = CORNERS.map(|corner| radius(text(&format!("border-{corner}-radius")), units));
         let shadows = text("box-shadow")
             .map(|value| shadow::parse(value, color, units))
@@ -129,8 +128,14 @@ impl Paint {
     }
 
     /// The backgrounds back to front for a box of `size`. Gradients the shell cannot paint as
-    /// they are become [`Fill::Raster`] with a spec added to `rasters`.
-    pub(crate) fn fills(&self, size: [f32; 2], rasters: &mut Vec<RasterSpec>) -> Vec<Fill> {
+    /// they are become [`Fill::Raster`] with a spec added to `rasters`. `padding` is what layout
+    /// gave the box (top, right, bottom, left), where `background-origin: content-box` starts.
+    pub(crate) fn fills(
+        &self,
+        size: [f32; 2],
+        padding: [f32; 4],
+        rasters: &mut Vec<RasterSpec>,
+    ) -> Vec<Fill> {
         let mut fills = Vec::new();
         if self.background_color[3] > 0. {
             fills.push(Fill::Color(self.background_color));
@@ -139,7 +144,13 @@ impl Paint {
             return fills;
         }
         for layer in self.layers.iter().rev() {
-            fills.push(fill_of(layer, size, rasters));
+            match layer {
+                Layer::Gradient(gradient) => fills.push(fill_of(gradient, size, rasters)),
+                Layer::Picture(picture) => {
+                    let [top, right, bottom, left] = self.border.widths;
+                    fills.extend(picture.fill(size, [top, right, bottom, left], padding));
+                }
+            }
         }
         fills
     }
@@ -187,16 +198,6 @@ fn linear_fill(layer: &Gradient, size: [f32; 2]) -> Option<Fill> {
         angle,
         stops: layer.stops_along(length),
     })
-}
-
-fn gradients(value: &str, color: Rgba, units: &Units) -> Vec<Gradient> {
-    if !value.contains("gradient(") {
-        return Vec::new();
-    }
-    split_outside(value, ',')
-        .into_iter()
-        .filter_map(|layer| gradient::parse(layer, color, units))
-        .collect()
 }
 
 fn line_of(text: Option<&str>) -> BorderLine {
@@ -276,7 +277,7 @@ fn outline<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gradient::LinearDirection;
+    use crate::gradient::{self, LinearDirection};
 
     fn direction_of(layer: &Gradient) -> Option<LinearDirection> {
         match layer {
@@ -333,17 +334,19 @@ mod tests {
     #[test]
     fn two_stop_gradients_and_axis_aligned_ones_stay_linear() {
         let paint = Paint {
-            layers: vec![
-                gradient("linear-gradient(45deg, red, blue)"),
-                gradient("linear-gradient(to right, red, lime, blue)"),
-                gradient("linear-gradient(30deg, red, lime, blue)"),
-                gradient("radial-gradient(red, blue)"),
-                gradient("repeating-linear-gradient(red, blue 10px)"),
-            ],
+            layers: [
+                "linear-gradient(45deg, red, blue)",
+                "linear-gradient(to right, red, lime, blue)",
+                "linear-gradient(30deg, red, lime, blue)",
+                "radial-gradient(red, blue)",
+                "repeating-linear-gradient(red, blue 10px)",
+            ]
+            .map(|text| Layer::Gradient(gradient(text)))
+            .to_vec(),
             ..paint_with_radii([(Dim::Px(0.), Dim::Px(0.)); 4])
         };
         let mut rasters = Vec::new();
-        let fills = paint.fills([100., 50.], &mut rasters);
+        let fills = paint.fills([100., 50.], [0.; 4], &mut rasters);
         // Back to front: the last layer is first.
         assert_eq!(fills.len(), 5);
         assert!(matches!(fills[0], Fill::Raster(_)));
@@ -355,7 +358,7 @@ mod tests {
         assert_eq!(rasters[0].size, [100., 50.]);
         // The same gradient at the same size is the same picture.
         let mut again = Vec::new();
-        paint.fills([100., 50.], &mut again);
+        paint.fills([100., 50.], [0.; 4], &mut again);
         assert_eq!(again, rasters);
     }
 

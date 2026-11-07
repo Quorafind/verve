@@ -92,16 +92,31 @@ RendererView 追加 images: Arc<ImageTable 快照>  ─────────�
 ## 接口契约
 
 ```rust
-// verve-layout / verve-electron 共用
-#[derive(Copy, Clone, Hash, Eq, PartialEq)] pub struct ImageKey { pub id: u64, pub generation: u32 }
-pub struct ImageFrames { pub width: u32, pub height: u32, pub frames: Vec<(Arc<[u8]> /* BGRA */, Duration)> }
-pub struct ImageTable { /* ImageKey -> Arc<ImageFrames>，不可变快照，Arc 共享 */ }
+// verve-layout（渲染器与 Shell 共用）
+// ImageKey 在 P30 里已经是 `ImageKey(pub u64)`，没有单独的 generation 字段，也不加：
+//   最高两位：`1x` = 渐变栅格（P30：散列 | 1<<63，第 62 位随意）；`01` = canvas 表面（第二阶段，generation 编进低位）；
+//   `00` = 页面图片地址（已解析的 URL）的 62 位散列（`key_for_url`）。同一地址永远是同一个键；
+//   两个地址有 2^-62 的概率撞键，撞了就显示同一张图（不处理）。
+pub struct ImageFrames { pub width: u32, pub height: u32, pub frames: Vec<(Arc<[u8]> /* straight-alpha BGRA */, Duration)> }
+pub struct ImageTable { /* ImageKey -> Arc<ImageFrames>，不可变快照；渲染器每次有新图就换一个新的 Arc */ }
 
-// RendererView 追加（P02 契约追加，本包第一个 commit 只改文档与 msg/input.rs）
+// RendererView 追加（P02 契约追加表里 P35 那一行）
 pub images: Arc<ImageTable>,
-// PaintItem::Image 追加字段
+// PaintItem::Image 追加字段；bounds 是整张图（已按 object-fit/position 算好）要画进的矩形，
+// clip 是可见范围（内容盒），fit 只记录样式里的关键字，Shell 不再用它
 frame: u32,
+// Fill 追加一种：背景图层（`background-image: url()`）。area/tile 都相对盒子的 border box 左上角
+Fill::Picture { image: ImageKey, area: Rect, tile: Rect, step: [f32; 2], count: [u32; 2], frame: u32 }
+// Snapshot 追加（verve-dom）：
+//   image_sources: HashMap<NodeId, (String, f32)>   每个 <img> 现在显示的地址与像素密度（srcset 选出的）
+//   base_url: String                                 解析 CSS url() 用的文档基地址
 ```
+
+- **解码**：渲染器里有一个固定的解码线程（`ImageDecoder`），显示列表点名的、`Snapshot.images` 里有字节的地址交给它，结果回到页面线程后进 `ImageTable`；
+  解码线程每完成一张就用 `verve::Waker` 叫醒页面线程（没有 waker 时才退回 `next_due` 的 5 ms 轮询）。显示列表不再点名的图片，其像素从表里退出。
+  **所有**图片都在这个线程上解码（任务书原写"超过 1 MP 才放后台"，统一了更简单）；头部给出的像素数超过 64 MP 的图不解码。
+- **画哪一帧**：Shell 只画 `frame`；第一阶段恒为 0，动图见第二阶段。
+- **第一阶段的偏差**：`<img>` 的 `border-radius` 不裁图（`PaintItem::Image` 没有 `radii`）；每层最多 4096 块瓦片，超出的部分不画（`space`/`round` 都实现了）。
 
 ## 步骤
 
@@ -128,4 +143,71 @@ frame: u32,
 
 ## 状态
 
-（实现者完成后填写）
+### 第一阶段（步骤 1–3、7）
+
+**做了**：
+
+- **契约**（第一个提交，见「接口契约」）：`ImageKey` 仍是 `ImageKey(pub u64)`（P30 已定义，没有 generation 字段；canvas 的 generation 第二阶段编进低位，第 62 位留给 canvas 表面）；页面图片的键是已解析 URL 的 62 位散列 `key_for_url`。`ImageFrames`/`ImageTable`（`verve-layout/src/images.rs`）、`RendererView.images`、`PaintItem::Image.frame`、`Fill::Picture`、`Snapshot.image_sources`/`base_url`。
+- **verve-dom**：
+  - `canvas/sources.rs`：`srcset`（`x`/`w` 描述符）、`sizes`（媒体条件、`calc()`、`vw`）和 `<picture><source media type>` 的选择；`img.rs::sync` 改用它，`currentSrc`/`naturalWidth` 随之（自然尺寸 = 像素 ÷ 密度，向下取整）。
+  - 样式里的图片：`background-image`/`list-style-image` 的 `url()` 和 `<video poster>` 在帧里被发现（`sync_images` 扫描改动/重算样式的节点），作为 `Request::Image` 交给加载器，只请求一次；字节到达或失败时 `touch()`，布局重做（`set_image_bytes` 原来漏了，评审后补上，`tests/images.rs` 有一条经 127.0.0.1 的 http 取图的测试）；背景图和 `<img>` 共用一个地址时，字节按 `Keep::Always` 保留（`<img>` 不再引用也不丢）。`poster=""` 不请求。
+  - `background` 简写现在拆成逐层的 `background-image/-position/-size/-repeat/-origin/-clip`（原来整条文字塞进 `background-image`），并且总是写全部长属性（`background:red` 会把图片、位置、尺寸、重复复位；CSS 全局关键字抄进每个长属性，含 `var()` 的值整条保留）。
+  - UA 样式表加了 `video { object-fit: contain }` 和 `audio:not([controls]) { display: none }`（Electron 39.8.10 观察到 `<audio>` 无 `controls` 时矩形为 0×0）。
+- **verve-layout**：`<img>` 的固有尺寸（图片到了就是图片的尺寸；只给一边的属性时按比例；加载前 `width`/`height` 属性同时给出时作为宽高比提示）；尺寸按 `props.rs::Follow` 分三种，由 `layout.rs::scale_ratio_heights` 在第一遍之后补：给了宽（样式或属性）没给高，高 = 实际宽 ÷ 比例；给了高没给宽，宽 = 实际高 × 比例；都没给，用图片的尺寸并按 CSS 2.1 10.4 的表被两边的 `min-`/`max-` 限制（`constrain`，不再用 taffy 的 `aspect_ratio`，它会把一边的限制带到另一边，而 Chromium 对给定的那一边不这样做）；样式里的 `width`/`height`（包括 `auto`）压过属性；`<video>` 没有尺寸时按 `poster` 的尺寸（40×20 的 poster 得 40×20，Electron 39.8.10 观察到）；`object-fit`/`object-position` 自己算目标矩形，`PaintItem::Image.bounds` 是整张图的矩形、`clip` 是内容盒（不用 `PushClip`）；`background-image: url()` 多层、`size`（`cover/contain/长度/auto`）、`position`（含四值边偏移）、`repeat`（`repeat/no-repeat/repeat-x/-y/space/round`）、`origin`/`clip`，输出 `Fill::Picture`，每层最多 4096 块瓦片。
+- **verve-electron**：`page_images.rs`——**一个**固定的解码线程（`verve-image-decoder`），显示列表点名且 `Snapshot.images` 里有字节的地址交给它（同一地址换了字节就重新解码），结果在页面线程汇成新的 `Arc<ImageTable>`（straight-alpha BGRA，用 P25 的 `decode`/`unpremultiply`）；解码线程用 `verve::Waker` 叫醒页面（没有 waker 才 5 ms 轮询）；头部像素数超过 64 MP 的图解码前就放弃；解码 panic 被 `catch_unwind` 接住，线程死了就复位 `pending` 并在下一个任务时重启；列表不再点名或文档不再持有的地址退出表；每个地址的键按字节分配的地址缓存，不在每帧对（可能几 MB 的）`data:` 地址做散列。`media_host.rs`：`MediaBackend` trait 和 `Unsupported`——`Load` 回 `Error { code: 4 }`，`Play` 回 `CommandFailed`，其余不回；`RendererGuest::drain` 里 `serve_media()`。`HeadlessShell::display_list(window)` 留下页面最后发布的显示列表和图片表供测试读。
+- **verve-gpui**：`pictures.rs` 扩展（没有第二套机制）：`Pictures::set_table/image`，页面图片按键缓存成带全部帧的 `RenderImage`，表里换了新的 `ImageFrames`（`Arc` 指针不同）就重做并让旧的退役，没画的帧末放弃、下一帧还给图集；不透明度小于 1 时同渐变一样用 alpha 副本。`plan.rs`：`Shape::Picture`（`PaintItem::Image` 和 `Fill::Picture` 的每块瓦片）；`dom_element.rs` 用 `paint_image(visible, bounds, radii, …)`（GPUI 的 fork 里前一个矩形是可见范围，后一个是整张图的矩形）；`screenshot.rs` 用 tiny-skia `Pattern` 画（`render_with`、`png`/`write` 多了 `images` 参数；`render` 不变）。`Look` 多了第四项 `Arc<ImageTable>`，`Window::show_images`，`DomView::show_images`。
+
+**Electron 39.8.10 的观察**（`show: false`、800×600、`--force-device-scale-factor` 1/2/3，scratch profile；脚本在草稿目录 `p35/obs/`）：
+
+- `<img>` 加载失败：无 `alt`、无尺寸属性 → 16×16（破图图标）；有非空 `alt` → 一个 `16 + 文字宽` × 21 的行内盒，**忽略** `width`/`height` 属性；`alt=""` 或没有 `src` 且无 `alt` → 0×0；失败且只有 `width="100" height="50"` → 100×50。
+- 4×2 的图：无属性 → 4×2；`width=100` → 100×50；`height=20` → 40×20；`max-width:2px` → 2×1；`width=100 height=100` → 100×100；`width:50%`（800 宽）→ 400×200（比例保持）。
+- 无属性的 `<svg>`、`<canvas>`、`<video>` 是 300×150；`<svg viewBox="0 0 40 20">` 无尺寸时宽是容器宽、高按 2:1；`<svg width=50>` 是 50×150；`<audio>` 无 `controls` 是 0×0，有 `controls` 是 300×54；`<video src>` 指向不存在的文件：`error.code === 4`，`networkState` 3；没有 `src` 时 `error` 是 `null`。
+- `object-fit`/`object-position`：用 `capturePage()` 量红色像素的包围盒（40×20 与 200×100 的图在 100×100 的盒里，全部组合）。**`object-position` 的长度对 `fill` 和 `cover` 也生效**（`fill` + `10px 20px` 的可见范围是 `[10,20,90,80]`）；`25% 75%` 的 `contain` 得 y=37.5，截图量得 38。DPR 2 时包围盒恰好翻倍。表在 `replaced.rs` 的测试里。
+- `srcset`：**经 http 取图**时按规范选（DPR 1：`1x,2x,3x` → 1x；`1.5x,2.5x` → 1.5x；DPR 2 → 2x/2.5x；`src` 是 1x 候选；`150px` 的 `sizes` 在 DPR 1 选 200w、在 DPR 2 选 300w；`sizes` 的媒体条件按窗口宽度；`calc(50vw - 100px)`；无 `sizes` 是 `100vw`）。`naturalWidth` = 像素 ÷ 密度并向下取整（10÷1.5 → 6，而 `width` 是 7）。**图片用 `data:` URL 时，Chromium 总是选最大的候选**（与 DPR 无关），所以测试里的选择只在 `sources.rs` 的单元测试里按规范断言。`<picture>`：媒体不匹配的 `source` 被跳过，`type="image/webp"`/`image/png` 的被采用，不认识的 `type` 被跳过，`<source media="(min-width: 700px)">` 在 800 宽时被采用。
+
+**没做 / 偏差**：
+
+- **破图盒与 `alt` 文字**：图片加载失败、没有尺寸属性时没有 16×16 的图标盒，`alt` 文字没有排进行内（现在是 0×0）；快照里没有"加载失败"的信息，要加一个字段才能区分"还在加载"和"失败"。上面观察到的数字都在，留给下一次。
+- **`list-style-image`**：URL 会被请求和解码，但 `list-style` 的标记（`::marker`）本身还没有画图（P31 的标记是文字）。
+- **`image-rendering: pixelated`**：未做（GPUI 没有采样选择；任务书里的整数倍预放大没实现）。
+- **解码线程**：所有图片都在那一个线程上解码（任务书原写大于 1 MP 才放后台）；`Snapshot.images` 里的图片只要文档还持有就一直在表里，**没有 256 MB 的 LRU**（背景图 `Keep::Always` 永不放；`<img>` 的在没有元素引用后释放）。
+- **SVG**（`<img src=x.svg>` 和背景）：布局有尺寸（头部读出），解码返回 `Unsupported`，所以不画；第二阶段。
+- `background-attachment`、`background-clip: text` 忽略；圆角盒的背景图只有铺满整个盒子时才带圆角，而且每块瓦片只在碰到区域那个角的地方圆（GPUI 与软件绘制一致）；`<img>` 的 `border-radius` 不裁图（`PaintItem::Image` 没有 `radii`），Chromium 会裁；`background-size` 对渐变层不起作用（原来就如此）。样式里的相对 `url()` 按文档地址解析，不是按样式表地址。
+- `<img>` 的 `srcset`/`<source>` 在视口或 DPR 变化后不会重选（只在该元素的属性变化时选）；`<source>` 本身的属性变化不会让 `<img>` 重选。
+- `PaintItem::Image.frame` 恒为 0（动图是第二阶段）。
+- **GPUI 的取整**：比圆角半径还小的瓦片在 GPUI 里近乎方形（GPUI 对每块单独取整并限制半径）；GPUI 把只露出一部分的小图的子矩形取整到整个纹素（`window.rs`），位置会有偏差；软件绘制是精确的。
+- **每帧的地址拷贝**：`Snapshot` 的 `images`/`image_sources` 每帧还要复制每个图片地址（大的 `data:` 地址有几 MB），只改了布局和解码线程这一侧的散列，没改快照。
+- **评审后留下的**：
+  - 每层超过 4096 块瓦片时多出的部分是空的（如 1×1 的瓦片铺 1000×800）；任务书说的"CPU 预铺"没做（要给预铺的图合成一个新键）；
+  - flex 容器里 `<img>` 的拉伸（Chromium 把 `<img width=40>` 在 100px 高的 flex 行里拉成 40×100，Verve 是 40×20）没做，也没有对应测试；
+  - `::before`/`::after` 里的 `url()` 不会被请求（`sync_images` 只读元素的样式）；
+  - P25 的 `decode` 先预乘再由 `still` 反预乘，低 alpha 的颜色会量化（还没有 straight-alpha 选项）；
+  - `image_size` 不看 EXIF 方向而 `decode` 会转，带旋转的手机 JPEG 固有尺寸会宽高颠倒；
+  - 布局每次读 `<img>` 仍要对地址做一次散列（`snapshot.images.get`），只在布局重做时发生，不在每帧；
+  - 解码后的像素在 CPU 上有两份（`ImageTable` 与 `RenderImage`）；
+  - 页面图片在 GPUI 里不画之后保留 300 帧才还给图集，来回滚动不会重新拷贝和上传；列表不点名但文档还持有字节的图片，解码好的像素在 128 MiB 的预算内保留（最久没被点名的先丢），隐藏再显示不会空白；
+  - 历史：gpui 测试在 `feat(gpui): Draw pictures and background tiles…` 之后单独一个提交，video/audio 的 UA 规则在 `feat(layout)` 里（要重排提交）；两者都没改。
+- 顺序：测试 `tests/images.rs` 的 `srcset` 一条用 `data:` URL，只验证 `src` 与 `srcset` 的配合（见观察）。
+
+**任务书「修改」之外动过的文件**：`verve-dom` 的 `css/shorthand.rs`、`css/values.rs`（UA 样式）、`snapshot.rs`、`update.rs`、`canvas/{document,image,img,mod}.rs`；`verve-electron` 的 `headless.rs`、`lib.rs`、`msg/input.rs`；`verve-gpui` 的 `shell.rs`、`window.rs`、`capture.rs`、`dom_view.rs`、`plan.rs`；`verve-layout` 的 `props.rs`、`layout.rs`、`paint.rs`、`paint_style.rs`、`display_list.rs`、`lib.rs`。
+
+**给其他包**：P24/P43 二期：`RendererView` 只在末尾多了 `images`；`Look` 多了第四项。P33：`Fill::Picture` 的瓦片在 `lower_tiles` 里展开，块缓存可以直接缓存 `Shape::Picture`。
+
+**要跑的测试**（一次一条）：
+
+```
+cargo test --locked -p verve-dom canvas::sources
+cargo test --locked -p verve-dom css::shorthand
+cargo test --locked -p verve-dom --test css
+cargo test --locked -p verve-dom --test canvas
+cargo test --locked -p verve-dom --test media
+cargo test --locked -p verve-layout
+cargo test --locked -p verve-electron --lib page_images
+cargo test --locked -p verve-electron --lib media_host
+cargo test --locked -p verve-electron --test images
+cargo test --locked -p verve-electron --test headless
+cargo test --locked -p verve-electron --test geometry
+cargo test --locked -p verve-gpui --features jit --lib
+cargo test --locked -p verve-gpui --features jit --test boxes
+cargo clippy --locked --workspace --all-targets -- -D warnings
+```

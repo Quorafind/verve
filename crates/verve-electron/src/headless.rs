@@ -88,6 +88,9 @@ struct State {
 #[derive(Default)]
 struct Page {
     snapshot: Option<Snapshot>,
+    /// The display list and the decoded pictures it names, as last published.
+    list: Option<Arc<verve_layout::DisplayList>>,
+    images: Option<Arc<verve_layout::ImageTable>>,
 }
 
 /// What a message did, to be said to the app once the shell's own state is let go.
@@ -262,6 +265,21 @@ impl HeadlessShell {
         let state = self.state();
         let contents = state.windows.get(&window)?.shown.contents;
         state.pages.get(&contents)?.snapshot.clone()
+    }
+
+    /// The display list `window`'s page last published, with the pictures it names.
+    pub fn display_list(
+        &self,
+        window: WindowId,
+    ) -> Option<(
+        Arc<verve_layout::DisplayList>,
+        Arc<verve_layout::ImageTable>,
+    )> {
+        self.pump();
+        let state = self.state();
+        let contents = state.windows.get(&window)?.shown.contents;
+        let page = state.pages.get(&contents)?;
+        Some((page.list.clone()?, page.images.clone()?))
     }
 
     /// A person clicked `window`'s close button: the main process is asked, a `'close'`
@@ -645,7 +663,13 @@ impl HeadlessShell {
             .map(|window| window.shown.contents)
             .collect();
         for contents in open {
-            let Some(update) = hub.renderer_view(contents).and_then(|view| view.update) else {
+            let Some(view) = hub.renderer_view(contents) else {
+                continue;
+            };
+            let page = state.pages.entry(contents).or_default();
+            page.list = view.display_list.or(page.list.take());
+            page.images = Some(view.images);
+            let Some(update) = view.update else {
                 continue;
             };
             state.settle(contents, update.snapshot);

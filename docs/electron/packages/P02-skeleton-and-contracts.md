@@ -334,7 +334,7 @@ P13 第二段另加两个类型（`msg/page.rs`）：`EditCommand`（`Undo` `Red
 | ~~`FromRenderer::Font`、`ToRendererInput::FontsChanged`~~（第二阶段作废：渲染器线程直接 `add_fonts`，见 P31 的 `@font-face` 通道；只剩 P30 契约的 `PlacedGlyph.font`：画这个字形的字体，用了回退时与请求的不同） | P31 |
 | `ToRendererInput::Choose { select, value }`（`<select>` 下拉弹层选中） | P32 |
 | `RendererView.display_list`（`Option<Arc<verve_layout::DisplayList>>`，随 `verve-layout` 接入渲染器时加）；`DisplayList.rasters`、`DisplayList.root`（页面的滚动容器）与进程内唯一的 `revision`、`Hitbox` 的形状、滚动帧 `PushScroll`/`PopScroll`（滚动只改 `Scroller` 的 offset）见 P30 的「契约调整」 | P30 |
-| `RendererView.images`、`PaintItem::Image.frame`、`DisplayList.chunks` | P35 / P33 |
+| `RendererView.images`（`Arc<verve_layout::ImageTable>`，键是 `ImageKey`，值是 straight-alpha BGRA 的 `ImageFrames`）、`PaintItem::Image.frame`、`Fill::Picture`、`Snapshot.image_sources`/`base_url`（P35，细节见 P35 的「接口契约」）；`DisplayList.chunks`（P33） | P35 / P33 |
 | `FromRenderer::{Protocol, ProtocolPull, ProtocolCancel}`、`ToRenderer::{ProtocolHead, ProtocolChunk, ProtocolEnd}`（页面 `fetch` 自定义 scheme，逐块拉取；见 P16 契约修订） | P16 |
 | `FromRenderer::{ProtocolRequest, ZoomChanged, PreloadError}`、`ToRenderer::ProtocolResponse` | P20 / P21 |
 | `ToRendererInput::{Drag, Paste, ClipboardContents}` | P24 |

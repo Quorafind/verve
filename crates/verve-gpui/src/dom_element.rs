@@ -156,10 +156,17 @@ impl DomElement {
         let mask = command.clip.map(|clip| ContentMask {
             bounds: in_window(origin, clip),
         });
-        // Text and its lines are the many shapes of a page: the ones outside the window or
-        // outside their own clip are not asked of the text system.
-        if let Shape::Glyphs { bounds, .. } = &command.shape
-            && !self.shows(*bounds, command.clip, origin, window)
+        // Text and pictures are the many shapes of a page: the ones outside the window or
+        // outside their own clip are not asked of the text system or uploaded to the atlas.
+        let seen = match &command.shape {
+            Shape::Glyphs { bounds, .. } => Some(Some(*bounds)),
+            Shape::Picture {
+                bounds, visible, ..
+            } => Some(visible.intersection(bounds)),
+            _ => None,
+        };
+        if let Some(seen) = seen
+            && !seen.is_some_and(|seen| self.shows(seen, command.clip, origin, window))
         {
             return;
         }
@@ -182,6 +189,21 @@ impl DomElement {
                 wavy,
                 through,
             } => paint_decoration(*bounds, *color, *wavy, *through, origin, window),
+            Shape::Picture {
+                bounds,
+                visible,
+                radii,
+                image,
+                frame,
+                alpha,
+            } => self.page_picture(
+                *bounds,
+                *visible,
+                *radii,
+                (*image, *frame as usize, *alpha),
+                origin,
+                window,
+            ),
             Shape::Border {
                 bounds,
                 radii,
@@ -256,6 +278,31 @@ impl DomElement {
         let mut quad = gpui::fill(at, background);
         quad.corner_radii = corners(radii);
         window.paint_quad(quad);
+    }
+
+    /// A picture the page loaded, the whole of it over `bounds`, of which `visible` shows.
+    fn page_picture(
+        &self,
+        bounds: Rect,
+        visible: Rect,
+        radii: [f32; 4],
+        (key, frame, alpha): (ImageKey, usize, f32),
+        origin: gpui::Point<Pixels>,
+        window: &mut Window,
+    ) {
+        let Some(picture) = self.state.borrow_mut().pictures.image(key, alpha) else {
+            return;
+        };
+        let frame = frame.min(picture.frame_count().saturating_sub(1));
+        // An error is a picture GPUI could not take; the page shows without it.
+        let _ = window.paint_image(
+            in_window(origin, visible),
+            in_window(origin, bounds),
+            corners(radii),
+            picture,
+            frame,
+            false,
+        );
     }
 
     /// The picture of a gradient the renderer asked the shell to rasterise, for the window's scale

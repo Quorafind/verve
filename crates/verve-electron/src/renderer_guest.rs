@@ -20,9 +20,11 @@ use crate::ids::ContentsId;
 use crate::inspector;
 use crate::loader::ElectronLoader;
 use crate::log::Log;
+use crate::media_host::{MediaBackend, Unsupported};
 use crate::msg::{
     FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
+use crate::page_images::PageImages;
 use crate::page_layout::PageLayout;
 use crate::renderer_net::{self, RendererNet};
 use crate::renderer_permissions::PagePermissions;
@@ -35,6 +37,10 @@ pub struct RendererGuest {
     document: Document,
     /// Where the page's boxes are, and what the shell draws of them.
     layout: PageLayout,
+    /// The pictures of the page, decoded.
+    images: PageImages,
+    /// What answers the page's `<video>` and `<audio>`.
+    media: Box<dyn MediaBackend>,
     /// Everything the page has to tell the main process, in the order it happened: console lines,
     /// lifecycle, requests and IPC. It leaves as one job after each job the page runs.
     outbox: Outbox,
@@ -110,6 +116,8 @@ impl RendererGuest {
             runtime,
             document,
             layout,
+            images: PageImages::new(),
+            media: Box::new(Unsupported),
             outbox,
             contents,
             generation,
@@ -133,6 +141,7 @@ impl RendererGuest {
 
     /// Lets work finished on another thread — a socket, a worker — wake the isolate.
     pub fn set_waker(&mut self, waker: verve::Waker) {
+        self.images.set_waker(waker.clone());
         self.runtime.set_waker(Some(waker));
     }
 
@@ -223,6 +232,24 @@ impl RendererGuest {
     /// Evaluates `code` in the page's realm, answering the result as JSON.
     pub fn eval(&mut self, code: &str) -> Result<String, String> {
         probe::evaluate(&mut self.runtime, code)
+    }
+
+    /// Answers the media commands the page gave: this host plays nothing, so a source fails with
+    /// `MEDIA_ERR_SRC_NOT_SUPPORTED`.
+    fn serve_media(&mut self) {
+        for command in self.document.take_media_commands() {
+            for update in self.media.handle(&command) {
+                let sent = self.document.media_update(
+                    &mut self.runtime,
+                    command.node,
+                    command.generation,
+                    update,
+                );
+                if let Err(error) = sent {
+                    eprintln!("electron: a media answer was refused: {error}");
+                }
+            }
+        }
     }
 
     /// A person's click on the first element `selector` matches; `false` if there is none.
@@ -424,11 +451,15 @@ impl Guest for RendererGuest {
             .document
             .pending_loads()
             .saturating_sub(self.loader.waiting());
-        let soon = (self.document.is_loading() && unasked > 0).then_some(Duration::from_millis(5));
+        // A decoder that cannot wake the page is asked after.
+        let decoding = self.images.pending() > 0 && !self.images.wakes();
+        let soon = ((self.document.is_loading() && unasked > 0) || decoding)
+            .then_some(Duration::from_millis(5));
         due.into_iter().chain(soon).min()
     }
 
     fn drain(&mut self, _out: &mut IsolateOutbox<FromRenderer>) {
+        self.serve_media();
         self.collect();
         self.outbox.borrow_mut().extend(self.loader.take_outbox());
         self.queue_requests();
@@ -442,13 +473,17 @@ impl Guest for RendererGuest {
         let update = self.document.update();
         let changed = !update.changes.is_empty();
         let (list, new_list) = self.layout.list();
-        (ran || changed || new_list).then(|| RendererView {
+        self.images
+            .sync(&update.snapshot.images, new_list.then_some(&*list));
+        let (images, new_images) = self.images.table();
+        (ran || changed || new_list || new_images).then(|| RendererView {
             applied,
             update: Some(update),
             wants_frame: self.document.wants_frame(),
             cursor: None,
             ime_rect: self.document.caret_rect(),
             display_list: Some(list),
+            images,
         })
     }
 

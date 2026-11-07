@@ -22,6 +22,7 @@ use crate::display_list::{Border, Fill, PaintItem, RasterSpec};
 use crate::layout::Laid;
 use crate::place::{Around, Placed, around, clips_in_frame, padding_box};
 use crate::props::Position;
+use crate::replaced::fit_rect;
 use crate::tree::BoxTree;
 
 /// What is open around the items being painted.
@@ -104,10 +105,11 @@ impl Painter<'_> {
         });
         let Some(source) = source else { return };
         let (width, height) = tree.viewport;
-        let background = tree.boxes[source]
-            .props
-            .paint
-            .fills([width, height], &mut self.rasters);
+        let background = tree.boxes[source].props.paint.fills(
+            [width, height],
+            self.laid.padding[source],
+            &mut self.rasters,
+        );
         self.canvas_from = Some(source);
         self.items.push(PaintItem::Box {
             node: tree.boxes[source].node,
@@ -249,7 +251,11 @@ impl Painter<'_> {
         let background = if self.canvas_from == Some(index) {
             Vec::new()
         } else {
-            paint.fills([rect.width, rect.height], &mut self.rasters)
+            paint.fills(
+                [rect.width, rect.height],
+                self.laid.padding[index],
+                &mut self.rasters,
+            )
         };
         if !background.is_empty() || paint.border.is_visible() || !paint.shadows.is_empty() {
             self.items.push(PaintItem::Box {
@@ -261,6 +267,7 @@ impl Painter<'_> {
                 shadows: paint.shadows.clone(),
             });
         }
+        self.picture(index, rect);
         if paint.outline.is_some() {
             self.outlines.push(index);
         }
@@ -272,6 +279,33 @@ impl Painter<'_> {
                 app_region: node.props.input.app_region,
             });
         }
+    }
+
+    /// The picture of a replaced element, fitted into its content box.
+    fn picture(&mut self, index: usize, rect: Rect) {
+        let node = &self.tree.boxes[index];
+        let Some(picture) = &node.props.picture else {
+            return;
+        };
+        let [top, right, bottom, left] = self.laid.border[index];
+        let [pad_top, pad_right, pad_bottom, pad_left] = self.laid.padding[index];
+        let content = Rect::new(
+            rect.x + left + pad_left,
+            rect.y + top + pad_top,
+            rect.width - left - right - pad_left - pad_right,
+            rect.height - top - bottom - pad_top - pad_bottom,
+        );
+        if content.width <= 0. || content.height <= 0. || picture.natural.contains(&0.) {
+            return;
+        }
+        self.items.push(PaintItem::Image {
+            node: node.node,
+            bounds: fit_rect(picture.fit, picture.natural, content, picture.position),
+            clip: content,
+            image: picture.key,
+            fit: picture.fit,
+            frame: 0,
+        });
     }
 
     /// Paints the outlines that waited for the end of their context.

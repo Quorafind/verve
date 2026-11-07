@@ -43,7 +43,7 @@ impl Capture {
     /// Looks at `window`; answers whether the picture was taken (or given up on), so the app ends.
     pub(crate) fn poll(&mut self, window: Option<&Window>, cx: &mut AsyncApp) -> bool {
         let look = window.and_then(|window| window.look(cx));
-        let Some((list, viewport, background)) = look.filter(|look| look.1.0 > 0.) else {
+        let Some((list, viewport, background, images)) = look.filter(|look| look.1.0 > 0.) else {
             return self.give_up_after_a_while("no window drew a page");
         };
         let now = Instant::now();
@@ -57,7 +57,7 @@ impl Capture {
         }
         let size = (viewport.0.round() as u32, viewport.1.round() as u32);
         let color = background.map(|c| [c.r, c.g, c.b, c.a]);
-        if let Err(error) = screenshot::write(&self.path, &list, size, color) {
+        if let Err(error) = screenshot::write(&self.path, &list, &images, size, color) {
             eprintln!("electron: no screenshot: {error}");
             self.failed.store(true, Ordering::SeqCst);
         }

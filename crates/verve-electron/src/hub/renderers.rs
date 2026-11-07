@@ -427,6 +427,7 @@ mod tests {
             cursor: None,
             ime_rect: None,
             display_list: None,
+            images: std::sync::Arc::default(),
         }
     }
 

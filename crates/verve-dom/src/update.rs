@@ -100,6 +100,8 @@ impl Document {
             media: state.media.snapshot(),
             canvases: canvas::snapshot_canvases(&state),
             images: state.images.snapshot(),
+            image_sources: state.images.sources(),
+            base_url: state.base_url().to_string(),
             pseudo: view.computed.pseudo().clone(),
         }))
     }

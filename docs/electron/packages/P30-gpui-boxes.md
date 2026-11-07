@@ -144,7 +144,7 @@ pub enum PaintItem {
     Box { node: NodeId, bounds: Rect, radii: [f32; 4], background: Vec<Fill>, border: Border, shadows: Vec<Shadow> },
     Glyphs { node: NodeId, origin: [f32; 2], font: FontKey, size: f32, color: [f32; 4], glyphs: Arc<[PlacedGlyph]> },   // P31
     Decoration { kind: DecorationKind, bounds: Rect, color: [f32; 4], wavy: bool },                                    // P31
-    Image { node: NodeId, bounds: Rect, clip: Rect, image: ImageKey, fit: ObjectFit },                                 // P35
+    Image { node: NodeId, bounds: Rect, clip: Rect, image: ImageKey, fit: ObjectFit, frame: u32 },                 // P35：bounds 是整张图画进的矩形（已按 object-fit 算好），clip 是可见范围
     Control { node: NodeId, bounds: Rect, kind: ControlKind },                                                         // P32
     PushClip { bounds: Rect, radii: [f32; 4] }, PopClip,
     PushOpacity(f32), PopOpacity,
@@ -152,7 +152,7 @@ pub enum PaintItem {
     Hitbox { node: NodeId, bounds: Rect, cursor: Cursor, app_region: Option<AppRegionKind> },                          // P32/P34
     Scroller { node: NodeId, viewport: Rect, content: [f32; 2], offset: [f32; 2], scrollbar: bool },                  // 在自己的帧之外
 }
-pub enum Fill { Color([f32; 4]), Linear { angle: f32, stops: Vec<([f32; 4], f32)> }, Raster(ImageKey) /* 复杂渐变栅格化 */ }
+pub enum Fill { Color([f32; 4]), Linear { angle: f32, stops: Vec<([f32; 4], f32)> }, Raster(ImageKey) /* 复杂渐变栅格化 */, Picture { /* P35：background-image: url() 的瓦片，见 P35 */ } }
 pub struct Border { pub widths: [f32; 4], pub colors: [[f32; 4]; 4], pub styles: [BorderLine; 4] }
 ```
 
