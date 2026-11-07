@@ -29,8 +29,14 @@ Verve 没有 Chromium DevTools，也不实现 Chrome DevTools 协议。本包提
 | 来源 | 去向 |
 |---|---|
 | 主进程 `console.*` | 总是写到进程的 stdout（log/info/debug）/ stderr（warn/error），格式与 `verve run` 相同（`util.inspect` 风格） |
-| 渲染器 `console.*` | ① 总是作为 `FromRenderer::Console` 交给主进程，`webContents` 发 `'console-message'`；② 仅当设了 `ELECTRON_ENABLE_LOGGING=1`、命令行 `--enable-logging`，或 `VERVE_ELECTRON_LOG` 含 `console` 时，才写到终端 stderr（与 Electron 一致：默认不写终端） |
+| 渲染器 `console.*` | ① 总是作为 `FromRenderer::Console` 交给主进程，`webContents` 发 `'console-message'`；② 仅当设了 `ELECTRON_ENABLE_LOGGING`（任何非空值）、命令行 `--enable-logging`，或 `VERVE_ELECTRON_LOG` 含 `console` 时，才写到终端 stderr（与 Electron 一致：默认不写终端） |
 
+- Electron 39.8.10（Windows）观测 `ELECTRON_ENABLE_LOGGING`：设为 `1`、`0`、`false` 都开启日志（Chromium 写 10 行 `INFO:CONSOLE`），空值等于没设，不写（`expected/logging-env.txt`）。
+- Electron 39.8.10 观测（`tests/electron/devtools/`）：事件对象自有可枚举属性恰为 `_level`（数字）、`frame`（即 `webContents.mainFrame`）、`level`、
+  `lineNumber`、`sourceId`、`message`（`expected/own-keys.txt`）；监听器再收到 `(event, level, message, line, sourceId)`，`level` 为数字 debug 0、info 1、warning 2、error 3。
+  任一 `console-message` 监听器声明了多于一个形参时，主进程 stderr 写一次 `(electron) 'console-message' arguments are deprecated and will be removed. Please use Event<WebContentsConsoleMessageEventParams> object instead.`。
+  `message` 是 Chromium 的文本（对象为 `[object Object]`，不做 `%s` 替换）；未捕获错误是 `Uncaught Error: page boom`，未处理拒绝是 `Uncaught (in promise) Error: page reject`，
+  级别都是 error，`lineNumber`/`sourceId` 指向抛出处。Verve 的 `message` 是它自己的 `util.inspect` 文本（见 P43「状态」）。
 - `'console-message'` 事件按 Electron 39 的签名：事件对象带 `level`（`'info'|'warning'|'error'|'debug'`）、`message`、
   `lineNumber`、`sourceId`、`frame`；同时保留已弃用的位置参数 `(event, level, message, line, sourceId)`，其中 `level` 为数字 0–3。
   以真实 Electron 39 的观测为准并冻结进测试。
@@ -57,7 +63,7 @@ Verve 没有 Chromium DevTools，也不实现 Chrome DevTools 协议。本包提
 
 - 每个不支持的参数在启动时 stderr 打印**一行**：`Verve: --inspect is not supported; see VERVE_ELECTRON_LOG and webContents.openDevTools()`。
 - P40 的 fuse `EnableNodeCliInspectArguments` 关闭时，`--inspect*` 按 Electron 行为处理（以观测为准）。
-- 这些参数不进入 `process.argv` 的应用部分的规则与 Electron 相同（Chromium 开关会被 Electron 吞掉；以观测为准）。
+- 这些参数留在 `process.argv` 里：Electron 39.8.10 观测，`--inspect=127.0.0.1:0 --remote-debugging-port=0 --js-flags=… --log-level=3 --v=0 --vmodule=x=0 --inspect-port=0 --enable-logging=stderr` 全部原样在 `process.argv`（应用路径之前）。真 Electron 的 `--inspect` 还会在 stderr 写 Node 的两行 `Debugger listening on ws://…` 与 `For help, see: https://nodejs.org/en/docs/inspector`（`expected/inspect.txt`）；Verve 只写一行警告。每个开关名警告一次，`--enable-logging` 不警告。
 
 ### 4. `VERVE_ELECTRON_LOG`
 

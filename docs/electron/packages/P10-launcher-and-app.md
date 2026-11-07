@@ -60,6 +60,7 @@ pub fn parse(args: Vec<OsString>, exe: &Path, env: &Env) -> Result<Launch, Strin
 | 是 `http(s):`/`file:` URL 或 `.html` 文件 | `OpenUrl` |
 | 无参数 | `DefaultApp` |
 | Chromium/Node 开关：`--inspect[=…]`、`--inspect-brk`、`--remote-debugging-port=…`、`--enable-logging`、`--no-sandbox`、`--disable-gpu`、`--disable-gpu-sandbox`、`--js-flags=…`、`--trace-warnings`、`--lang=…`、`--force-device-scale-factor=…`、`--high-dpi-support=…`、`--user-data-dir=…`、`--proxy-server=…` 等任何 `--x[=y]` | **不报错**，保留在 `process.argv` 里，并记入 `app.commandLine`（`hasSwitch`/`getSwitchValue` 能读到）。其中真正生效的：`--user-data-dir`（改 `userData`）、`--lang`（`app.getLocale`）、`--force-device-scale-factor`（交给 Shell）、`--proxy-server`（交给 P16 的 session） |
+| 调试开关：`--inspect[=…]`、`--inspect-brk[=…]`、`--inspect-port=…`、`--inspect-publish-uid=…`、`--remote-debugging-port=…`、`--remote-debugging-pipe`、`--js-flags=…`、`--log-level=…`、`--v=…`、`--vmodule=…`（P43） | 照上一行保留在 `process.argv` 与 `app.commandLine`（Electron 39.8.10 观测：这些开关都留在 `process.argv` 里），启动时每个开关名在 stderr 打**一行** `Verve: --<name> is not supported; see VERVE_ELECTRON_LOG and webContents.openDevTools()`，没有监听端口，应用照常启动。`--enable-logging[=…]` 真正生效（渲染器 console 写终端），不警告；与 Electron 的差异：`--enable-logging=file`、`ELECTRON_ENABLE_LOGGING=file` 在 Electron 里写文件，Verve 仍写 stderr |
 | `--`、单独的 `-` | 跳过，不当路径也不当开关：`electron -- --version` 照样打印版本、`electron -- app.js` 照样运行 `app.js`（39.8.10 观测）；`-r` 后没有模块则当没写（默认应用） |
 
 `process.argv`：开发形态 `[execPath, app_path_as_given, ...args]`；打包形态 `[execPath, ...args]`。
