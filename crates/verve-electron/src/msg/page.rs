@@ -326,6 +326,9 @@ pub enum FromRenderer {
         text: String,
         is_error: bool,
     },
+    /// The page left a key down alone: it did not prevent it and its default action did nothing
+    /// but type. The menu's accelerator for it, if any, is chosen (P15, P32).
+    KeyUnhandled(verve_dom::Key),
 }
 
 /// The page's life, in the order `webContents` reports it.

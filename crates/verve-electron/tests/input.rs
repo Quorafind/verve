@@ -16,13 +16,12 @@ const PAGE: &str = r#"<style>html,body{margin:0}button,input{display:block;margi
 /// Records what the page hears: `heard` is a list of `type:target:detail:buttons`-like words.
 const LISTEN: &str = r#"globalThis.heard = [];
 for (const kind of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'dblclick', 'auxclick', 'contextmenu', 'wheel', 'keydown', 'keypress', 'beforeinput', 'input', 'keyup']) {
-  document.addEventListener(kind, (e) => heard.push(kind + (e.target.id ? '#' + e.target.id : '') + (kind.includes('click') || kind.startsWith('mouse') || kind.startsWith('pointer') ? ':' + e.detail + ':' + e.buttons : '')));
+  document.addEventListener(kind, (e) => heard.push(kind + (e.target.id ? '#' + e.target.id : '') + (kind.includes('click') || kind === 'contextmenu' || kind.startsWith('mouse') || kind.startsWith('pointer') ? ':' + e.detail + ':' + e.buttons : '')));
 }
 0"#;
 
 struct Page {
     app: App,
-    window: u32,
     contents: u32,
 }
 
@@ -40,7 +39,7 @@ fn launch(extra: &str) -> Page {
     );
     let app = App::launch_script(&main, &[]);
     let window = app.window("input").expect("the window was made");
-    let (id, contents) = (window.id, window.contents);
+    let contents = window.contents;
     let ready = |app: &App| {
         app.eval_renderer(
             contents,
@@ -49,11 +48,7 @@ fn launch(extra: &str) -> Page {
     };
     assert!(app.run_until(ready, TIMEOUT), "the page was laid out");
     app.eval_renderer(contents, LISTEN);
-    Page {
-        app,
-        window: id,
-        contents,
-    }
+    Page { app, contents }
 }
 
 impl Page {
@@ -180,8 +175,14 @@ fn shift_a_types_an_upper_case_a_with_its_key_and_code() {
 
 #[test]
 fn a_composition_ends_as_one_committed_text_in_the_field() {
+    // Electron 39.8.10 (as P24 froze it): compositionstart, compositionupdate, beforeinput and
+    // input for the first update; the commit is compositionupdate, beforeinput, input, then
+    // compositionend; every input is `insertCompositionText` with `isComposing`, and there is no
+    // other `input`.
     let page = launch("");
-    page.eval("document.getElementById('i').focus(); 0");
+    page.eval(
+        "globalThis.words = []; for (const kind of ['compositionstart', 'compositionupdate', 'compositionend', 'beforeinput', 'input']) { document.addEventListener(kind, (e) => words.push(kind + (e.inputType ? ':' + e.inputType : '') + (e.data ? '=' + e.data : '') + (e.isComposing ? '*' : ''))); } document.getElementById('i').focus(); 0",
+    );
     page.send(ToRendererInput::Composition(CompositionEvent::Update {
         text: "ni".into(),
         selection: Some(2..2),
@@ -191,6 +192,24 @@ fn a_composition_ends_as_one_committed_text_in_the_field() {
     )));
     let value = |app: &App| app.eval_renderer(page.contents, "document.getElementById('i').value");
     assert!(page.app.run_until(|app| value(app) == "\"你\"", TIMEOUT));
+    assert_eq!(
+        page.eval("words.join(' ')"),
+        "\"compositionstart compositionupdate=ni beforeinput:insertCompositionText=ni* input:insertCompositionText=ni* compositionupdate=你 beforeinput:insertCompositionText=你* input:insertCompositionText=你* compositionend=你\""
+    );
+}
+
+#[test]
+fn tab_with_its_keydown_prevented_leaves_the_focus_where_it_is() {
+    let page = launch("");
+    page.eval(
+        "document.getElementById('i').focus(); document.addEventListener('keydown', (e) => { if (e.key === 'Tab') e.preventDefault(); }); 0",
+    );
+    let none = Modifiers::default();
+    page.key(true, "Tab", "Tab", none);
+    page.key(false, "Tab", "Tab", none);
+    // Keys go in order: once the keyup has been heard the Tab has been dealt with.
+    assert_eq!(page.heard(2), "keydown#i keyup#i");
+    assert_eq!(page.eval("document.activeElement.id"), "\"i\"");
 }
 
 #[test]
@@ -322,5 +341,4 @@ fn what_the_shell_sees_of_the_pointer_becomes_webcontents_events() {
             == "\"cursor-changed:hand update-target-url:https://example.test/x update-target-url: cursor-changed:pointer\"",
         TIMEOUT
     ));
-    let _ = page.window;
 }

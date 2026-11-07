@@ -185,10 +185,21 @@ pub(crate) fn person(
         ToRendererInput::Pointer {
             kind: PointerKind::Move,
             pointer,
+            target,
+        } => match target {
+            Some(node) if document.dom().exists(node) => {
+                document.pointer_move_on(runtime, node, &pointer)
+            }
+            _ => document.pointer_move(runtime, &pointer),
+        },
+        ToRendererInput::Pointer {
+            kind: PointerKind::Leave,
             ..
-        } => document.pointer_move(runtime, &pointer),
+        } => document.pointer_leave(runtime),
         ToRendererInput::Key { down: true, key } => {
-            document.key_down(runtime, &key);
+            if document.key_down_unhandled(runtime, &key) {
+                return Some(FromRenderer::KeyUnhandled(key));
+            }
         }
         ToRendererInput::Key { down: false, key } => {
             document.key_up(runtime, &key);

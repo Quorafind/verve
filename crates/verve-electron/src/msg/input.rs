@@ -65,6 +65,8 @@ pub enum PointerKind {
     Down,
     Up,
     Move,
+    /// The pointer left the window: nothing is under it any more.
+    Leave,
 }
 
 /// What the shell reads of a page to draw it: `Guest::View` of [`crate::RendererGuest`].

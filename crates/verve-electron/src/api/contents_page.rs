@@ -171,7 +171,7 @@ fn input_of(event: &JsObject, context: &mut Context) -> JsResult<Vec<ToRendererI
         button,
         count: fields.f64("clickCount", 1., context)? as u32,
         modifiers,
-        buttons: 0,
+        buttons: buttons_of(event, context)?,
     };
     let at = |kind| ToRendererInput::Pointer {
         kind,
@@ -257,4 +257,26 @@ fn key_named(name: &str) -> Key {
         "Return" => Key::named("Enter"),
         other => Key::named(other),
     }
+}
+
+/// The `buttons` mask the `modifiers` of a `sendInputEvent` name (`leftButtonDown`,
+/// `rightButtonDown`, `middleButtonDown`): the buttons held while the pointer moves.
+fn buttons_of(event: &JsObject, context: &mut Context) -> JsResult<u16> {
+    let list = define::Fields::new(Some(event)).object("modifiers", context)?;
+    let items = native::list_of(&list.map_or(JsValue::undefined(), Into::into), context)
+        .unwrap_or_default();
+    let mut held = 0;
+    for item in items {
+        match item
+            .as_string()
+            .map(|s| s.to_std_string_escaped().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("leftbuttondown") => held |= 1,
+            Some("rightbuttondown") => held |= 2,
+            Some("middlebuttondown") => held |= 4,
+            _ => {}
+        }
+    }
+    Ok(held)
 }

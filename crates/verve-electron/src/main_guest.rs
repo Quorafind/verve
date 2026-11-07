@@ -374,6 +374,7 @@ fn page_family(context: &mut boa_engine::Context, contents: ContentsId, event: F
             page_events::page_event(context, contents, PageEvent::TitleUpdated(title));
         }
         FromRenderer::Lifecycle(event) => page_events::page_event(context, contents, event),
+        FromRenderer::KeyUnhandled(key) => input_events::key_unhandled(context, contents, key),
         FromRenderer::BeforeUnloadReply { call, proceed } => {
             window_lifecycle::before_unload_reply(context, contents, call, proceed);
         }

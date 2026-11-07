@@ -373,7 +373,9 @@ app.whenReady().then(async () => {
 });"#;
 
 #[test]
-fn a_key_that_is_an_accelerator_clicks_the_item_and_the_page_never_gets_it() {
+fn the_page_hears_an_accelerators_key_first_and_the_item_is_clicked_after() {
+    // Electron 39.8.10 (a visible window, the coordinator's menu-order probes): the page gets
+    // keydown and keyup, and the item is clicked because the page left the keydown alone.
     let app = launch(&WITH_ACCELERATOR.replace("BEFORE_INPUT", ""));
     let window = app.window("w").unwrap();
     app.shell.press_key(window.id, ctrl("KeyO", "o"));
@@ -381,20 +383,45 @@ fn a_key_that_is_an_accelerator_clicks_the_item_and_the_page_never_gets_it() {
         |app| app.console().iter().any(|line| line == "opened true true"),
         TIMEOUT
     ));
+    assert!(app.run_until(
+        |app| app.eval_renderer(window.contents, "window.keys") == r#"["o"]"#,
+        TIMEOUT
+    ));
+}
+
+#[test]
+fn a_page_that_prevents_the_keydown_keeps_the_item_from_being_clicked() {
+    let script = WITH_ACCELERATOR.replace("BEFORE_INPUT", "").replace(
+        "window.keys.push(e.key))",
+        "{ window.keys.push(e.key); if (e.key === 'p') e.preventDefault(); })",
+    );
+    let script = script
+        .replace("Ctrl+O", "Ctrl+P")
+        .replace("'opened'", "'opened-p'");
+    let app = launch(&script);
+    let window = app.window("w").unwrap();
     app.shell.press_key(window.id, ctrl("KeyP", "p"));
+    // The page heard it, so the main process has had the chance to click; a later key proves it
+    // has gone by.
     assert!(app.run_until(
         |app| app.eval_renderer(window.contents, "window.keys") == r#"["p"]"#,
         TIMEOUT
     ));
-    // The key the menu took never reached the page.
-    assert_eq!(
-        app.eval_renderer(window.contents, "window.keys"),
-        r#"["p"]"#
+    app.shell.press_key(window.id, ctrl("KeyQ", "q"));
+    assert!(app.run_until(
+        |app| app.eval_renderer(window.contents, "window.keys") == r#"["p","q"]"#,
+        TIMEOUT
+    ));
+    app.eval_main("0");
+    assert!(
+        !app.console().iter().any(|line| line.starts_with("opened")),
+        "{:?}",
+        app.console()
     );
 }
 
 #[test]
-fn before_input_event_is_heard_before_the_menu_and_can_keep_the_key_from_it() {
+fn before_input_event_is_heard_before_the_page_and_can_keep_the_key_from_both() {
     let app = launch(&WITH_ACCELERATOR.replace(
         "BEFORE_INPUT",
         "global.block = true; win.webContents.on('before-input-event', (event) => { if (global.block) event.preventDefault(); });",
@@ -408,6 +435,7 @@ fn before_input_event_is_heard_before_the_menu_and_can_keep_the_key_from_it() {
         "{:?}",
         app.console()
     );
+    assert_eq!(app.eval_renderer(window.contents, "window.keys"), "[]");
     app.shell.press_key(window.id, ctrl("KeyO", "o"));
     assert!(app.run_until(
         |app| app.console().iter().any(|line| line == "opened true true"),
@@ -416,13 +444,13 @@ fn before_input_event_is_heard_before_the_menu_and_can_keep_the_key_from_it() {
 }
 
 #[test]
-fn the_key_up_of_a_key_a_menu_took_never_reaches_the_page_either() {
-    // A `before-input-event` listener sends every key through the main process, which does the lookup.
+fn the_key_up_of_a_key_before_input_event_prevented_reaches_neither_it_nor_the_page() {
+    // Electron 39.8.10: a prevented key down has no key up for the listener or the page.
     let page = r#"window.keys = []; window.ups = []; addEventListener("keyup", (e) => window.ups.push(e.key));"#;
     let script = WITH_ACCELERATOR
         .replace(
             "BEFORE_INPUT",
-            "win.webContents.on('before-input-event', () => {});",
+            "global.heard = []; win.webContents.on('before-input-event', (event, input) => { global.heard.push(input.type + ':' + input.key); if (input.key === 'o') event.preventDefault(); });",
         )
         .replace("window.keys = [];", page);
     let app = launch(&script);
@@ -434,14 +462,14 @@ fn the_key_up_of_a_key_a_menu_took_never_reaches_the_page_either() {
         TIMEOUT
     ));
     assert_eq!(
-        app.eval_renderer(window.contents, "window.keys"),
-        r#"["p"]"#
+        app.eval_main("global.heard.join(' ')"),
+        r#""keyDown:o keyDown:p keyUp:p""#
     );
 }
 
 #[test]
-fn a_held_accelerator_leaves_one_key_up_to_swallow_not_one_per_repeat() {
-    // Without and with a `before-input-event` listener, which sends the keys through the main process.
+fn a_held_accelerator_is_heard_by_the_page_each_repeat_and_its_key_up_is_not_swallowed() {
+    // Nothing is swallowed but the key up of a key `before-input-event` prevented.
     for listener in ["", "win.webContents.on('before-input-event', () => {});"] {
         let page = r#"window.keys = []; window.ups = []; addEventListener("keyup", (e) => window.ups.push(e.key));"#;
         let script = WITH_ACCELERATOR
@@ -450,12 +478,6 @@ fn a_held_accelerator_leaves_one_key_up_to_swallow_not_one_per_repeat() {
         let app = launch(&script);
         let window = app.window("w").unwrap();
         app.shell.hold_key(window.id, ctrl("KeyO", "o"), 3);
-        // The next plain "o" is the page's, both going down and coming up.
-        let plain = Key {
-            modifiers: Modifiers::default(),
-            ..ctrl("KeyO", "o")
-        };
-        app.shell.press_key(window.id, plain);
         assert!(
             app.run_until(
                 |app| app.eval_renderer(window.contents, "window.ups") == r#"["o"]"#,
@@ -463,6 +485,10 @@ fn a_held_accelerator_leaves_one_key_up_to_swallow_not_one_per_repeat() {
             ),
             "{listener:?}: {}",
             app.eval_renderer(window.contents, "window.ups")
+        );
+        assert_eq!(
+            app.eval_renderer(window.contents, "window.keys"),
+            r#"["o","o","o","o"]"#
         );
     }
 }

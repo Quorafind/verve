@@ -285,12 +285,23 @@ impl RendererGuest {
             // Control held it asks to zoom (`zoom-changed`) and scrolls nothing. Shift turns a
             // vertical wheel into a horizontal scroll, while the page still hears `deltaY`.
             ToRendererInput::Wheel {
-                pointer, dx, dy, ..
+                pointer,
+                dx,
+                dy,
+                target,
             } => {
-                if !self.document.wheel(&mut self.runtime, &pointer, dx, dy) {
+                let node = target.filter(|node| self.document.dom().exists(*node));
+                let allowed = match node {
+                    Some(node) => {
+                        self.document
+                            .wheel_on(&mut self.runtime, node, &pointer, (dx, dy))
+                    }
+                    None => self.document.wheel(&mut self.runtime, &pointer, dx, dy),
+                };
+                if !allowed {
                     return;
                 }
-                if pointer.modifiers.ctrl {
+                if pointer.modifiers.ctrl && dy != 0. {
                     let zoom = PageEvent::ZoomChanged { zoom_in: dy < 0. };
                     (self.outbox.borrow_mut()).push(FromRenderer::Lifecycle(zoom));
                     return;
