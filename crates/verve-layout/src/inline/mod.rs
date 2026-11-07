@@ -15,6 +15,7 @@ mod lines;
 mod vertical;
 
 pub(crate) mod breaks;
+pub(crate) mod query;
 pub(crate) mod space;
 pub(crate) mod style;
 
