@@ -120,6 +120,7 @@ pub(crate) fn forget(context: &mut Context, id: ContentsId) {
     let Ok(state) = ipc_main::state(context) else {
         return;
     };
+    shared(context).hub.set_devtools_open(id, false);
     let gone = state.pages.borrow_mut().remove(&id);
     if let Some(page) = gone {
         ipc_main::forget_handlers(context, &[&page.ipc, &page.frame_ipc]);

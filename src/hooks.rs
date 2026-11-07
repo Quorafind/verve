@@ -236,14 +236,7 @@ pub(crate) fn report_rejections(context: &mut Context) -> bool {
             crate::process::unhandled_rejection(context, reason);
         } else if !heard {
             let error = JsError::from_opaque(reason);
-            let text = crate::describe(context, &error);
-            let frames = crate::thrown_at(context, &error);
-            let line = if frames.is_empty() {
-                format!("Uncaught (in promise) {text}")
-            } else {
-                format!("Uncaught (in promise) {text} ({frames})")
-            };
-            crate::console_line(context, crate::Level::Error, line);
+            crate::uncaught::console_uncaught(context, "Uncaught (in promise)", &error);
         }
         let mut reported = state.reported.borrow_mut();
         if reported.len() == REMEMBERED_REJECTIONS {

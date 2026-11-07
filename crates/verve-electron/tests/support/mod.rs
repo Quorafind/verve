@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use verve_electron::ids::{ContentsId, WindowId};
 use verve_electron::launcher::{self, Env, Launch, Start, Target};
+use verve_electron::log::Log;
 use verve_electron::{ElectronOptions, HeadlessOptions, HeadlessShell, HeadlessWindow, Hub};
 
 /// How long a test waits for something that has to happen.
@@ -50,7 +51,7 @@ impl App {
             panic!("launch_with runs an app from a folder or a script");
         };
         let (app_path, entry) = (app_path.clone(), entry.clone());
-        Self::start(&app_path, entry, scratch, false, Some(start))
+        Self::start(&app_path, entry, scratch, false, Some(start), None)
     }
 
     /// A directory of its own for a test to use, made.
@@ -62,6 +63,19 @@ impl App {
         ));
         std::fs::create_dir_all(&dir).expect("a scratch directory is made");
         dir
+    }
+
+    /// Writes `main.js` and `files` (paths relative to it) into `dir`, which may not exist yet.
+    fn write_app(dir: &Path, main_js: &str, files: &[(&str, &str)]) {
+        for (name, text) in [("main.js", main_js)]
+            .into_iter()
+            .chain(files.iter().copied())
+        {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().expect("a file is in a directory"))
+                .expect("the app's directory is made");
+            std::fs::write(path, text).expect("the app's file is written");
+        }
     }
 
     /// Writes `main.js` and `files` (paths relative to it) into a directory of their own and
@@ -77,16 +91,29 @@ impl App {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        for (name, text) in [("main.js", main_js)]
-            .into_iter()
-            .chain(files.iter().copied())
-        {
-            let path = dir.join(name);
-            std::fs::create_dir_all(path.parent().expect("a file is in a directory"))
-                .expect("the app's directory is made");
-            std::fs::write(path, text).expect("the app's file is written");
-        }
-        Self::start(&dir, dir.join("main.js"), Some(dir.clone()), dark, None)
+        Self::write_app(&dir, main_js, files);
+        Self::start(
+            &dir,
+            dir.join("main.js"),
+            Some(dir.clone()),
+            dark,
+            None,
+            None,
+        )
+    }
+
+    /// [`App::launch_script`] writing its terminal output to `log`, which the test reads.
+    pub fn launch_script_logged(main_js: &str, files: &[(&str, &str)], log: Arc<Log>) -> App {
+        let dir = Self::scratch_dir("logged");
+        Self::write_app(&dir, main_js, files);
+        Self::start(
+            &dir,
+            dir.join("main.js"),
+            Some(dir.clone()),
+            false,
+            None,
+            Some(log),
+        )
     }
 
     fn start(
@@ -95,11 +122,15 @@ impl App {
         scratch: Option<PathBuf>,
         dark: bool,
         launch: Option<Start>,
+        log: Option<Arc<Log>>,
     ) -> App {
         let hub = Hub::new(ElectronOptions {
             app_path: app_dir.to_path_buf(),
             dark,
         });
+        if let Some(log) = log {
+            hub.set_log(log);
+        }
         // Every app of a test has a profile directory of its own in the temporary one — whichever
         // way it was launched — and it is removed with the app. An app that took the user's
         // (`%APPDATA%\<name>`) would leave folders there, take the lock of a real instance, and

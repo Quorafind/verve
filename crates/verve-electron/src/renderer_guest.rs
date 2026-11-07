@@ -17,7 +17,9 @@ use crate::api::{self, ipc_renderer::Outbox};
 use crate::beat;
 use crate::hub::Hub;
 use crate::ids::ContentsId;
+use crate::inspector;
 use crate::loader::ElectronLoader;
+use crate::log::Log;
 use crate::msg::{
     FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
@@ -43,6 +45,8 @@ pub struct RendererGuest {
     /// The address the page last told the main process of, to see when the page moved within
     /// itself (`location.hash`, `pushState`).
     url: String,
+    /// Where the page writes what it dumps for DevTools.
+    log: Arc<Log>,
 }
 
 impl RendererGuest {
@@ -92,6 +96,7 @@ impl RendererGuest {
             prefs,
             loader,
             url: String::new(),
+            log: Arc::clone(hub.log()),
         }
     }
 
@@ -154,6 +159,9 @@ impl RendererGuest {
             }
             ToRenderer::ConsoleError { message } => {
                 verve::console_line(self.runtime.context(), Level::Error, message);
+            }
+            ToRenderer::InspectTree { at } => {
+                inspector::dump(&self.document, &self.log, self.contents, at);
             }
             ToRenderer::BeforeUnload { call } => self.before_unload(call),
             ToRenderer::Unload { call } => self.unload(call),

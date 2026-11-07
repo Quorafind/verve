@@ -157,6 +157,14 @@ impl MainGuest {
         self.runtime.run_microtasks();
     }
 
+    /// `'devtools-opened'` or `'devtools-closed'` of page `contents`, heard after the call that
+    /// asked for it returned.
+    pub(crate) fn devtools_event(&mut self, contents: ContentsId, event: &str) {
+        let said = api::devtools::said(self.runtime.context(), contents, event);
+        api::define::report(self.runtime.context(), said);
+        self.runtime.run_microtasks();
+    }
+
     pub(crate) fn all_closed(&mut self) {
         app::quit::all_closed(self.runtime.context());
     }
@@ -293,6 +301,18 @@ impl MainGuest {
             FromRenderer::ContextMenu(params) => {
                 input_events::context_menu(context, contents, params)
             }
+            FromRenderer::Console {
+                level,
+                message,
+                line,
+                source,
+            } => api::console_message::console_message(
+                context,
+                contents,
+                level,
+                message,
+                (line, source),
+            ),
             FromRenderer::Gone { reason } => {
                 eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
                 page_events::render_process_gone(context, contents, &reason);

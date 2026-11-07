@@ -183,6 +183,31 @@ pub fn emit_process(context: &mut Context, event: &str, args: &[JsValue]) {
     report(context, heard);
 }
 
+/// Says Electron's deprecation warning `message` on the main process's console, the first time
+/// `key` is asked for and not again; with `process.noDeprecation` set it says nothing, as
+/// Electron's `deprecate` does.
+///
+/// # Errors
+///
+/// What the console or `process` throws.
+pub fn deprecate_once(context: &mut Context, key: &str, message: &str) -> JsResult<()> {
+    {
+        let state = super::shared(context);
+        let mut said = state.deprecated.borrow_mut();
+        if said.iter().any(|known| known == key) {
+            return Ok(());
+        }
+        said.push(key.to_owned());
+    }
+    let process = native::global(context, "process")?;
+    if native::get(&process, "noDeprecation", context)?.to_boolean() {
+        return Ok(());
+    }
+    let console = native::global(context, "console")?;
+    native::invoke(&console, "warn", &[native::js_text(message)], context)?;
+    Ok(())
+}
+
 /// [`emit_cancelable`] for an event nobody can answer for, with a listener's throw [`report`]ed
 /// and the event taken as not prevented.
 pub fn emit_reporting(

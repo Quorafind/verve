@@ -76,6 +76,11 @@ pub enum ToRenderer {
     },
     /// One of `webContents`' editing methods, done to what the page has selected or focused.
     EditCommand(EditCommand),
+    /// `webContents.openDevTools()`, `inspectElement(x, y)`: the page writes the element tree to the
+    /// terminal, or with `at` the line of the element under that point. Nothing is said back.
+    InspectTree {
+        at: Option<(f32, f32)>,
+    },
 }
 
 /// What `webContents` does to the text a page has selected or focused.

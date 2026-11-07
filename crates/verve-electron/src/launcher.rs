@@ -389,11 +389,6 @@ pub fn run_as_node(argv0: OsString, args: Vec<OsString>) -> ExitCode {
 ///
 /// A page of the default app that is not a URL or a file.
 pub fn boot(mut start: Start) -> Result<(Arc<Hub>, Program), String> {
-    for (name, _) in &start.switches {
-        if ["inspect", "inspect-brk", "remote-debugging-port"].contains(&name.as_str()) {
-            eprintln!("electron: --{name} is accepted, and nothing listens (the debugger is P43)");
-        }
-    }
     let skip_integrity = start
         .switches
         .iter()
@@ -419,6 +414,16 @@ pub fn boot(mut start: Start) -> Result<(Arc<Hub>, Program), String> {
         dark: false,
     });
     hub.set_overlay(overlay);
+    start_logging(&hub, &start.switches);
+    if packed {
+        crate::log::diag!(
+            hub.log(),
+            Asar,
+            Info,
+            "reading the packed app {}",
+            hub.options().app_path.display()
+        );
+    }
     let program = match &start.target {
         Target::App { entry, .. } => Program::Script(entry.clone()),
         Target::Packaged { app_path } => {
@@ -434,6 +439,57 @@ pub fn boot(mut start: Start) -> Result<(Arc<Hub>, Program), String> {
     };
     hub.set_launch(start);
     Ok((hub, program))
+}
+
+/// The switches that name a debugger or a Chromium log setting Verve has none of. They are kept in
+/// `process.argv` and `app.commandLine` like any switch, and each is told once at the start.
+const UNSUPPORTED_SWITCHES: [&str; 10] = [
+    "inspect",
+    "inspect-brk",
+    "inspect-port",
+    "inspect-publish-uid",
+    "remote-debugging-port",
+    "remote-debugging-pipe",
+    "js-flags",
+    "log-level",
+    "v",
+    "vmodule",
+];
+
+/// The lines to say at the start about switches Verve accepts and cannot honour: one for each
+/// name, in the order they were given.
+pub fn unsupported_switch_warnings(switches: &[Switch]) -> Vec<String> {
+    let mut told: Vec<&str> = Vec::new();
+    for (name, _) in switches {
+        let name = name.as_str();
+        if UNSUPPORTED_SWITCHES.contains(&name) && !told.contains(&name) {
+            told.push(name);
+        }
+    }
+    let line = |name: &&str| {
+        format!(
+            "Verve: --{name} is not supported; see VERVE_ELECTRON_LOG and webContents.openDevTools()"
+        )
+    };
+    told.iter().map(line).collect()
+}
+
+/// Turns on what `--enable-logging` and `ELECTRON_ENABLE_LOGGING` ask for (a page's console on
+/// the terminal), gets a terminal to write to when anything will go there, and says the
+/// unsupported switches. Both write to standard error, where Electron's `=file` forms write to a
+/// file instead.
+fn start_logging(hub: &Hub, switches: &[Switch]) {
+    let log = hub.log();
+    if switches.iter().any(|(name, _)| name == "enable-logging") {
+        log.set_console(true);
+    }
+    let warnings = unsupported_switch_warnings(switches);
+    if log.writes_anything() || !warnings.is_empty() {
+        crate::log::attach_parent_console();
+    }
+    for line in warnings {
+        log.terminal(&line);
+    }
 }
 
 /// The entry of a packaged app: the `main` of its `package.json`, found in its `app.asar` or
@@ -685,6 +741,26 @@ mod tests {
         );
         assert_eq!(start.argv.last().map(String::as_str), Some("--y"));
         assert_eq!(start.argv.len(), 9);
+    }
+
+    #[test]
+    fn each_unsupported_debugging_switch_is_told_once() {
+        let switch = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+        let given = [
+            switch("inspect", "9229"),
+            switch("no-sandbox", ""),
+            switch("js-flags", "--max-old-space-size=100"),
+            switch("inspect", "9230"),
+            switch("enable-logging", ""),
+        ];
+        assert_eq!(
+            unsupported_switch_warnings(&given),
+            [
+                "Verve: --inspect is not supported; see VERVE_ELECTRON_LOG and webContents.openDevTools()",
+                "Verve: --js-flags is not supported; see VERVE_ELECTRON_LOG and webContents.openDevTools()",
+            ]
+        );
+        assert!(unsupported_switch_warnings(&[switch("enable-logging", "")]).is_empty());
     }
 
     /// Electron 39.8.10: `electron -- --version` prints the version and `electron -- app.js` runs

@@ -325,9 +325,34 @@ fn an_error_nobody_catches_shows_a_box_and_leaves_the_app_running() {
     assert!(run.run_until(|app| error_box(app).is_some(), TIMEOUT));
     let (title, content) = error_box(&run).expect("an error box");
     assert_eq!(title, "A JavaScript error occurred in the main process");
-    assert!(content.contains("Error: later"), "{content}");
+    // Electron 39.8.10's `lib/browser/init.ts` puts the error's stack after "Uncaught Exception:".
+    assert!(
+        content.starts_with(
+            "Uncaught Exception:
+Error: later
+    at "
+        ),
+        "{content}"
+    );
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(run.shell.exit_code(), None);
+}
+
+/// The same file builds the text of an error that has no stack as `${name}: ${message}`, which is
+/// `undefined: undefined` for a string that was thrown.
+#[test]
+fn a_thrown_string_shows_undefined_in_the_box_as_electrons_init_ts_does() {
+    let run = Run::script(
+        "require('electron').app.on('ready', () => setTimeout(() => { throw 'plain'; }, 20));",
+        &[],
+    );
+    assert!(run.run_until(|app| error_box(app).is_some(), TIMEOUT));
+    let (_, content) = error_box(&run).expect("an error box");
+    assert_eq!(
+        content,
+        "Uncaught Exception:
+undefined: undefined"
+    );
 }
 
 /// Runs `script` as an app and answers what it put in `out`. The script has `app`, `out` and

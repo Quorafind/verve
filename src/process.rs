@@ -128,7 +128,8 @@ pub enum UncaughtBehavior {
     /// The process ends with 1, as Node's does.
     Exit,
     /// Told to the host, which decides: an Electron main process keeps running (and may show a
-    /// dialog) until it quits.
+    /// dialog) until it quits. The host is given the error's stack as Electron's `init.ts` gives
+    /// it (see `error_box_text`), and the stack is written to standard error.
     Report(Arc<dyn Fn(&str) + Send + Sync>),
 }
 
@@ -1234,7 +1235,41 @@ pub(crate) fn uncaught(context: &mut Context, error: &JsError) {
     }
     print_uncaught(context, error);
     // Only a host that is told reads the error's `name` and `message`, which may be getters.
-    after_uncaught(context, |context| crate::describe(context, error));
+    after_uncaught(context, |context| error_box_text(context, error));
+}
+
+/// What Electron 39.8.10's `lib/browser/init.ts` tells its host of an error nobody caught: the
+/// error's `stack`, or `${name}: ${message}` when it has none (`undefined: undefined` for a value
+/// that is no error).
+fn error_box_text(context: &mut Context, error: &JsError) -> String {
+    let value = error.clone().into_opaque(context).unwrap_or_default();
+    let mut read = |key: &str| match crate::native::get(&value, key, context) {
+        Ok(property) if !property.is_undefined() => property
+            .to_string(context)
+            .map(|text| text.to_std_string_escaped())
+            .unwrap_or_default(),
+        _ => "undefined".to_owned(),
+    };
+    let stack = read("stack");
+    if stack != "undefined" && !stack.is_empty() {
+        return stack;
+    }
+    format!("{}: {}", read("name"), read("message"))
+}
+
+/// An error nobody caught in a realm with no profile whose host is told of it
+/// ([`UncaughtBehavior::Report`]): the stack on standard error, and the text of Electron's error
+/// box to the host. Answers whether the host was told; other realms write the console line.
+pub(crate) fn report_to_host(context: &mut Context, error: &JsError) -> bool {
+    let reports = matches!(
+        crate::shared(context).process.borrow().on_uncaught,
+        UncaughtBehavior::Report(_)
+    );
+    if reports {
+        print_uncaught(context, error);
+        after_uncaught(context, |context| error_box_text(context, error));
+    }
+    reports
 }
 
 /// What an uncaught error does, in both paths that report one: the process ends with 1, the

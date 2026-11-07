@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use boa_engine::JsResult;
+use boa_engine::{Context, JsResult};
 
 use crate::ImportMap;
 use crate::vfs;
@@ -25,14 +25,29 @@ pub struct SourcePos {
 }
 
 /// What a host is told of each console line as it is written; see
-/// [`Runtime::set_console_sink`]. The third argument is the line's position, when there is one;
-/// the runtime does not work it out yet, so it is `None` today.
+/// [`Runtime::set_console_sink`]. The third argument is the line's position, when there is one: where
+/// the script that called the console is, or where an uncaught error was thrown. An uncaught
+/// error's text has no frames in it when its position is given.
 pub type ConsoleSink = Box<dyn Fn(Level, &str, Option<&SourcePos>)>;
 
 /// The source of a module at one of the host's own addresses (`app://`, `https://`), from what
 /// the host has fetched already; `None` when it has none for that address. See
 /// [`Runtime::set_module_source`].
 pub type ModuleSource = Rc<dyn Fn(&url::Url) -> Option<Rc<str>>>;
+
+/// Where the script that called the console is: the newest frame running JavaScript.
+pub(crate) fn call_site(context: &Context) -> Option<SourcePos> {
+    let at = context.stack_trace().next()?.position();
+    let boa_engine::vm::SourcePath::Path(file) = at.path else {
+        return None;
+    };
+    let position = at.position?;
+    Some(SourcePos {
+        file: file.display().to_string(),
+        line: position.line_number(),
+        column: position.column_number(),
+    })
+}
 
 impl Runtime {
     /// Makes `process` what this realm is: an Electron main process, a renderer, a utility —

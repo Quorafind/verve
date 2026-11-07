@@ -1,24 +1,11 @@
 //! `electron --headless`: the same binary on a shell with no display, which opens no window and
 //! prints what the app's windows would do. It runs anywhere, a display or not.
 
-use std::path::PathBuf;
-use std::process::Command;
+mod support;
 
 /// Runs `main_js` as an app with `--headless` and answers its exit code and standard error.
 fn run_headless(name: &str, main_js: &str) -> (Option<i32>, String) {
-    let dir: PathBuf =
-        std::env::temp_dir().join(format!("verve-gpui-headless-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("a directory for the app");
-    let main = dir.join("main.js");
-    std::fs::write(&main, main_js).expect("the app's script");
-    let output = Command::new(env!("CARGO_BIN_EXE_electron"))
-        .env("VERVE_NO_SYSTEM_DIALOGS", "1")
-        .arg("--headless")
-        .arg(&main)
-        .arg(format!("--user-data-dir={}", dir.join("profile").display()))
-        .output()
-        .expect("the electron binary runs");
-    let _ = std::fs::remove_dir_all(&dir);
+    let output = support::run_headless(name, main_js, &[], &[], &[]);
     (
         output.status.code(),
         String::from_utf8_lossy(&output.stderr).into_owned(),

@@ -178,22 +178,13 @@ fn run_legacy(
 ) -> JsResult<JsValue> {
     let (name, op) = LEGACY[*index];
     let record = record_of(this, context)?;
-    warn_once(context, name, op);
+    let said = format!(
+        "(electron) 'webContents.{name}' is deprecated and will be removed. Please use 'webContents.navigationHistory.{op}' instead."
+    );
+    define::deprecate_once(context, name, &said)?;
     let run = OPS
         .iter()
         .find(|(known, _, _)| *known == op)
         .map(|(_, _, run)| run);
     run.map_or(Ok(JsValue::undefined()), |run| run(&record, args, context))
-}
-
-/// Electron's one-time deprecation line for a legacy method.
-fn warn_once(context: &Context, name: &str, op: &str) {
-    let state = shared(context);
-    let mut warned = state.deprecated.borrow_mut();
-    if !warned.iter().any(|known| known == name) {
-        warned.push(name.to_owned());
-        eprintln!(
-            "(electron) 'webContents.{name}' is deprecated and will be removed. Please use 'webContents.navigationHistory.{op}' instead."
-        );
-    }
 }

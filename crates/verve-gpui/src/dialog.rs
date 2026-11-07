@@ -77,9 +77,14 @@ pub(crate) fn show(
     }
 }
 
-/// `showErrorBox`: a box with one button, over any window; with none, [`Hub::error_box`] has already shown the system's own or written
-/// to standard error.
+/// `showErrorBox`: a box with one button, over any window; with none, [`Hub::error_box`] has already
+/// shown the system's own. With `VERVE_NO_SYSTEM_DIALOGS` it shows nothing and writes the box to
+/// standard error, as the headless shell does.
 pub(crate) fn error_box(title: &str, content: &str, window: Option<&Window>, cx: &mut AsyncApp) {
+    if !crate::native::touches_desktop() {
+        eprintln!("[app] error box {title:?} {content:?}");
+        return;
+    }
     let Some(window) = window else {
         return;
     };

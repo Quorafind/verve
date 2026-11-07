@@ -1,0 +1,10 @@
+argv ["<APP>"]
+console-message nargs 5 level info message "plain 1 [object Object]" lineNumber 2 sourceId page.html scheme file | positional 1 "plain 1 [object Object]" 2 page.html
+console-message nargs 5 level info message "info line" lineNumber 3 sourceId page.html scheme file | positional 1 "info line" 3 page.html
+console-message nargs 5 level warning message "warn line" lineNumber 4 sourceId page.html scheme file | positional 2 "warn line" 4 page.html
+console-message nargs 5 level error message "error line" lineNumber 5 sourceId page.html scheme file | positional 3 "error line" 5 page.html
+console-message nargs 5 level debug message "debug line" lineNumber 6 sourceId page.html scheme file | positional 0 "debug line" 6 page.html
+console-message nargs 5 level info message "%s is %d x 5" lineNumber 7 sourceId page.html scheme file | positional 1 "%s is %d x 5" 7 page.html
+console-message nargs 5 level error message "Uncaught Error: page boom" lineNumber 8 sourceId page.html scheme file | positional 3 "Uncaught Error: page boom" 8 page.html
+console-message nargs 5 level error message "Uncaught (in promise) Error: page reject" lineNumber 9 sourceId page.html scheme file | positional 3 "Uncaught (in promise) Error: page reject" 9 page.html
+console-message nargs 5 level error message "Uncaught (in promise) plain reason" lineNumber 10 sourceId page.html scheme file | positional 3 "Uncaught (in promise) plain reason" 10 page.html

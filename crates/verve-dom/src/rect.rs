@@ -50,3 +50,11 @@ impl Rect {
             })
     }
 }
+
+impl crate::Document {
+    /// The box the layout provider (or the drawer, through [`Document::set_layout`](crate::Document::set_layout))
+    /// keeps for `node`, laid out afresh first if the document changed: `None` for a node with no box.
+    pub fn rect(&self, node: crate::NodeId) -> Option<Rect> {
+        self.laid().rects.get(&node).copied()
+    }
+}

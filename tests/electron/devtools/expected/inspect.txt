@@ -1,0 +1,4 @@
+// electron --inspect=127.0.0.1:0 (Electron 39.8.10, Windows): Node's two lines on stderr, besides the DevTools line of
+// expected/argv.txt that --remote-debugging-port prints. Nothing of this is written by Verve, which warns once instead.
+stderr: Debugger listening on ws://127.0.0.1:<port>/<id>
+stderr: For help, see: https://nodejs.org/en/docs/inspector

@@ -21,7 +21,8 @@ use super::page_state::Intent;
 use super::web_frame::LEVEL_STEP;
 use super::windows::WindowRecord;
 use super::{
-    app, contents_history, contents_page, contents_stubs, navigation, shared, web_frame_main,
+    app, contents_history, contents_page, contents_stubs, devtools, navigation, shared,
+    web_frame_main,
 };
 use crate::ids::ContentsId;
 use crate::ipc;
@@ -62,6 +63,7 @@ fn make_class(context: &mut Context) -> JsResult<JsObject> {
     contents_page::install(context, &prototype)?;
     contents_history::install_legacy(context, &prototype)?;
     contents_stubs::install(context, &prototype)?;
+    devtools::install(context, &prototype)?;
     Ok(class)
 }
 

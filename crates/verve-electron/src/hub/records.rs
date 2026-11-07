@@ -24,6 +24,8 @@ impl Hub {
 
     /// Notes a lifecycle event, if they are being kept.
     pub(super) fn log_page_event(&self, contents: ContentsId, event: &PageEvent) {
+        let log = self.log();
+        crate::log::diag!(log, Lifecycle, Info, "page {contents}: {event:?}");
         if let Some(kept) = lock(&self.page_events).as_mut() {
             kept.push((contents, event.clone()));
         }
