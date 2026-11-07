@@ -66,11 +66,14 @@ impl DomElement {
         });
         let (focus, bridge, editable) = {
             let state = self.state.borrow();
-            let editable =
-                (state.snapshot.as_ref()).is_some_and(|s| ime::editable_focus(s).is_some());
+            let editable = (state.snapshot.as_ref()).is_some_and(ime::accepts_ime);
             (state.focus.clone(), state.ime.clone(), editable)
         };
-        if let (Some(focus), Some(bridge), true) = (focus, bridge, editable) {
+        let paused = std::mem::take(&mut self.state.borrow_mut().ime_pause);
+        if paused {
+            // One frame without the handler; the next one registers it again.
+            window.request_animation_frame();
+        } else if let (Some(focus), Some(bridge), true) = (focus, bridge, editable) {
             window.handle_input(&focus, ElementInputHandler::new(bounds, bridge), cx);
         }
     }

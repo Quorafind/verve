@@ -68,6 +68,13 @@ pub(crate) struct DomState {
     pub input: Input,
     /// The cursor an `auto` box shows, by node, for the snapshot it was worked out from.
     auto_cursors: HashMap<NodeId, Cursor>,
+    /// Whether the input method is composing (the bridge sets it).
+    pub composing: bool,
+    /// The next frame registers no input handler, so that GPUI ends an input method composition
+    /// the page has already ended (the focus moved while it was composing).
+    pub ime_pause: bool,
+    /// The parts of the window that drag it (`-webkit-app-region: drag`, minus the `no-drag` holes).
+    pub drag_area: Vec<verve_electron::msg::Rect>,
 }
 
 impl DomState {
@@ -182,8 +189,11 @@ impl DomView {
         {
             state.auto_cursors.clear();
         }
-        if before != Some(after) {
-            state.input.clear_typed();
+        // A composition left open by a focus change is over (the page ended it): the next frame
+        // gives the platform no handler, which finishes the composition on its side. The typed
+        // characters waited for are not forgotten: their text may still be on its way.
+        if before != Some(after) && std::mem::take(&mut state.composing) {
+            state.ime_pause = true;
         }
         state.snapshot = Some(snapshot);
         let moved = state.ime_rect != caret;
@@ -214,6 +224,7 @@ impl DomView {
 
     /// The parts of the window that drag it: they come from the display list's hitboxes.
     pub fn set_app_regions(&mut self, regions: Vec<AppRegion>) {
+        self.state.borrow_mut().drag_area = app_region::drag_area(&regions);
         self.regions = regions;
     }
 

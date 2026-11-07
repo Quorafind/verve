@@ -38,6 +38,11 @@ pub(crate) struct Input {
     /// The node the pointer was last over, so that nothing is worked out for a move that stays
     /// on it.
     over: Option<NodeId>,
+    /// A press began in a drag area of the window: the system moves the window and eats the
+    /// release, so the page hears neither.
+    area_press: bool,
+    /// The pointer is in a drag area, where the page has been told it left.
+    in_area: bool,
     /// The characters keys typed that the system will send again as text, oldest first: they are
     /// dropped when they come. The system's thread may handle more keys before the text of the
     /// first arrives (GPUI drains input before the posted `WM_CHAR`), so this is a queue that
@@ -59,12 +64,6 @@ impl Input {
             self.typed.pop_front();
         }
         self.typed.push_back(text);
-    }
-
-    /// Forgets the characters waited for: the field they were typed in is not the one with the
-    /// keyboard any more.
-    pub fn clear_typed(&mut self) {
-        self.typed.clear();
     }
 
     /// Whether `text` is a character a key typed: it is then taken, so that the one the system
@@ -199,14 +198,47 @@ pub(crate) fn key_event(
 ) -> Option<Heard> {
     let key = keymap::key_with(stroke, held, now)?;
     let by_itself = !(key.modifiers.ctrl || key.modifiers.alt || key.modifiers.meta);
+    // A dead key then Space is how a lone accent is typed (US-International `'` or `"`): GPUI
+    // sends the key "space" with the accent as its key_char (ToUnicode composes it without
+    // consuming the dead key). The page hears the accent, as it does for the composed letter.
+    if stroke.key == "space"
+        && by_itself
+        && let Some(accent) = (stroke.key_char.as_deref()).filter(|c| *c != " " && !c.is_empty())
+    {
+        let key = Key {
+            key: accent.to_owned(),
+            ..key
+        };
+        let types = types(&key);
+        return Some(Heard { key, types });
+    }
     if prefer_character_input && by_itself && stroke.key_char.is_some() {
         return Some(Heard {
             key: keymap::dead(key),
             types: None,
         });
     }
+    // A dead key and a letter it cannot take: GPUI's key_char holds both ("´x"). The page hears
+    // the letter's key; the accent and the letter come as text.
+    if key_char_is_many(stroke) && by_itself {
+        let bare = Keystroke {
+            key_char: None,
+            ..stroke.clone()
+        };
+        let key = keymap::key_with(&bare, held, now)?;
+        return Some(Heard { key, types: None });
+    }
     let types = types(&key);
     Some(Heard { key, types })
+}
+
+/// Whether the key's text is more than one character: a dead key's accent and the letter it
+/// could not take, which Windows composes into two.
+fn key_char_is_many(stroke: &Keystroke) -> bool {
+    stroke
+        .key_char
+        .as_deref()
+        .is_some_and(|text| text.chars().count() > 1)
 }
 
 /// The text a key types by itself, which the system will send again as text: one character, with
@@ -260,6 +292,18 @@ fn report_hover(state: &mut DomState, over: Option<(NodeId, verve_layout::Cursor
     }
 }
 
+/// Whether `(x, y)` is in a part of the window that drags it (`-webkit-app-region: drag`). The
+/// system takes presses there as a title bar's (`HTCAPTION`): it moves the window and the release
+/// never comes to the app. Electron's frameless-window docs make controls `no-drag` to be
+/// clickable, i.e. the page gets no mouse events in a drag region. From those docs and GPUI's
+/// source (`gpui_windows` events.rs, the non-client press), not from observation: injected input
+/// cannot reach a real title bar.
+fn in_drag_area(state: &DomState, x: f32, y: f32) -> bool {
+    state.drag_area.iter().any(|rect| {
+        x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+    })
+}
+
 /// A button went down over the page.
 pub(crate) fn mouse_down(
     state: &Rc<RefCell<DomState>>,
@@ -272,11 +316,15 @@ pub(crate) fn mouse_down(
     if state.picking {
         return;
     }
+    let (x, y) = local(event.position, origin);
+    if in_drag_area(&state, x, y) {
+        state.input.area_press = true;
+        return;
+    }
     // A click on the page puts the keyboard back on it, wherever GPUI had left it.
     if let Some(focus) = state.focus.clone() {
         window.focus(&focus, cx);
     }
-    let (x, y) = local(event.position, origin);
     let target = hit(&mut state, x, y).map(|(node, _)| node);
     state.input.buttons |= button_mask(event.button);
     let buttons = state.input.buttons;
@@ -290,6 +338,10 @@ pub(crate) fn mouse_up(state: &Rc<RefCell<DomState>>, event: &MouseUpEvent, orig
         return;
     }
     let (x, y) = local(event.position, origin);
+    if std::mem::take(&mut state.input.area_press) {
+        state.input.buttons &= !button_mask(event.button);
+        return;
+    }
     let target = hit(&mut state, x, y).map(|(node, _)| node);
     state.input.buttons &= !button_mask(event.button);
     let buttons = state.input.buttons;
@@ -308,6 +360,21 @@ pub(crate) fn mouse_move(
     }
     state.input.buttons = event.pressed_button.map_or(0, button_mask);
     let (x, y) = local(event.position, origin);
+    if in_drag_area(&state, x, y) {
+        // One `Leave`, not a stream of moves: the page's hover ends where the window is dragged.
+        if !std::mem::replace(&mut state.input.in_area, true) {
+            state.input.over = None;
+            let leave = ToRendererInput::Pointer {
+                kind: PointerKind::Leave,
+                pointer: Pointer::default(),
+                target: None,
+            };
+            tell(&state, leave);
+            report_hover(&mut state, None);
+        }
+        return;
+    }
+    state.input.in_area = false;
     let over = hit(&mut state, x, y);
     tell(&state, moved(event, origin, over.map(|(node, _)| node)));
     let node = over.map(|(node, _)| node);
@@ -346,8 +413,7 @@ pub(crate) fn key(
     let route = {
         let mut state = state.borrow_mut();
         // The system sends a typed character as text only when a field takes text.
-        let takes_text =
-            (state.snapshot.as_ref()).is_some_and(|s| crate::ime::editable_focus(s).is_some());
+        let takes_text = (state.snapshot.as_ref()).is_some_and(crate::ime::accepts_ime);
         if let (true, true, Some(text)) = (down, takes_text, heard.types) {
             state.input.note_typed(text);
         }
@@ -539,6 +605,45 @@ mod tests {
     }
 
     #[test]
+    fn a_dead_key_and_a_letter_it_cannot_take_is_the_letters_key_and_both_come_as_text() {
+        let none = gpui::Modifiers::default();
+        let pair = heard(&stroke("x", Some("´x")), &none, false);
+        assert_eq!(
+            (pair.key.key.as_str(), pair.key.code.as_str()),
+            ("x", "KeyX")
+        );
+        assert_eq!(pair.types, None);
+    }
+
+    #[test]
+    fn a_drag_area_is_where_the_page_hears_nothing() {
+        let mut state = DomState::default();
+        state.drag_area = vec![verve_electron::msg::Rect {
+            x: 0.,
+            y: 0.,
+            width: 100.,
+            height: 30.,
+        }];
+        assert!(in_drag_area(&state, 50., 10.));
+        assert!(!in_drag_area(&state, 50., 30.));
+        assert!(!in_drag_area(&state, 100., 10.));
+    }
+
+    #[test]
+    fn a_dead_key_then_space_types_the_accent_once() {
+        let none = gpui::Modifiers::default();
+        // The shape gpui_windows sends for the second key: "space" carrying the accent.
+        let accent = heard(&stroke("space", Some("´")), &none, true);
+        assert_eq!(accent.key.key, "´");
+        assert_eq!(accent.key.code, "Space");
+        assert_eq!(accent.types.as_deref(), Some("´"));
+        // A plain Space is still a space.
+        let plain = heard(&stroke("space", Some(" ")), &none, false);
+        assert_eq!(plain.key.key, " ");
+        assert_eq!(plain.types.as_deref(), Some(" "));
+    }
+
+    #[test]
     fn a_dead_key_is_dead_for_the_page_and_types_nothing_but_the_letter_after_it_does() {
         let none = gpui::Modifiers::default();
         // GPUI on Windows: the accent is the key_char and the character is the system's to compose.
@@ -578,16 +683,13 @@ mod tests {
     }
 
     #[test]
-    fn text_that_never_came_is_forgotten_and_a_field_change_forgets_it_all() {
+    fn text_that_never_came_is_forgotten_when_a_later_one_arrives() {
         let mut input = Input::default();
         input.note_typed("a".to_owned());
         input.note_typed("b".to_owned());
         // The text of "a" was lost: "b" arrives, and "a" goes with it.
         assert!(input.is_typed("b"));
         assert!(!input.is_typed("a"));
-        input.note_typed("c".to_owned());
-        input.clear_typed();
-        assert!(!input.is_typed("c"));
     }
 
     #[test]

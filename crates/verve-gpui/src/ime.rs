@@ -65,6 +65,7 @@ impl ImeBridge {
     /// one left behind by a field that lost it is over, or its commit would be typed twice.
     fn take_composing(&mut self) -> Option<Composing> {
         let here = (self.state.borrow().snapshot.as_ref()).and_then(editable_focus);
+        self.state.borrow_mut().composing = false;
         self.composing.take().filter(|c| c.field == here)
     }
 }
@@ -158,6 +159,7 @@ impl EntityInputHandler for ImeBridge {
             return;
         }
         let field = (self.state.borrow().snapshot.as_ref()).and_then(editable_focus);
+        self.state.borrow_mut().composing = true;
         self.composing = Some(Composing {
             field,
             spelled: new_text.to_owned(),
@@ -204,4 +206,15 @@ impl EntityInputHandler for ImeBridge {
         // a question the platform asks synchronously cannot wait for it. P32's 「状态」.
         None
     }
+}
+
+/// Whether the field with the keyboard takes an input method: Chromium turns it off for a
+/// password field (from its source; hidden windows cannot show it).
+pub(crate) fn accepts_ime(snapshot: &Snapshot) -> bool {
+    let Some(id) = editable_focus(snapshot) else {
+        return false;
+    };
+    let kind = snapshot.dom.get_attr(id, "type").unwrap_or_default();
+    !(snapshot.dom.get(id).and_then(|n| n.tag()) == Some("input")
+        && kind.eq_ignore_ascii_case("password"))
 }
