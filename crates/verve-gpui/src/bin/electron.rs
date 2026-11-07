@@ -19,6 +19,10 @@ fn main() -> ExitCode {
     if headless {
         rest.remove(0);
     }
+    let screenshot = match screenshot_path(&mut rest) {
+        Ok(path) => path,
+        Err(message) => return fail(&message),
+    };
     match launcher::parse(rest, &launcher::exe_path(), &Env::from_process()) {
         Ok(Launch::Version) => print_line(&format!("v{}", verve_electron::ELECTRON_VERSION)),
         Ok(Launch::Abi) => print_line(verve_electron::MODULES_VERSION),
@@ -27,11 +31,32 @@ fn main() -> ExitCode {
         Ok(Launch::RunAsNode { args }) => launcher::run_as_node(argv0, args),
         Ok(Launch::Start(start)) => match launcher::boot(*start) {
             Ok((hub, program)) if headless => finish(verve_electron::headless::run(&hub, program)),
-            Ok((hub, program)) => finish(verve_gpui::run(hub, program)),
+            Ok((hub, program)) => match screenshot {
+                Some(path) => finish(verve_gpui::run_screenshot(hub, program, path)),
+                None => finish(verve_gpui::run(hub, program)),
+            },
             Err(message) => fail(&message),
         },
         Err(message) => fail(&message),
     }
+}
+
+/// Takes `--screenshot <path>` (or `--screenshot=<path>`) out of the arguments: the picture the
+/// first window's page is drawn into before the app ends.
+fn screenshot_path(args: &mut Vec<OsString>) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(at) = args.iter().position(|arg| {
+        arg == "--screenshot" || arg.to_string_lossy().starts_with("--screenshot=")
+    }) else {
+        return Ok(None);
+    };
+    let arg = args.remove(at);
+    if let Some(path) = arg.to_string_lossy().strip_prefix("--screenshot=") {
+        return Ok(Some(path.into()));
+    }
+    if at < args.len() {
+        return Ok(Some(args.remove(at).into()));
+    }
+    Err("--screenshot needs a path".to_owned())
 }
 
 fn print_line(text: &str) -> ExitCode {

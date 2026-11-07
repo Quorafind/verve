@@ -40,6 +40,8 @@ pub(crate) struct DomState {
     /// made for.
     plan: Option<(Arc<DisplayList>, u64, Rc<Plan>)>,
     pub pictures: Pictures,
+    /// How big the page was drawn, in CSS pixels.
+    pub viewport: (f32, f32),
     pub tell: Option<Tell>,
 }
 
@@ -145,6 +147,21 @@ impl DomView {
         state.list = Some(list);
         Shown::New
     }
+
+    /// The list the window draws.
+    pub fn list(&self) -> Option<Arc<DisplayList>> {
+        self.state.borrow().list.clone()
+    }
+
+    /// How big the page was drawn last, in CSS pixels; zero before the first frame.
+    pub fn viewport(&self) -> (f32, f32) {
+        self.state.borrow().viewport
+    }
+
+    /// The color under the page.
+    pub fn background(&self) -> Option<Rgba> {
+        self.background
+    }
 }
 
 /// Electron's white: what a window shows until its page or its `backgroundColor` says otherwise.
@@ -183,10 +200,7 @@ mod tests {
         assert_eq!(view.show(list(1)), Shown::New);
         assert_eq!(view.show(list(1)), Shown::Unchanged);
         assert_eq!(view.show(list(2)), Shown::New);
-        assert_eq!(
-            view.state.borrow().list.as_ref().map(|list| list.revision),
-            Some(2)
-        );
+        assert_eq!(view.list().map(|list| list.revision), Some(2));
     }
 
     #[test]

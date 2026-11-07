@@ -74,6 +74,7 @@ impl Element for DomElement {
         _: &mut App,
     ) -> Vec<(Hitbox, CursorStyle)> {
         let mut state = self.state.borrow_mut();
+        state.viewport = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         let Some(plan) = state.plan() else {
             return Vec::new();
         };

@@ -32,6 +32,9 @@ use crate::shell::{Inbox, Item};
 /// without it: the page is not responding.
 const UNRESPONSIVE: Duration = Duration::from_secs(5);
 
+/// What a window draws: its display list, the size its page was drawn at, and the color under it.
+pub type Look = (Arc<DisplayList>, (f32, f32), Option<Rgba>);
+
 /// A window the shell has open.
 pub(crate) struct Window {
     handle: WindowHandle<DomView>,
@@ -367,6 +370,17 @@ impl Window {
             self.regions.replace(regions.clone());
             self.set_app_regions(regions, cx);
         }
+    }
+
+    /// What the window draws now: its display list, how big the page was drawn and the color
+    /// under it. `None` for a window that is gone.
+    pub fn look(&self, cx: &mut AsyncApp) -> Option<Look> {
+        self.handle
+            .update(cx, |view, _, _| {
+                Some((view.list()?, view.viewport(), view.background()))
+            })
+            .ok()
+            .flatten()
     }
 
     /// Sets the regions the window is dragged by.

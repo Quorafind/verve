@@ -15,6 +15,7 @@ use verve_electron::ids::WindowId;
 use verve_electron::msg::{AppEvent, FromShell, ToRendererInput, ToShell, WindowOp};
 
 use crate::app_region::AppRegion;
+use crate::capture::Capture;
 use crate::dialog;
 use crate::platform;
 use crate::window::{self, Opening, Window};
@@ -100,6 +101,8 @@ pub(crate) struct Shell {
     windows: BTreeMap<WindowId, Window>,
     /// Whether the system theme is dark, as the pages were last told.
     dark: Option<bool>,
+    /// The screenshot `--screenshot` asked for, until it is taken.
+    capture: Option<Capture>,
 }
 
 impl Shell {
@@ -112,7 +115,13 @@ impl Shell {
             messages,
             windows: BTreeMap::new(),
             dark: None,
+            capture: None,
         }
+    }
+
+    /// Takes a picture of the first window's page once it has settled, then ends the app.
+    pub fn capture(&mut self, capture: Capture) {
+        self.capture = Some(capture);
     }
 
     /// Does what the main process asked since the last wake, hands each window what its page
@@ -122,6 +131,12 @@ impl Shell {
             self.apply(item, cx);
         }
         self.draw(cx);
+        if let Some(capture) = &mut self.capture
+            && capture.poll(self.windows.values().next(), cx)
+        {
+            self.capture = None;
+            cx.update(|cx| cx.quit());
+        }
         if self.hub.exit_code().is_some() {
             cx.update(|cx| cx.quit());
         }

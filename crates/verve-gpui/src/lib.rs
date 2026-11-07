@@ -12,6 +12,7 @@
 //! [`AppRegion`]s the window is dragged by are the list's own hitboxes.
 
 mod app_region;
+mod capture;
 mod dialog;
 mod dom_element;
 mod dom_view;
@@ -20,11 +21,15 @@ mod plan;
 mod platform;
 mod raster;
 mod report;
+pub mod screenshot;
 mod shell;
 mod wheel;
 mod window;
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use gpui::{App, QuitMode};
 use verve_electron::Hub;
@@ -34,6 +39,7 @@ use verve_electron::msg::{AppEvent, ToShell};
 
 pub use app_region::{AppRegion, drag_area};
 
+use crate::capture::Capture;
 use crate::shell::{Inbox, Item, Shell};
 
 /// What an embedder can do to the shell besides what the Hub sends it.
@@ -54,9 +60,26 @@ pub fn run(hub: Arc<Hub>, program: Program) -> i32 {
     run_with(hub, move |hub, _| hub.start(program))
 }
 
+/// [`run`] that takes a picture of the first window's page once it stops changing, writes it to
+/// `path` as a PNG and ends: `electron --screenshot <path>`. It leaves with 1 when no picture could
+/// be made, whatever the app's exit code is.
+pub fn run_screenshot(hub: Arc<Hub>, program: Program, path: PathBuf) -> i32 {
+    run_inner(hub, move |hub, _| hub.start(program), Some(path))
+}
+
 /// [`run`] with `start` in place of the app's script: it is called once, on the OS thread, when
 /// the shell is listening, and may start threads that talk to the Hub.
 pub fn run_with(hub: Arc<Hub>, start: impl FnOnce(&Arc<Hub>, Control) + 'static) -> i32 {
+    run_inner(hub, start, None)
+}
+
+fn run_inner(
+    hub: Arc<Hub>,
+    start: impl FnOnce(&Arc<Hub>, Control) + 'static,
+    screenshot: Option<PathBuf>,
+) -> i32 {
+    let failed = Arc::new(AtomicBool::new(false));
+    let capture_failed = Arc::clone(&failed);
     let (wake, woken) = async_channel::bounded(1);
     let inbox = Inbox::new(wake);
     // The system's own error box when no window exists, unless the environment says no (the
@@ -92,6 +115,11 @@ pub fn run_with(hub: Arc<Hub>, start: impl FnOnce(&Arc<Hub>, Control) + 'static)
     });
     application.run(move |cx: &mut App| {
         let mut shell = Shell::new(Arc::clone(&app), inbox.clone());
+        if let Some(path) = screenshot {
+            shell.capture(Capture::new(path, capture_failed));
+            // Nothing wakes the shell when a page has been still for long enough.
+            wake_every(&inbox, Duration::from_millis(150), cx);
+        }
         let pump = inbox.clone();
         cx.spawn(async move |cx| {
             let mut cx = cx.clone();
@@ -107,7 +135,23 @@ pub fn run_with(hub: Arc<Hub>, start: impl FnOnce(&Arc<Hub>, Control) + 'static)
         pump.push_item(Item::Displays);
         start(&app, Control(inbox));
     });
+    // A picture that could not be made is a failure, whatever the app's own code says.
+    if failed.load(Ordering::SeqCst) {
+        return 1;
+    }
     hub.exit_code().unwrap_or(0)
+}
+
+/// Wakes the shell every `period`, for what it waits for without anything telling it.
+fn wake_every(inbox: &Inbox, period: Duration, cx: &mut App) {
+    let waker = inbox.clone();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(period).await;
+            waker.wake();
+        }
+    })
+    .detach();
 }
 
 /// A system that asks the app to quit (a shutdown, a Cmd+Q the menu did not take) is told to the
