@@ -17,6 +17,7 @@ use crate::api::define;
 use crate::api::ipc_renderer::outbox;
 use crate::api::web_frame::{SCRIPT_FAILED, evaluate};
 use crate::ipc;
+use crate::msg::CompositionEvent;
 use crate::msg::{ContextMenuParams, EditCommand, FromRenderer, PointerKind, ToRendererInput};
 use crate::preload::world_numbered;
 
@@ -103,9 +104,28 @@ pub(crate) fn remove_css(runtime: &mut Runtime, key: &str) {
     verve_dom::remove_stylesheet(runtime.context(), key);
 }
 
-/// Does an editing command to what the page has selected or focused, through the document's own
-/// `execCommand`: whatever the page's editing supports (P24) is what these do.
+/// The menu's `execCommand` name for the commands the page's editing does.
+fn command_name(command: &EditCommand) -> Option<&'static str> {
+    Some(match command {
+        EditCommand::Undo => "undo",
+        EditCommand::Redo => "redo",
+        EditCommand::Cut => "cut",
+        EditCommand::Copy => "copy",
+        EditCommand::Paste | EditCommand::PasteAndMatchStyle => "paste",
+        EditCommand::Delete => "delete",
+        EditCommand::SelectAll => "selectAll",
+        _ => return None,
+    })
+}
+
+/// Does an editing command to what the page has selected or focused. The commands the page's
+/// editing knows go through the document's `exec_command`, as a person's would: `beforeinput` is
+/// fired first (P24).
 pub(crate) fn edit(runtime: &mut Runtime, document: &Document, command: EditCommand) {
+    if let Some(name) = command_name(&command) {
+        document.exec_command(runtime, name, "");
+        return;
+    }
     let context = runtime.context();
     let done = match command {
         EditCommand::InsertText(text) => return document.insert_text(runtime, &text),
@@ -113,26 +133,10 @@ pub(crate) fn edit(runtime: &mut Runtime, document: &Document, command: EditComm
         EditCommand::ScrollToBottom => scroll_to(context, 1e9),
         EditCommand::Unselect => selection(context)
             .and_then(|selection| native::invoke(&selection, "removeAllRanges", &[], context)),
-        EditCommand::Undo => exec(context, "undo"),
-        EditCommand::Redo => exec(context, "redo"),
-        EditCommand::Cut => exec(context, "cut"),
-        EditCommand::Copy => exec(context, "copy"),
-        EditCommand::Paste | EditCommand::PasteAndMatchStyle => exec(context, "paste"),
-        EditCommand::Delete => exec(context, "delete"),
-        EditCommand::SelectAll => exec(context, "selectAll"),
+        _ => return,
     };
     define::report(context, done);
     runtime.run_microtasks();
-}
-
-fn exec(context: &mut Context, command: &str) -> JsResult<JsValue> {
-    let document = native::global(context, "document")?;
-    native::invoke(
-        &document,
-        "execCommand",
-        &[native::js_text(command)],
-        context,
-    )
 }
 
 fn scroll_to(context: &mut Context, top: f64) -> JsResult<JsValue> {
@@ -190,6 +194,13 @@ pub(crate) fn person(
             document.key_up(runtime, &key);
         }
         ToRendererInput::Text(text) => document.type_text(runtime, &text),
+        ToRendererInput::Composition(event) => match event {
+            CompositionEvent::Update { text, selection } => {
+                document.compose(runtime, &text, selection)
+            }
+            CompositionEvent::Commit(text) => document.commit_composition(runtime, &text),
+            CompositionEvent::Cancel => document.cancel_composition(runtime),
+        },
         _ => {}
     }
     None
@@ -261,21 +272,16 @@ fn describe(dom: &Dom, node: NodeId, base: Option<&Url>) -> ContextMenuParams {
             params.link_url = resolve(href);
             params.link_text = dom.text_content(id);
         }
-        params.is_editable |= ancestor.is_some_and(is_editable);
+        params.is_editable |= ancestor.is_some_and(is_editable_field);
         at = dom.parent(id);
     }
+    params.is_editable |= dom.is_editable(node);
     params
 }
 
-/// Whether the element takes text a person types: a field, or a region marked editable.
-fn is_editable(node: &verve_dom::Node) -> bool {
-    match node.tag() {
-        Some("input" | "textarea") => {
-            node.attr("readonly").is_none() && node.attr("disabled").is_none()
-        }
-        Some(_) => node
-            .attr("contenteditable")
-            .is_some_and(|value| value != "false"),
-        None => false,
-    }
+/// Whether the element is a text field a person can type in.
+fn is_editable_field(node: &verve_dom::Node) -> bool {
+    matches!(node.tag(), Some("input" | "textarea"))
+        && node.attr("readonly").is_none()
+        && node.attr("disabled").is_none()
 }

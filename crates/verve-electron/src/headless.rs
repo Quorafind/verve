@@ -301,6 +301,14 @@ impl HeadlessShell {
         self.on_page(window, move |page| page.type_text(&text));
     }
 
+    /// An input method did `event` to the field or editable region of `window`'s page that has
+    /// the keyboard.
+    pub fn compose(&self, window: WindowId, event: crate::msg::CompositionEvent) {
+        self.on_page(window, move |page| {
+            page.input(crate::msg::ToRendererInput::Composition(event))
+        });
+    }
+
     /// A person chose menu item `item`.
     pub fn menu_click(&self, item: u32) {
         self.say(FromShell::MenuClicked {

@@ -14,10 +14,17 @@ use std::sync::Arc;
 
 use crate::field::Draft;
 
+mod edit;
 mod marks;
+mod names;
+mod ranges;
 mod reclaim;
 mod shadow;
 
+pub(crate) use edit::Edit;
+pub use names::{camel_name, css_name, parse_style};
+pub(crate) use ranges::{Contents, Ranges, utf16_len};
+pub use ranges::{Direction, RangeData, RangeError};
 use shadow::Shadows;
 pub(crate) use shadow::is_custom_element_name;
 pub use shadow::{Shadow, ShadowMode, SlotAssignment};
@@ -291,6 +298,10 @@ pub struct Dom {
     pinned: HashSet<NodeId>,
     /// Nodes whose subtrees are drawn as views of their own; see [`Dom::partition_of`].
     partitions: HashSet<NodeId>,
+    /// The live ranges and the selection: see `ranges.rs`.
+    pub(crate) ranges: Ranges,
+    /// `document.designMode = "on"`: the whole document is editable.
+    pub design_mode: bool,
     /// Every `<style>` element made: the ones in the document are stylesheets.
     styles: HashSet<NodeId>,
     /// The shadow roots and what is assigned to their slots.
@@ -347,6 +358,8 @@ impl Dom {
             roots: HashSet::new(),
             pinned: HashSet::new(),
             partitions: HashSet::new(),
+            ranges: Ranges::default(),
+            design_mode: false,
             styles: HashSet::new(),
             shadows: Shadows::default(),
             slot_dirty: false,
@@ -822,6 +835,7 @@ impl Dom {
         } else {
             (None, None)
         };
+        self.ranges_removing(id, parent, at);
         if let Some(node) = self.node_mut(parent) {
             node.children.remove(at);
         }
@@ -841,6 +855,10 @@ impl Dom {
     pub(crate) fn detach_many(&mut self, ids: &[NodeId]) {
         let selected: HashSet<NodeId> = ids.iter().copied().collect();
         let parents: HashSet<NodeId> = ids.iter().filter_map(|id| self.parent(*id)).collect();
+        if !self.ranges_unaffected(&selected, &parents) {
+            ids.iter().for_each(|id| self.detach(*id));
+            return;
+        }
         let mut links = std::collections::HashMap::new();
         for parent in &parents {
             let children = self.children(*parent);
@@ -975,6 +993,7 @@ impl Dom {
         }
         let nodes = if matches!(self.get(child).map(|n| &n.kind), Some(NodeKind::Fragment)) {
             // A fragment gives up all its children at once, heard as one change of each list.
+            self.ranges_emptying(child);
             let moved = match self.node_mut(child) {
                 Some(fragment) => std::mem::take(&mut fragment.children),
                 None => Vec::new(),
@@ -1021,6 +1040,7 @@ impl Dom {
             return false;
         };
         node.children.splice(at..at, nodes.iter().copied());
+        self.ranges_inserted(parent, at, nodes.len());
         let (previous, next) = if self.record_mutations {
             let children = self.children(parent);
             (
@@ -1061,6 +1081,7 @@ impl Dom {
             _ => return,
         };
         self.note_slot_input(None);
+        self.ranges_emptying(id);
         for (at, child) in children.iter().enumerate() {
             self.unlink(*child);
             if self.record_mutations {
@@ -1110,6 +1131,9 @@ impl Dom {
         if let Some(old) = old {
             if old == text {
                 return;
+            }
+            if !self.ranges.quiet && !self.ranges.is_empty() {
+                self.ranges_data_replaced(id, 0, utf16_len(&old), utf16_len(text));
             }
             if let Some(Node {
                 kind: NodeKind::Text(own) | NodeKind::Comment(own),
@@ -1618,71 +1642,6 @@ fn style_text(node: &Node) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// `color: red; padding: 4px !important` as pairs, and the names declared `!important`.
-pub fn parse_style(text: &str) -> (Vec<(String, String)>, Vec<String>) {
-    let mut important = Vec::new();
-    let pairs = crate::css::declarations(text)
-        .into_iter()
-        .map(|d| {
-            if d.important {
-                important.push(d.name.clone());
-            }
-            (d.name, d.value)
-        })
-        .collect();
-    (pairs, important)
-}
-
-/// `fontSize` as `font-size`, `cssFloat` as `float`, `webkitTransform` as `-webkit-transform`; a
-/// custom property is left alone.
-pub fn css_name(camel: &str) -> String {
-    if camel.starts_with("--") {
-        return camel.to_owned();
-    }
-    if camel == "cssFloat" {
-        return "float".to_owned();
-    }
-    let mut out = String::with_capacity(camel.len() + 4);
-    for c in camel.chars() {
-        if c.is_ascii_uppercase() {
-            out.push('-');
-            out.push(c.to_ascii_lowercase());
-        } else {
-            out.push(c);
-        }
-    }
-    for prefix in ["webkit-", "moz-", "ms-"] {
-        if out.starts_with(prefix) {
-            return format!("-{out}");
-        }
-    }
-    out
-}
-
-/// `font-size` as `fontSize`.
-pub fn camel_name(css: &str) -> String {
-    if css.starts_with("--") {
-        return css.to_owned();
-    }
-    if css == "float" {
-        return "cssFloat".to_owned();
-    }
-    let css = css.strip_prefix('-').unwrap_or(css);
-    let mut out = String::with_capacity(css.len());
-    let mut upper = false;
-    for c in css.chars() {
-        if c == '-' {
-            upper = true;
-        } else if upper {
-            out.push(c.to_ascii_uppercase());
-            upper = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 #[cfg(test)]

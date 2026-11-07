@@ -654,16 +654,7 @@ fn editable(dom: &Dom, id: NodeId) -> bool {
     };
     match node.tag() {
         Some("input" | "textarea") => node.attr("readonly").is_none() && !disabled(dom, id),
-        _ => {
-            let mut at = Some(id);
-            while let Some(n) = at {
-                if let Some(value) = dom.get(n).and_then(|n| n.attr("contenteditable")) {
-                    return value != "false";
-                }
-                at = dom.parent(n);
-            }
-            false
-        }
+        _ => dom.is_editable(id),
     }
 }
 

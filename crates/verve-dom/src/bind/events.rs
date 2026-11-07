@@ -527,6 +527,20 @@ pub fn fire_event(
     init: &[(&str, JsValue)],
     trusted: bool,
 ) -> JsResult<(bool, JsObject)> {
+    fire_with(context, target, class, kind, init, trusted, |_, _| Ok(()))
+}
+
+/// [`fire_event`], with `prepare` given the event before it is dispatched: for what the event
+/// carries that is no field of its class.
+pub fn fire_with(
+    context: &mut Context,
+    target: &JsValue,
+    class: &str,
+    kind: &str,
+    init: &[(&str, JsValue)],
+    trusted: bool,
+    prepare: impl FnOnce(&mut Context, &JsObject) -> JsResult<()>,
+) -> JsResult<(bool, JsObject)> {
     let (bubbles, cancelable) = defaults(kind);
     let dict = native::object(context);
     dict.set(js_string!("bubbles"), bubbles, false, context)?;
@@ -550,6 +564,7 @@ pub fn fire_event(
         .ok_or_else(|| type_error(format!("no event class {class}")))?;
     let event = constructor.construct(&[js_text(kind), dict.into()], None, context)?;
     verve::dom_events::set_trusted(&event.clone().into(), trusted)?;
+    prepare(context, &event)?;
     let global = context.global_object();
     let previous = global.get(js_string!("event"), context)?;
     global.set(js_string!("event"), event.clone(), false, context)?;
@@ -580,8 +595,7 @@ pub fn is_focusable(dom: &Dom, id: NodeId) -> bool {
     if !dom.is_connected(id) || !node.is_element() {
         return false;
     }
-    if node.attr("tabindex").is_some() || node.attr("contenteditable").is_some_and(|v| v != "false")
-    {
+    if node.attr("tabindex").is_some() || dom.editing_host(id) == Some(id) {
         return true;
     }
     match node.tag() {
