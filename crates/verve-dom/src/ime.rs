@@ -34,6 +34,8 @@ pub(crate) struct Composition {
     /// The selection's revision when the composition began: the step the commit joins is the
     /// one open at that moment.
     started: u64,
+    /// The text field's draft before the composition began, for its undo history.
+    field_before: Option<crate::field::Draft>,
 }
 
 fn composition_event(cx: &mut Context, target: NodeId, kind: &str, data: &str) -> JsResult<()> {
@@ -137,6 +139,7 @@ impl Document {
             }
             let before = read_dom(cx, Dom::selection);
             let started = read_dom(cx, |dom| dom.ranges.revision);
+            let field_before = self.draft_before(target);
             self.state.borrow_mut().editing.composition = Some(Composition {
                 target,
                 node: None,
@@ -145,6 +148,7 @@ impl Document {
                 before,
                 log: Vec::new(),
                 started,
+                field_before,
             });
             composition_event(cx, target, "compositionstart", "")?;
         }
@@ -275,7 +279,11 @@ impl Document {
             }
         }
         let finished = self.state.borrow_mut().editing.composition.take();
-        if let Some(c) = finished.filter(|_| committed && !field) {
+        if committed && field {
+            // The commit is one step of the field's history, as typing is.
+            let before = finished.and_then(|c| c.field_before);
+            self.edited(target, before, crate::field_undo::Edit::Commit);
+        } else if let Some(c) = finished.filter(|_| committed && !field) {
             remember(cx, c);
         }
         input_event(
