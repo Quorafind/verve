@@ -13,12 +13,17 @@
 
 mod app_region;
 mod capture;
+mod cursor;
 mod dialog;
 mod dom_element;
 mod dom_view;
 mod font_name;
 mod frame_stats;
+mod ime;
+mod input;
 pub(crate) mod inspector;
+pub mod keymap;
+mod link;
 mod menu;
 mod native;
 mod pictures;
@@ -59,22 +64,6 @@ impl Control {
     /// The page of `window` has these `-webkit-app-region` boxes now.
     pub fn set_app_regions(&self, window: WindowId, regions: Vec<AppRegion>) {
         self.0.push_item(Item::Regions(window, regions));
-    }
-
-    /// The menu item that `key`, pressed in `window`, chooses by its accelerator, if any: the window's
-    /// menu then the application menu, as `MenuBook::item_for` reads them.
-    ///
-    /// The shell does not forward keys to pages (P32's input bridge does), so the bridge calls this
-    /// on every key down *before* it sends the key to the page, and, for an item found, says
-    /// `FromShell::MenuClicked { menu_item, window: Some(window), triggered_by_accelerator: true,
-    /// modifiers }` to the Hub and does not send the key on. A page whose `webContents` has a
-    /// `'before-input-event'` listener (`Hub::intercepts_keys`) gets the key sent to the main
-    /// process as `FromShell::KeyForContents` instead, which looks the menu up itself after the
-    /// listeners.
-    pub fn menu_item_for_key(&self, window: WindowId, key: &verve_dom::Key) -> Option<u32> {
-        let book = self.0.book();
-        let book = book.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        book.item_for(window, key)
     }
 }
 

@@ -523,9 +523,9 @@ impl HeadlessShell {
         self.say(FromShell::Shortcut { id });
     }
 
-    /// A person pressed `key` in `window` and let go. A key `'before-input-event'` listeners are
-    /// asked of goes to the main process first; otherwise the menu's accelerators are looked up
-    /// here, and a key one chooses is a click on that item and not a key for the page.
+    /// A person pressed `key` in `window` and let go. A key `before-input-event` listeners are
+    /// asked of goes to the main process first; the page hears it, and the main process looks the
+    /// menu's accelerators up only if the page left the key down alone (as the GPUI shell does).
     pub fn press_key(&self, window: WindowId, key: verve_dom::Key) {
         self.key_event(window, true, key.clone());
         self.key_event(window, false, key);
@@ -561,41 +561,7 @@ impl HeadlessShell {
             });
             return;
         }
-        let chosen = {
-            let mut state = self.state();
-            let chosen = down
-                .then(|| state.menus.book.item_for(window, &key))
-                .flatten();
-            match (chosen, down) {
-                (Some(_), _) => {
-                    if !state.menus.swallowed.contains(&key.code) {
-                        state.menus.swallowed.push(key.code.clone());
-                    }
-                }
-                (None, false) => {
-                    let at = state
-                        .menus
-                        .swallowed
-                        .iter()
-                        .position(|code| *code == key.code);
-                    if let Some(at) = at {
-                        state.menus.swallowed.remove(at);
-                        return;
-                    }
-                }
-                (None, true) => state.menus.swallowed.retain(|code| *code != key.code),
-            }
-            chosen
-        };
-        match chosen {
-            Some(item) => self.say(FromShell::MenuClicked {
-                menu_item: item,
-                window: Some(window),
-                triggered_by_accelerator: true,
-                modifiers: key.modifiers,
-            }),
-            None => self.input(contents, ToRendererInput::Key { down, key }),
-        }
+        self.input(contents, ToRendererInput::Key { down, key });
     }
 
     /// The system theme changed.

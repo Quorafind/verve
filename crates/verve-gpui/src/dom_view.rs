@@ -12,14 +12,19 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{Context, IntoElement, ParentElement, Render, Rgba, Styled, Window, div, rgb};
-use verve_dom::NodeId;
+use gpui::{
+    AppContext as _, Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    KeyUpEvent, ModifiersChangedEvent, ParentElement, Render, Rgba, Styled, Window, div, rgb,
+};
+use verve_dom::{NodeId, Rect, Snapshot};
 use verve_electron::msg::ToRendererInput;
-use verve_layout::{DisplayList, ImageTable};
+use verve_layout::{Cursor, DisplayList, ImageTable};
 
 use crate::app_region::{self, AppRegion};
 use crate::dom_element::DomElement;
 use crate::frame_stats::FrameStats;
+use crate::ime::{self, ImeBridge};
+use crate::input::{self, Input};
 use crate::inspector::model::Highlight;
 use crate::inspector::overlay::{self, Picker};
 use crate::pictures::Pictures;
@@ -49,6 +54,20 @@ pub(crate) struct DomState {
     pub viewport: (f32, f32),
     pub tell: Option<Tell>,
     pub stats: Option<FrameStats>,
+    /// The page as its renderer last published it: what a link, a field and a cursor are read from.
+    pub snapshot: Option<Snapshot>,
+    /// Where a candidate window goes: the caret's box in the page.
+    pub ime_rect: Option<Rect>,
+    /// Whether the inspector's element picker has the pointer: the page hears nothing then.
+    pub picking: bool,
+    /// What takes the keyboard for the page: the window's input goes to its element.
+    pub focus: Option<FocusHandle>,
+    /// The platform's text input into the page.
+    pub ime: Option<Entity<ImeBridge>>,
+    /// The pointer, the keys and what they reported.
+    pub input: Input,
+    /// The cursor an `auto` box shows, by node, for the snapshot it was worked out from.
+    auto_cursors: HashMap<NodeId, Cursor>,
 }
 
 impl DomState {
@@ -56,6 +75,20 @@ impl DomState {
     pub(crate) fn predict(&mut self, node: NodeId, to: [f32; 2]) {
         self.predicted.insert(node, to);
         self.generation += 1;
+    }
+
+    /// The cursor a pointer over `node` shows, given what its box asks for: `auto` is worked out
+    /// from the page (a link, a field) once per snapshot.
+    pub(crate) fn cursor_of(&mut self, node: NodeId, asked: Cursor) -> Cursor {
+        if asked != Cursor::Auto {
+            return asked;
+        }
+        if let Some(known) = self.auto_cursors.get(&node) {
+            return *known;
+        }
+        let shown = crate::cursor::resolve(self.snapshot.as_ref(), node, asked);
+        self.auto_cursors.insert(node, shown);
+        shown
     }
 
     /// What the list comes to now: kept from the frame before while the list and the predicted
@@ -122,8 +155,55 @@ impl DomView {
         self.highlight = highlight;
     }
 
+    /// Gives the view the keyboard handle and the text input its window needs; called once, as
+    /// the view is made.
+    pub(crate) fn attach(&mut self, cx: &mut Context<Self>) {
+        let ime = cx.new(|_| ImeBridge::new(Rc::clone(&self.state)));
+        let mut state = self.state.borrow_mut();
+        state.focus = Some(cx.focus_handle());
+        state.ime = Some(ime);
+    }
+
+    /// The keyboard handle of the page, for the window to give the focus to.
+    pub(crate) fn focus_handle(&self) -> Option<FocusHandle> {
+        self.state.borrow().focus.clone()
+    }
+
+    /// Keeps the page as its renderer published it, and where the caret is. Answers whether the
+    /// field with the keyboard or the caret moved, which the platform's text input must hear of.
+    pub(crate) fn set_page(&mut self, snapshot: Snapshot, caret: Option<Rect>) -> bool {
+        let mut state = self.state.borrow_mut();
+        let before = state.snapshot.as_ref().map(ime::editable_focus);
+        let after = ime::editable_focus(&snapshot);
+        if state
+            .snapshot
+            .as_ref()
+            .is_none_or(|seen| seen.revision != snapshot.revision)
+        {
+            state.auto_cursors.clear();
+        }
+        if before != Some(after) {
+            state.input.clear_typed();
+        }
+        state.snapshot = Some(snapshot);
+        let moved = state.ime_rect != caret;
+        state.ime_rect = caret;
+        moved || before != Some(after)
+    }
+
+    /// Where the keys and what the pointer shows go.
+    pub(crate) fn on_keys(&mut self, keys: Rc<dyn Fn(bool, verve_dom::Key)>) {
+        self.state.borrow_mut().input.keys = Some(keys);
+    }
+
+    /// Where the cursor and the link under the pointer are reported.
+    pub(crate) fn on_report(&mut self, report: Rc<dyn Fn(verve_electron::msg::PageEvent)>) {
+        self.state.borrow_mut().input.report = Some(report);
+    }
+
     /// Takes the pointer for `picker` (the inspector's element picker), or gives it back.
     pub(crate) fn set_picker(&mut self, picker: Option<Picker>) {
+        self.state.borrow_mut().picking = picker.is_some();
         self.picker = picker;
     }
 
@@ -212,11 +292,28 @@ pub fn white() -> Rgba {
 }
 
 impl Render for DomView {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(drawn) = &self.drawn {
             drawn(window);
         }
         let mut page = div().size_full();
+        // The keys go to the page through the window's keyboard handle, whose element this is.
+        if let Some(focus) = self.focus_handle() {
+            page = page
+                .track_focus(&focus)
+                .key_context("VervePage")
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, _| {
+                    let kind = (true, event.is_held, event.prefer_character_input);
+                    input::key(&this.state, &event.keystroke, kind, &window.modifiers());
+                }))
+                .on_key_up(cx.listener(|this, event: &KeyUpEvent, window, _| {
+                    let kind = (false, false, false);
+                    input::key(&this.state, &event.keystroke, kind, &window.modifiers());
+                }))
+                .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, _| {
+                    input::modifiers_changed(&this.state, event);
+                }));
+        }
         if let Some(background) = self.background {
             page = page.bg(background);
         }

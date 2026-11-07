@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::field::Draft;
+use crate::input::LastInput;
 
 mod edit;
 mod marks;
@@ -268,6 +269,10 @@ pub struct Dom {
     pub body: NodeId,
     /// The element with the keyboard, if any.
     pub focused: Option<NodeId>,
+    /// Whether the focus ring shows on the focused element: `:focus-visible`.
+    pub focus_visible: bool,
+    /// What the person did last, which says whether a focus the page asks for shows its ring.
+    pub(crate) last_input: LastInput,
     /// The elements the pointer is over, innermost first; see [`Dom::set_hovered`].
     hovered: Vec<NodeId>,
     /// The element a button is held down on: `:active`.
@@ -343,6 +348,8 @@ impl Dom {
             head: 0,
             body: 0,
             focused: None,
+            focus_visible: false,
+            last_input: LastInput::default(),
             hovered: Vec::new(),
             active: None,
             revision: 0,

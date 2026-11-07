@@ -286,7 +286,12 @@ Wayland 全局快捷键、菜单项 `palette`/`header` 的 macOS 14 新样式（
 
 ### 给其他包的备注
 
-- **P32（输入桥）**：对窗口里的每个 **key down**，在把键发给页面**之前**：若该页面的 `Hub::intercepts_keys(contents)` 为真，**不查**，把键作为 `FromShell::KeyForContents` 发给主进程（主进程先发 `before-input-event`，没被阻止再查菜单，命中就点击，否则交给页面）；否则调 `verve_gpui::Control::menu_item_for_key(window, &key)`，得到 `Some(item)` 就向 Hub 发 `FromShell::MenuClicked { menu_item: item, window: Some(window), triggered_by_accelerator: true, modifiers: key.modifiers }` 且**不**把这个键发给页面（它的 key up 也不发）；`None` 就照常发给页面。无头 Shell 的 `HeadlessShell::press_key` 是同样的流程，可以对照；主进程路径（`input_events::key_for`）同样吞掉 key up。规则（第四轮修正）：吞掉的键记成 `(页面, code)`，**同一个 `(页面, code)` 不重复记**（按住不放的自动重复 `repeat: true` 的 key down 会反复命中）；一个没有菜单项接走的 key down 要**删掉**该 `(页面, code)` 的记录（菜单项开了对话框，key up 去了别处，下一次普通按键不该丢 key up）；key up 找到记录就删掉它并吞掉。无头 Shell 的 `hold_key` 与 `tests/menu.rs` 的 `a_held_accelerator_leaves_one_key_up_to_swallow_not_one_per_repeat` 是这条规则的样子。
+- **P32（输入桥）**：**页面先听到键，菜单的加速键只在页面没处理这个 key down 时才动**（第五轮改了：原先的规则是“菜单先拿走，页面听不到”，**不对**，别照它做）。Electron 39.8.10、可见的屏幕外窗口观察（总控的 `probe-keys` 探针，`keys-out.json`、`keys2-out.json`）：
+  - Ctrl+O、F6 带菜单项：页面先收到 keydown 和 keyup，然后菜单项被点击；页面取消 keydown：不点击；`before-input-event` 取消 keyDown：页面既没有 keydown 也没有 keyup，不点击，也没有 keyUp 的 `before-input-event`。
+  - “没处理”是：没被取消，且 keydown 的默认动作没有做取消之外的事——**输入这个字符不算**。会点击：空 input 里的 Ctrl+Z、普通 input 里的 Ctrl+B、body 上的 Ctrl+Left 和 Backspace；不点击：input 或 body 里的 Ctrl+A（选中）、输入过后的 Ctrl+Z（撤销）、input 里的 Ctrl+Left（移动光标）、input 里的 Backspace（删除）。input 里的普通 `Q` 加速键：字符 `q` 被输入，菜单项也被点击。
+  - 除了“被 `before-input-event` 取消的 key down 的 key up”，**什么也不吞**。
+  - 路径：Shell 把 key down 发给页面（页面有 `before-input-event` 监听时先作为 `FromShell::KeyForContents` 发给主进程，监听器没取消才交给页面）；渲染器的 `Document::key_down_unhandled` 说没处理，就发 `FromRenderer::KeyUnhandled(key)`；主进程（`input_events::key_unhandled`）查菜单并点击（`triggered_by_accelerator: true`）。查找只在 verve-electron 里做一次，GPUI Shell 与无头 Shell 共用；`Control::menu_item_for_key` 已删。macOS 没有观察，规则相同。
+  - 原先第四轮的吞键记录规则（Shell、无头 Shell、主进程各一份）只剩主进程 `MenuState::swallow/release` 里这一条：被 `before-input-event` 取消的 key down 记下 `(页面, code)`，它的 key up 找到记录就吞掉。`tests/menu.rs` 对应改了五个测试。
 - **P34**：`ToShell::Menu` 的分发在 `shell.rs` 一行，具体在 `native.rs`（读开关的函数叫 `touches_desktop`）；`VERVE_NO_SYSTEM_DIALOGS` 的意思是“Shell 不碰桌面”：现在也关掉菜单栏、托盘、全局快捷键（GPUI 的二进制测试都设了它，所以它们不会把菜单放到桌面上）。Windows 上 `Popup` 在 OS 线程里阻塞（`TrackPopupMenu` 自己抽消息）到菜单关闭才返回；这在嵌套消息循环里是否与 GPUI 的前台任务相安无事**没有在真机上验证**，见下面的手动清单。`ClosePopup` 在 Windows 上无法实现（弹出菜单阻塞着）。
 - **P13**：`setMenu`/`removeMenu` 已实现；`setIgnoreMenuShortcuts` 没接线；`isMenuBarVisible` 等标志仍由 `window_state.rs` 记录（初值与真 Electron 不一致：观察到隐藏窗口 `isMenuBarVisible()` 初始 `false`，`setAutoHideMenuBar(true)` 之后读到 `true`，本包没改）。内容区高度见上。
 - **P24**：菜单角色 `undo`/`redo`/`cut`/`copy`/`paste`/`pasteAndMatchStyle`/`delete`/`selectAll` 调的是 `webContents` 同名方法，P13 已把它们接到 `ToRenderer::EditCommand`；渲染器侧没有就什么也不发生。
@@ -298,7 +303,7 @@ Wayland 全局快捷键、菜单项 `palette`/`header` 的 macOS 14 新样式（
 
 1. 窗口只有 `MENU_TRAY_STAY=1` 时才显示（`global.win`/`global.tray` 持有，否则托盘对象会被回收、图标消失，正是本包照抄的那个坑）。在没有 `VERVE_NO_SYSTEM_DIALOGS` 的 PowerShell 里：`$env:MENU_TRAY_STAY='1'; electron.exe tests\electron\apps\menu-tray --user-data-dir=<临时目录>`。
 2. 窗口有菜单栏：File（Open `Ctrl+O`、分隔线、Exit）、Edit（Copy/Paste）；按 `Alt+F` 能展开（助记符），点 Open 控制台出现 `menu: open`。
-3. 按 `Ctrl+O` **不会**触发 Open（GPUI 还不把键交给菜单，P32 之后会）；这是已知的。
+3. 按 `Ctrl+O` 触发 Open（页面先收到这个键，没取消它菜单项才动，见上面 P32 的备注）。
 4. 通知区出现图标，悬停显示 `menu-tray fixture`，右键出现菜单（只有 Exit）；选 Exit 退出应用。
 5. 另一个窗口有焦点时按 `Ctrl+Shift+X`，控制台出现 `shortcut: pressed`。
 6. 退出后通知区的图标消失（没有残留的幽灵图标）。

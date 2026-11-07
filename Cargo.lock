@@ -6956,6 +6956,7 @@ dependencies = [
  "raw-window-handle",
  "tiny-skia",
  "tray-icon",
+ "url",
  "verve",
  "verve-dom",
  "verve-electron",

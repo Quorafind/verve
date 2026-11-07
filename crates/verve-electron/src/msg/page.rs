@@ -326,6 +326,9 @@ pub enum FromRenderer {
         text: String,
         is_error: bool,
     },
+    /// The page left a key down alone: it did not prevent it and its default action did nothing
+    /// but type. The menu's accelerator for it, if any, is chosen (P15, P32).
+    KeyUnhandled(verve_dom::Key),
 }
 
 /// The page's life, in the order `webContents` reports it.
@@ -350,6 +353,16 @@ pub enum PageEvent {
     /// There is something to paint for the first time — one of `ready-to-show`'s conditions, which
     /// P13 settles.
     FirstPaintable,
+    /// The cursor the page shows under the pointer changed: Chromium's name for it (`hand`,
+    /// `text`, `pointer` for the arrow); `cursor-changed`.
+    CursorChanged(String),
+    /// The pointer is over a link, whose address this is, or left it (empty): `update-target-url`.
+    UpdateTargetUrl(String),
+    /// A wheel turned with Control held and the page did not prevent it: `zoom-changed`, `in` for
+    /// a wheel turned up.
+    ZoomChanged {
+        zoom_in: bool,
+    },
 }
 
 /// Electron's `render-process-gone` reasons.

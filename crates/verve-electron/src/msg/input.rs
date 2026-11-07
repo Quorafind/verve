@@ -89,6 +89,8 @@ pub enum PointerKind {
     Down,
     Up,
     Move,
+    /// The pointer left the window: nothing is under it any more.
+    Leave,
 }
 
 /// What the shell reads of a page to draw it: `Guest::View` of [`crate::RendererGuest`].
@@ -99,7 +101,8 @@ pub struct RendererView {
     pub update: Option<verve_dom::Update>,
     /// Whether the page asked for an animation frame: send [`ToRendererInput::Frame`].
     pub wants_frame: bool,
-    /// The CSS `cursor` of the element under the pointer.
+    /// Not used: the renderer does not know where the pointer is. The shell reads the cursor from
+    /// the display list's hitboxes and reports it itself (P32).
     pub cursor: Option<String>,
     /// Where a candidate window goes: the caret's box (P24/P32).
     pub ime_rect: Option<verve_dom::Rect>,

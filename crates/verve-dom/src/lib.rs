@@ -43,6 +43,7 @@ mod load;
 mod media;
 mod options;
 mod permissions;
+mod person;
 mod rect;
 mod schemes;
 pub mod selection;
@@ -697,22 +698,10 @@ impl Document {
             .unwrap_or(state.dom.body)
     }
 
+    /// The fields of a mouse event for `pointer` with `buttons` held; its `detail` is the click
+    /// count (see `person.rs` for the events that have none).
     fn pointer_init(pointer: &Pointer, buttons: u16) -> Vec<(&'static str, JsValue)> {
-        vec![
-            ("clientX", f64::from(pointer.x).into()),
-            ("clientY", f64::from(pointer.y).into()),
-            ("screenX", f64::from(pointer.x).into()),
-            ("screenY", f64::from(pointer.y).into()),
-            ("pageX", f64::from(pointer.x).into()),
-            ("pageY", f64::from(pointer.y).into()),
-            ("button", pointer.button.into()),
-            ("buttons", buttons.into()),
-            ("ctrlKey", pointer.modifiers.ctrl.into()),
-            ("shiftKey", pointer.modifiers.shift.into()),
-            ("altKey", pointer.modifiers.alt.into()),
-            ("metaKey", pointer.modifiers.meta.into()),
-            ("detail", pointer.count.max(1).into()),
-        ]
+        person::fields(pointer, buttons, pointer.count.max(1))
     }
 
     fn fire(
@@ -733,21 +722,10 @@ impl Document {
         }
     }
 
-    /// The pointer moved to `pointer`'s place: the elements it left hear `pointerout`/
-    /// `mouseout` and `pointerleave`/`mouseleave`, the ones it came onto `pointerover`/
-    /// `mouseover` and `pointerenter`/`mouseenter`, a `:hover` rule follows, and the element
-    /// under it hears `pointermove` and `mousemove`.
+    /// The pointer moved to `pointer`'s place: see [`Document::pointer_move_on`].
     pub fn pointer_move(&self, runtime: &mut verve::Runtime, pointer: &Pointer) {
-        if self.drag_moved(runtime, pointer) {
-            return;
-        }
         let target = self.pointer_target(pointer);
-        self.hover_node(runtime, Some(target), pointer);
-        let init = Self::pointer_init(pointer, 0);
-        self.fire(runtime, target, "PointerEvent", "pointermove", &init);
-        self.fire(runtime, target, "MouseEvent", "mousemove", &init);
-        self.drag_may_start(runtime, pointer);
-        runtime.run_microtasks();
+        self.pointer_move_on(runtime, target, pointer);
     }
 
     /// The pointer left the document.
@@ -761,65 +739,6 @@ impl Document {
     pub fn hover(&self, runtime: &mut verve::Runtime, node: Option<NodeId>, pointer: &Pointer) {
         self.hover_node(runtime, node, pointer);
         runtime.run_microtasks();
-    }
-
-    fn hover_node(&self, runtime: &mut verve::Runtime, node: Option<NodeId>, pointer: &Pointer) {
-        let previous = self.view.borrow().over;
-        if previous == node {
-            return;
-        }
-        self.view.borrow_mut().over = node;
-        let path: Vec<NodeId> = {
-            let state = self.state.borrow();
-            match node {
-                Some(node) => {
-                    let mut path = vec![node];
-                    let mut at = state.dom.parent_element(node);
-                    while let Some(parent) = at {
-                        path.push(parent);
-                        at = state.dom.parent_element(parent);
-                    }
-                    path
-                }
-                None => Vec::new(),
-            }
-        };
-        let (left, entered) = self.state.borrow_mut().dom.set_hovered(path);
-        let context = runtime.context();
-        let related = |n: Option<NodeId>, cx: &mut Context| {
-            n.map_or(JsValue::null(), |n| bind::node::wrap(cx, n))
-        };
-        // The pointer's events, then the mouse's, as UI Events orders them: out of the old
-        // element and each element left (innermost first), over the new and each element
-        // entered (outermost first).
-        let mut init = Self::pointer_init(pointer, 0);
-        if let Some(previous) = previous.filter(|p| self.state.borrow().dom.exists(*p)) {
-            let to = related(node, context);
-            init.push(("relatedTarget", to));
-            for (class, out, leave) in [
-                ("PointerEvent", "pointerout", "pointerleave"),
-                ("MouseEvent", "mouseout", "mouseleave"),
-            ] {
-                self.fire(runtime, previous, class, out, &init);
-                for id in &left {
-                    self.fire(runtime, *id, class, leave, &init);
-                }
-            }
-            init.pop();
-        }
-        if let Some(node) = node {
-            let from = related(previous, runtime.context());
-            init.push(("relatedTarget", from));
-            for (class, over, enter) in [
-                ("PointerEvent", "pointerover", "pointerenter"),
-                ("MouseEvent", "mouseover", "mouseenter"),
-            ] {
-                self.fire(runtime, node, class, over, &init);
-                for id in entered.iter().rev() {
-                    self.fire(runtime, *id, class, enter, &init);
-                }
-            }
-        }
     }
 
     /// A button pressed at `pointer`: `pointerdown` and `mousedown` at the element under it,
@@ -843,13 +762,18 @@ impl Document {
     fn press_down(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) -> bool {
         self.activate();
         self.hover_node(runtime, Some(target), pointer);
-        let buttons = match pointer.button {
+        self.pointer_used();
+        let held = match pointer.button {
             1 => 4,
             2 => 2,
+            3 => 8,
+            4 => 16,
             _ => 1,
         };
-        let init = Self::pointer_init(pointer, buttons);
+        let held = held | pointer.buttons;
+        let init = person::fields(pointer, held, 0);
         let pointer_allowed = self.fire(runtime, target, "PointerEvent", "pointerdown", &init);
+        let init = Self::pointer_init(pointer, held);
         let allowed =
             pointer_allowed && self.fire(runtime, target, "MouseEvent", "mousedown", &init);
         {
@@ -858,7 +782,7 @@ impl Document {
             state.dom.mark(target);
         }
         self.view.borrow_mut().pressed = Some(target);
-        if allowed && pointer.button == 0 {
+        if allowed && pointer.button <= 2 {
             let context = runtime.context();
             let focus = {
                 let mut at = Some(target);
@@ -872,6 +796,9 @@ impl Document {
                 }
                 found
             };
+            if focus.is_none() {
+                self.pointer_missed();
+            }
             if let Err(error) = bind::events::set_focus_from(context, focus, true) {
                 verve::report(context, &error);
             }
@@ -922,8 +849,9 @@ impl Document {
         if let Some(dropped) = self.drag_released(runtime, pointer) {
             return dropped;
         }
-        let init = Self::pointer_init(pointer, 0);
-        self.fire(runtime, target, "PointerEvent", "pointerup", &init);
+        let none = person::fields(pointer, pointer.buttons, 0);
+        self.fire(runtime, target, "PointerEvent", "pointerup", &none);
+        let init = Self::pointer_init(pointer, pointer.buttons);
         self.fire(runtime, target, "MouseEvent", "mouseup", &init);
         {
             let mut state = self.state.borrow_mut();
@@ -964,11 +892,13 @@ impl Document {
                         self.fire(runtime, clicked, "MouseEvent", "dblclick", &init);
                     }
                 }
-                1 => {
+                1 | 3 | 4 => {
                     allowed = self.fire(runtime, clicked, "PointerEvent", "auxclick", &init);
                 }
                 _ => {
-                    allowed = self.fire(runtime, clicked, "PointerEvent", "contextmenu", &init);
+                    // Chromium says `auxclick` for the secondary button too, ahead of the menu.
+                    self.fire(runtime, clicked, "PointerEvent", "auxclick", &init);
+                    allowed = self.fire(runtime, clicked, "PointerEvent", "contextmenu", &none);
                 }
             }
         }
@@ -1000,12 +930,7 @@ impl Document {
         delta_y: f32,
     ) -> bool {
         let target = self.pointer_target(pointer);
-        let mut init = Self::pointer_init(pointer, 0);
-        init.push(("deltaX", f64::from(delta_x).into()));
-        init.push(("deltaY", f64::from(delta_y).into()));
-        let allowed = self.fire(runtime, target, "WheelEvent", "wheel", &init);
-        runtime.run_microtasks();
-        allowed
+        self.wheel_on(runtime, target, pointer, (delta_x, delta_y))
     }
 
     /// The element with the keyboard.
@@ -1062,6 +987,7 @@ impl Document {
         if key.key == "Escape" && self.drag_cancel(runtime) {
             return false;
         }
+        self.keyboard_used(key);
         let target = self.key_target();
         let allowed = self.fire(
             runtime,
@@ -1166,7 +1092,7 @@ impl Document {
                 return;
             }
         }
-        let printable = key.key.chars().count() == 1 && !chord;
+        let printable = key.key.chars().count() == 1 && !chord && !key.modifiers.alt;
         if printable {
             let char_code = key.key.chars().next().map_or(0, |c| c as u32);
             let allowed = self.fire(

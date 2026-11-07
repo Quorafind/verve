@@ -47,8 +47,6 @@ pub(super) struct Desk {
     pub(super) shortcuts: BTreeMap<u32, Accelerator>,
     pub(super) refuse_shortcuts: bool,
     pub(super) trays: BTreeMap<TrayId, HeadlessTray>,
-    /// Keys a menu took on the way down, whose key-up the page is not sent either.
-    pub(super) swallowed: Vec<String>,
 }
 
 impl Desk {

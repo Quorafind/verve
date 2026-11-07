@@ -404,6 +404,9 @@ impl Shell {
             let Some(view) = self.hub.renderer_view(window.contents) else {
                 continue;
             };
+            if let Some(update) = &view.update {
+                window.show_page(update.snapshot.clone(), view.ime_rect, cx);
+            }
             // The pictures first: the list that names them is drawn with them.
             window.show_images(view.images, cx);
             let list = view.display_list;

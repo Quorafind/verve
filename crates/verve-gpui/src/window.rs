@@ -18,12 +18,14 @@ use gpui::{
 use verve_electron::Hub;
 use verve_electron::ids::{ContentsId, WindowId};
 use verve_electron::msg::{
-    Display, Rect, TitleBarStyle, ToRendererInput, ToShell, WindowEvent, WindowOp, WindowOptions,
+    Display, FromShell, Rect, TitleBarStyle, ToRendererInput, ToShell, WindowEvent, WindowOp,
+    WindowOptions,
 };
 use verve_layout::{DisplayList, ImageTable};
 
 use crate::app_region::AppRegion;
 use crate::dom_view::{DomView, Shown, white};
+use crate::input::KeyRoute;
 use crate::platform::{self, Native, Target};
 use crate::report::Reporter;
 use crate::shell::{Inbox, Item};
@@ -153,7 +155,11 @@ pub(crate) fn open(opening: Opening, display: &Display, cx: &mut AsyncApp) -> Op
     let bounds = opening_bounds(options, display);
     let color = background(options);
     let opened = cx.open_window(gpui_options(options, bounds), |_, cx| {
-        cx.new(|_| DomView::new(color))
+        cx.new(|cx| {
+            let mut view = DomView::new(color);
+            view.attach(cx);
+            view
+        })
     });
     let handle = match opened {
         Ok(handle) => handle,
@@ -178,14 +184,20 @@ pub(crate) fn open(opening: Opening, display: &Display, cx: &mut AsyncApp) -> Op
         asked,
         regions: RefCell::new(Vec::new()),
     };
-    window.guard(cx, options.closable, inbox, id);
+    window.guard(cx, options.closable, (hub, inbox), id);
     window.start(options, cx);
     Some(window)
 }
 
 impl Window {
     /// Makes the user's close ask the main process, and the first frame report `FirstPaint`.
-    fn guard(&self, cx: &mut AsyncApp, closable: bool, inbox: &Inbox, id: WindowId) {
+    fn guard(
+        &self,
+        cx: &mut AsyncApp,
+        closable: bool,
+        (hub, inbox): (&Arc<Hub>, &Inbox),
+        id: WindowId,
+    ) {
         let inbox_for_gone = inbox.clone();
         let (reporter, asked, inbox) = (
             Rc::clone(&self.reporter),
@@ -195,9 +207,19 @@ impl Window {
         let themed = inbox.clone();
         let (native, painted) = (Rc::clone(&self.native), Rc::clone(&self.reporter));
         let told = Rc::clone(&self.reporter);
+        let route = KeyRoute::new(Arc::clone(hub), self.contents);
+        let (seen, contents) = (Arc::clone(hub), self.contents);
         // An error is a window that is gone before it was set up, and it needs nothing then.
         let _ = self.handle.update(cx, move |view, window, cx| {
             view.on_input(Rc::new(move |input| told.input(input)));
+            view.on_keys(Rc::new(move |down, key| route.send(down, key)));
+            view.on_report(Rc::new(move |event| {
+                seen.from_shell(FromShell::Page { contents, event });
+            }));
+            // The page has the keyboard from the start; a click on it takes it back.
+            if let Some(focus) = view.focus_handle() {
+                window.focus(&focus, cx);
+            }
             view.on_draw(Rc::new(move |window| {
                 if let Some(look) = native.looked(window) {
                     painted.sync(look);
@@ -382,6 +404,22 @@ impl Window {
             self.regions.replace(regions.clone());
             self.set_app_regions(regions, cx);
         }
+    }
+
+    /// Hands the window the page its renderer published and where its caret is: what a link, a
+    /// field and a cursor are read from, and where the input method puts its candidate window.
+    pub fn show_page(
+        &self,
+        snapshot: verve_dom::Snapshot,
+        caret: Option<verve_dom::Rect>,
+        cx: &mut AsyncApp,
+    ) {
+        let _ = self.handle.update(cx, |view, window, cx| {
+            if view.set_page(snapshot, caret) {
+                window.invalidate_character_coordinates();
+                cx.notify();
+            }
+        });
     }
 
     /// Hands the window the pictures its page has decoded.

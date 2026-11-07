@@ -292,15 +292,40 @@ impl RendererGuest {
             ToRendererInput::ColorScheme { dark } => {
                 self.document.set_color_scheme(&mut self.runtime, dark)
             }
-            // The page hears `wheel`; unless a listener prevents it, the wheel scrolls.
+            // The page hears `wheel`; unless a listener prevents it, the wheel scrolls, or with
+            // Control held it asks to zoom (`zoom-changed`) and scrolls nothing. Shift turns a
+            // vertical wheel into a horizontal scroll, while the page still hears `deltaY`.
             ToRendererInput::Wheel {
-                pointer, dx, dy, ..
+                pointer,
+                dx,
+                dy,
+                target,
             } => {
-                if self.document.wheel(&mut self.runtime, &pointer, dx, dy) {
-                    let (at, by) = ([pointer.x, pointer.y], [dx, dy]);
-                    self.layout.wheel(&mut self.runtime, &self.document, at, by);
+                let node = target.filter(|node| self.document.dom().exists(*node));
+                let allowed = match node {
+                    Some(node) => {
+                        self.document
+                            .wheel_on(&mut self.runtime, node, &pointer, (dx, dy))
+                    }
+                    None => self.document.wheel(&mut self.runtime, &pointer, dx, dy),
+                };
+                if !allowed {
+                    return;
                 }
+                if pointer.modifiers.ctrl && dy != 0. {
+                    let zoom = PageEvent::ZoomChanged { zoom_in: dy < 0. };
+                    (self.outbox.borrow_mut()).push(FromRenderer::Lifecycle(zoom));
+                    return;
+                }
+                let at = [pointer.x, pointer.y];
+                let by = if pointer.modifiers.shift && dx == 0. {
+                    [dy, 0.]
+                } else {
+                    [dx, dy]
+                };
+                self.layout.wheel(&mut self.runtime, &self.document, at, by);
             }
+            ToRendererInput::Focus(on) => self.document.set_window_focus(&mut self.runtime, on),
             ToRendererInput::Frame { now } => {
                 self.document.frame(&mut self.runtime, now);
             }

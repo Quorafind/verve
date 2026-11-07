@@ -409,7 +409,7 @@ impl Document {
         let cx = runtime.context();
         let transfer =
             data_transfer::create(cx, Mode::Write, self.default_data(source), "uninitialized");
-        let mut init = Self::pointer_init(&at, 1);
+        let mut init = crate::person::fields(&at, 1, 0);
         init.push(("dataTransfer", transfer.clone().into()));
         init.push(("relatedTarget", JsValue::null()));
         if !self.fire(runtime, source, "DragEvent", "dragstart", &init) {
@@ -536,7 +536,7 @@ impl Document {
             let live = related.filter(|n| self.state.borrow().dom.exists(*n));
             live.map_or(JsValue::null(), |n| wrap(runtime.context(), n))
         };
-        let mut init = Self::pointer_init(pointer, 0);
+        let mut init = crate::person::fields(pointer, pointer.buttons, 0);
         init.push(("dataTransfer", transfer.clone().into()));
         init.push(("relatedTarget", related));
         self.fire(runtime, target, "DragEvent", kind, &init)

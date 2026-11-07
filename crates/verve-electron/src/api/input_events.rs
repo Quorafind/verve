@@ -69,8 +69,13 @@ pub(crate) fn watch_listeners(
 }
 
 /// The shell sent a key meant for page `contents`: `before-input-event`, and the page gets the key
-/// unless a listener prevented it.
+/// unless a listener prevented it. Electron 39.8.10 (a visible window, `p32` menu probes): a key
+/// down a listener prevented reaches neither the page nor, as its key up, `before-input-event`.
 pub(crate) fn key_for(context: &mut Context, contents: ContentsId, down: bool, key: Key) {
+    let menus = super::menu_state::state(context);
+    if !down && menus.release(contents, &key.code) {
+        return;
+    }
     let prevented = match contents_ipc::contents_object(context, contents) {
         Ok(object) => {
             let input = input_object(context, down, &key);
@@ -82,28 +87,29 @@ pub(crate) fn key_for(context: &mut Context, contents: ContentsId, down: bool, k
         Err(_) => false,
     };
     if prevented {
-        return;
-    }
-    // The menu's accelerators come after `before-input-event`, and a key one chooses is the
-    // menu's and not the page's, going down and coming up.
-    let window = shared(context).hub.window_of(contents);
-    let menus = super::menu_state::state(context);
-    let chosen = window
-        .filter(|_| down)
-        .and_then(|window| menus.item_for(window, &key));
-    if let Some(item) = chosen {
-        menus.swallow(contents, &key.code);
-        super::menu_state::clicked(context, item, window, true, key.modifiers);
+        if down {
+            menus.swallow(contents, &key.code);
+        }
         return;
     }
     if down {
         menus.pass(contents, &key.code);
-    } else if menus.release(contents, &key.code) {
-        return;
     }
     shared(context)
         .hub
         .input(contents, ToRendererInput::Key { down, key });
+}
+
+/// The page of `contents` left a key down alone (it neither prevented it nor used it for more
+/// than typing): the menu's accelerator for it, if any, is chosen. The page heard the key first
+/// (Electron 39.8.10 on Windows and Linux; macOS was not observed and follows the same rule).
+pub(crate) fn key_unhandled(context: &mut Context, contents: ContentsId, key: Key) {
+    let window = shared(context).hub.window_of(contents);
+    let menus = super::menu_state::state(context);
+    let chosen = window.and_then(|window| menus.item_for(window, &key));
+    if let Some(item) = chosen {
+        super::menu_state::clicked(context, item, window, true, key.modifiers);
+    }
 }
 
 /// The `input` a `before-input-event` listener is given.
