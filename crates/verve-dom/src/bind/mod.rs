@@ -11,8 +11,10 @@
 
 pub mod animation;
 pub mod caret;
+pub mod clipboard;
 pub mod computed;
 pub mod custom;
+pub mod data_transfer;
 pub mod document;
 pub mod element;
 pub mod events;

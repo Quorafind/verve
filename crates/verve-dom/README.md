@@ -112,7 +112,7 @@ default actions, runs the microtasks the listeners queued, and leaves the docume
 
 ### What only the embedder can do
 
-`Document::take_requests()`: `Navigate`, `Reload`, `Open`, `CopyText`, `Alert`, `Title`,
+`Document::take_requests()`: `Navigate`, `Reload`, `Open`, `WriteClipboard`, `ReadClipboard`, `Alert`, `Title`,
 `Scroll`, `Fullscreen`, `Submit`, `Frame`.
 
 ## Extending the classes

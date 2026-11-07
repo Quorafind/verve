@@ -18,8 +18,9 @@ pub(crate) enum Asked {
     Request,
     /// `permissions.query({ name })`: a `PermissionStatus`.
     Query(String),
-    /// `clipboard.readText()`: the text, or `NotAllowedError`.
-    Read,
+    /// `clipboard.readText()` or `clipboard.read()`: what the shell's clipboard holds once
+    /// the permission is granted, else `NotAllowedError`.
+    Read(super::clipboard::ReadKind),
 }
 
 /// The pending questions, by the number the page gave each, and what the answers so far were.
@@ -100,8 +101,10 @@ fn settle_with(
     let outcome = match kind {
         Asked::Request => Ok(js_text(state_name(granted))),
         Asked::Query(name) => status(context, &name, granted).map(JsValue::from),
-        Asked::Read if granted => Ok(js_text("")),
-        Asked::Read => Err(dom_error(
+        Asked::Read(kind) if granted => {
+            return super::clipboard::begin_read(context, resolvers, kind);
+        }
+        Asked::Read(_) => Err(dom_error(
             context,
             "Read permission denied.",
             "NotAllowedError",
@@ -193,9 +196,12 @@ fn query(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsVal
     remember(context, &permission, &asked)
 }
 
-/// What `clipboard.readText()` asks before it reads.
-pub(crate) fn ask_to_read(context: &mut Context) -> JsResult<JsValue> {
-    ask(context, "clipboard-read", false, Asked::Read)
+/// What `clipboard.readText()` and `clipboard.read()` ask before they read.
+pub(crate) fn ask_to_read(
+    context: &mut Context,
+    kind: super::clipboard::ReadKind,
+) -> JsResult<JsValue> {
+    ask(context, "clipboard-read", false, Asked::Read(kind))
 }
 
 /// Installs `Notification` and `navigator.permissions`.

@@ -1000,32 +1000,7 @@ fn install_navigator(context: &mut Context, options: &crate::Options) -> JsResul
         let languages = native::array(context, vec![js_text(language)]);
         navigator.set(js_string!("languages"), languages, false, context)?;
     }
-    let clipboard = native::object(context);
-    let methods: &[Method] = &[
-        ("writeText", 1, |_, args, cx| {
-            let content = arg_text(args, 0, cx)?;
-            shared(cx)
-                .borrow_mut()
-                .requests
-                .push(crate::Request::CopyText(content));
-            native::settled(Ok(JsValue::undefined()), cx)
-        }),
-        ("readText", 0, |_, _, cx| {
-            super::permissions::ask_to_read(cx)
-        }),
-        ("write", 1, |_, _, cx| {
-            native::settled(Ok(JsValue::undefined()), cx)
-        }),
-        ("read", 0, |_, _, cx| {
-            let empty = native::array(cx, Vec::new());
-            native::settled(Ok(empty), cx)
-        }),
-    ];
-    for (name, length, f) in methods {
-        let made = function(context, name, *length, *f);
-        set(&clipboard, name, made, context)?;
-    }
-    navigator.set(js_string!("clipboard"), clipboard, false, context)?;
+    super::clipboard::install_clipboard(context, &navigator)?;
     Ok(())
 }
 

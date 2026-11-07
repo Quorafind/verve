@@ -194,6 +194,8 @@ pub struct State {
     /// answer.
     pub permissions: Option<Rc<dyn crate::PermissionBackend>>,
     pub permissions_pending: crate::bind::permissions::Pending,
+    /// The clipboard reads the shell has yet to answer.
+    pub clipboard: crate::bind::clipboard::Pending,
     pub observers: Vec<ObserverRecord>,
     /// A microtask is queued to deliver mutation records.
     pub mutation_queued: bool,
@@ -223,6 +225,10 @@ pub struct State {
     pub hidden: bool,
     /// Whether the window has the keyboard: `document.hasFocus()`.
     pub window_focused: bool,
+    /// When a person last pressed, released or typed: transient activation, which lets a script
+    /// write the clipboard for a few seconds ([`State::has_activation`], set by
+    /// `Document::activate`). Menu and keybinding commands do not need it.
+    pub activation: Option<std::time::Instant>,
     /// The rectangles of the lines an inline box is broken over, as the drawer reported them;
     /// `getClientRects` answers these over the one border box.
     pub fragments: HashMap<NodeId, Vec<crate::Rect>>,
@@ -239,6 +245,12 @@ pub struct State {
 }
 
 impl State {
+    /// Whether a person pressed, released or typed within the last five seconds.
+    pub(crate) fn has_activation(&self) -> bool {
+        self.activation
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5))
+    }
+
     pub fn new(url: url::Url) -> Self {
         Self {
             dom: Dom::new(),
@@ -281,6 +293,7 @@ impl State {
             cookies: None,
             permissions: None,
             permissions_pending: crate::bind::permissions::Pending::default(),
+            clipboard: crate::bind::clipboard::Pending::default(),
             observers: Vec::new(),
             mutation_queued: false,
             frame_clock: FrameClock::Timer,
@@ -299,6 +312,7 @@ impl State {
             fonts: Default::default(),
             hidden: false,
             window_focused: true,
+            activation: None,
             fragments: HashMap::new(),
             history_at: 0,
             base_cache: Default::default(),
