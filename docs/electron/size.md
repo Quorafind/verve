@@ -464,3 +464,19 @@ verve-electron:
   verve-dom;
 - the page events for the cursor, the link under the pointer and the zoom wheel, and the menu lookup shared by both shells, in
   verve-electron.
+
+## P35: inline SVG, canvas surfaces and animated pictures (phase 2)
+
+`electron/p35-images` merged on `docs/electron-plan` after P32 phase 1: `cargo build --release -p verve-gpui --bin electron --features
+jit` is 38,151,168 bytes against 37,714,432 for P32's size note, +436,736 bytes, measured at the branch's tip before the last change
+(a test only). With phase 1 (+156,672) P35 has cost 593,408 bytes against its 400 KB budget for both phases, over by about 190 KB.
+The cap (41,943,040) leaves 3,791,872 bytes.
+
+Where it goes (cargo-bloat, `.text`, the branch's first round against its base; the later rounds added about 28 KB of P35's own
+code):
+- resvg's renderer, +110 KiB: GPUI links usvg, but this binary never reached resvg's drawing code before;
+- resvg's own decoders for pictures inside an SVG (its `raster-images` feature: zune-jpeg, png, image-webp), +144 KiB. The feature
+  is on because the GPUI fork's workspace `Cargo.toml` enables it, and features unify across the build. Turning it off there would
+  give these back, at the cost of SVGs not drawing pictures embedded in them;
+- P35's own code (the SVG writer, frames, surfaces, budgets) in verve-layout, verve-gpui, verve-electron and verve-dom, about 70 KiB;
+- the rest is in `std` and rounding.
