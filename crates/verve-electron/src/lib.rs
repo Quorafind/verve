@@ -13,6 +13,7 @@
 pub mod accelerator;
 pub mod api;
 mod beat;
+mod files;
 pub mod headless;
 pub mod hub;
 pub mod ids;
@@ -25,6 +26,7 @@ pub mod log;
 pub mod main_guest;
 pub mod menu;
 pub mod msg;
+mod net_watch;
 mod os;
 mod oscrypt;
 mod page_layout;
@@ -33,6 +35,8 @@ mod pixels;
 mod preload;
 mod probe;
 pub mod renderer_guest;
+mod renderer_net;
+mod renderer_permissions;
 mod single_instance;
 mod window_state;
 

@@ -12,30 +12,45 @@ pub(crate) mod contents_ipc;
 pub(crate) mod contents_page;
 pub(crate) mod contents_stubs;
 pub(crate) mod context_bridge;
+pub(crate) mod cookies;
 pub mod define;
 pub(crate) mod devtools;
 pub(crate) mod dialog;
+pub(crate) mod download;
+pub(crate) mod download_item;
 pub(crate) mod global_shortcut;
 pub(crate) mod input_events;
 pub(crate) mod ipc_main;
 pub(crate) mod ipc_renderer;
+pub(crate) mod main_net;
+pub(crate) mod match_pattern;
 pub(crate) mod menu;
 pub(crate) mod menu_item;
 pub(crate) mod menu_roles;
 pub(crate) mod menu_state;
 pub(crate) mod menu_window;
 pub(crate) mod message_port_main;
+pub(crate) mod mime;
 pub(crate) mod native_image;
 pub(crate) mod native_theme;
 pub(crate) mod navigation;
+pub(crate) mod net;
+pub(crate) mod net_request;
 pub(crate) mod notification;
 pub(crate) mod page_calls;
 pub(crate) mod page_events;
 pub(crate) mod page_state;
+pub(crate) mod permissions;
 pub(crate) mod power;
 pub(crate) mod process;
+pub(crate) mod protocol;
+pub(crate) mod protocol_legacy;
+pub(crate) mod protocol_serve;
 pub(crate) mod safe_storage;
 pub(crate) mod screen;
+pub(crate) mod session;
+pub(crate) mod session_proxy;
+pub(crate) mod session_stubs;
 pub(crate) mod shell;
 pub(crate) mod system_preferences;
 pub(crate) mod tray;
@@ -43,6 +58,7 @@ pub(crate) mod web_contents;
 pub(crate) mod web_frame;
 pub(crate) mod web_frame_main;
 pub(crate) mod web_preferences;
+pub(crate) mod web_request;
 pub(crate) mod web_utils;
 pub(crate) mod window_events;
 pub(crate) mod window_geometry;
@@ -79,6 +95,31 @@ pub(crate) struct MainState {
     pub(crate) deprecated: std::cell::RefCell<Vec<String>>,
     /// The `BrowserWindow` class, for the windows `window.open` makes.
     pub(crate) window_class: std::cell::RefCell<Option<boa_engine::JsObject>>,
+    /// What `session`, `protocol` and `net` keep.
+    pub(crate) net: NetState,
+}
+
+/// What the main process keeps for sessions, custom schemes and `net.request`.
+#[derive(Default)]
+pub(crate) struct NetState {
+    /// The objects scripts hold for the sessions.
+    pub(crate) objects: session::Objects,
+    /// The handlers of `protocol.handle` and the older calls, by session.
+    pub(crate) protocols: protocol::Registry,
+    /// The requests the handlers are answering.
+    pub(crate) serving: protocol_serve::Serving,
+    /// The `net.request`s a script made.
+    pub(crate) requests: net_request::Requests,
+    /// The objects of the sessions' `cookies`.
+    pub(crate) cookies: cookies::Objects,
+    /// The objects and listeners of the sessions' `webRequest`.
+    pub(crate) web: web_request::Objects,
+    /// The permission handlers of the sessions.
+    pub(crate) permissions: permissions::Objects,
+    /// Whether `setProxy` has warned about a mode it does not support: once is enough.
+    pub(crate) proxy_warned: std::cell::Cell<bool>,
+    /// The downloads, and the objects of those a script was given.
+    pub(crate) downloads: download::Objects,
 }
 
 impl MainState {
@@ -91,6 +132,7 @@ impl MainState {
             calls: page_calls::Calls::default(),
             deprecated: std::cell::RefCell::new(Vec::new()),
             window_class: std::cell::RefCell::new(None),
+            net: NetState::default(),
         })
     }
 
@@ -116,6 +158,7 @@ pub fn install(runtime: &mut verve::Runtime, hub: Arc<Hub>) {
 /// [`install`], answering what the API keeps.
 pub(crate) fn install_state(runtime: &mut verve::Runtime, hub: Arc<Hub>) -> Rc<MainState> {
     let state = MainState::new(Arc::clone(&hub), app::AppState::new(&hub.launch()));
+    hub.set_user_data(state.app.user_data());
     runtime.context().insert_data(Rc::clone(&state));
     runtime.define_builtin_lazy("electron", main_module);
     state
@@ -169,7 +212,10 @@ fn main_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     exports.set(js_string!("app"), app::make(context)?, false, context)?;
     ipc_main::add_exports(context, &exports)?;
     menu::add_exports(context, &exports)?;
-    let modules: [(&str, ModuleMaker); 13] = [
+    let modules: [(&str, ModuleMaker); 16] = [
+        ("session", session::make),
+        ("protocol", protocol::make),
+        ("net", net::make),
         ("webContents", web_contents::make_module),
         ("webFrameMain", web_frame_main::make_module),
         ("dialog", dialog::make),

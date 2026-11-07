@@ -194,6 +194,7 @@ impl MainState {
         super::menu_window::window_gone(context, window);
         define::emit_reporting(context, &record.object, "closed", &[]);
         if let Some(contents) = contents {
+            super::protocol_serve::cancel_all(context, contents);
             if let Ok(object) = contents_ipc::contents_object(context, contents)
                 && !record.contents_destroyed.replace(true)
             {

@@ -13,17 +13,21 @@ pub use crate::ids::{ContentsId, WindowId};
 /// observes them.
 pub use verve::clone::Cloned;
 
+mod cookie;
 mod dialog;
 mod input;
 mod menu;
+mod net;
 mod page;
 mod preferences;
 mod shell;
 mod window;
 
+pub use cookie::*;
 pub use dialog::*;
 pub use input::*;
 pub use menu::*;
+pub use net::*;
 pub use page::*;
 pub use preferences::*;
 pub use shell::*;

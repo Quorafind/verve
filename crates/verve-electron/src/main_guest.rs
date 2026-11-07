@@ -18,7 +18,7 @@ use verve::{Level, ProcessInfo, Runtime, UncaughtBehavior};
 
 use crate::api::{
     self, MainState, app, define, global_shortcut, input_events, menu_state, navigation,
-    page_events, tray, web_contents, window_events, window_lifecycle, window_open,
+    page_events, protocol_serve, tray, web_contents, window_events, window_lifecycle, window_open,
 };
 use crate::beat;
 use crate::hub::{Hub, Program};
@@ -48,6 +48,8 @@ impl MainGuest {
     /// [`run`]: MainGuest::run
     pub fn new(hub: Arc<Hub>) -> Self {
         let mut runtime = Runtime::new();
+        // The browser process may reach any network, as Electron's does.
+        runtime.set_permissions(verve::Permissions::all());
         set_up_process(&mut runtime, &hub);
         runtime.set_vfs(hub.overlay());
         let api = api::install_state(&mut runtime, Arc::clone(&hub));
@@ -264,60 +266,15 @@ impl MainGuest {
                 self.sweep_at = api::ipc_main::watch_unanswered(self.runtime.context());
                 return;
             }
-            // The window is titled by its page, as in Electron, unless a listener of the window's
-            // 'page-title-updated' says otherwise.
-            FromRenderer::Dom(verve_dom::Request::Title(title)) => {
-                page_events::page_event(context, contents, PageEvent::TitleUpdated(title));
-            }
-            FromRenderer::Lifecycle(event) => page_events::page_event(context, contents, event),
-            FromRenderer::BeforeUnloadReply { call, proceed } => {
-                window_lifecycle::before_unload_reply(context, contents, call, proceed);
-            }
-            FromRenderer::UnloadReply { call } => {
-                window_lifecycle::unload_reply(context, contents, call);
-            }
-            // A page that goes to another address (`location.href`, a link, a form) asks the
-            // main process, whose `will-navigate` listeners may refuse.
-            FromRenderer::Dom(verve_dom::Request::Navigate { url, replace }) => {
-                navigation::page_navigates(context, contents, url, replace);
-            }
-            FromRenderer::Dom(verve_dom::Request::Open {
-                url,
-                name,
-                features,
-            }) => window_open::requested(context, contents, (url, name, features)),
-            FromRenderer::Reload { url } => navigation::page_reloads(context, contents, url),
-            FromRenderer::PreloadError {
-                path,
-                name,
-                message,
-            } => api::contents_ipc::preload_error(context, contents, path, name, message),
-            FromRenderer::ZoomChanged(factor) => {
-                web_contents::zoom_changed(context, contents, factor)
-            }
-            FromRenderer::ExecuteJavaScriptReply { call, result } => {
-                api::shared(context).calls.answer(context, call, result);
-            }
-            FromRenderer::ContextMenu(params) => {
-                input_events::context_menu(context, contents, params)
-            }
-            FromRenderer::Console {
-                level,
-                message,
-                line,
-                source,
-            } => api::console_message::console_message(
-                context,
-                contents,
-                level,
-                message,
-                (line, source),
-            ),
-            FromRenderer::Gone { reason } => {
-                eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
-                page_events::render_process_gone(context, contents, &reason);
-            }
-            _ => return,
+            FromRenderer::Protocol { .. }
+            | FromRenderer::ProtocolPull { .. }
+            | FromRenderer::ProtocolCancel { .. }
+            | FromRenderer::ProtocolRequest { .. }
+            | FromRenderer::Navigating => protocol_family(context, contents, event),
+            FromRenderer::Cookies { .. }
+            | FromRenderer::WebRequest { .. }
+            | FromRenderer::Permission { .. } => session_family(context, contents, event),
+            _ => page_family(context, contents, event),
         }
         self.runtime.run_microtasks();
     }
@@ -343,6 +300,121 @@ impl MainGuest {
     fn window_event(&mut self, window: WindowId, event: WindowEvent) {
         window_events::shell_event(self.runtime.context(), window, event);
         self.runtime.run_microtasks();
+    }
+}
+
+/// What a page asked of the protocols it can reach.
+#[inline(never)]
+fn protocol_family(context: &mut boa_engine::Context, contents: ContentsId, event: FromRenderer) {
+    match event {
+        FromRenderer::Protocol {
+            call,
+            session,
+            request,
+        } => protocol_serve::from_page(context, contents, call, session, request),
+        FromRenderer::ProtocolPull { call } => {
+            protocol_serve::pull(context, protocol_serve::Asker::Page(contents), call);
+        }
+        FromRenderer::ProtocolCancel { call } => {
+            protocol_serve::cancel(context, protocol_serve::Asker::Page(contents), call);
+        }
+        FromRenderer::ProtocolRequest { call, request } => {
+            protocol_serve::from_loader(context, contents, call, request);
+        }
+        FromRenderer::Navigating => protocol_serve::cancel_all(context, contents),
+        _ => {}
+    }
+}
+
+/// What a page asked of its session: cookies, `webRequest` and permissions.
+#[inline(never)]
+fn session_family(context: &mut boa_engine::Context, contents: ContentsId, event: FromRenderer) {
+    match event {
+        FromRenderer::Cookies { session, changes } => {
+            api::cookies::emit_changes(context, session, changes);
+        }
+        FromRenderer::WebRequest {
+            call,
+            session,
+            stage,
+            details,
+        } => api::web_request::from_page(context, contents, (call, session), stage, &details),
+        FromRenderer::Permission {
+            call,
+            session,
+            permission,
+            url,
+            check_only,
+        } => api::permissions::from_page(
+            context,
+            contents,
+            (call, session),
+            (&permission, &url, check_only),
+        ),
+        _ => {}
+    }
+}
+
+/// What a page said about itself: its title, navigation, downloads, zoom and end.
+#[inline(never)]
+fn page_family(context: &mut boa_engine::Context, contents: ContentsId, event: FromRenderer) {
+    match event {
+        // The window is titled by its page, as in Electron, unless a listener of the window's
+        // 'page-title-updated' says otherwise.
+        FromRenderer::Dom(verve_dom::Request::Title(title)) => {
+            page_events::page_event(context, contents, PageEvent::TitleUpdated(title));
+        }
+        FromRenderer::Lifecycle(event) => page_events::page_event(context, contents, event),
+        FromRenderer::BeforeUnloadReply { call, proceed } => {
+            window_lifecycle::before_unload_reply(context, contents, call, proceed);
+        }
+        FromRenderer::UnloadReply { call } => {
+            window_lifecycle::unload_reply(context, contents, call);
+        }
+        // A page that goes to another address (`location.href`, a link, a form) asks the
+        // main process, whose `will-navigate` listeners may refuse.
+        FromRenderer::Dom(verve_dom::Request::Navigate { url, replace }) => {
+            navigation::page_navigates(context, contents, url, replace);
+        }
+        FromRenderer::Dom(verve_dom::Request::Open {
+            url,
+            name,
+            features,
+        }) => window_open::requested(context, contents, (url, name, features)),
+        FromRenderer::Dom(verve_dom::Request::Download { url, filename }) => {
+            api::download_item::from_page(context, contents, url, filename);
+        }
+        FromRenderer::Reload { url } => navigation::page_reloads(context, contents, url),
+        FromRenderer::PreloadError {
+            path,
+            name,
+            message,
+        } => api::contents_ipc::preload_error(context, contents, path, name, message),
+        FromRenderer::ZoomChanged(factor) => web_contents::zoom_changed(context, contents, factor),
+        FromRenderer::ExecuteJavaScriptReply { call, result } => {
+            api::shared(context).calls.answer(context, call, result);
+        }
+        FromRenderer::ContextMenu(params) => input_events::context_menu(context, contents, params),
+        FromRenderer::Console {
+            level,
+            message,
+            line,
+            source,
+        } => {
+            api::console_message::console_message(
+                context,
+                contents,
+                level,
+                message,
+                (line, source),
+            );
+        }
+        FromRenderer::Gone { reason } => {
+            eprintln!("electron: the page of webContents {contents} is gone: {reason:?}");
+            protocol_serve::cancel_all(context, contents);
+            page_events::render_process_gone(context, contents, &reason);
+        }
+        _ => {}
     }
 }
 

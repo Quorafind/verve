@@ -18,6 +18,11 @@
 //! errors its body with the signal's `reason`, and closes the connection. A request body that is
 //! a stream is read whole before sending. `data:` and `blob:` addresses are answered without any
 //! network.
+//!
+//! A realm whose host set a [`BrowserNet`](crate::browser_net::BrowserNet) has each request shown
+//! to it: it may answer the address itself, change the request before it is sent or the
+//! response head when it is back, and is told how the request ends. Without one nothing here
+//! changes.
 
 use boa_engine::{
     Context, JsData, JsError, JsObject, JsResult, JsString, JsValue,
@@ -25,7 +30,12 @@ use boa_engine::{
 };
 use boa_gc::{Finalize, Trace};
 use std::io::Write;
+use std::rc::Rc;
 
+use crate::browser_net::{
+    BrowserNet, Decision, Gate, NetError, NetEvent, RequestHead, ResourceType, ResponseDecision,
+    ResponseHead, Route, fresh_id, gate,
+};
 use crate::fetch::{Fetched, FetchedBody, OutgoingBody};
 use crate::native::{arg, closure, get, hidden, invoke, js_text, list_of, object, text_of};
 use crate::streams::{error_value, pending, reject, resolve, when};
@@ -39,14 +49,48 @@ const MAX_REDIRECTS: u32 = 20;
 /// The global `fetch`.
 pub(crate) fn create(context: &mut Context) -> JsObject {
     crate::native::function(context, "fetch", 1, |_, args, cx| {
-        let (promise, resolvers) = pending(cx);
-        // Nothing is thrown: every failure, even a bad argument, is the promise's.
-        if let Err(error) = begin(&arg(args, 0), &arg(args, 1), &resolvers, cx) {
-            let reason = error_value(error, cx);
-            reject(&resolvers, reason, cx);
-        }
-        Ok(promise.into())
+        let how = InternalFetch::of_realm(cx);
+        Ok(fetch_internal(cx, &arg(args, 0), &arg(args, 1), how).into())
     })
+}
+
+/// How a fetch the host makes differs from the global one a script calls.
+pub struct InternalFetch {
+    /// The hook it asks about the request; `None` fetches as a realm with no
+    /// [`BrowserNet`] does.
+    pub net: Option<Rc<dyn BrowserNet>>,
+    /// What the request is for, as the hook is told.
+    pub resource_type: ResourceType,
+    /// The origin of the page that makes it.
+    pub initiator: Option<String>,
+}
+
+impl InternalFetch {
+    /// What the realm's own `fetch` is: asked of the realm's hook, as an `xhr`.
+    pub fn of_realm(cx: &Context) -> Self {
+        Self {
+            net: crate::browser_net::runtime_net(cx),
+            resource_type: ResourceType::Xhr,
+            initiator: None,
+        }
+    }
+}
+
+/// `fetch(input, init)` for the host: the global `fetch`, with the hook, the resource type and
+/// the initiator the caller gives instead of the realm's. Answers the promise of the response;
+/// nothing is thrown, every failure, even a bad argument, is the promise's.
+pub fn fetch_internal(
+    context: &mut Context,
+    input: &JsValue,
+    init: &JsValue,
+    how: InternalFetch,
+) -> JsObject {
+    let (promise, resolvers) = pending(context);
+    if let Err(error) = begin(input, init, &resolvers, how, context) {
+        let reason = error_value(error, context);
+        reject(&resolvers, reason, context);
+    }
+    promise
 }
 
 // ─── One fetch ──────────────────────────────────────────────────────────────────────────────
@@ -87,6 +131,9 @@ struct Fetch {
     stream: Option<JsObject>,
     #[unsafe_ignore_trace]
     hop: Hop,
+    /// The host's watch over the request, when the realm has a hook.
+    #[unsafe_ignore_trace]
+    gate: Option<Gate>,
 }
 
 fn with<R>(fetch: &JsObject, f: impl FnOnce(&mut Fetch) -> R) -> R {
@@ -97,6 +144,7 @@ fn begin(
     input: &JsValue,
     init: &JsValue,
     resolvers: &ResolvingFunctions,
+    how: InternalFetch,
     cx: &mut Context,
 ) -> JsResult<()> {
     let outgoing = crate::fetch::outgoing(input, init, cx)?;
@@ -108,24 +156,13 @@ fn begin(
     }
     let url = url::Url::parse(&outgoing.url)
         .map_err(|_| crate::native::type_error(format!("Invalid URL: {}", outgoing.url)))?;
-    match url.scheme() {
-        "http" | "https" => {}
-        "data" => return answer(crate::encoding::data_url(&url), &url, resolvers, cx),
-        "blob" => {
-            let found = (outgoing.method == "GET")
-                .then(|| crate::shared(cx).blobs.borrow().get(url.as_str()).cloned())
-                .flatten();
-            let local = found
-                .map(|bytes| (String::new(), bytes))
-                .ok_or_else(|| "invalid method or blob URL not found".to_owned());
-            return answer(local, &url, resolvers, cx);
-        }
-        scheme => {
-            let cause = plain_error(cx, &format!("unknown scheme '{scheme}:'"), None);
-            let reason = fetch_failed(cx, cause);
-            reject(resolvers, reason, cx);
-            return Ok(());
-        }
+    let head = request_head(&outgoing, &url, how.resource_type, how.initiator.clone());
+    if let Some(net) = how.net.clone().filter(|net| net.custom(&url)) {
+        let body = outgoing.body;
+        return crate::browser_net::begin_custom(net, head, body, signal, resolvers.clone(), cx);
+    }
+    if answered_without_network(&outgoing.method, &url, how.net.as_ref(), resolvers, cx)? {
+        return Ok(());
     }
     let redirect = match outgoing.redirect.as_str() {
         "manual" => Redirect::Manual,
@@ -152,6 +189,11 @@ fn begin(
                 paused: false,
                 decoders: Vec::new(),
             },
+            gate: how.net.map(|net| Gate {
+                net,
+                head,
+                response: None,
+            }),
         },
     );
     if signal.is_object() {
@@ -192,6 +234,60 @@ fn begin(
         }
     }
     Ok(())
+}
+
+/// The request as the host sees it.
+fn request_head(
+    outgoing: &crate::fetch::Outgoing,
+    url: &url::Url,
+    resource_type: ResourceType,
+    initiator: Option<String>,
+) -> RequestHead {
+    RequestHead {
+        id: fresh_id(),
+        method: outgoing.method.clone(),
+        url: url.to_string(),
+        headers: outgoing.headers.clone(),
+        resource_type,
+        referrer: String::new(),
+        initiator,
+    }
+}
+
+/// Answers a `data:` or `blob:` address, and rejects any scheme but `http(s)`, without a network;
+/// `false` when the address is for the network.
+fn answered_without_network(
+    method: &str,
+    url: &url::Url,
+    net: Option<&Rc<dyn BrowserNet>>,
+    resolvers: &ResolvingFunctions,
+    cx: &mut Context,
+) -> JsResult<bool> {
+    match url.scheme() {
+        "http" | "https" => return Ok(false),
+        "data" => answer(crate::encoding::data_url(url), url, resolvers, cx)?,
+        "blob" => {
+            let found = (method == "GET")
+                .then(|| crate::shared(cx).blobs.borrow().get(url.as_str()).cloned())
+                .flatten();
+            let local = found
+                .map(|bytes| (String::new(), bytes))
+                .ok_or_else(|| "invalid method or blob URL not found".to_owned());
+            answer(local, url, resolvers, cx)?;
+        }
+        scheme => {
+            let cause = plain_error(cx, &format!("unknown scheme '{scheme}:'"), None);
+            let reason = match net {
+                Some(net) => {
+                    let error = NetError::from_code(-302);
+                    gate::failure(cx, net.failure_style(), cause, &error)
+                }
+                None => fetch_failed(cx, cause),
+            };
+            reject(resolvers, reason, cx);
+        }
+    }
+    Ok(true)
 }
 
 /// A `data:` or `blob:` address answered: its type and bytes, or why it cannot be.
@@ -270,11 +366,118 @@ fn start(fetch: &JsObject, cx: &mut Context) -> JsResult<()> {
         super::tcp::put(&refusal, "resource", js_text(&resource), cx)?;
         return Err(JsError::from_opaque(refusal));
     }
+    let agent = with(fetch, |f| f.gate.as_ref().and_then(|g| g.net.user_agent()));
+    let wire = wire_list(&headers, &method, body.as_deref(), agent.as_deref());
+    // A request the host watches waits for its say before it is sent.
+    let watch = with(fetch, |f| {
+        let gate = f.gate.as_mut()?;
+        gate.head.url = url.to_string();
+        gate.head.method = method;
+        gate.head.headers = wire.clone();
+        gate.response = None;
+        Some((Rc::clone(&gate.net), gate.head.clone()))
+    });
+    let Some((net, head)) = watch else {
+        return dispatch(fetch, wire, cx);
+    };
+    let waiting = fetch.clone();
+    gate::ask_request(cx, &net, (head, body), move |decision, cx| {
+        resume(&waiting, hop, decision, cx);
+    });
+    Ok(())
+}
+
+/// The host has decided about this hop's request: it goes out, is refused or goes elsewhere.
+fn resume(fetch: &JsObject, hop: u32, decision: Option<Decision>, cx: &mut Context) {
+    if stale(fetch, hop) {
+        return;
+    }
+    let sent = match decision {
+        Some(Decision::Cancel) => return fail(fetch, gate::blocked(cx), cx),
+        Some(Decision::Redirect(to)) => return redirect_to(fetch, &to, cx),
+        Some(Decision::Continue(head)) => {
+            let headers = crate::browser_net::lowercase(head.headers);
+            with(fetch, |f| {
+                if let Some(gate) = f.gate.as_mut() {
+                    gate.head.headers.clone_from(&headers);
+                }
+            });
+            headers
+        }
+        None => {
+            with(fetch, |f| f.gate.as_ref().map(|g| g.head.headers.clone())).unwrap_or_default()
+        }
+    };
+    match dispatch(fetch, sent, cx) {
+        Ok(()) => watch(fetch, cx, Gate::sent),
+        Err(error) => {
+            let cause = error_value(error, cx);
+            fail(fetch, cause, cx);
+        }
+    }
+}
+
+/// The host sent the request to `to` instead: the next hop, as a redirect makes it.
+fn redirect_to(fetch: &JsObject, to: &str, cx: &mut Context) {
+    let moved = with(fetch, |f| {
+        let hop = &mut f.hop;
+        let next = url::Url::parse(to).map_err(|_| format!("invalid redirect location '{to}'"))?;
+        if !matches!(next.scheme(), "http" | "https") {
+            return Err("URL scheme must be a HTTP(S) scheme".to_owned());
+        }
+        if hop.redirects >= MAX_REDIRECTS {
+            return Err("redirect count exceeded".to_owned());
+        }
+        hop.redirects += 1;
+        hop.url = next;
+        Ok(())
+    });
+    match moved {
+        Ok(()) => {
+            let internal = ResponseHead {
+                status: 307,
+                status_text: "Internal Redirect".to_owned(),
+                headers: vec![("location".to_owned(), to.to_owned())],
+            };
+            note_redirect(fetch, internal, to, cx);
+            send(fetch, cx);
+        }
+        Err(message) => {
+            let cause = plain_error(cx, &message, None);
+            fail(fetch, cause, cx);
+        }
+    }
+}
+
+/// Tells the host the request is being sent on to `to`, as `response` said or the host asked.
+fn note_redirect(fetch: &JsObject, response: ResponseHead, to: &str, cx: &mut Context) {
+    watch(fetch, cx, |gate| gate.redirected(response, to));
+}
+
+/// Puts the request on the wire with these headers.
+fn dispatch(fetch: &JsObject, wire: Vec<(String, String)>, cx: &mut Context) -> JsResult<()> {
+    let (url, method, body, hop) = with(fetch, |f| {
+        (
+            f.hop.url.clone(),
+            f.hop.method.clone(),
+            f.hop.body.clone(),
+            f.hop.redirects,
+        )
+    });
+    let https = url.scheme() == "https";
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_matches(['[', ']'])
+        .to_owned();
+    let port = url
+        .port_or_known_default()
+        .unwrap_or(if https { 443 } else { 80 });
     let module = crate::modules::node_module(cx, if https { "https" } else { "http" })?;
     let agent = agent(&module, cx)?;
     let options = object(cx);
     let path = &url[url::Position::BeforePath..url::Position::AfterQuery];
-    let headers = wire_headers(&headers, &method, body.as_deref(), cx)?;
+    let headers = header_object(&wire, cx)?;
     for (key, value) in [
         ("protocol", js_text(&format!("{}:", url.scheme()))),
         ("hostname", js_text(&host)),
@@ -286,6 +489,7 @@ fn start(fetch: &JsObject, cx: &mut Context) -> JsResult<()> {
     ] {
         options.set(JsString::from(key), value, false, cx)?;
     }
+    set_route(fetch, &options, &url, cx)?;
     let request = invoke(&module, "request", &[options.into()], cx)?;
     with(fetch, |f| {
         f.request = request.clone();
@@ -311,18 +515,48 @@ fn start(fetch: &JsObject, cx: &mut Context) -> JsResult<()> {
     Ok(())
 }
 
+/// Puts the route the host chose for this hop on the request's options: a proxy of its own, or
+/// the direct connection. Without a host, or when it leaves the route to the realm, the agent's
+/// configuration decides.
+fn set_route(
+    fetch: &JsObject,
+    options: &JsObject,
+    url: &url::Url,
+    cx: &mut Context,
+) -> JsResult<()> {
+    let net = with(fetch, |f| f.gate.as_ref().map(|g| Rc::clone(&g.net)));
+    let route = net.map_or(Route::Realm, |net| net.proxy(url));
+    match route {
+        Route::Realm => {}
+        Route::Direct => crate::network::proxy::direct(options, cx)?,
+        Route::Via { host, port } => {
+            let tunnel = url.scheme() == "https";
+            crate::network::proxy::via(options, (host, port), tunnel, cx)?;
+        }
+        Route::Unsupported(message) => {
+            return Err(crate::native::coded_error(
+                cx,
+                &message,
+                "ERR_PROXY_INVALID_CONFIG",
+            ));
+        }
+    }
+    Ok(())
+}
+
 type Listener = fn(&JsValue, &[JsValue], &(JsObject, u32), &mut Context) -> JsResult<JsValue>;
 type BodyListener = fn(&JsValue, &[JsValue], &JsObject, &mut Context) -> JsResult<JsValue>;
 
 /// The request's headers as `http.request` takes them, with what undici adds when they are not
 /// there: `accept`, `accept-language`, `accept-encoding` (what this module decodes),
-/// `user-agent`, and the body's `content-length`.
-fn wire_headers(
+/// `user-agent` (the host's, else `Verve`), and the body's `content-length`. A name sent twice
+/// is joined.
+fn wire_list(
     list: &[(String, String)],
     method: &str,
     body: Option<&[u8]>,
-    cx: &mut Context,
-) -> JsResult<JsObject> {
+    agent: Option<&str>,
+) -> Vec<(String, String)> {
     let mut joined: Vec<(String, String)> = Vec::new();
     for (name, value) in list {
         match joined.iter_mut().find(|(n, _)| n == name) {
@@ -342,7 +576,7 @@ fn wire_headers(
         ("accept", Some("*/*".to_owned())),
         ("accept-language", Some("*".to_owned())),
         ("sec-fetch-mode", Some("cors".to_owned())),
-        ("user-agent", Some("Verve".to_owned())),
+        ("user-agent", Some(agent.unwrap_or("Verve").to_owned())),
         ("accept-encoding", Some("gzip, deflate, br".to_owned())),
         ("content-length", length.map(|n| n.to_string())),
     ];
@@ -353,9 +587,14 @@ fn wire_headers(
             joined.push((name.to_owned(), value));
         }
     }
+    joined
+}
+
+/// The headers as the plain object `http.request` takes.
+fn header_object(list: &[(String, String)], cx: &mut Context) -> JsResult<JsObject> {
     let headers = object(cx);
-    for (name, value) in joined {
-        headers.set(JsString::from(name), js_text(&value), false, cx)?;
+    for (name, value) in list {
+        headers.set(JsString::from(name.as_str()), js_text(value), false, cx)?;
     }
     Ok(headers)
 }
@@ -443,35 +682,100 @@ fn on_response(
             text_of(&pair[1], cx)?.trim().to_owned(),
         ));
     }
-    let location = headers
+    let head = ResponseHead {
+        status,
+        status_text,
+        headers,
+    };
+    let watch = with(fetch, |f| {
+        f.gate.as_ref().map(|g| (Rc::clone(&g.net), g.head.clone()))
+    });
+    let Some((net, request)) = watch else {
+        proceed(fetch, &message, head, cx)?;
+        return Ok(JsValue::undefined());
+    };
+    // The host sees the head first, and the message waits unread meanwhile.
+    let (waiting, hop) = ((fetch.clone(), message, head.clone()), *hop);
+    gate::ask_response(cx, &net, &request, head, move |decision, cx| {
+        let (fetch, message, original) = waiting;
+        host_decided(&fetch, hop, message, original, decision, cx);
+    });
+    Ok(JsValue::undefined())
+}
+
+/// The host has decided about a response head: it goes on, as it was or changed, or the request
+/// is refused.
+fn host_decided(
+    fetch: &JsObject,
+    hop: u32,
+    message: JsValue,
+    original: ResponseHead,
+    decision: Option<ResponseDecision>,
+    cx: &mut Context,
+) {
+    let outcome = if stale(fetch, hop) {
+        drain(&message, cx)
+    } else {
+        match decision {
+            Some(ResponseDecision::Cancel) => {
+                let blocked = gate::blocked(cx);
+                drain(&message, cx).map(|()| fail(fetch, blocked, cx))
+            }
+            Some(ResponseDecision::Continue(head)) => {
+                let headers = crate::browser_net::lowercase(head.headers);
+                proceed(fetch, &message, ResponseHead { headers, ..head }, cx)
+            }
+            None => proceed(fetch, &message, original, cx),
+        }
+    };
+    if let Err(error) = outcome {
+        let cause = error_value(error, cx);
+        fail(fetch, cause, cx);
+    }
+}
+
+/// The response head is settled: a redirect is followed, returned or refused, anything else is
+/// the response.
+fn proceed(
+    fetch: &JsObject,
+    message: &JsValue,
+    head: ResponseHead,
+    cx: &mut Context,
+) -> JsResult<()> {
+    let location = head
+        .headers
         .iter()
         .find(|(n, _)| n == "location")
         .map(|(_, v)| v.clone());
     let mode = with(fetch, |f| f.hop.redirect);
-    if let Some(location) = location.filter(|_| matches!(status, 301 | 302 | 303 | 307 | 308)) {
+    if let Some(location) = location.filter(|_| matches!(head.status, 301 | 302 | 303 | 307 | 308))
+    {
         match mode {
             Redirect::Manual => {}
             Redirect::Error => {
-                drain(&message, cx)?;
+                drain(message, cx)?;
                 let cause = plain_error(cx, "unexpected redirect", None);
                 fail(fetch, cause, cx);
-                return Ok(JsValue::undefined());
+                return Ok(());
             }
             Redirect::Follow => {
-                drain(&message, cx)?;
-                match follow(fetch, status, &location) {
-                    Ok(()) => send(fetch, cx),
+                drain(message, cx)?;
+                match follow(fetch, head.status, &location) {
+                    Ok(()) => {
+                        let to = with(fetch, |f| f.hop.url.to_string());
+                        note_redirect(fetch, head, &to, cx);
+                        send(fetch, cx);
+                    }
                     Err(message) => {
                         let cause = plain_error(cx, &message, None);
                         fail(fetch, cause, cx);
                     }
                 }
-                return Ok(JsValue::undefined());
+                return Ok(());
             }
         }
     }
-    respond(fetch, &message, status, status_text, headers, cx)?;
-    Ok(JsValue::undefined())
+    respond(fetch, message, head, cx)
 }
 
 /// Reads and drops a message the fetch has no use for, so its connection can go back to the
@@ -531,11 +835,15 @@ fn follow(fetch: &JsObject, status: u16, location: &str) -> Result<(), String> {
 fn respond(
     fetch: &JsObject,
     message: &JsValue,
-    status: u16,
-    status_text: String,
-    headers: Vec<(String, String)>,
+    head: ResponseHead,
     cx: &mut Context,
 ) -> JsResult<()> {
+    let ResponseHead {
+        status,
+        status_text,
+        headers,
+    } = head.clone();
+    watch(fetch, cx, |gate| gate.started(head));
     let (method, mut url, redirects) = with(fetch, |f| {
         (f.hop.method.clone(), f.hop.url.clone(), f.hop.redirects)
     });
@@ -544,6 +852,7 @@ fn respond(
     let body = if null_body {
         drain(message, cx)?;
         finish(fetch, cx)?;
+        watch(fetch, cx, Gate::completed);
         None
     } else {
         let encodings = headers
@@ -650,6 +959,7 @@ fn on_body_end(
                 crate::streams::source_enqueue(cx, &stream, chunk)?;
             }
             finish(fetch, cx)?;
+            watch(fetch, cx, Gate::completed);
             crate::streams::source_close(cx, &stream)?;
         }
         Err(error) => {
@@ -691,10 +1001,23 @@ fn cancel_body(
     cx: &mut Context,
 ) -> JsResult<JsValue> {
     if !with(fetch, |f| f.hop.done) {
+        watch(fetch, cx, |gate| gate.failed(NetError::from_code(-3)));
         finish(fetch, cx)?;
         teardown(fetch, cx)?;
     }
     Ok(JsValue::undefined())
+}
+
+/// Lets the host's watch over the request, if it has one, note something.
+fn watch(fetch: &JsObject, cx: &mut Context, note: impl FnOnce(&mut Gate) -> Option<NetEvent>) {
+    let told = with(fetch, |f| {
+        let gate = f.gate.as_mut()?;
+        Some((Rc::clone(&gate.net), note(gate)?))
+    });
+    // Outside the borrow: the host's listener may run scripts that reach this fetch again.
+    if let Some((net, event)) = told {
+        net.notify(event, cx);
+    }
 }
 
 // ─── Endings ────────────────────────────────────────────────────────────────────────────────
@@ -706,6 +1029,7 @@ fn on_abort(_: &JsValue, _: &[JsValue], fetch: &JsObject, cx: &mut Context) -> J
     }
     let signal = with(fetch, |f| f.signal.clone());
     let reason = get(&signal, "reason", cx)?;
+    watch(fetch, cx, |gate| gate.failed(NetError::from_code(-3)));
     end_with(fetch, reason, cx);
     Ok(JsValue::undefined())
 }
@@ -716,11 +1040,16 @@ fn fail(fetch: &JsObject, cause: JsValue, cx: &mut Context) {
     if with(fetch, |f| f.hop.done) {
         return;
     }
+    let style = with(fetch, |f| f.gate.as_ref().map(|g| g.net.failure_style()));
+    let error = style.map(|_| gate::net_error_of(&cause, cx));
+    if let Some(error) = error.clone() {
+        watch(fetch, cx, |gate| gate.failed(error));
+    }
     let answered = with(fetch, |f| f.resolvers.is_none());
-    let reason = if answered {
-        type_error_with_cause(cx, "terminated", cause)
-    } else {
-        fetch_failed(cx, cause)
+    let reason = match (answered, style, error) {
+        (true, ..) => type_error_with_cause(cx, "terminated", cause),
+        (false, Some(style), Some(error)) => gate::failure(cx, style, cause, &error),
+        _ => fetch_failed(cx, cause),
     };
     end_with(fetch, reason, cx);
 }
@@ -770,7 +1099,7 @@ fn teardown(fetch: &JsObject, cx: &mut Context) -> JsResult<()> {
 // ─── Errors ─────────────────────────────────────────────────────────────────────────────────
 
 /// An `Error` with `message`, and Node's `code` when there is one.
-fn plain_error(cx: &mut Context, message: &str, code: Option<&str>) -> JsValue {
+pub(crate) fn plain_error(cx: &mut Context, message: &str, code: Option<&str>) -> JsValue {
     match code {
         Some(code) => crate::native::coded_error_value(cx, message, code),
         None => crate::native::construct_global(cx, "Error", &[js_text(message)])
@@ -779,7 +1108,7 @@ fn plain_error(cx: &mut Context, message: &str, code: Option<&str>) -> JsValue {
     }
 }
 
-fn type_error_with_cause(cx: &mut Context, message: &str, cause: JsValue) -> JsValue {
+pub(crate) fn type_error_with_cause(cx: &mut Context, message: &str, cause: JsValue) -> JsValue {
     let options = object(cx);
     let _ = options.set(js_string!("cause"), cause, false, cx);
     crate::native::construct_global(cx, "TypeError", &[js_text(message), options.into()])
@@ -801,7 +1130,7 @@ fn undici_cause(error: JsValue, cx: &mut Context) -> JsResult<JsValue> {
 }
 
 /// `TypeError: fetch failed`, as undici rejects with for any network error.
-fn fetch_failed(cx: &mut Context, cause: JsValue) -> JsValue {
+pub(crate) fn fetch_failed(cx: &mut Context, cause: JsValue) -> JsValue {
     type_error_with_cause(cx, "fetch failed", cause)
 }
 

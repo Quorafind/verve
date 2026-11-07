@@ -3,7 +3,10 @@
 
 use std::sync::mpsc::{SyncSender, TrySendError};
 
-use super::{Cloned, ContentsId};
+use super::{
+    Cloned, ContentsId, CookieChange, NetError, ProtoRequest, SessionId, WebRequestDetails,
+    WebRequestReply, WebRequestStage,
+};
 
 /// What the main process asks of a page.
 #[derive(Debug)]
@@ -80,6 +83,35 @@ pub enum ToRenderer {
     /// terminal, or with `at` the line of the element under that point. Nothing is said back.
     InspectTree {
         at: Option<(f32, f32)>,
+    },
+    /// The head of the main process's answer to a [`FromRenderer::Protocol`].
+    ProtocolHead {
+        call: u64,
+        status: u16,
+        status_text: String,
+        headers: Vec<(String, String)>,
+    },
+    /// A piece (at most 64 KiB) of the body of the answer to [`FromRenderer::Protocol`] `call`,
+    /// sent when the page pulled: one read of the handler's body answers a pull, and a read
+    /// longer than 64 KiB is several pieces.
+    ProtocolChunk {
+        call: u64,
+        bytes: Vec<u8>,
+    },
+    /// The end of the answer to [`FromRenderer::Protocol`] `call`: complete, or failed with `error`.
+    ProtocolEnd {
+        call: u64,
+        error: Option<NetError>,
+    },
+    /// What the listener of a [`FromRenderer::WebRequest`] `call` answered (P16).
+    WebRequestReply {
+        call: u64,
+        reply: WebRequestReply,
+    },
+    /// What the app's permission handler answered to a [`FromRenderer::Permission`] `call`.
+    PermissionReply {
+        call: u64,
+        granted: bool,
     },
 }
 
@@ -232,6 +264,53 @@ pub enum FromRenderer {
     ZoomChanged(f64),
     /// The page's `contextmenu` event was not prevented: the main process says `'context-menu'`.
     ContextMenu(ContextMenuParams),
+    /// A request of the page's `fetch` for an address the main process answers (a scheme
+    /// `protocol.handle` took, P16). `call` is the kernel's request id; the answer is
+    /// [`ToRenderer::ProtocolHead`], then chunks the page pulls, then [`ToRenderer::ProtocolEnd`].
+    Protocol {
+        call: u64,
+        session: SessionId,
+        request: ProtoRequest,
+    },
+    /// The reader of the answer to [`FromRenderer::Protocol`] `call` wants a chunk.
+    ProtocolPull {
+        call: u64,
+    },
+    /// The page gave up on the answer to [`FromRenderer::Protocol`] `call`.
+    ProtocolCancel {
+        call: u64,
+    },
+    /// The page is about to load another document: whatever it asked of the main process for the
+    /// last one is of no use now, and the main process stops producing it.
+    Navigating,
+    /// Cookies of the session changed in the page's thread (a `Set-Cookie` of a response, a
+    /// `document.cookie`), for `cookies.on('changed')`. Sent only once a script has asked for
+    /// the session's `cookies`.
+    Cookies {
+        session: SessionId,
+        changes: Vec<CookieChange>,
+    },
+    /// A request of the page that a `webRequest` listener of its session wants to see (P16).
+    /// For a stage that blocks (`BeforeRequest`, `BeforeSendHeaders`, `HeadersReceived`) the
+    /// request waits for [`ToRenderer::WebRequestReply`] `call`; the other stages have `call`
+    /// `0` and are not answered.
+    WebRequest {
+        call: u64,
+        session: SessionId,
+        stage: WebRequestStage,
+        details: Box<WebRequestDetails>,
+    },
+    /// The page wants to use `permission` (Electron's name for it) at `url`, and the app has a
+    /// handler for it in its session: `check_only` asks what is allowed (`permissions.query`),
+    /// otherwise it is a request. The answer is [`ToRenderer::PermissionReply`] `call`. A session
+    /// with no such handler allows it, and the page does not ask.
+    Permission {
+        call: u64,
+        session: SessionId,
+        permission: String,
+        url: String,
+        check_only: bool,
+    },
 }
 
 /// The page's life, in the order `webContents` reports it.

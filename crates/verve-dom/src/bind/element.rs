@@ -2649,7 +2649,7 @@ const ANCHOR_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             Ok(js_text(
                 &anchor_url(this, cx)
-                    .map(|u| u.origin().ascii_serialization())
+                    .map(|u| shared(cx).borrow().schemes.origin_of(&u))
                     .unwrap_or_default(),
             ))
         }),

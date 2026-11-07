@@ -2746,7 +2746,7 @@ const UTIL_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok((!arg(args, 0).is_object()).into())
     }),
     ("isBuffer", 1, |_, args, cx| {
-        let buffer = crate::native::global(cx, "Buffer")?;
+        let buffer = JsValue::from(crate::native::buffer_class(cx)?);
         let value = arg(args, 0);
         Ok((value.is_object() && value.instance_of(&buffer, cx).unwrap_or(false)).into())
     }),

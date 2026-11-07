@@ -243,6 +243,23 @@ fn entry_of(value: &JsValue, context: &mut Context) -> Option<(Kind, u32)> {
         .map(|(_, kind, id)| (*kind, *id))
 }
 
+/// The own enumerable properties of a headers object, in order: each name with its value as given.
+pub fn entries_of(object: &JsObject, context: &mut Context) -> JsResult<Vec<(String, JsValue)>> {
+    let keys = verve::native::invoke(
+        &verve::native::global(context, "Object")?,
+        "keys",
+        &[object.clone().into()],
+        context,
+    )?;
+    let mut entries = Vec::new();
+    for key in verve::native::list_of(&keys, context)? {
+        let name = verve::native::text_of(&key, context)?;
+        let value = verve::native::get(&object.clone().into(), &name, context)?;
+        entries.push((name, value));
+    }
+    Ok(entries)
+}
+
 /// The id the object `value` stands for, when it is an instance of `kind`.
 pub fn id_of(value: &JsValue, kind: Kind, context: &mut Context) -> Option<u32> {
     entry_of(value, context).and_then(|(found, id)| (found == kind).then_some(id))
@@ -297,6 +314,22 @@ pub fn not_supported(context: &mut Context, api: &str) -> JsResult<JsValue> {
 pub fn rejected(context: &mut Context, api: &str) -> JsResult<JsValue> {
     let error = unsupported(context, api);
     native::settled(Err(error), context)
+}
+
+/// The `(name, value)` pairs of a `Headers`, in the order its iterator gives them.
+pub fn header_pairs(headers: &JsValue, context: &mut Context) -> JsResult<Vec<(String, String)>> {
+    let mut list = Vec::new();
+    for entry in native::list_from(headers, context)? {
+        let pair = native::list_of(&entry, context)?;
+        if let [name, value] = &pair[..] {
+            let (name, value) = (
+                native::text_of(name, context)?,
+                native::text_of(value, context)?,
+            );
+            list.push((name, value));
+        }
+    }
+    Ok(list)
 }
 
 /// A plain object with `fields` set in order, as the objects Electron's methods answer are.

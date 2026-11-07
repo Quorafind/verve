@@ -27,6 +27,7 @@
 mod animation;
 mod bind;
 pub mod canvas;
+mod cookies;
 pub mod css;
 pub mod dom;
 pub mod field;
@@ -36,7 +37,10 @@ mod input;
 mod layout_provider;
 mod load;
 mod media;
+mod options;
+mod permissions;
 mod rect;
+mod schemes;
 mod snapshot;
 mod state;
 mod storage;
@@ -55,6 +59,7 @@ use std::sync::Arc;
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
 
+pub use cookies::CookieBackend;
 pub use css::{Computed, Environment, Style};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
 pub use field::{Draft, utf8_offset_to_utf16, utf16_offset_to_utf8};
@@ -63,6 +68,8 @@ pub use load::{Destination, LoadError, LoadEvent, LoadRequest, LoadResult, Loade
 pub use media::{
     MediaCommand, MediaCommandKind, MediaError, MediaSettings, MediaState, MediaUpdate,
 };
+pub use options::Options;
+pub use permissions::PermissionBackend;
 pub use rect::Rect;
 pub use snapshot::{Snapshot, SnapshotData};
 pub use state::FrameClock;
@@ -86,6 +93,13 @@ pub enum Request {
     },
     /// `location.reload()`.
     Reload,
+    /// Save what is at `url` instead of showing it: a link with a `download` attribute was
+    /// pressed (`filename` is the attribute's value, if it has one), or a document came with
+    /// `Content-Disposition: attachment`, in which case the load failed with `ERR_FAILED`.
+    Download {
+        url: String,
+        filename: Option<String>,
+    },
     /// `window.open(url, name, features)`, the address resolved.
     Open {
         url: String,
@@ -116,54 +130,6 @@ pub enum Request {
     Image(String),
 }
 
-/// What the window is.
-pub struct Options {
-    /// The page's address: `location`, `document.URL`, what relative links resolve against.
-    pub url: String,
-    /// `navigator.userAgent`; `None` keeps Verve's own.
-    pub user_agent: Option<String>,
-    /// `navigator.language`; `None` keeps Verve's own (`en-US`).
-    pub language: Option<String>,
-    /// The viewport, in CSS pixels: `innerWidth`/`innerHeight`, what `@media` and
-    /// `matchMedia` ask of.
-    pub viewport: (f32, f32),
-    pub device_pixel_ratio: f32,
-    /// `prefers-color-scheme: dark`.
-    pub dark: bool,
-    /// How `requestAnimationFrame` is paced.
-    pub frames: FrameClock,
-    /// Whether the user agent's own sheet (`div { display: block }`, the headings' sizes…) is in
-    /// the cascade.
-    pub user_agent_sheet: bool,
-    /// Stylesheets of the embedder's, by name, after the user agent's and before the page's.
-    pub stylesheets: Vec<(String, String)>,
-    /// Where `localStorage` lives between runs; `None` keeps it for this run only.
-    pub storage: Option<Box<dyn StorageBackend>>,
-    /// `document.title` when the page has no `<title>`.
-    pub title: String,
-    /// What the page loads its scripts, sheets and images through; `None` loads nothing.
-    pub loader: Option<Box<dyn Loader>>,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            url: "about:blank".into(),
-            user_agent: None,
-            language: None,
-            viewport: (1280., 800.),
-            device_pixel_ratio: 1.,
-            dark: false,
-            frames: FrameClock::Timer,
-            user_agent_sheet: true,
-            stylesheets: Vec::new(),
-            storage: None,
-            title: String::new(),
-            loader: None,
-        }
-    }
-}
-
 /// Gives the runtime a document: `window` (the global object, made a `Window`), `document`,
 /// and the classes and functions of the web platform (see the README for the list). Answers
 /// the handle whoever draws the document keeps. A runtime has one document; installing again
@@ -191,7 +157,10 @@ pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Doc
         s.frame_clock = options.frames;
         s.title_fallback = options.title.clone();
         s.navigator = (options.user_agent.clone(), options.language.clone());
+        s.schemes = schemes::Schemes::new(&options.standard_schemes, &options.secure_schemes);
         s.load.loader = options.loader.take().map(Rc::from);
+        s.cookies = options.cookies.take().map(Rc::from);
+        s.permissions = options.permissions.take().map(Rc::from);
         s.load.active = s.load.loader.is_some();
         let document = s.dom.document;
         if options.user_agent_sheet {
@@ -233,6 +202,7 @@ pub(crate) fn install_classes(context: &mut Context, options: &Options) -> JsRes
     bind::fetch::install(context)?;
     load::install(context)?;
     bind::platform::install(context)?;
+    bind::permissions::install(context)?;
     bind::observers::install(context)?;
     bind::xhr::install(context)?;
     bind::animation::install(context)?;

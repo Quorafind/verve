@@ -105,6 +105,22 @@ pub(crate) fn configured_proxies(state: &State) -> Vec<(String, u16)> {
         .unwrap_or_default()
 }
 
+/// Routes the realm of `cx` through `proxy`, or directly again with `None`:
+/// [`crate::Runtime::set_proxy_env`]'s work. A host that wants a proxy for some requests only
+/// answers [`crate::browser_net::BrowserNet::proxy`] instead.
+pub(crate) fn set_realm_proxy(cx: &Context, proxy: Option<ProxyEnv>) {
+    let state = crate::shared(cx);
+    let mut net = state.network.borrow_mut();
+    net.proxy = proxy.map(|env| {
+        let config = std::rc::Rc::new(proxy::Config::parse(&env));
+        (env, config)
+    });
+    let proxies = configured_proxies(&net);
+    if let Some(reactor) = &net.reactor {
+        reactor.send(reactor::Command::Proxies(proxies));
+    }
+}
+
 /// The realm's own proxy configuration, if the embedder set one.
 pub(crate) fn proxy_config(cx: &Context) -> Option<std::rc::Rc<proxy::Config>> {
     crate::shared(cx)
@@ -154,7 +170,7 @@ pub(crate) fn diagnostics(cx: &Context) -> NetworkDiagnostics {
 }
 
 pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> usize {
-    let mut count = 0;
+    let mut count = crate::browser_net::deliver(cx);
     let mut drained = false;
     // Bound a beat even when JS and I/O keep producing work.
     for _ in 0..1024 {
@@ -236,7 +252,10 @@ pub(crate) fn queued(cx: &Context) -> bool {
 pub(crate) fn active(cx: &Context) -> bool {
     let shared = crate::shared(cx);
     let state = shared.network.borrow();
-    !state.targets.is_empty() || !state.dns.pending.is_empty() || !state.revoked.is_empty()
+    !state.targets.is_empty()
+        || !state.dns.pending.is_empty()
+        || !state.revoked.is_empty()
+        || crate::browser_net::active(cx)
 }
 
 /// `ref()` and `unref()` on a socket or server: whether it keeps a process waiting for it.

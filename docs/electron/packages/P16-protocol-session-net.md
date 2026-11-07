@@ -218,8 +218,16 @@ Verve 的 HTTP 客户端流式写文件（`<path>.crdownload` 临时名，完成
 
 ### 10. 主进程权限
 
-Electron 主进程默认拥有全部网络权限：P10 为主进程 Runtime 设置 `Permissions::all()`，渲染器同样（Chromium 渲染器能访问
-任意网络）。本包不新增权限检查。
+Electron 主进程默认拥有全部网络权限：主进程 Runtime 设置 `Permissions::all()`。渲染器的权限由 `preload::permissions_for` 定：
+- 出站网络到任意主机（Chromium 渲染器能访问任意网络）；没有 `listen`，没有 `dns` 模块；
+- 磁盘与 Worker 保持内核默认（不受限，不是本包的改动）；
+- 页面带 Node（未沙盒的 `nodeIntegration` 或 preload）时才是 `Permissions::all()`；
+- Worker 拿不到网络（`set_worker_permissions` 没有被调用）。
+
+`file:` 不靠权限挡，而是 `ElectronLoader` 挡：对 `file:` 地址，先问发起者是不是 `file:` 页面（或浏览器自己的 `loadURL`，没有发起者）且主机是本机，
+不是就以 `ERR_ACCESS_DENIED (-10)` 拒绝，**即使 `file` 有处理器也一样**（Electron 39.8.10，探针 5：装了 `file` 处理器后，`app://` 页面对 `file:` 的 `fetch`、XHR、
+`<img>`、`<script>` 仍都失败，`loadFile` 的页面仍读得到）。所以 `Loader::forwards("file")` 恒为假：页面对 `file:` 的 `fetch`/XHR 走加载器的规则，再由加载器问处理器。
+本包不新增权限检查。
 
 ## 步骤
 
@@ -266,6 +274,343 @@ HTTP 缓存（`clearCache` resolve、`getCacheSize` 返回 0）、Chromium Cooki
 `setCertificateVerifyProc` 以外的证书 UI、`serviceWorkers`、`extensions`、`setCodeCachePath`、`setBluetoothPairingHandler`、
 `setUSBProtectedClassesHandler`、`netLog`（对象存在，`startLogging` resolve，不写文件）、PAC 脚本、SOCKS 与 HTTPS 代理（受 Verve 现状限制）。
 
+## 契约修订（阶段 1 实现时确定；与上文冲突处以本节为准）
+
+### 内核钩子 `verve::browser_net`（P03 未实现，由本包落在 `src/browser_net.rs`）
+
+- `BrowserNet` 不是 `Send + Sync`：它属于一个 realm，以 `Rc<dyn BrowserNet>` 交给 `Runtime::set_browser_net`。会跑宿主脚本的方法
+  （`handle`、`pull`、`cancel`、`before_send`、`headers_received`、`notify`）都带 `cx: &mut Context`，在 realm 线程上被调用；
+  `custom`、`user_agent`、`failure_style` 不带。主进程的 `net.request`/`net.fetch` 因此可以直接在主 realm 里跑 `protocol.handle` 的处理器。
+- `Responder`、`Decider<T>` 是 `Send` 的，可在任何线程、任何时候（包括 `handle` 调用之内）使用；说的话进 realm 的信箱，下一拍（`run_due`）听见，
+  realm 的 waker 被唤醒。丢弃未答的 `Responder` 以 `net::ERR_FAILED` 失败；丢弃未答的 `Decider` 让请求原样通过。
+- 响应体按拉取驱动：新增 `BrowserNet::pull(id)`（响应流的读者要数据时调用，首次在头之后立即发生）与 `BrowserNet::cancel(id)`（读者放弃或 abort）。
+  宿主每收到一次 `pull` 只发一块，这就是背压。
+- `handle` 收到的请求体是整块 `Option<Vec<u8>>`（`fetch` 本来就先读完流式请求体再发送），所以**没有** `FromRenderer::ProtocolBody`。
+- 失败的样子由 `BrowserNet::failure_style()` 决定：`Undici`（默认，`TypeError: fetch failed` + `cause`）、`Chromium`（页面的 `fetch`：`TypeError: Failed to fetch`）、
+  `Net`（Electron 的 `net.fetch`：`Error: net::ERR_FILE_NOT_FOUND`，观察自 Electron 39.8.10）。
+- `fetch_internal(context, input, init, InternalFetch { net, resource_type, initiator }) -> JsObject`：全局 `fetch` 就是它加上 realm 自己的钩子；
+  `net.fetch` 显式传入主进程的 `BrowserNet`（每次请求一份，带 `bypassCustomProtocolHandlers`）；P20 的加载器仍用 `ProtocolRequest`，不经 `fetch_internal`。
+  是否认领一个地址由宿主的 `custom()` 决定，内核没有 bypass 开关。
+- `before_send` 的 `Decision::{Continue(RequestHead), Cancel, Redirect(url)}`，`headers_received` 的 `ResponseDecision::{Continue(ResponseHead), Cancel}`；
+  取消的请求以 `ERR_BLOCKED_BY_CLIENT` 失败。`notify` 的 `NetEvent::{Sent, Started, Redirected, Completed, Failed}` 对应 webRequest 的
+  `onSendHeaders`、`onResponseStarted`、`onBeforeRedirect`、`onCompleted`、`onErrorOccurred`。
+- WebSocket 握手不经 `before_send`，登记给 P41。
+
+### `msg/page.rs`
+
+- 追加（不重排）：`FromRenderer::{Protocol { call, session, request }, ProtocolPull { call }, ProtocolCancel { call }}`，
+  `ToRenderer::{ProtocolHead, ProtocolChunk, ProtocolEnd}`；`call` 就是内核的 `RequestHead::id`（进程内唯一）。`ProtoRequest` 带 `body: Option<Vec<u8>>`。
+- P20 的 `ProtocolRequest`/`ProtocolResponse`（整块应答）保留给页面自己的子资源加载（`<script>`、`<link>`、`<img>`、文档）；页面的 `fetch`/XHR 对自定义 scheme
+  改走内核 `fetch` 与 `BrowserNet`（流式、带 headers 与 body、可 abort）：verve-dom 的 `Loader` 新增 `forwards(scheme)` 与 `allows_fetch(scheme)`。
+  主进程用同一个“处理器引擎”服务两条路。
+
+### 对任务书的观察订正（Electron 39.8.10，见「状态」里的冻结清单）
+
+- 旧的 `register*Protocol`/`intercept*Protocol` **不发** deprecation 警告（`process.on('warning')` 与标准错误都没有；`lib/browser/api/protocol.ts` 里也没有）。
+  任务书与派发要求的“首次调用发一次警告”与观察不符，按观察不发。
+- 处理器抛错、拒绝、返回非 `Response` 都是 `net::ERR_UNEXPECTED`（-9），`Response.error()` 才是 `net::ERR_FAILED`（-2）；不是任务书写的“抛错 → ERR_FAILED”。
+- `net.fetch` 的 `Response` 没有 `url`（空串）、`type` 是 `default`、`redirected` 为假；它建在 `ClientRequest` 上，`redirect: 'manual'` 以 `Error: Redirect was cancelled` 失败。
+- `registerSchemesAsPrivileged` 在 ready 之后调用的错误是 `protocol.registerSchemesAsPrivileged should be called before app is ready`。
+- 页面的 `fetch()` 对没有 `supportFetchAPI` 的 scheme 以 `TypeError: Failed to fetch` 拒绝且不调用处理器，XHR 不受此限。
+
+### 阶段 2a 契约（cookie 罐与 webRequest；与上文冲突处以本节为准）
+
+- **消息用类型化的结构，不用 `Cloned`**：`msg/net.rs` 追加 `Cookie`、`SameSite`、`CookieCause`、`CookieChange`、`WebRequestStage`、`WebRequestDetails`、`WebRequestReply`；
+  `msg/page.rs` 末尾追加 `FromRenderer::{Cookies { session, changes }, WebRequest { call, session, stage, details }, Navigating}` 与
+  `ToRenderer::WebRequestReply { call, reply }`。`details` 在主进程里才变成 JS 对象（补 `webContents`、`frame`），渲染器只带 Rust 数据。
+  只有会改请求的三个阶段（`BeforeRequest`、`BeforeSendHeaders`、`HeadersReceived`）等回复；其余阶段 `call == 0`，不回复。
+  `Navigating`：页面在同一个 isolate 里要载入别的文档了，它之前向主进程要的东西全部作废（取消仍在服务的处理器应答与读者）。Hub 对已载入过的页面换新 isolate
+  （`renew_for_navigation`），旧 isolate 说不出话，所以那条路径由主进程在 `navigation::start` 里取消（`protocol_serve::cancel_all`）；`Navigating` 只留给不换 isolate 的载入。
+- **罐在 `Session` 里**（`hub/cookies.rs`）：`CookieStore { jar: Mutex<Jar>, file, dirty, last_write, watched }`，渲染器线程与主进程线程都直接读写，不经消息。
+  `Jar` 的每个会改罐的方法返回 `Vec<CookieChange>`，由调用者决定怎么告诉主进程（渲染器：`FromRenderer::Cookies`，且只在 `session.cookies` 被脚本取过之后才发；主进程：直接 emit `changed`）。
+  `Jar` 是纯逻辑（RFC 6265 的域匹配、路径匹配、`Secure`、`HttpOnly`、`SameSite`、过期、host-only、`__Secure-`/`__Host-` 前缀）；`Set-Cookie` 行由 `cookie` crate（`default-features = false`）解析。
+  没有公共后缀表：单标签的 `Domain` 只有等于主机名本身时才接受；这个缺口登记给 P41。
+- **持久化**：`<storage_path>/Cookies.json`（默认会话是 `<userData>/Cookies.json`，`persist:x` 是 `<userData>/Partitions/x/Cookies.json`），只存有过期时间的 cookie
+  （会话 cookie 不落盘，与 Chromium 默认一致）；`flushStore()`、`Hub::shutdown`、`CookieStore` 被丢弃时写；运行中一次改动若距上次写盘已过 30 秒才写。内存分区与 `fromPath` 之外无文件。
+  `Hub` 记着 `userData`（`MainState::new` 与 `app.setPath('userData')` 告诉它），罐在第一次被用到时才按当时的路径读入。
+- **`document.cookie`**：verve-dom 的 `CookieBackend`（`get(url) -> String`、`set(url, line)`）与 `Options::cookies`；页面线程的实现读写同一个 `CookieStore`，读不到 `HttpOnly`，写不了 `HttpOnly`。
+- **`before_send` / `headers_received` / `notify` 的接线**（`net_watch.rs`，页面与主进程共用）：`before_send` 先附 `Cookie`，再依次问 `onBeforeRequest`、`onBeforeSendHeaders`（它们看得到已附的 `Cookie`，与 Electron 一致）；
+  `headers_received` 先问 `onHeadersReceived`，再把（可能被改过的）`Set-Cookie` 存进罐，最后放行，所以 `fetch` 的 promise 兑现时 `document.cookie` 已经有它。
+  `notify` 对应其余五个阶段。没有监听者或 filter 不匹配时不发任何消息（`Session::wants`，原子读）。
+- **主进程的请求用不用 cookie**：`net.fetch` 默认 `credentials: 'include'`，用；`net.request` 默认不用，`useSessionCookies: true` 或 `credentials: 'include'` 才用，`credentials: 'omit'` 不用（观察自 Electron 39.8.10，探针 `probe5`，加上 `lib/browser/api/net-fetch.ts`）。
+- **SameSite**：页面的请求按页面地址与请求地址的 site（没有公共后缀表时取主机名最后两段）判断，跨 site 的子资源请求不附 `Strict`/`Lax`/未指明的 cookie，也不存它们；主进程的请求不判断。
+  凭证模式（`credentials: 'omit'`）内核没有告诉宿主，页面请求一律附 cookie，这一点登记给 P41。
+- **观察（Electron 39.8.10，`probe5`）**：
+  - `Cookie`：`name, value, domain, hostOnly, path, secure, httpOnly, session, expirationDate（仅持久）, sameSite`；host-only 的 `domain` 不带点，域 cookie 带点；API 设置不给 `sameSite` 得 `lax`，`Set-Cookie` 不给得 `unspecified`；
+    `sameSite: 'no_restriction'` 存成 `secure: true`；回环主机上 `Secure` cookie 在 `http:` 也发；`get()` 按「路径长者在前，同长按建立先后」排序，覆盖写入的 cookie 排到最后；无名 cookie 的 `Cookie` 头只有值。
+  - `set` 的错误：缺 `url` 为 `Error: Missing required option 'url'`；`url` 不能解析、`domain` 与 `url` 不符是 `Error: Failed to set cookie - The cookie was set with an invalid Domain attribute.EXCLUDE_INVALID_DOMAIN, DO_NOT_WARN, NO_EXEMPTION`；
+    名字或值含 `;`/控制字符是 `Error: Failed to set cookie - The cookie contains ASCII control charactersEXCLUDE_DISALLOWED_CHARACTER, DO_NOT_WARN, NO_EXEMPTION`；`sameSite` 非法是 `Error: Failed to convert 'bogus' to an appropriate cookie same site value`；
+    非对象是 `TypeError: Error processing argument at index 0, conversion failure from x`；`get()`、`remove()` 无参数是 `TypeError: Insufficient number of arguments.`；`remove` 的 `url` 不能解析时 promise 照常兑现。
+  - `changed(event, cookie, cause, removed)`：`event` 是空 `Event`；设置是 `'explicit'`、`removed: false`；覆盖先发旧的 `'overwrite'`、`removed: true`，再发新的；`remove` 是 `'explicit'`、`removed: true`。
+  - `webRequest`：`details` 的字段次序（`BeforeRequest`：`id, url, method, timestamp, resourceType, [frame, webContents, webContentsId,] referrer, [uploadData,] redirectURL`；
+    `BeforeSendHeaders`/`SendHeaders`：同前，无 `redirectURL`，末尾 `requestHeaders`；`HeadersReceived`/`ResponseStarted`/`Completed`：`id, url, method, timestamp, resourceType, ip, fromCache, statusLine, statusCode, responseHeaders, [frame, webContents, webContentsId,] referrer, [uploadData]`，`Completed` 末尾加 `error: 'net::OK'`；
+    `BeforeRedirect`：同 `HeadersReceived`，末尾 `redirectURL`；`ErrorOccurred`：`id, url, method, timestamp, resourceType, [frame, webContents, webContentsId,] referrer, error`）；
+    页面的 `fetch` 与 XHR 都是 `resourceType: 'xhr'`；重定向的各跳共用一个 `id`；主进程的请求没有 `frame`/`webContents`/`webContentsId`，其 `referrer` 为 `''`；`timestamp` 是毫秒级的浮点时间；
+    请求头名是大写词首（`User-Agent`），响应头值是数组；`statusLine` 形如 `HTTP/1.1 200 OK`；`uploadData` 是 `[{ type: 'rawData', bytes: Buffer }]`；通知阶段的监听器只收到 `details`。
+  - `webRequest` 的错误：`onX(5)` 是 `TypeError: Must pass null or a Function`；filter 没有 `urls` 数组是 `TypeError: Parameter 'filter' must have property 'urls'.`；坏模式是 `TypeError: Invalid url pattern nonsense: Missing scheme separator.`
+    （模式解析的其余文本取自 `electron.exe` 里的字符串表：`Invalid scheme.`、`Wrong scheme type.`、`Host can not be empty.`、`Invalid host wildcard.`、`Empty path.`、`Invalid port.`、`Invalid host.`）。
+  - 取消的请求在页面里是 `TypeError: Failed to fetch`；`redirectURL` 的跳转被 `fetch` 当作重定向（`response.redirected === true`，`response.url` 是新地址）；
+    `onBeforeSendHeaders` 里改的头到达服务器；`onHeadersReceived` 改的响应头页面读得到。
+
+### 阶段 2b 契约（权限、代理、下载；与上文冲突处以本节为准）
+
+- **权限**（观察自 Electron 39.8.10，`probe7`）：
+  - 没有任何处理器时，`Notification.permission`、`Notification.requestPermission()`、`navigator.permissions.query({name:'notifications'})` 都是 `granted`。
+  - `setPermissionRequestHandler((webContents, permission, callback, details) => …)` 只管「请求」：`Notification.requestPermission()` 走它，`callback(false)` 得 `'denied'`；`details` 是 `{ isMainFrame, requestingUrl }`。
+  - `setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => boolean)` 管「查询」：`Notification.permission` 与 `permissions.query` 各调它一次；`requestingOrigin` 形如 `http://127.0.0.1:52602/`（带结尾斜杠），`details` 是 `{ embeddingOrigin, isMainFrame, requestingUrl }`。
+    只设查询处理器时，`requestPermission()` 仍是 `granted`（请求没有处理器，默认允许）。
+  - `setPermissionRequestHandler(5)` 抛 `Must pass null or function`；传 `null` 取消处理器。
+  - 页面一侧的消息是类型化的：`FromRenderer::Permission { call, session, permission, url, check_only }` 与 `ToRenderer::PermissionReply { call, granted }`。会话原子地记着两种处理器是否存在，
+    没有处理器时页面当场得到 `granted`，不发任何消息（与 webRequest 一样，没人听就没有代价）。
+  - verve-dom 加 `PermissionBackend`（`ask(ask, permission, url, check_only) -> Option<bool>`：`Some` 是当场的答案，`None` 表示稍后由 `Document::settle_permission` 给；`known(permission)` 给 `Notification.permission` 的同步读）、
+    `Options::permissions`，以及页面里的 `Notification`（只有 `permission`、`requestPermission()`，构造函数只记标题，不显示）、`navigator.permissions.query` 与 `clipboard.readText()` 的 `clipboard-read` 询问（拒绝时 `NotAllowedError`）。没有后端的页面一律被拒。
+    **同步读的缺口**：Electron 的 `Notification.permission` 直接问查询处理器；页面线程不能等主进程，所以有查询处理器时它在问过一次之前是 `default`，问过之后是上一次**查询**的答案（`requestPermission()` 的答案不记，评审所述的差异；未另行探针）。登记给 P41。
+- **代理**：
+  - `setProxy(config)`：`mode` 是 `direct`、`auto_detect`、`pac_script`、`fixed_servers`、`system` 之一，否则拒绝 `Invalid mode, must be one of direct, auto_detect, pac_script, fixed_servers or system`（观察）。
+    `proxyRules` 按 Chromium 的格式读：`host:port`、`http://host:port`、`socks5://host:port`、`https://host:port`，以及 `http=foo:80;https=bar:81` 这样的逐 scheme 写法（逗号分隔的候选取第一个）。
+    细处按 Chromium 的 `proxy_config.cc`/`proxy_string_util.cc` 读（读源码，不是观察）：`socks=h` 是 SOCKS4、端口 1080；无 scheme 的条目只有排在第一位时才算「全部 scheme」；列表里的 `direct://` 是一个候选（选中即直连）；scheme 不分大小写。
+    解析结果是 `hub/proxy.rs` 的 `Proxy`，**每个请求**问它 `route(url)`：`http:` 代理给内核 `Route::Via { host, port }`，直连（含被绕过的、该 scheme 没有规则的）给 `Route::Direct`，`socks4`/`socks5`/`https` 代理给 `Route::Unsupported`，请求以 `ERR_PROXY_INVALID_CONFIG` 失败（P41 缺口）。
+    只写了 `http=foo:80` 时，`https:` 请求直连，不向 foo 发 `CONNECT`。
+  - 回环与链路本地地址（`localhost`、`127.0.0.0/8`、`::1`、`169.254.0.0/16`、`fe80::/10`）恒不走代理，有没有 `proxyBypassRules` 都一样（观察：`proxyRules: 'foo:80'` 时 `resolveProxy('http://127.0.0.1:5/')` 是 `DIRECT`）。
+    `proxyBypassRules` 逗号或分号分隔，含子域、`*x`/`x.*.y` 通配、scheme 前缀、`<local>`、`a.b.c.d/n`；`resolveProxy` 与请求的路由用同一个函数匹配，二者不会不一致。`pacScript` 而无 `mode` 就是 `pac_script`。
+  - `resolveProxy(url)`：`DIRECT`、`PROXY host:port`、`SOCKS5 host:port`、`HTTPS host:port`（观察）；没有 `url` 参数时兑现 `DIRECT`（观察）。`fixed_servers` 没有 `proxyRules`、`direct`、以及未给 `mode` 的空配置都是直连。
+  - `auto_detect` 与 `pac_script` 按直连处理并警告一次。真 Electron 在本机上做 `auto_detect`/`pac_script` 后会崩溃（`probe7` 里两次），所以没有观察到它们的 `resolveProxy`；行为取自任务书。
+  - `system` 只读系统代理：Windows 用 `WinHttpGetIEProxyConfigForCurrentUser`，其余平台读 `http_proxy`/`https_proxy`/`no_proxy` 环境变量；任何测试都不依赖其值，也从不改系统设置。
+  - **生效的方式**：内核的 `BrowserNet` 有一个有默认实现的 `proxy(&self, url) -> Route`（`Realm`、`Direct`、`Via { host, port }`、`Unsupported(message)`）。`fetch` 在每一跳（含重定向）发请求前问它，把答案放在请求选项的 `__verveVia`（或 `__verveDirect`）上，
+    代理 agent 的 `route()` 本来就先看它，连接池的键本来就含路由。`MainNet` 与 `RendererNet` 都用会话的 `Session::route(url)` 回答。所以：不同会话的请求永远各走各的代理，`webRequest` 监听者延迟决定也不会串；
+    主进程的 Node `http`/`https` 与全局 `fetch` 不经会话，也就不走代理（与 Electron 一致）。没有「会话代理的代数」，也没有改 realm 代理的调用。
+  - **WebSocket 缺口**：页面的 `WebSocket` 不经 `BrowserNet`，仍按 realm 自己的代理配置（页面 realm 里没有设置），即不走会话代理：登记给 P41。
+- **下载**（观察自 Electron 39.8.10，`probe7`）：
+  - 触发：`session.downloadURL(url[, { headers }])`、`webContents.downloadURL(url[, { headers }])`、导航到 `Content-Disposition: attachment` 的响应、`<a download>` 被点击。`downloadURL()` 无参数抛 `Insufficient number of arguments.`，坏地址不抛。
+    导航到 attachment 时 `loadURL` 以 `ERR_FAILED (-2)` 拒绝，页面留在原处（Electron），同时发 `will-download`。Verve 的 `Load` 一发出就换掉 isolate，所以旧文档在响应到达前就没了：缺口，见「状态」。
+  - `will-download(event, item, webContents)`：`event` 是空 `Event`；`session.downloadURL` 触发时 `webContents` 不是任何窗口的（`null`），其余是发起的页面。
+    此时 `item` 已有：`getURL()`、`getURLChain()`、`getFilename()`（`Content-Disposition` 的 `filename`，否则地址路径的末段；`<a download="x.bin">` 的值优先；无扩展名且 `text/plain` 时补 `.txt`，`application/octet-stream` 不补）、
+    `getMimeType()`、`getTotalBytes()`（没有 `Content-Length` 时为 `0`）、`getState()`（`progressing`）、`getSavePath()`（`''`）、`getReceivedBytes()`（`0`）、`isPaused()`、`canResume()`（`false`）、`getContentDisposition()`（没有则 `''`）、`hasUserGesture()`、`getLastModifiedTime()`、`getETag()`、`getStartTime()`。
+  - 监听者同步 `item.setSavePath(path)` 则直接下载；`event.preventDefault()` 取消（不发任何 `updated`/`done`）；两者都没有则走保存对话框（`dialog.showSaveDialog`，含 `setSaveDialogOptions`），取消对话框即取消下载。
+  - 下载中写 `<path>.crdownload`，完成后改名为 `<path>`（Chromium 的临时名是另一个，本版取任务书的名字，不是观察值）。`setSavePath` 之后立刻发一次 `updated`（`progressing`），之后至多每 100 ms 一次；`done(event, state)` 的 `state` 是 `completed`、`cancelled`、`interrupted`。
+    `cancel()` 后 `done('cancelled')`，既没有 `<path>` 也没有 `.crdownload`（观察：目录里无残留）。`pause()` 后 `isPaused()` 为 `true`、`canResume()` 为 `true`、`getState()` 仍是 `progressing`，并发一次 `updated`；`resume()` 用 `Range: bytes=<已收>-` 续传，
+    服务器回 `200`（不认 `Range`）则从头来过，回 `206` 则接着写。
+  - 下载在主进程里经会话的 `net`（带会话 cookie 与 webRequest）取，写文件在主进程线程里同步进行。页面的 `Content-Disposition` 导航由 verve-dom 报 `Request::Download { url, filename }`（`<a download>` 同），主进程重新取一次地址（页面那次响应被丢弃）；缺口：该地址被取两次。
+
 ## 状态
 
-（实现者完成后填写）
+### 阶段 1（钩子、protocol、net；会话只做值类方法）
+
+**做了什么**
+
+- **内核钩子 `verve::browser_net`**（`src/browser_net.rs`、`src/browser_net/{custom,gate}.rs`，`src/network/fetch.rs` 接入）：见上文“契约修订”。
+  未设置 `BrowserNet` 时 `fetch` 的路径不变：只有 `Fetch` 多了一个 `Option<Gate>`，`wire_headers` 拆成 `wire_list` + `header_object`（行为相同），
+  `start` 拆成 `start`（权限与是否交给宿主）+ `dispatch`（发出）。`src/fetch.rs`、`src/network/http.rs` 没有变长。测试 `tests/browser_net.rs`（宿主应答、逐块拉取与背压、失败的三种样子、
+  取消/abort、请求体与头到达宿主、`before_send`/`headers_received` 改头/取消/改址、`notify` 顺序、显式 `BrowserNet`；内核没有 bypass 开关，`bypassCustomProtocolHandlers` 是宿主的 `custom()` 不认领）。
+- **verve-dom**：`Options::{standard_schemes, secure_schemes}`（`Options` 搬到新文件 `options.rs`，因为 `lib.rs` 在行数上限上）、`schemes.rs`（`location.origin`、`history` 同源判断、
+  `isSecureContext` 改成按地址计算的 getter）、`Loader::{forwards, allows_fetch}`、页面 `fetch` 对 forwards 的 scheme 走内核 `fetch`（XHR 另走一份不受 `supportFetchAPI` 限制的闭包）。
+- **verve-electron**：
+  - `hub/sessions.rs`：`Session`（分区名、`persist:`、`fromPath`、已处理的 scheme、UA）、`Hub::{session_for, session_at, session_by_id, session_of, set_privileged, privileged}`。
+  - `renderer_net.rs`：页面线程的 `BrowserNet`（`FromRenderer::{Protocol, ProtocolPull, ProtocolCancel}` / `ToRenderer::{ProtocolHead, ProtocolChunk, ProtocolEnd}`）；
+    `loader.rs` 的 scheme 表改为会话的，`files.rs` 与 `api/mime.rs` 是页面加载与 `net.fetch` 共用的文件读取与唯一的 MIME 表（65 种）。
+  - 主进程：`api/protocol.rs`（`handle`/`unhandle`/`isProtocolHandled`、`register*`/`intercept*`、`registerSchemesAsPrivileged`、`getStandardSchemes`）、
+    `api/protocol_serve.rs`（处理器引擎：一份代码服务页面 `fetch`、页面子资源加载与主进程 `net.fetch`；每次拉取读一块）、`api/protocol_legacy.rs`（旧回调接口转成 `Response`）、
+    `api/main_net.rs`（主进程请求的 `BrowserNet`，含 `file:`，asar 内可读）、`api/session.rs`（`defaultSession`、`fromPartition`、`fromPath`、UA、存储路径、`isPersistent`、`protocol`、`fetch`、
+    `resolveHost`、`session-created`）、`api/net.rs`（`net.fetch`、`isOnline`/`online`、`resolveHost`）、`api/net_request.rs`（`ClientRequest`、`IncomingMessage`）。`webContents.session` 是真的会话对象。
+- 测试：`tests/protocol.rs`、`tests/net.rs`（见下面“要跑的命令”）。
+
+**第五轮（合并前的最后修正）**
+
+- **代理按请求走**：评审发现的真缺陷是主进程的 `net` 请求每次都给主 realm 设会话的代理，Node `http`/`https`、全局 `fetch` 因而跟着最近一次会话的代理，两个会话的请求还会因 `onBeforeRequest` 的异步决定而串。
+  现在内核的 `BrowserNet::proxy(url) -> Route`（默认 `Realm`）由 `fetch` 在每一跳问，答案放在请求选项上（`__verveVia`/`__verveDirect`）；`MainNet`/`RendererNet` 用 `Session::route`，`resolveProxy` 用同一个 `Proxy::server_for`。
+  删掉了 `apply_proxy`、`proxy_seen`、会话的代数、`ProxyEnv` 的转换；`verve::set_realm_proxy` 不再导出。新测试：(a) 代理用过之后主进程的 Node `http` 与全局 `fetch` 不到代理；(b) 两个会话、两个代理、延迟的 `onBeforeRequest`，各代理只见自己的请求；(c) 只有 `http=foo:80` 时 `https:` 不发 `CONNECT`。
+  `proxyBypassRules` 与 `resolveProxy` 同一个函数匹配（子域、通配、scheme 前缀、`<local>`）。文法修正：`socks=h` 是 SOCKS4:1080，无 scheme 条目只有排第一位才算全部，列表里的 `direct://`，scheme 大小写，链路本地地址的隐式绕过，`pacScript` 无 `mode` 即 `pac_script`；这些读自 Chromium 源码，未观察。`WARNED` 移进主进程的状态。
+  页面的 `WebSocket` 仍不走会话代理（缺口，登记给 P41）。
+- **会话的存根方法**（`api/session_stubs.rs`，全部无效果，只让应用调用不抛 `not a function`）：`clearCache`、`clearStorageData`、`clearData`、`clearAuthCache`、`clearHostResolverCache`、`closeAllConnections`、`forceReloadProxyConfig`（兑现 `undefined`）；`getCacheSize`（兑现 `0`）；`flushStorageData`（同步，`undefined`）；
+  `setDownloadPath`、`setSSLConfig`、`setCertificateVerifyProc`、`setSpellCheckerEnabled`/`isSpellCheckerEnabled`、`setSpellCheckerLanguages`/`getSpellCheckerLanguages`、`setSpellCheckerDictionaryDownloadURL`（只存值）；`listWordsInSpellCheckerDictionary`（空表）、`addWordToSpellCheckerDictionary`/`removeWordFromSpellCheckerDictionary`（`true`）；
+  `netLog`（`startLogging` 兑现、`stopLogging` 兑现 `''`、`currentlyLogging` 为 `false`，不记任何日志）。这些返回值与参数检查都没有对着真 Electron 观察过。`setPreloads`/`getPreloads` 是 P21 的，仍未加。
+- **下载**：两个失败的测试改对了（第一次 `updated` 时 `.crdownload` 已存在，Chromium 的临时名不同；在 `getReceivedBytes() > 0` 的 `updated` 上暂停，断言 `bytes=N-`，并加一个不认 `Range` 的路径测从头来过）。
+  页面的 `Content-Disposition: attachment` 现在在响应头处认出并取消 body（原来整份读进来才认）。`setSavePath` 在开始保存后被忽略（它的 "Path must be absolute" 未观察，是 Verve 的）。结束的下载只保留最近 256 个（更老的释放，之后问它们会像已销毁的对象一样抛错；Electron 的对象在持有期间一直能问）。
+- **权限**：查询处理器抛错时回复 `false`；`requestPermission` 的答案不再记入 `Notification.permission`；问题的编号带上 isolate 的代数，上一个文档的迟到答复不会结算下一个文档的问题。
+
+**第五轮后仍有的缺口**
+
+- **导航到 attachment 不会让页面留在原处**：`Load` 一发出就换掉 isolate，旧文档在响应头到达前就没了（Electron 里留在原处，`loadURL` 以 `ERR_FAILED (-2)` 拒绝）。测试已改名，不再声称这一点。要做需要在响应头显示是文档而非 attachment 之后才换 isolate。
+- `<a download>` 一个 `blob:` 地址会静默失败：主进程读不了页面的 blob，而 head 之前的失败什么都不发。
+- 页面一侧经 `protocol.handle`/`file:` 的 attachment 答复本来就是整份；经网络的在响应头处取消。
+- 页面的 `WebSocket` 不走会话代理；`socks4`/`socks5`/`https` 代理（`resolveProxy` 认，请求以 `ERR_PROXY_INVALID_CONFIG` 失败）。
+- **给 P23 的**：权限的 `PermissionBackend`（`verve-dom`；`ask(ask, permission, url, check_only)` 与 `known(permission)`）、`Options::permissions`、页面的全局 `Notification`（只有 `permission`/`requestPermission()`，构造只记标题）、`navigator.permissions.query`、
+  `clipboard.readText()` 在没有后端时现在一律拒绝（`NotAllowedError`）、`Request::Download { url, filename }`（`<a download>` 与 attachment 文档），以及主进程一侧的 attachment 处理（`will-download`）。做通知的人要接 `Notification` 的显示与点击；它的权限问题已经由这个后端回答。
+
+**没做 / 只做了一部分**
+
+- asar 内文件经 `protocol.handle` + `net.fetch`：`file:` 读取走 `Hub::overlay()`（P11），`tests/protocol.rs` 有测试（打包一个 asar）。
+- 旧的 `registerStreamProtocol` 的 Node `Readable` 是收齐后再发（不是流式）；`registerHttpProtocol` 的 `{url, method, headers}` 用主进程全局 `fetch` 取，不带 `session`/`uploadData`。Electron 对后者的行为（探针里 `cb({url})` 得到 `ERR_UNEXPECTED`）没有弄清，没有冻结。
+- `net.request` 的上传不是真的分块：`write()` 的片段收齐后随 `end()` 一次发送（服务器收到完整正文；`chunkedEncoding` 只是被记下）。`login` 事件不触发，`useSessionCookies`、`credentials`、`referrerPolicy`、`cache`、`priority` 被接受但无效（cookie 在阶段 2）。
+- `webPreferences.session`（用会话对象指定页面的会话）读，换算成分区名；`webContents.session` 是真的会话对象。`canvas` 的同源判断仍按 `url::Origin`。
+- 阶段 2 的 cookie 罐、webRequest、权限、代理、下载、`--test session` 都没开始。`Session` 对象目前只有值类方法与 `protocol`、`fetch`、`resolveHost`。
+- 页面线程的 `RendererNet::user_agent` 读会话的 UA，但没有人把页面 `navigator.userAgent` 接到 `session.setUserAgent`（verve-dom 的 `Options::user_agent` 在 `RendererGuest::new` 时没有设）。阶段 2。
+- 体积：没有测（不跑 release 构建）。新增依赖：无。
+
+**冻结的 Electron 39.8.10 观察**（探针在本包 scratch 里：`probe1`…`probe3`；JS 源码取自 `electron.exe` 里的 `lib/…` 压缩文本）
+
+- `protocol.registerSchemesAsPrivileged` 在 ready 之后：`Error: protocol.registerSchemesAsPrivileged should be called before app is ready`。
+- `protocol.handle` 同一 scheme 两次：`Failed to register protocol: <scheme>`；`unhandle` 未登记的：`Failed to unhandle protocol: <scheme>`；`handle` 不检查 scheme 的写法与 handler 的类型，不抛；
+  scheme 不转小写（`handle('UPPER')` 之后 `isProtocolHandled('upper')` 为假）；`http`/`https`/`file` 的 `handle` 是拦截（`isProtocolHandled('https')` 初始为假）。
+- 处理器抛错、拒绝、返回非 `Response`：`net.fetch` 以 `Error: net::ERR_UNEXPECTED` 失败（抛错还把栈写到标准错误）；`Response.error()`：`net::ERR_FAILED`。**与任务书不同**。
+- 旧 `register*Protocol`/`intercept*Protocol` **不发任何 deprecation 警告**。**与任务书/派发不同**，按观察不发。`registerFileProtocol` 重复登记不抛（返回 `false`），`cb({error: -6})` 得 `net::ERR_FILE_NOT_FOUND`，
+  `registerStringProtocol` 的回应没有 `content-type`，`registerBufferProtocol` 的 `mimeType`/`statusCode`/`headers` 生效。
+- `net.fetch`：`Response` 无 `url`（`''`）、`type` 为 `default`、`redirected` 为假；`statusText` 取自 `IncomingMessage.statusMessage`（http 是 `OK`；探针 netfetch-http 那一行里的 `""` 是 `url`）；`file:` 的头只有 `content-type`（`application/json`）与 `last-modified`，无 `content-length`；
+  失败是 `Error: net::ERR_…`（无 `cause`）；`redirect: 'manual'` 以 `Error: Redirect was cancelled` 失败；未知 scheme `net::ERR_UNKNOWN_URL_SCHEME`；`new URL` 解析失败是 `TypeError`。
+- `net.request`：要求 ready（`net module can only be used after app is ready`）；`ftp:` 抛 `ClientRequest only supports http: and https: protocols`；`nonsense` 抛 `TypeError: Invalid URL`（`ERR_INVALID_URL`）；
+  事件顺序 `finish`、`close`（请求体交出即关）、`redirect`、`response`；`redirect` 的参数是 `(302, 'GET', 新地址, 响应头)`，**跟随模式也发**；`manual` 不调 `followRedirect()` 以 `Redirect was cancelled` 失败；
+  `error` 模式以 `Attempted to redirect, but redirect policy was 'error'` 失败；`abort()` 得 `finish`、`abort`、`close`；`IncomingMessage` 的 `statusMessage` 为 `OK`，`httpVersion` 为 `1.1`，`set-cookie` 是数组。
+- 页面：标准+secure+supportFetchAPI 的 scheme：`location.origin === 'std://bundle'`、`isSecureContext === true`、`fetch('./data')` 的 `url` 为 `std://bundle/data`、`type` 为 `basic`；
+  只 `standard`：`isSecureContext === false`，`fetch()` 以 `TypeError: Failed to fetch` 拒绝且**不调用处理器**，XHR 可用；`standard`+`secure` 无 `supportFetchAPI`：`fetch()` 拒绝、XHR 可用；
+  非 standard：`origin === 'null'`、`localStorage` 抛 `SecurityError`、XHR 也失败。处理器收到的请求头只有 `accept`（和用户设的、`content-type`），`referrer` 为空。
+- `session.fromPartition`：`''` 是默认会话；同名同对象；`persist:per` 的存储路径是 `<userData>/Partitions/per`；内存分区 `getStoragePath()` 为 `null`、`isPersistent()` 为假；默认会话持久且路径就是 `userData`；
+  `fromPartition(5)` 抛 gin 的 `Error processing argument at index 0, conversion failure from `；默认 UA 形如 `Mozilla/5.0 (…) AppleWebKit/537.36 (KHTML, like Gecko) <app>/<version> Chrome/142.0.7444.265 Electron/39.8.10 Safari/537.36`。
+- `net.resolveHost('localhost')`：`{ endpoints: [{ address: '::1', family: 'ipv6' }, { address: '127.0.0.1', family: 'ipv4' }] }`。
+
+**未观察（没有对 Electron 39.8.10 探针，所以不算冻结）**：处理器自定义的 `statusText` 是否原样转给页面；standard scheme 的页面用 XHR 访问另一个自定义 scheme（跨源）；
+无 origin 的（`bare`）页面在有 `supportFetchAPI` 时的 `fetch()`。P20 的 `page_has_node` 不看 `sandbox`（只决定页面脚本看到什么），而 `preload::permissions_for` 看：`!sandbox && (nodeIntegration || preload)`。
+
+**已知缺口**：`localStorage` 在不透明 origin 上没有分区；处理器收不到 `accept`（探针 `std` 里有）；`new URL('app://…').origin` 对 standard scheme 仍是 `"null"`；
+`file:` 应答没有 `last-modified`；页面载入别的文档时，主进程里仍在服务的处理器应答（`Served`）与读者没有被取消（阶段 2a 补）；Worker 没有 BrowserNet，也拿不到网络
+（页面的 `Worker` 是完整的 Verve runtime，磁盘不受限，早于本包，登记给 P20/P41）；`fromPath` 与 `getStandardSchemes` 的文本未观察；session/protocol 在 ready 之前的限制未实施；
+`registerHttpProtocol` 在 Verve 里成功，Electron 探针给的是 `ERR_UNEXPECTED`。
+
+**第三轮**：`net.request('nonsense')` 抛带 `code` 的 `TypeError`；`session.getStoragePath()` 返回原生路径；自定义 scheme 应答的拉取是一块一次
+（宿主在 `pull` 里还没给出块时，流不再重复拉取，`tests/browser_net.rs` 的拉取数恢复为精确的 4）；渲染器权限如上；`session.protocol` 是 `Protocol` 类的实例；
+`IncomingMessage` 的读取状态在 `Requests` 里，不在脚本可见的属性上；页面关闭或渲染进程消失时取消它的 `protocol.handle` 应答；页面 XHR 对无 origin 的
+自定义 scheme 页面失败（探针 3 `bare`）；`loadFile` + `file` 处理器、不带 Node 的页面读不了 `file:`、asar 内 `protocol.handle` + `net.fetch` 都有了测试；
+探针 4（Electron 39.8.10）：`net.fetch` 的 `statusText` 对 `file:` 与 http 都是 `OK`；`file` 处理器 + `bypassCustomProtocolHandlers` 读到文件。
+**还没做**：`last-modified`（阶段 2a 补）。电子包与内核的大提交已拆成小提交。
+
+**给其他包的备注**
+
+- **P23**：verve-dom 新增 `Options::{standard_schemes, secure_schemes}`、`window.isSecureContext` 改为按地址计算的 getter、`location.origin`/`a.origin`/`pushState` 同源判断经 `Schemes`、`Loader::{forwards, allows_fetch}`。
+- **P30**：verve-dom 的 `Options` 搬到了 `crates/verve-dom/src/options.rs`（`lib.rs` 仍 `pub use`），并发改 `Options` 的请改那里。
+
+- **P20**：页面 `fetch`/XHR 对自定义 scheme 现在带 headers、body 与 abort（走内核 `fetch`），你登记的“fetch 的 body 与 headers 没有传给处理器”已解决。
+- **P30**：`renderer_guest.rs` 我只加了 `renderer_net::install`、`scheme_names` 和两个 `Options` 字段、三条 `ToRenderer` 分支。
+- **阶段 2 的人**：`RendererNet` 的 `before_send`/`headers_received`/`notify` 还是默认实现；cookie 与 webRequest 在它们里面接，`MainNet` 同理（主进程那份有 `cx`，可直接跑监听者）。
+
+**要跑的命令（逐个跑）**
+
+```
+cargo test -p verve --test browser_net
+cargo test -p verve --test fetch --test fetch_network
+cargo test -p verve --lib browser_net
+cargo test -p verve-dom --lib schemes
+cargo test -p verve-dom --test fetch --test load
+cargo test -p verve-electron --lib
+cargo test -p verve-electron --test protocol
+cargo test -p verve-electron --test net
+cargo test -p verve-electron --test page_load
+```
+
+
+### 阶段 2a（cookie 罐、webRequest、阶段 1 的两条遗留）
+
+**做了什么**
+
+- **cookie 罐**（`hub/cookies.rs`）：`Jar`（纯逻辑，时钟是参数）与 `CookieStore`（锁、文件、`watched`）。RFC 6265 的域匹配/路径匹配、`Secure`（回环主机视同安全传输）、`HttpOnly`、`SameSite`、过期、host-only、
+  `__Secure-`/`__Host-` 前缀；`Set-Cookie` 行由 `cookie` crate（`default-features = false`，只解析）读，罐是自写的。新增依赖只有 `cookie 0.18.2`（它拉 `version_check` 作构建依赖，`time` 本来就在图里），
+  `Cargo.lock` 只多了这两处，没有顺带升级别的包。持久化 `Cookies.json`（见契约），`Hub::set_user_data` 由 `MainState::new` 与 `app.setPath('userData')` 通知，`Hub::shutdown` 写盘（没被「启动」过的临时应用不写）。
+- **`session.cookies`**（`api/cookies.rs`）：`get`/`set`/`remove`/`flushStore`、`changed(event, cookie, cause, removed)`；错误文本与 `Cookie` 的字段取自 Electron 39.8.10 的观察（契约里列了）。页面线程改的罐经 `FromRenderer::Cookies` 到主进程发 `changed`，
+  且只在脚本取过 `session.cookies` 之后才发。
+- **请求的接线**（`net_watch.rs`，页面与主进程共用一个 `Watch`）：`before_send` 附 `Cookie` 再问 `onBeforeRequest`/`onBeforeSendHeaders`，`headers_received` 先问 `onHeadersReceived` 再存 `Set-Cookie`，`notify` 对应其余五个阶段。
+  页面的 `RendererNet`（`renderer_net.rs`）直接读写 `SessionState`，没有主进程往返；`MainNet`（`net.fetch`/`net.request`）同一份代码，`net.fetch` 默认用罐（`credentials: 'omit'` 不用），`net.request` 看 `useSessionCookies`/`credentials`。
+- **webRequest**（`api/web_request.rs`、`api/match_pattern.rs`）：八个阶段的 `onX([filter, ]listener|null)`，每阶段一个监听者，后设覆盖前设；match pattern 的解析与匹配（含 `filter.types`）；`details` 的字段与次序、`uploadData`（Buffer）、`requestHeaders`/`responseHeaders` 的形状；
+  `callback({cancel, redirectURL, requestHeaders, responseHeaders, statusLine})`。没有监听者或 filter 不匹配时页面不发任何消息（`Session::web_request_messages()` 在发送处计数，测试断言）；主进程自己的请求直接在主 realm 里跑监听者。
+- **verve-dom**：`CookieBackend` 与 `Options::cookies`，`document.cookie` 的读写转给它；没有它时仍是窗口内的旧实现。
+- **阶段 1 遗留**：页面载入别的文档时（`RendererGuest::load`），之前它向主进程要的东西作废：加载器的未决询问丢掉，`FromRenderer::Navigating` 让主进程取消仍在服务的处理器应答（`Served`）与它们的读者（`protocol_serve::cancel_all`，现在也认加载器的询问）；
+  等 `webRequest` 回复的请求被取消。`file:` 的应答有了 `last-modified`（磁盘文件的修改时间；`app.asar` 内的没有）。
+- **测试**：`tests/session.rs`（9 个）、`tests/protocol.rs` 一个、`tests/net.rs` 一个、`hub::cookies`、`api::match_pattern`、`files`、`net_watch` 的单元测试、verve-dom 的 `tests/cookie_backend.rs`。
+
+**没做 / 只做了一部分**
+
+- 阶段 2b 的权限、代理、下载与 `--test session` 的其余部分没有开始。`Session` 对象还没有 `setPermissionRequestHandler`、`setProxy`、`downloadURL`、`on('will-download')`。
+- 没有公共后缀表（单标签的 `Domain` 只在等于主机名时接受）；也没有 Chromium 的淘汰规则（每域 180、总共 3000 个）。登记给 P41。
+- 内核没有把 fetch 的凭证模式告诉宿主，所以页面的请求一律附 cookie（含跨源），跨 site 时只按 `SameSite` 过滤；site 取主机名最后两段。登记给 P41。
+- 写盘：改动后若距上次写已过 30 秒才写，没有定时器；之间的改动在 `flushStore()`、退出、`CookieStore` 被丢弃时写。会话 cookie 不落盘。`app.setPath('sessionData')` 不影响 cookie 的位置（只认 `userData`）。
+- `details`：`ip` 只在地址本身是 IP 字面量时给；`fromCache` 恒为 `false`；`frame` 是页面的主框架对象，子框架的请求也是；页面自己载入的文档、`<script>`/`<link>`/`<img>` 子资源不经页面线程的 `fetch`，所以
+  文档载入（若走 `fetch`）的 `resourceType` 是 `xhr` 而不是 `mainFrame`，由加载器取的子资源（只有 `file:`、`data:` 与自定义 scheme）不经 `webRequest`——与 Electron 不同，没有逐项核实。
+- WebSocket 握手不经 `before_send`（内核没接），登记给 P41。`onBeforeSendHeaders` 里对 `Cookie` 头的改动照样被发送，不再被罐覆盖。
+- 没有跑任何测试（只跑了 `cargo check`）；测试期望都来自 `probe5`/`probe6` 的观察，没有拿真 Electron 对跑过。
+
+**给其他包的备注**
+
+- **P23**：verve-dom 新增 `CookieBackend`（`get(url) -> String`、`set(url, line)`）与 `Options::cookies`；`document.cookie` 的访问器只在 `bind/document.rs` 里多走一步 `jar_of`。页面的 `document.cookie` 看不到 `HttpOnly`，写不了 `HttpOnly`。
+- **P30**：`renderer_guest.rs` 这一阶段又动了四处：`Options::cookies`、`ToRenderer::WebRequestReply` 一条分支、`load()` 开头的 `abandon`、两处 `set_page`。
+- **P20**：`ElectronLoader::abandon()`；加载器的询问现在以 `Asker::Loader(contents)` 登记，页面载入别的文档时被取消。
+- **阶段 2b 的人**：`Session` 的状态在 `hub/sessions.rs`，`webRequest` 与 `cookies` 的对象表在 `NetState`（`api/mod.rs`）；`MainNet::for_request(cx, session, (bypass, cookies))` 是主进程请求的唯一入口。
+
+**要跑的命令（逐个跑）**
+
+```
+cargo test -p verve-dom --test cookie_backend
+cargo test -p verve-electron --lib
+cargo test -p verve-electron --test session
+cargo test -p verve-electron --test protocol
+cargo test -p verve-electron --test net
+cargo test -p verve-electron --test page_load
+cargo test -p verve --test browser_net
+```
+
+### 第四轮（评审与阶段 2a 的集中测试后的修正）
+
+- **安全**：装了 `file` 处理器后，P20 的 `file:` 来源规则被跳过，任何页面都能读本地文件。现在 `ElectronLoader::fetch` 在问处理器之前先过 `file_allowed`，不满足以 `ERR_ACCESS_DENIED` 拒绝；
+  `forwards("file")` 恒为假，页面对 `file:` 的 `fetch`/XHR 因而走加载器。探针 5（Electron 39.8.10，装了 `file` 处理器并传 `bypassCustomProtocolHandlers`）：`app://` 页面的 `fetch`、XHR、`<img>`、`<script>`
+  都失败（`TypeError: Failed to fetch`、XHR `error`），`loadFile` 页面的 `fetch`、XHR、`<script>` 成功（`<img>` 因内容不是图片而 `error`）。
+- **页面载入 http 地址失败的原因（阶段 2a 的六个 `--test session`）**：不带 Node 的页面从全局对象上拿掉了 `Buffer`，而内核的流、文件与网络用全局 `Buffer` 造 `Buffer`，页面的 http 响应就读不出来。
+  现在内核记着自己造出的 `Buffer` 类（`native::buffer_class`），不再读全局。这是静态读代码得出的结论，没有跑过。
+- 页面载入别的文档时，Hub 换新的 isolate，旧 isolate 的 `Navigating` 说不出口；取消仍在服务的处理器应答改由主进程在 `navigation::start` 里做。
+- `cookies.rs` 的路径测试期望错了（无路径的 cookie 的默认路径是 `/a`，也匹配 `/a`）；`session.rs` 的 JSON 数字比较与过长的测试已修；`support::report_of` 不再 `unwrap`。
+- 其他：`preload::permissions_for` 按 `!sandbox && (nodeIntegration || preload)`；`fromPartition('path:/x')` 与 `fromPath` 不再撞键；空 body 的应答（HEAD、204）也通知宿主放手；
+  `net.request` 的上传体在应答后释放（`Requests.table` 里每个请求的小记录仍留到应用结束：`with_req` 之后的访问要求它在）；`webPreferences.session` 与 `webContents.session` 有了测试；
+  `net.fetch` 的 `file:` 应答断言 200、`OK`、处理器只被问一次。
+- **没做**：`cx` 改名 `context`（按派发留到阶段 2b 之后）；`tests/browser_net.rs` 的 `<= 4` 与 `tests/protocol.rs` 的 `1..=5` 改成精确值（要跑一次才知道确切的数）；
+  把 protocol.rs 里几处断言挪到更早的提交；`Kind` 与 `define::Kind` 重名、`protocol_serve::report` 与 `define::report` 重名、六处 promise 的 ok/err 写法、三处头对循环、`RequestHead` → `ProtoRequest` 的两份、
+  `64 * 1024` 与重定向状态码的命名、`native::exports` 化、`Schemes::new` 等公开项的文档、测试夹具的去重、`cancel_all` 的测试、未探针的三条（见阶段 1 的「未观察」）。
+
+### 阶段 2b（权限、代理、下载；评审遗留的清理；`cx` 改名）
+
+**做了什么**
+
+- **权限**（`api/permissions.rs`、`renderer_permissions.rs`、verve-dom 的 `PermissionBackend`）：`setPermissionRequestHandler`、`setPermissionCheckHandler`、`setDevicePermissionHandler`（只存，不用）。
+  页面一侧只在会话有对应处理器时才发 `FromRenderer::Permission`；没有处理器就当场 `granted`，不发消息。verve-dom 增加 `Options::permissions`、`Notification`（`permission`、`requestPermission()`）、
+  `navigator.permissions.query`，`clipboard.readText()` 问 `clipboard-read`。处理器的参数与 `details` 的字段取自 `probe7`（见契约）。
+- **代理**（`hub/proxy.rs`、`hub/system_proxy.rs`、`api/session_proxy.rs`）：`setProxy`/`resolveProxy`；`proxyRules`/`proxyBypassRules` 读成 `Proxy`，每个请求问它的 `route(url)`；回环与链路本地地址恒直连；`system` 读 WinHTTP（其他平台读环境变量），只读。
+  内核的 `BrowserNet::proxy(url) -> Route` 让每个请求自带路由（第五轮取代了原来「改 realm 代理」的做法，见下）。`mode: 'bogus'` 的错误文本取自 `probe7`。
+- **下载**（`api/download.rs`、`api/download_item.rs`、verve-dom 的 `Request::Download`）：`DownloadItem`、`will-download`、`session.downloadURL`、`webContents.downloadURL`（原来是抛错的占位）、`<a download>`、`Content-Disposition: attachment` 的文档。
+  写 `<path>.crdownload`，完成后改名；`updated` 至多每 100 ms 一次（在写每块之后判断，没有定时器）；`pause`/`resume` 用 `Range`；`cancel` 删掉部分文件。没有 `setSavePath` 时走 `dialog.showSaveDialog`（含 `setSaveDialogOptions`）。
+- **评审遗留**：
+  - 精确计数：`tests/browser_net.rs` 的拉取次数改为 `assert_eq!(pulls, 2)`；`tests/protocol.rs` 改为 `assert_eq!(paused, 3)`。推导：流在创建时拉一次，读者读走一块后又拉一次（high-water mark 1）；
+    页面一侧的流同理，每次拉取令主进程读处理器的流一次、处理器的流因此又拉一次，所以处理器共被拉 3 次。**这两个数没有跑过，请集中跑一次确认。**
+  - 命名：`BODY_CHUNK`、`is_redirect`、`ERR_FAILED`/`ERR_FILE_NOT_FOUND`/`ERR_UNEXPECTED`/`ERR_UNKNOWN_URL_SCHEME`（`msg/net.rs`）；`protocol.rs` 的 `Kind` 改名 `HandlerKind`（`define::Kind` 不再要别名）；`protocol_serve::report` 改名 `log_error`。
+  - 重复：`verve::native::then`（promise 的两个反应共用一份捕获；用在 `protocol_serve`、`protocol_legacy`、`net_request` 两处与 `download.rs` 三处）；`define::header_pairs`（原来三处的头对循环）；`ProtoRequest::of`（原来两处的 `RequestHead` → `ProtoRequest`）。
+  - 文档：`Session::id`、`set_user_agent`、`Schemes::new`。
+  - `cancel_all` 的测试：`a_page_that_loads_another_document_gives_up_what_its_handler_was_still_producing`（f0dc631f 那条修正带来的）就是它的测试：它走 `navigation::start` → `cancel_all`，断言处理器的 `cancel` 被调用一次。
+- **`cx` → `context`**：verve-electron 与 verve-dom 里 P16 加的函数形参 `cx` 都改成了 `context`（闭包的 `|this, args, cx|` 不动）。做法是对 `b1a27600..` 的每个提交的树套同一个确定性的改写（不是在末尾补一个提交），所以每个提交本身都是干净的，没有逐提交的冲突；
+  `BrowserNet` 的 trait 声明与 `InternalFetch::of_realm` 在内核里，仍用 `cx`（实现它的 `impl BrowserNet for …` 在 verve-electron，已改）。
+
+**没做 / 只做了一部分**
+
+- 下载的保存对话框路径由 `app.shell.queue_dialog_answer(DialogResult::Save{..})` 在测试里答复（第五轮补了测试：选了路径则下载完成，默认的取消给 `done('cancelled')`）。
+- 临时文件名是任务书的 `<path>.crdownload`，不是观察值（Chromium 的是另一个名字，`probe7` 里按 `<path>.crdownload` 找不到）。
+- `Notification.permission` 在有查询处理器时，问过之前是 `default`（Electron 是同步问处理器）；`new Notification()` 只记标题，不显示；`navigator.permissions.query` 只认名字的映射（`camera`/`microphone` → `media`）。登记给 P41。
+- `auto_detect`/`pac_script` 在本机上让真 Electron 崩溃，没有观察到它们的 `resolveProxy`。
+- `Content-Disposition: attachment` 的文档被取两次（页面那次丢弃，主进程再取一次）；`hasUserGesture()` 恒为 `false`；`getURLChain()` 只有原地址；文件名不做 URL 的百分号解码（`Content-Disposition` 的 `filename*` 做）。
+- 评审遗留里没做：`Kind::Handle` 的死分支（protocol_legacy）、`native::exports` 化模块、`let _ = cx.run_jobs()` 的理由、测试夹具去重、几处未探针的断言。
+- 没有跑任何测试（只跑了 `cargo check`）。
+
+**要跑的命令（逐个跑）**
+
+```
+cargo test -p verve --test browser_net
+cargo test -p verve-dom --test permissions
+cargo test -p verve-dom --test download_link
+cargo test -p verve-dom --lib
+cargo test -p verve-electron --lib
+cargo test -p verve-electron --test session
+cargo test -p verve-electron --test protocol
+cargo test -p verve-electron --test net
+cargo test -p verve-electron --test page_load
+```

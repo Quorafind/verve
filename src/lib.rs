@@ -27,6 +27,7 @@ pub use boa_gc;
 
 mod assert;
 pub mod blob;
+pub mod browser_net;
 mod buffer;
 mod child_process;
 mod cjs_exports;
@@ -116,6 +117,7 @@ pub use process::{
     CHROME_VERSION, ELECTRON_VERSION, ExitBehavior, MODULES_VERSION, NODE_VERSION, ProcessInfo,
     UncaughtBehavior,
 };
+pub use sockets::status_text;
 pub use world::{
     MAIN_WORLD, WorldId, current_world, in_realm, in_world, make_world, world_global,
     world_of_global, world_realm,
@@ -253,6 +255,8 @@ struct Shared {
     blobs: RefCell<HashMap<String, Vec<u8>>>,
     /// The workers this realm started.
     network: RefCell<network::State>,
+    /// The host's say over `fetch`: see [`browser_net`].
+    browser: RefCell<browser_net::State>,
     workers: RefCell<Vec<worker::WorkerSlot>>,
     /// In a worker's own realm: its messages, coming and going.
     port: RefCell<Option<worker::Port>>,
@@ -276,6 +280,9 @@ struct Shared {
     /// `verve run`'s default folder before the cache has proved worth keeping: all it holds is what
     /// this run has loaded.
     code_cache_deferred: RefCell<Option<code_cache_mark::Deferred>>,
+    /// The `Buffer` class the runtime made, which its own streams, files and network make
+    /// buffers with whatever the global `Buffer` is later: see [`native::buffer_class`].
+    buffer_class: RefCell<Option<JsObject>>,
 }
 
 /// The microtask queue: promise reactions, `queueMicrotask`, `process.nextTick`.
@@ -451,16 +458,7 @@ impl Runtime {
     /// as they are. See the `proxy` module of `network` for what is proxied and how `NO_PROXY`
     /// matches.
     pub fn set_proxy_env(&mut self, proxy: Option<ProxyEnv>) {
-        let state = shared(&self.context);
-        let mut net = state.network.borrow_mut();
-        net.proxy = proxy.map(|env| {
-            let config = Rc::new(network::proxy::Config::parse(&env));
-            (env, config)
-        });
-        let proxies = network::configured_proxies(&net);
-        if let Some(reactor) = &net.reactor {
-            reactor.send(network::reactor::Command::Proxies(proxies));
-        }
+        network::set_realm_proxy(&self.context, proxy);
     }
 
     /// The proxy [`Runtime::set_proxy_env`] set, if any.
@@ -555,6 +553,7 @@ impl Runtime {
             echo: std::env::var_os("VERVE_ECHO").is_some(),
             blobs: RefCell::new(HashMap::new()),
             network: RefCell::new(network::State::default()),
+            browser: RefCell::default(),
             workers: RefCell::new(Vec::new()),
             port: RefCell::new(None),
             idb: RefCell::new(indexeddb::IdbState::default()),
@@ -567,6 +566,7 @@ impl Runtime {
             code_cache: RefCell::new(code_cache),
             code_cache_protection: RefCell::new(code_cache_protection),
             code_cache_deferred: RefCell::default(),
+            buffer_class: RefCell::default(),
         }));
         globals::install(&mut context).expect("the globals install");
         Self { context }

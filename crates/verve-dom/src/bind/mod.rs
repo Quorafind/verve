@@ -21,6 +21,7 @@ pub mod fonts;
 pub mod live;
 pub mod node;
 pub mod observers;
+pub mod permissions;
 pub mod platform;
 pub mod range_rects;
 pub mod reveal;

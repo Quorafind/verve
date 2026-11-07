@@ -130,6 +130,8 @@ pub struct State {
     pub dom: Dom,
     pub url: url::Url,
     pub title_fallback: String,
+    /// The embedder's custom schemes: which have an origin and which are secure.
+    pub schemes: crate::schemes::Schemes,
     /// What the window's `navigator` was given (user agent, language), for a world made later.
     pub navigator: (Option<String>, Option<String>),
     /// Each node's object in each world, held without keeping it alive.
@@ -181,6 +183,12 @@ pub struct State {
     pub local: BTreeMap<String, String>,
     pub session: BTreeMap<String, String>,
     pub storage: Option<Box<dyn StorageBackend>>,
+    /// The embedder's cookie jar, which `document.cookie` goes to when there is one.
+    pub cookies: Option<Rc<dyn crate::CookieBackend>>,
+    /// The embedder's answers to the permissions a page uses, and the questions it has yet to
+    /// answer.
+    pub permissions: Option<Rc<dyn crate::PermissionBackend>>,
+    pub permissions_pending: crate::bind::permissions::Pending,
     pub observers: Vec<ObserverRecord>,
     /// A microtask is queued to deliver mutation records.
     pub mutation_queued: bool,
@@ -232,6 +240,7 @@ impl State {
             history: vec![(JsValue::null(), url.to_string())],
             url,
             title_fallback: String::new(),
+            schemes: crate::schemes::Schemes::default(),
             navigator: (None, None),
             wrappers: HashMap::new(),
             links: HashMap::new(),
@@ -261,6 +270,9 @@ impl State {
             local: BTreeMap::new(),
             session: BTreeMap::new(),
             storage: None,
+            cookies: None,
+            permissions: None,
+            permissions_pending: crate::bind::permissions::Pending::default(),
             observers: Vec::new(),
             mutation_queued: false,
             frame_clock: FrameClock::Timer,

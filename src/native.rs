@@ -78,6 +78,11 @@ pub fn coded_error(context: &mut Context, message: &str, code: &str) -> JsError 
     JsError::from_opaque(error.into())
 }
 
+/// A `TypeError` with Node's `code` on it: `ERR_INVALID_URL` of `new URL('nonsense')`.
+pub fn coded_type_error(context: &mut Context, message: &str, code: &str) -> JsError {
+    crate::events::coded_type_error(context, message, code)
+}
+
 /// The same, as a value: what a callback or an `error` event is handed.
 pub fn coded_error_value(context: &mut Context, message: &str, code: &str) -> JsValue {
     coded_error(context, message, code)
@@ -185,6 +190,24 @@ pub fn closure<T: boa_gc::Trace + 'static>(
     .length(length)
     .build()
     .into()
+}
+
+/// A function a [`closure`] runs: the receiver, the arguments, its captures, the context.
+pub type ClosureFn<T> = fn(&JsValue, &[JsValue], &T, &mut Context) -> JsResult<JsValue>;
+
+/// `promise.then(ok, err)` where both reactions hold `captures`: `ok` runs with the value the
+/// promise is fulfilled with, `err` with the reason it is rejected with. Answers the promise
+/// `then` made.
+pub fn then<T: boa_gc::Trace + Clone + 'static>(
+    context: &mut Context,
+    promise: &JsValue,
+    ok: ClosureFn<T>,
+    err: ClosureFn<T>,
+    captures: T,
+) -> JsResult<JsValue> {
+    let ok = closure(context, "", 1, ok, captures.clone());
+    let err = closure(context, "", 1, err, captures);
+    invoke(promise, "then", &[ok.into(), err.into()], context)
 }
 
 /// A property that is there but not listed: a method, or state kept on an object.
@@ -320,6 +343,26 @@ pub fn array(context: &mut Context, items: Vec<JsValue>) -> JsValue {
 /// A global by name.
 pub fn global(context: &mut Context, name: &str) -> JsResult<JsValue> {
     context.global_object().get(JsString::from(name), context)
+}
+
+/// Remembers the global `Buffer` as the class the runtime makes its buffers with.
+pub(crate) fn keep_buffer_class(context: &mut Context) -> JsResult<()> {
+    let class = global(context, "Buffer")?.as_object();
+    *crate::shared(context).buffer_class.borrow_mut() = class;
+    Ok(())
+}
+
+/// The `Buffer` class the runtime made, whatever the global `Buffer` is now. An embedder that
+/// takes Node's globals off a page's global object (Electron's renderer without Node) leaves
+/// the runtime's own streams, files and network able to make buffers.
+pub(crate) fn buffer_class(context: &mut Context) -> JsResult<JsObject> {
+    let kept = crate::shared(context).buffer_class.borrow().clone();
+    match kept {
+        Some(class) => Ok(class),
+        None => global(context, "Buffer")?
+            .as_object()
+            .ok_or_else(|| type_error("Buffer is not installed")),
+    }
 }
 
 /// `new Name(...args)`, for the global class `Name`.

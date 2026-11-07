@@ -8,7 +8,7 @@
 
 use boa_engine::native_function::NativeFunctionPointer;
 use boa_engine::object::builtins::{JsFunction, JsPromise};
-use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
+use boa_engine::{Context, JsObject, JsResult, JsString, JsValue};
 use verve::native::{self, arg, js_text};
 
 use super::define::{self, Args};
@@ -64,7 +64,6 @@ const TABLE: &[(&str, usize, Answer)] = &[
     ("adjustSelection", 1, Throws),
     ("replace", 1, Throws),
     ("replaceMisspelling", 1, Throws),
-    ("downloadURL", 1, Throws),
     ("beginFrameSubscription", 1, Throws),
     ("endFrameSubscription", 0, Throws),
 ];
@@ -164,14 +163,15 @@ fn refuse_print(context: &mut Context, callback: JsObject) -> JsResult<()> {
     Ok(())
 }
 
-/// `session`: the same object each time. Verve has none of Electron's until P16.
+/// `session`: the session of the page's `webPreferences.partition`.
 fn session(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    record_of(this, context)?;
-    let made = JsValue::from(native::object(context));
-    if let Some(object) = this.as_object() {
-        native::hidden(&object, js_string!("session"), made.clone(), context)?;
-    }
-    Ok(made)
+    let record = record_of(this, context)?;
+    let contents = record.page.contents;
+    let hub = std::sync::Arc::clone(&super::shared(context).hub);
+    let session = hub
+        .session_of(contents)
+        .ok_or_else(super::define::destroyed)?;
+    Ok(super::session::object_of(context, &session)?.into())
 }
 
 /// Gives `prototype` the members of this file.

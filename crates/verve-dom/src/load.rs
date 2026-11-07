@@ -25,7 +25,7 @@ mod script;
 mod sheets;
 
 pub(crate) use handlers::attribute;
-pub(crate) use net::{claims, fetch_response, is_network, navigable};
+pub(crate) use net::{allows_fetch, claims, fetch_response, forwards, is_network, navigable};
 pub(crate) use script::{connected, install, write};
 
 /// What a page fetches as it loads: its scripts, sheets, images, fonts, icons — and what its
@@ -37,6 +37,18 @@ pub trait Loader: 'static {
     /// Whether this loader answers `scheme` (file, app, custom ones registered by P16).
     /// http/https/data/blob go through Verve's own fetch unless the loader claims them.
     fn handles(&self, scheme: &str) -> bool;
+    /// Whether a page's `fetch` and `XMLHttpRequest` of `scheme` are answered by the realm's own
+    /// `fetch`, which the embedder's `BrowserNet` hooks (streamed bodies, the request's headers
+    /// and body, abort), instead of by [`Loader::fetch`]. The page's own loads of the scheme
+    /// (scripts, sheets, images) still go through [`Loader::fetch`].
+    fn forwards(&self, _scheme: &str) -> bool {
+        false
+    }
+    /// Whether `fetch()`, which XHR is not, may use a scheme that [`Loader::forwards`]: a custom
+    /// scheme registered without `supportFetchAPI` is refused by `fetch()` alone.
+    fn allows_fetch(&self, _scheme: &str) -> bool {
+        true
+    }
 }
 
 /// What is asked of a [`Loader`].
@@ -289,6 +301,9 @@ pub(crate) struct Load {
     /// The document's own `fetch` (which asks the loader for the addresses it answers), as it was
     /// installed: what `XMLHttpRequest` asks through, whatever the page does to `window.fetch`.
     pub dom_fetch: Option<boa_engine::JsValue>,
+    /// [`Load::dom_fetch`] for `XMLHttpRequest`, which unlike `fetch()` may use every scheme the
+    /// loader forwards.
+    pub dom_xhr_fetch: Option<boa_engine::JsValue>,
     pub module_scripts_started: usize,
     pub phase: Phase,
     painted: bool,
@@ -502,6 +517,19 @@ impl Document {
     }
 
     fn document_arrived(&self, result: LoadResult) {
+        if is_attachment(&result.headers) && result.body.is_ok() {
+            // The browser saves what it is told to save and shows nothing: the load fails, and
+            // the embedder is asked to download the address.
+            let url = result.url.to_string();
+            self.state
+                .borrow_mut()
+                .requests
+                .push(crate::Request::Download {
+                    url: url.clone(),
+                    filename: None,
+                });
+            return self.fail(&url, -2, "ERR_FAILED");
+        }
         match result.body {
             Err(error) => self.fail(result.url.as_str(), error.code, &error.description),
             Ok(bytes) => {
@@ -681,5 +709,30 @@ impl Document {
         script::fire_on_window(context, "pageshow");
         self.state.borrow_mut().load.events.push(LoadEvent::Loaded);
         true
+    }
+}
+
+/// Whether a response says it is to be saved, not shown (`Content-Disposition: attachment`).
+pub(crate) fn is_attachment(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-disposition")
+            && value
+                .trim_start()
+                .get(..10)
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("attachment"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_attachment;
+
+    #[test]
+    fn only_an_attachment_disposition_is_saved() {
+        let header = |value: &str| vec![("Content-Disposition".to_owned(), value.to_owned())];
+        assert!(is_attachment(&header("attachment; filename=\"a.txt\"")));
+        assert!(is_attachment(&header("Attachment")));
+        assert!(!is_attachment(&header("inline")));
+        assert!(!is_attachment(&[]));
     }
 }

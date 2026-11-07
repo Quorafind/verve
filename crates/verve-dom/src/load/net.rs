@@ -34,9 +34,29 @@ fn loader_handles(context: &Context, scheme: &str) -> bool {
         .is_some_and(|loader| loader.handles(scheme))
 }
 
-/// Whether a page's `fetch` of `url` is the loader's to answer.
+/// Whether a page's `fetch` of `url` is the loader's to answer: it handles the scheme, and does
+/// not leave it to the realm's own `fetch`.
 pub(crate) fn claims(context: &Context, url: &Url) -> bool {
-    loader_handles(context, url.scheme())
+    loader_handles(context, url.scheme()) && !forwards(context, url)
+}
+
+/// Whether the loader has the realm's own `fetch` answer the scheme of `url`.
+pub(crate) fn forwards(context: &Context, url: &Url) -> bool {
+    loader_says(context, |loader| loader.forwards(url.scheme()))
+}
+
+/// Whether `fetch()` may use the scheme of `url`, which the loader forwards.
+pub(crate) fn allows_fetch(context: &Context, url: &Url) -> bool {
+    loader_says(context, |loader| loader.allows_fetch(url.scheme()))
+}
+
+fn loader_says(context: &Context, ask: impl FnOnce(&dyn super::Loader) -> bool) -> bool {
+    shared(context)
+        .borrow()
+        .load
+        .loader
+        .as_ref()
+        .is_some_and(|loader| ask(loader.as_ref()))
 }
 
 /// Whether the page may send itself to `url` besides the network's addresses: Chromium blocks
@@ -90,6 +110,7 @@ fn send(
     loader: Option<std::rc::Rc<dyn super::Loader>>,
 ) {
     let scheme = request.url.scheme().to_owned();
+    let document = request.destination == Destination::Document;
     let claimed = loader
         .as_ref()
         .is_some_and(|l| l.handles(&scheme) || !is_network(&scheme));
@@ -98,7 +119,9 @@ fn send(
             request,
             Box::new(move |result| inbox.borrow_mut().push((token, result))),
         ),
-        None if is_network(&scheme) => through_fetch(context, request.url, inbox, token),
+        None if is_network(&scheme) => {
+            through_fetch(context, request.url, (inbox, token), document)
+        }
         None => inbox
             .borrow_mut()
             .push((token, LoadResult::failed(request.url, -2, "ERR_FAILED"))),
@@ -114,6 +137,8 @@ struct Reply {
     #[unsafe_ignore_trace]
     url: Url,
     response: Option<JsObject>,
+    /// Whether this is the load of a document, which may turn out to be an attachment.
+    document: bool,
 }
 
 impl Reply {
@@ -134,6 +159,18 @@ impl Reply {
         self.inbox.borrow_mut().push((self.token, result));
     }
 
+    /// The answer is an attachment: no body, and the header that says so.
+    fn attached(&self, status: u16, disposition: String) {
+        let result = LoadResult {
+            status,
+            url: self.url.clone(),
+            mime: None,
+            headers: vec![("content-disposition".to_owned(), disposition)],
+            body: Ok(Vec::new()),
+        };
+        self.inbox.borrow_mut().push((self.token, result));
+    }
+
     fn fail(&self) {
         let error = LoadError {
             code: -2,
@@ -143,12 +180,13 @@ impl Reply {
     }
 }
 
-fn through_fetch(context: &mut Context, url: Url, inbox: Inbox, token: u64) {
+fn through_fetch(context: &mut Context, url: Url, (inbox, token): (Inbox, u64), document: bool) {
     let reply = Reply {
         inbox,
         token,
         url,
         response: None,
+        document,
     };
     let started = (|| -> JsResult<()> {
         // The runtime's own `fetch`, not the page's: a page that wraps `window.fetch` does not
@@ -186,6 +224,7 @@ fn copy_of(reply: &Reply) -> Reply {
         token: reply.token,
         url: reply.url.clone(),
         response: reply.response.clone(),
+        document: reply.document,
     }
 }
 
@@ -215,6 +254,9 @@ fn read_response(args: &[JsValue], reply: &Reply, context: &mut Context) -> JsRe
         reply.fail();
         return Ok(());
     };
+    if reply.document && save_instead(&response, reply, context)? {
+        return Ok(());
+    }
     let body = invoke(&response.clone().into(), "arrayBuffer", &[], context)?;
     let mut next = copy_of(reply);
     next.response = Some(response);
@@ -222,6 +264,31 @@ fn read_response(args: &[JsValue], reply: &Reply, context: &mut Context) -> JsRe
     let on_error = closure(context, "failed", 0, failed, next);
     invoke(&body, "then", &[on_body.into(), on_error.into()], context)?;
     Ok(())
+}
+
+/// A document whose head says it is an attachment is saved, not shown: its body is given up on
+/// unread, and the load is told only what it needs to hand the address to the embedder.
+fn save_instead(response: &JsObject, reply: &Reply, context: &mut Context) -> JsResult<bool> {
+    let response: JsValue = response.clone().into();
+    let headers = get(&response, "headers", context)?;
+    let disposition = invoke(&headers, "get", &[js_text("content-disposition")], context)?;
+    let Some(disposition) = disposition
+        .as_string()
+        .map(|text| text.to_std_string_escaped())
+    else {
+        return Ok(false);
+    };
+    if !super::is_attachment(&[("content-disposition".to_owned(), disposition.clone())]) {
+        return Ok(false);
+    }
+    let body = get(&response, "body", context)?;
+    // The cancelled body's promise is not awaited: nothing in it matters any more.
+    let _ = invoke(&body, "cancel", &[], context);
+    let status = get(&response, "status", context)?
+        .to_u32(context)
+        .unwrap_or(0) as u16;
+    reply.attached(status, disposition);
+    Ok(true)
 }
 
 fn got_body(

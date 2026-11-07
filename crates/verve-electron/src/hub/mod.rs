@@ -22,16 +22,22 @@ use crate::log::Log;
 use crate::msg::{AppEvent, Display, FromShell, PageEvent, ToShell};
 use crate::{ElectronOptions, MainGuest};
 
+pub mod cookies;
 mod diagnostics;
+mod proxy;
 mod records;
 mod renderers;
+mod sessions;
 mod shell;
+pub mod system_proxy;
 mod text;
 mod windows;
 
+pub use proxy::{Config as ProxyConfig, Proxy};
 pub use records::ConsoleLine;
 pub use renderers::RendererHandle;
 use renderers::{RendererSlot, stop};
+pub use sessions::{Privileged, Privileges, Session};
 pub use shell::ShellPort;
 use shell::{ShellObserver, Theme};
 
@@ -110,6 +116,8 @@ pub struct Hub {
     measurer: Mutex<Option<Arc<dyn verve_layout::TextMeasurer>>>,
     /// A page has been given its measurer (whichever it was).
     measurer_taken: AtomicBool,
+    /// The app's sessions and the schemes it made privileged.
+    sessions: Mutex<sessions::Registry>,
 }
 
 impl Hub {
@@ -140,6 +148,7 @@ impl Hub {
             any_devtools: AtomicBool::new(false),
             measurer: Mutex::new(None),
             measurer_taken: AtomicBool::new(false),
+            sessions: Mutex::default(),
         })
     }
 
@@ -284,6 +293,7 @@ impl Hub {
         for page in pages {
             stop(&page);
         }
+        self.end_cookies(self.told.load(Ordering::SeqCst));
         self.to_shell(ToShell::Quit { exit_code });
     }
 

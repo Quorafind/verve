@@ -24,6 +24,8 @@ use crate::msg::{
     FromRenderer, PageEvent, RendererView, ToRenderer, ToRendererInput, WebPreferences,
 };
 use crate::page_layout::PageLayout;
+use crate::renderer_net::{self, RendererNet};
+use crate::renderer_permissions::PagePermissions;
 use crate::{page_script, preload, probe};
 
 /// One page: the runtime its scripts run in, its document, and what it has yet to tell the main
@@ -37,11 +39,16 @@ pub struct RendererGuest {
     /// lifecycle, requests and IPC. It leaves as one job after each job the page runs.
     outbox: Outbox,
     contents: ContentsId,
+    /// Which isolate this is among the page's: a reply meant for an earlier document's question
+    /// carries another one and is dropped.
+    generation: u64,
     /// What the page was made with; the Hub makes the isolate of the next document anew with
     /// the same ones.
     prefs: WebPreferences,
     /// What the page's document is loaded through; the other half is the document's.
     loader: ElectronLoader,
+    /// The page's `fetch` of the schemes its session's main process answers.
+    net: Rc<RendererNet>,
     /// The address the page last told the main process of, to see when the page moved within
     /// itself (`location.hash`, `pushState`).
     url: String,
@@ -60,6 +67,7 @@ impl RendererGuest {
     ) -> Self {
         let dark = hub.dark();
         let mut runtime = Runtime::new();
+        runtime.set_permissions(preload::permissions_for(&prefs));
         runtime.set_vfs(hub.overlay());
         // A page without Node resolves its modules as a browser does.
         runtime.set_web_modules(!preload::page_has_node(&prefs));
@@ -72,7 +80,14 @@ impl RendererGuest {
         .expect("a page's electron module installs");
         let outbox = api::ipc_renderer::outbox(runtime.context());
         set_up_process(&mut runtime, &outbox);
-        let loader = ElectronLoader::new(hub.overlay(), hub.protocol_calls());
+        let network = renderer_net::install(&mut runtime, hub, &prefs, &outbox);
+        let permissions = PagePermissions::new(Arc::clone(&network.session), &outbox, generation);
+        let loader = ElectronLoader::new(
+            hub.overlay(),
+            hub.protocol_calls(),
+            network.session,
+            network.privileged.clone(),
+        );
         let document = verve_dom::install(
             &mut runtime,
             Options {
@@ -81,6 +96,10 @@ impl RendererGuest {
                 // `requestAnimationFrame` on a page nobody draws.
                 frames: FrameClock::Host,
                 dark,
+                standard_schemes: renderer_net::scheme_names(&network.privileged, |p| p.standard),
+                secure_schemes: renderer_net::scheme_names(&network.privileged, |p| p.secure),
+                cookies: Some(network.cookies),
+                permissions: Some(Box::new(permissions)),
                 ..Options::default()
             },
         )
@@ -93,8 +112,10 @@ impl RendererGuest {
             layout,
             outbox,
             contents,
+            generation,
             prefs,
             loader,
+            net: network.net,
             url: String::new(),
             log: Arc::clone(hub.log()),
         }
@@ -108,13 +129,6 @@ impl RendererGuest {
     /// The preferences the page was made with.
     pub fn preferences(&self) -> &WebPreferences {
         &self.prefs
-    }
-
-    /// Makes `scheme` one the main process answers: what the page asks of it goes to the main
-    /// process as a [`FromRenderer::ProtocolRequest`] (P16 registers a scheme per
-    /// `protocol.handle`).
-    pub fn register_scheme(&mut self, scheme: &str) {
-        self.loader.register_scheme(scheme);
     }
 
     /// Lets work finished on another thread — a socket, a worker — wake the isolate.
@@ -134,6 +148,23 @@ impl RendererGuest {
             ToRenderer::ProtocolResponse { call, response } => {
                 self.loader.answer(call, response);
                 self.pump();
+            }
+            ToRenderer::ProtocolHead {
+                call,
+                status,
+                status_text,
+                headers,
+            } => self.net.head(call, status, status_text, headers),
+            ToRenderer::ProtocolChunk { call, bytes } => self.net.chunk(call, bytes),
+            ToRenderer::ProtocolEnd { call, error } => self.net.end(call, error),
+            ToRenderer::WebRequestReply { call, reply } => {
+                self.net.web_reply(call, reply, self.runtime.context());
+            }
+            ToRenderer::PermissionReply { call, granted } => {
+                if let Some(ask) = PagePermissions::ask_of(call, self.generation) {
+                    self.document
+                        .settle_permission(&mut self.runtime, ask, granted);
+                }
             }
             ToRenderer::ExecuteJavaScript {
                 call, code, world, ..
@@ -244,6 +275,9 @@ impl RendererGuest {
     /// Loads `url` into the document: the page is fetched and read as it arrives, and each stage
     /// is told to the main process as the loader reports it.
     fn load(&mut self, url: &str) {
+        // Whatever the last document was waiting for is of no use to this one.
+        let asked = self.loader.abandon();
+        self.net.abandon(asked, self.runtime.context());
         self.require_from(url);
         self.document
             .navigate_initial_with(&mut self.runtime, url, preload::run);
@@ -305,6 +339,7 @@ impl RendererGuest {
             return;
         }
         self.url.clone_from(&now);
+        self.net.set_page(&now);
         let moved = PageEvent::DidNavigateInPage { url: now };
         self.outbox
             .borrow_mut()
@@ -319,6 +354,7 @@ impl RendererGuest {
                 LoadEvent::Started => PageEvent::DidStartLoading,
                 LoadEvent::Committed(url) => {
                     self.url.clone_from(&url);
+                    self.net.set_page(&url);
                     PageEvent::DidNavigate { url }
                 }
                 LoadEvent::DomContentLoaded => PageEvent::DomReady,
