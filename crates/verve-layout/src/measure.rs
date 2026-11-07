@@ -35,6 +35,9 @@ pub struct PlacedGlyph {
     /// The UTF-8 byte of the text the glyph is for.
     pub byte: u32,
     pub is_emoji: bool,
+    /// The font that draws the glyph. When the requested font lacks a character the platform
+    /// takes another one for it, so this differs from [`ShapedRun::font`] for such a glyph.
+    pub font: FontKey,
 }
 
 /// A run of text in one font, shaped.
@@ -96,6 +99,7 @@ impl TextMeasurer for HeadlessMeasurer {
                 x: place as f32 * advance,
                 byte: byte as u32,
                 is_emoji: false,
+                font,
             })
             .collect();
         Arc::new(ShapedRun {
@@ -120,6 +124,7 @@ mod tests {
         assert_eq!(run.glyphs.len(), 5);
         assert_eq!(run.glyphs[2].byte, 3);
         assert_eq!(run.glyphs[2].x, 20.);
+        assert_eq!(run.glyphs[2].font, font);
         assert_eq!(measurer.metrics(font, 10.).ascent, 8.);
     }
 
