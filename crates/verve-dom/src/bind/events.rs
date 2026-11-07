@@ -612,6 +612,39 @@ pub fn is_focusable(dom: &Dom, id: NodeId) -> bool {
     }
 }
 
+/// Whether focus moving to `id` shows its ring (`:focus-visible`), as Chromium decides it: after
+/// the keyboard, or before any input, always; after the pointer, only for what takes text.
+fn shows_focus_ring(dom: &Dom, id: NodeId) -> bool {
+    match dom.last_input {
+        crate::input::LastInput::Pointer => takes_text(dom, id),
+        crate::input::LastInput::Keyboard | crate::input::LastInput::Nothing => true,
+    }
+}
+
+/// Whether `id` is a field a person types in, or an editing host.
+fn takes_text(dom: &Dom, id: NodeId) -> bool {
+    let tag = dom.get(id).and_then(|node| node.tag());
+    match tag {
+        Some("textarea") => true,
+        Some("input") => matches!(
+            super::element::input_type(dom, id).as_str(),
+            "text"
+                | "search"
+                | "tel"
+                | "url"
+                | "email"
+                | "password"
+                | "number"
+                | "date"
+                | "month"
+                | "week"
+                | "time"
+                | "datetime-local"
+        ),
+        _ => dom.editing_host(id) == Some(id),
+    }
+}
+
 /// Focus moves to `id` (or away, with `None`), with the events that says.
 pub fn set_focus(context: &mut Context, id: Option<NodeId>) -> JsResult<()> {
     set_focus_from(context, id, false)
@@ -624,6 +657,7 @@ pub fn set_focus_from(context: &mut Context, id: Option<NodeId>, trusted: bool) 
     }
     with_dom(context, |dom| {
         dom.focused = id;
+        dom.focus_visible = id.is_some_and(|id| shows_focus_ring(dom, id));
         for node in [before, id].into_iter().flatten() {
             if dom.exists(node) {
                 dom.mark(node);

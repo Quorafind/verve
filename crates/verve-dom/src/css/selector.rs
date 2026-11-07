@@ -468,7 +468,8 @@ impl Compound {
                 dom.active.is_some_and(|a| dom.contains(id, a))
                     || matching.hover_probe.is_some_and(|p| dom.contains(id, p))
             }
-            Pseudo::Focus | Pseudo::FocusVisible => dom.has_focus(id),
+            Pseudo::Focus => dom.has_focus(id),
+            Pseudo::FocusVisible => dom.focus_visible && dom.has_focus(id),
             Pseudo::FocusWithin => dom.focus_within(id),
             Pseudo::Checked => match tag.as_str() {
                 "input" => node.checked,

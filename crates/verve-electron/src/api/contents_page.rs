@@ -171,6 +171,7 @@ fn input_of(event: &JsObject, context: &mut Context) -> JsResult<Vec<ToRendererI
         button,
         count: fields.f64("clickCount", 1., context)? as u32,
         modifiers,
+        buttons: 0,
     };
     let at = |kind| ToRendererInput::Pointer {
         kind,

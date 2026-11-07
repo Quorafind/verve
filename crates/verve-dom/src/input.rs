@@ -19,6 +19,10 @@ pub struct Pointer {
     /// How many presses in a row this is: 2 for the second of a double click.
     pub count: u32,
     pub modifiers: Modifiers,
+    /// The buttons held while this happens, as `MouseEvent.buttons` has them (primary 1,
+    /// secondary 2, auxiliary 4, back 8, forward 16): the pointer after the event, so a button
+    /// that went down is in it and one that came up is not.
+    pub buttons: u16,
 }
 
 /// A key, as `KeyboardEvent` has it: `key` (`"a"`, `"Enter"`, `"ArrowLeft"`) and `code`
@@ -62,4 +66,14 @@ impl Key {
             ..Key::default()
         }
     }
+}
+
+/// What a person did to the page last: whether a focus the page asks for shows its ring
+/// (`:focus-visible`). Before any input, a script's focus shows it, as in Chromium.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum LastInput {
+    #[default]
+    Nothing,
+    Keyboard,
+    Pointer,
 }
