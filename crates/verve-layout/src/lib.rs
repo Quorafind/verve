@@ -11,6 +11,7 @@ mod engine;
 pub mod fonts;
 mod gradient;
 mod grid;
+mod inline;
 mod layout;
 mod measure;
 mod paint;
