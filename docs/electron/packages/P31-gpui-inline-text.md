@@ -171,4 +171,104 @@ impl Document {
 
 ## 状态
 
-（实现者完成后填写）
+### 第一阶段：行内排版（`verve-layout`，无头测量器）
+
+**做了**（步骤 2、3、4、5、7，以及步骤 8 的契约文档）：
+
+- **契约先行**：第一个提交只改文档：`PlacedGlyph.font`（实际画这个字形的字体，用了回退时与请求的不同）、`FromRenderer::Font { family, weight, italic, bytes }` / `ToRendererInput::FontsChanged`（P02 的追加表）、`text_position_at`/`range_rects` 的偏移是 UTF-16、
+  `line-height: normal` = `metrics` 的 `ascent + descent + line_gap`（布局不取整，取整是测量器的事）。`Decoration`、`Glyphs`、`Box` 不变（行内背景边框用 `Box`，选区也是 `Box`）。
+- **`fonts.rs`**（只有数据与规则）：通用族→平台名（Windows/macOS/Linux）、回退链（按 `lang` 调整 CJK 顺序）、`@font-face` 注册表 `FontRegistry`（按族名，`best()` 按槽位/字重匹配，`generation()` 供布局判过期）；
+  `LayoutEngine::register_font` 登记后下一次 `update` 整体重排。通道（`FromRenderer::Font` 等）是第二阶段。
+- **`inline/`**（新）：
+  - `space.rs`：`white-space` 六种（`normal/nowrap/pre/pre-wrap/pre-line/break-spaces`）的折叠与保留、跨文本节点的折叠状态、tab 展到制表位、CJK 之间的换行不留空格（韩文除外）、`text-transform`（含 `ß`→`SS`；`capitalize` 在同一块里跨文本节点接着算词首，空格、换行与原子盒之后重新算）；
+    每个输出字符记着它来自文本节点的哪个字节，选区由此换回偏移。
+  - `breaks.rs`：UAX #14 用 **`unicode-linebreak` 0.1.5**（`Cargo.lock` 里早已有它（`cosmic-text` 在 Linux/macOS 的 GPUI 文字栈里用它），所以没有第二份表、`Cargo.lock` 只多了 `verve-layout` → `unicode-linebreak` 这一条边；**但在 Windows 上 GPUI 走 DirectWrite，不带 `cosmic-text`，所以对 `electron.exe` 来说它是新代码（约 21 KB，协调者量体积时要计入）**；没有另选 `icu_segmenter`，那样要带数据且 Boa 那份是另一套特性）。
+    `word-break: break-all/keep-all`、`overflow-wrap: break-word/anywhere`（旧的 `word-break: break-word` 当 `anywhere`）、`<wbr>`、`break-spaces` 的每个空格可断。
+  - `style.rs`：从计算样式读出字体（族、字号、字重、斜体 → `measurer.resolve/metrics`）、`line-height`、`white-space`、`text-align`、`text-indent`、`letter/word-spacing`、`vertical-align`、`direction`/`dir`、`text-decoration`（简写与长写、线型、颜色、粗细）、`text-shadow`、
+    `text-overflow`、`-webkit-line-clamp`。级联把继承的相对长度（`1.5em`）原样传给子元素，所以 `inherited_length` 找到写下它的祖先、用那个祖先的字号算。
+  - `collect.rs`：把块的内容收成 `Item`（文本、行内元素的起止、原子行内盒、强制换行、`<wbr>`），文本塑形一次（整个文本节点），按字符边界算 `stops`（含字距、词距）；`::before`/`::after` 的文字（引号、`attr()`/计数器已由快照算好）作为生成文本。
+  - `chunks.rs`：按可断处切成“块”（chunk）：一段不可断的内容，行起止与元素边界（左边界归后一块、右边界归前一块）都在其中。
+  - `lines.rs`：贪心填行；放不下就换行，空行上还放不下且 `overflow-wrap` 允许时在字符处断开（不在组合符前断）；同一文本节点在一行里是一个片段；末尾空格悬挂不占宽（`pre`/`break-spaces` 除外）；最小内容宽度 = 最长不可断块（`anywhere` 时是最宽的一个字符）。
+  - `finish.rs`：行尾去空格、`text-align`（`left/right/center/start/end/justify`，RTL 整块镜像）、`text-indent`（首行，可为负、可为百分比）、`justify`（拉丁文拉空格，没有空格时拉相邻 CJK 之间；最后一行和强制换行结束的行不拉）、
+    `text-overflow: ellipsis`（仅 `overflow` 非 visible 的块）、`-webkit-line-clamp` + `display: -webkit-box`、每个行内元素每行一个 `SpanBox`（`getClientRects` 的来源）。
+  - `vertical.rs`：每个行内盒的 line-height 盒（`half-leading`），`vertical-align`：`baseline/sub/super/text-top/text-bottom/middle/<length>/<percentage>/top/bottom`；`top`/`bottom` 在其余盒定出行高后贴边、不够高就撑高（`top` 向下撑、`bottom` 向上撑）。
+  - `query.rs`：`span_rects`、`range_rects`（元素端点按子节点下标换成文本位置）、`position_at`（点 → 最近的文本节点与 UTF-16 偏移，只在块的边框盒内，`user-select: none` 的文字不参与）。
+- **进树**（`flow.rs`、`atoms.rs`、`tree.rs`）：块的孩子只有行内内容时，块自己就是 taffy 的叶子（带 `Ifc` 做上下文，量度函数给内容的最小/最大宽度和给定宽度下的高度）；
+  有块级孩子时，每段行内内容放进**匿名块**（`BoxNode.anonymous`，不画、不进 `by_node`/`rects`、不出 `Hitbox`），行内元素包着块时在块的两边各收一段（行内元素的边在两段里各出现一次）；
+  flex/grid 容器里的文字每段是一个匿名项；只有可折叠空白的一段不建盒（所以块与块之间的缩进空白不影响任何旧布局）；浮动与绝对定位的盒不拆行内内容，排在这段内容之后（内容之前没有文字时排在前面）。
+  行内元素没有盒；`display: inline-block/inline-flex/inline-grid` 与替换元素（`<img>` 等）是**原子行内盒**：不是叶子的 taffy 子节点，单独布局（见下），由行摆放。
+- **原子行内盒的宽度与基线**：taffy 的量度函数不能回头调 taffy，所以原子盒在页面树之外单独布局：先按最小/最大内容宽度量一遍，再按“块的内容宽度”取 `min(max, max(min, 可用))`（收缩适配）定宽，再量高与基线
+  （基线 = 盒内最后一行文字的基线，没有文字或 `overflow` 非 visible 时是下边缘）。一轮页面布局后读每个块实际的内容宽度，与原子盒量时用的不同就重量（最深的先量），至多六轮（`BoxTree::compute`）。
+  这修好了 `inline-block` 宽度 `auto` 时被拉满的问题。
+- **进 verve-dom**（任务书范围之外，改得很小）：`Layout.fragments`（行内元素每行的盒子，provider 一并交上来，`getClientRects` 用）、`Document::set_range_provider` 与 `bind/range_rects.rs`
+  （`Range.getClientRects`/`getBoundingClientRect` 问 provider；没有 provider 时仍是起点元素的盒）；`platform.rs` 里这两个方法换成对新文件的调用，行数只减不增。verve-electron 的 `PageLayout` 装上两个 provider。
+- **测试**：模块内的单元测试（空白、断点、块切分、`stops`、字体匹配、UTF-16 换算）与 `tests/inline.rs`（无头测量器，字宽 0.5em、ascent 0.8em）：空白各模式、`br`、`break-all`/`keep-all`/`break-word`/`anywhere`、`text-indent`、
+  `text-align`（含 RTL）、`justify`、`line-height`（数字/长度/百分比）、`vertical-align`（长度/middle/top）、原子行内盒的基线、`inline-block` 收缩适配、浮动按文字收缩、`<img>` 撑高行、
+  行内元素跨两行有两个盒子、行内元素的 padding/border、字距与 `text-transform`、`ellipsis`、`line-clamp`、匿名块、行内元素包着块、生成文本、`text_position_at`、`range_rects`，
+  以及脚本里 `document.createRange()` 选中跨行的 `<span>` 得 `getClientRects().length === 2`。
+
+**没做 / 已知偏差**：
+
+- **全部测试都没有跑过**（规则：我只跑 `cargo check`）。数字是按无头测量器的规则手算的，算错的话是测试的错，请把失败发回来。
+- **文字不绕浮动**：浮动在块级孩子之间时，匿名块按普通块排（taffy 的叶子无法知道浮动占了哪一段），文字会与浮动重叠。要做需要自己实现浮动的行盒避让（P33 或之后）。
+- **`position: relative` 的行内元素**仍不是后代绝对定位盒的包含块，也不按 `top/left` 偏移；原子行内盒的 `position: relative` 偏移也没有应用（原子盒的位置全由行给出）。
+- **列表标记**（`::marker`、`list-style`）没有；`::before`/`::after` 只当行内文字处理（`display` 不是 `inline` 的也当行内，`content: url()` 的图被忽略），没有自己的 `NodeId` 也没有盒子。
+- 字体特性（`font-feature-settings`、`font-variant-numeric: tabular-nums`）没读：`resolve` 的签名没有地方放，第二阶段随 GPUI 测量器一起定。`text-justify`、`text-align-last`、`hyphens`、`line-break`、`initial-letter`、双向算法（只有整块 RTL 的镜像）、竖排都没做。
+- `line-height: normal` 只用块与元素自己主字体的 `metrics`，回退字体（比如 CJK）更高时行高不随之增加（Chromium 会）；这要等真字体的第二阶段对照。
+- **`vertical-align: sub/super`** 的位移是我按 Blink 的实现记的（上一级字号的 `1/5 + 1` 向下、`1/3 + 1` 向上），**没有在 Electron 39.8.10 里观察过**，第二阶段用真字体探针核对；`middle` 用上一级的 x 高度的一半。
+- 文本装饰（`text-decoration`）的传播按 DOM 祖先估算（遇到原子行内盒、浮动、绝对定位就停），数据在 `TextPaint.decorations`，第一阶段不画。
+- 显示列表第一阶段没有变化：还没有 `Glyphs`/`Decoration`/行内背景边框/选区项；行内元素没有 `Hitbox`，点击行内元素（`<a>` 的文字）仍命中它所在的块——这两件事在第二阶段（`paint.rs` 的“P31”注释处接）。
+- 整树仍在每次文档变化时重排；有原子行内盒的页面至少布局两轮（第一轮还不知道块的内容宽度，第二轮按它重量原子盒），至多六轮；没有原子盒的页面一轮。原子盒的最小/最大内容宽度在没有百分比、里面没有原子盒时只量一次，之后各轮只在宽度变了才重新布局它。
+- `Fragment` 与契约的差别：契约里的 `InlineStart`/`InlineEnd` 换成了 `LineBox.spans: Vec<SpanBox>`（每个有内容的行内元素每行一个边框盒，带 `starts`/`ends`），因为它们的两个用处（`getClientRects`、画背景边框）要的都是一个矩形；
+  `Fragment::Text` 是 `TextFragment`（节点、UTF-8 范围、塑形结果、x、宽、基线、`TextPaint`、可放光标的位置 `stops`、`generated`、`select_none`），其中 `run.glyphs[i].byte` 是相对该片段自己文字起点的字节。`InlineLayout` 另有 `last_baseline` 与 `width`（最宽一行，量内容宽度用）。
+  `LayoutEngine` 另有 `inline_layout(node)`、`fragments()`、`register_font(...)`。
+
+**第二轮（评审与中央测试之后）**：
+
+- 中央测试的失败：`pre_breaks_only_at_newlines` 与 `characters_remember_the_byte_they_came_from` 是期望写错了（`Builder::read(Item::Break)` 把换行放进它结束的那一块；“a  é” 里 é 在字节 3），已改；
+  `capitalize` 只大写第一个词是真错（`after_letter` 在空白与换行处没有清零），已改；
+  `word_break_and_overflow_wrap…` 是代码错：taffy 对固定宽度或拉满的块用 `PerformLayout`，量度函数收到的是“已知宽度 = Definite(可用)”，旧代码取 `max(最小内容宽度, …)`，
+  `overflow-wrap: break-word` 的最小内容宽度是整个单词，所以块按单词那么宽排版、高度只有一行。现在固定宽度、百分比宽度与流内块（拉满）按可用宽度排版（`atoms.rs` 的 `fills_room`），收缩适配的盒仍不窄于最小内容宽度。
+- 评审的 MUST：M1 契约写全（`SpanBox`、`LineBox.spans`、`TextFragment`、`InlineLayout.{last_baseline,width}`、`LayoutEngine::{inline_layout,fragments,register_font}`、`Layout.fragments`、`RangeProvider`、`Boundary`、`fonts::{FontRegistry,Platform}`，P30 与 P02 的文档也补了）；
+  M2 一段文字在保留的换行处结束，范围与末尾光标位置取换行的字节（也用上了 `Segment::Newline` 的字节，M9）；M3 见上；M4 原子盒后的断行按它所在元素（最内层打开的行内元素，否则块）的 `white-space`/`word-break`；
+  M5 原子盒的百分比宽度、最小/最大宽度、内外边距按块的内容宽度先换成长度再单独布局（高度的百分比按 `auto`）；M6 没有基线的原子盒以下外边距边贴基线；M7 `Element.getClientRects` 先 `fresh`；
+  M8 见上；M10 一个片段的字形用按字节排序的下标二分找，不再每个片段扫全部字形。
+- SHOULD：`bolder`/`lighter` 走到写下它的祖先再算一步；继承来的百分比 `line-height` 按写下它的祖先的字号；`keep-all` 只把字母与数字（`is_alphanumeric`）连在一起；
+  `pre-wrap` 行尾的空格悬挂但留在片段里（有 stops，光标可以停在后面；以换行结束的行里不悬挂，除非溢出），整个片段的宽度含它，行本身不含；两端对齐的行上，行内元素的盒到两端对齐后的行尾；
+  被块拆开的行内元素只有第一段有起始边、最后一段有结束边（`Plan::Resume`/`Plan::Pause`）；空的行内元素有外边距/内边距/边框就占一行（`style::has_edges`）；折叠的 range 返回一个宽度为 0 的盒子（`caret_rect`）；
+  `Document::set_position_provider` 与 `Document::text_position_at`（`PageLayout` 装上）；UTF-16 换算与 `unquote` 用 verve-dom 导出的（`utf8_offset_to_utf16`、`utf16_offset_to_utf8`、`css::unquote`）；
+  `style::Len` 并入 `value::Dim`；`style::Reader` 的方法改名为 `text`/`text_or`，与 `props::Reader` 同名（两个结构体没有合并：一个能读生成盒的样式表、能找写下继承值的祖先，另一个要记 `unsupported` 与百分比 padding，合并要重写 props，留给 P33 之后）；
+  `FontRegistry::best` 按 CSS Fonts 4 的顺序匹配字重（400–500 先试不细于请求、不超过 500 的）；`ranks()` 每次布局只算一次（`OnceLock`）；原子盒的最小/最大内容宽度缓存（见上）；
+  新增文字很多的页面：`tests/electron/apps/text-2000/`（2000 段，在窗口里量帧时间）与 `tests/inline.rs` 里被 `#[ignore]` 的 `two_thousand_paragraphs_lay_out`（无头，release 下量布局时间）。
+- 仍然没做、也没在这一轮做的（第二阶段或之后）：
+  - `-webkit-line-clamp` 只在块直接有行内内容时数行，不会数穿块级孩子；也没有对被截掉的内容裁剪；
+  - `display: inline-table` 当块处理；
+  - `text-indent` 没有算进最小/最大内容宽度；
+  - 双向文字：RTL 里夹的 LTR 片段在跨元素时不重排（只有整块镜像）；
+  - `inline-flex` 的基线按最后一行算，Flexbox §8.5 要的是第一个 flex 项的基线；
+  - 影子宿主与 slot 里的文字：范围偏移按 `flat_children` 走，没有为 slot 的分配另做处理；
+  - 原子行内盒（`<img>`、`inline-block`）不出 range 的盒子（选中一个图片得不到矩形）；
+  - `document.caretPositionFromPoint`/`caretRangeFromPoint` 的绑定（钩子 `Document::text_position_at` 有了，对象的构造留给第二阶段）；
+  - `pre-wrap` 行尾悬挂空格的 range 盒子的宽度含空格——这一点没有在 Electron 39.8.10 里观察过，第二阶段用真字体核对；
+  - 两端对齐的行里，悬挂的空格不参与拉伸，但以空格以外的东西结束的 `Gap::Cjk` 行没有单独测试。
+
+**给第二阶段（接着做）**：
+
+- `paint.rs` 的 `Painter::context` 里 “P31” 注释处接：对每个有 `InlineLayout` 的盒（`BoxTree.inline[index]`，内容盒原点 = `Placed.rect` 加边框与内边距），按行出：行内元素的 `Box`（背景、边框）→ 选区 `Box` → `Glyphs`（按字形的 `font` 切段）→ `Decoration` → 原子盒照旧（`flow()` 里已画）。
+- 真测量器（`text_measurer.rs`）要给 `metrics` 取整，`shape` 要在回退字体处给字形标 `font`；`WindowTextSystem` 每若干次布局重建。
+- 通道（`FromRenderer::Font`、`FontsChanged`）接到 `LayoutEngine::register_font`，`document.fonts.ready`。
+- 选区：快照里的文档选区还没有（`Snapshot` 没带），`range_rects` 已可用，需要 verve-dom 把选区交出来。
+
+**要跑的测试**（一次一条）：
+
+```
+cargo test --locked -p verve-layout --lib
+cargo test --locked -p verve-layout --test inline
+cargo test --locked -p verve-layout --test behavior
+cargo test --locked -p verve-layout --test chromium
+cargo test --locked -p verve-dom --test layout_provider
+cargo test --locked -p verve-electron --test geometry
+cargo test --locked -p verve-electron --test headless
+cargo clippy --locked -p verve-layout -p verve-dom -p verve-electron --all-targets -- -D warnings
+```
+
