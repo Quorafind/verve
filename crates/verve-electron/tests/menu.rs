@@ -393,7 +393,7 @@ fn the_page_hears_an_accelerators_key_first_and_the_item_is_clicked_after() {
 fn a_page_that_prevents_the_keydown_keeps_the_item_from_being_clicked() {
     let script = WITH_ACCELERATOR.replace("BEFORE_INPUT", "").replace(
         "window.keys.push(e.key))",
-        "{ window.keys.push(e.key); if (e.key === 'p') e.preventDefault(); })",
+        "{ window.keys.push(e.key); if (e.key === \"p\") e.preventDefault(); })",
     );
     let script = script
         .replace("Ctrl+O", "Ctrl+P")

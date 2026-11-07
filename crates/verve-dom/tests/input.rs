@@ -328,6 +328,7 @@ fn the_focus_ring_follows_what_the_person_did_as_chromium_shows_it() {
             ),
             (Key::named("Escape"), true),
         ] {
+            page.document.focus(&mut page.runtime, None);
             click_at(&mut page, 20., 15.);
             page.document.key_down(&mut page.runtime, &key);
             let expected = format!("go:{shows}");
@@ -341,9 +342,7 @@ fn pointer_events_have_no_click_count_and_the_buttons_held_are_reported() {
     on_page(|| {
         let mut page = page();
         page.eval(
-            "{ const target = document.getElementById('go'); \
-             for (const kind of ['pointerdown', 'mousedown', 'pointermove', 'pointerup', 'mouseup', 'click']) \
-               target.addEventListener(kind, (e) => log.push(kind + ':' + e.detail + ':' + e.buttons)); }",
+            "globalThis.trace = []; { const target = document.getElementById('go'); \n             for (const kind of ['pointerdown', 'mousedown', 'pointermove', 'pointerup', 'mouseup', 'click', 'dblclick']) \n               target.addEventListener(kind, (e) => trace.push(kind + ':' + e.detail + ':' + e.buttons)); }",
         );
         // Onto the button first, so that what entering logs is not in the way.
         let over = Pointer {
@@ -352,7 +351,7 @@ fn pointer_events_have_no_click_count_and_the_buttons_held_are_reported() {
             ..Pointer::default()
         };
         page.document.pointer_move(&mut page.runtime, &over);
-        log(&mut page);
+        trace(&mut page);
         let down = Pointer {
             x: 20.,
             y: 15.,
@@ -367,8 +366,8 @@ fn pointer_events_have_no_click_count_and_the_buttons_held_are_reported() {
         page.document.pointer_up(&mut page.runtime, &up);
         // Observed in Electron 39.8.10: `detail` is 0 on pointer events and the count on mouse events.
         assert_eq!(
-            log(&mut page),
-            "pointerdown:0:1 mousedown:2:1 pointermove:0:1 pointerup:0:0 mouseup:2:0 click:2:0"
+            trace(&mut page),
+            "pointerdown:0:1 mousedown:2:1 pointermove:0:1 pointerup:0:0 mouseup:2:0 click:2:0 dblclick:2:0"
         );
     });
 }

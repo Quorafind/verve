@@ -196,9 +196,9 @@ pub(crate) fn person(
             ..
         } => document.pointer_leave(runtime),
         ToRendererInput::Key { down: true, key } => {
-            if document.key_down_unhandled(runtime, &key) {
-                return Some(FromRenderer::KeyUnhandled(key));
-            }
+            // The keydown is delivered here, once; the answer says whether the menu may have it.
+            let unhandled = document.key_down_unhandled(runtime, &key);
+            return unhandled.then_some(FromRenderer::KeyUnhandled(key));
         }
         ToRendererInput::Key { down: false, key } => {
             document.key_up(runtime, &key);
