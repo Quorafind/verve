@@ -582,4 +582,24 @@ mark { background-color: yellow; color: black }
 hr { border: 1px inset; margin-top: 0.5em; margin-bottom: 0.5em }
 button { cursor: default }
 center { text-align: center }
+input[type=hidden] { display: none }
+input, select, textarea, button { font-size: 13.3333px; font-family: Arial; font-weight: 400; font-style: normal; line-height: normal; color: #000; letter-spacing: normal; word-spacing: normal; text-align: start; text-indent: 0; text-transform: none; margin: 0 }
+input { padding: 1px 2px; border: 2px inset #767676; background-color: #fff; white-space: pre }
+input:not([type=image]):not([type=range]):not([type=checkbox]):not([type=radio]) { overflow: clip !important }
+input[type=search] { box-sizing: border-box }
+input[type=image] { padding: 0; border: 0 none }
+input[type=checkbox], input[type=radio] { box-sizing: border-box; margin: 3px 3px 3px 4px; padding: 0; border: 0 none; background-color: transparent }
+input[type=radio] { margin: 3px 3px 0 5px }
+input[type=range] { margin: 2px; padding: 0; border: 0 none; background-color: transparent }
+input[type=color] { box-sizing: border-box; padding: 1px 2px; border: 1px solid #767676; background-color: #f0f0f0 }
+input[type=date], input[type=time], input[type=datetime-local] { font-family: monospace; padding: 0 0 0 1px }
+input[type=file] { padding: 0; border: 0 none; background-color: transparent }
+input[type=button], input[type=submit], input[type=reset], button { box-sizing: border-box; padding: 1px 6px; border: 2px outset #767676; background-color: #f0f0f0; text-align: center; white-space: pre }
+textarea { padding: 2px; border: 1px solid #767676; background-color: #fff; font-family: monospace; overflow: auto }
+select { box-sizing: border-box; padding: 0; border: 1px solid #767676; background-color: #fff; white-space: pre }
+progress { box-sizing: border-box; width: 10em; height: 1em; vertical-align: -0.2em }
+meter { box-sizing: border-box; width: 5em; height: 1em; vertical-align: -0.2em }
+input:disabled, textarea:disabled, select:disabled { color: rgb(84, 84, 84); cursor: default }
+input:disabled, textarea:disabled { background-color: rgba(239, 239, 239, 0.3); border-color: rgba(118, 118, 118, 0.3) }
+button:disabled { color: rgba(16, 16, 16, 0.3); cursor: default }
 "#;
