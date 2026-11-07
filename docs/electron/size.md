@@ -407,3 +407,15 @@ The cost is P43's own code, with no new dependency:
 - the Hub's routing of REPL calls and replies, and the per-page console ring;
 - in the kernel, `inspect_value` and Node's `UnhandledPromiseRejectionWarning`/`PromiseRejectionHandledWarning` text, with V8's
   naming of a reason.
+
+## P24: live ranges and selection, contenteditable editing, input-method composition (phase 1)
+
+`electron/p24-editing` merged on `docs/electron-plan` after P43 phase 2: `cargo build --release -p verve-gpui --bin electron
+--features jit` is 37,295,616 bytes against 37,128,192 for P43 phase 2's merge, +167,424 bytes. It was measured at 6feb23de; the
+tested tip 539d4d10 adds only the doctype case of `deleteContents`. Alone on `124ca9af` it measured
++155,648. The budget is 450 KB for both phases. The cap (41,943,040) leaves 4,647,424 bytes.
+
+The cost is verve-dom's own code, with no new dependency (`unicode-segmentation` was already in the graph):
+- live ranges in the arena and their boundary rules, and `Range`/`StaticRange`/`Selection` on them;
+- the contenteditable key paths, `beforeinput` with target ranges, the undo history and `execCommand`;
+- composition in fields and editable regions, and the caret box for the candidate window.
