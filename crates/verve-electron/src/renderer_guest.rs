@@ -390,6 +390,8 @@ impl Guest for RendererGuest {
 
     fn publish(&mut self, applied: u64, ran: bool) -> Option<RendererView> {
         self.document.ensure_layout();
+        self.layout
+            .show_selection(&mut self.runtime, &self.document);
         let update = self.document.update();
         let changed = !update.changes.is_empty();
         let (list, new_list) = self.layout.list();

@@ -60,6 +60,13 @@ pub trait TextMeasurer: Send + Sync + 'static {
     fn metrics(&self, font: FontKey, size: f32) -> FontMetrics;
     /// `text` shaped in one font.
     fn shape(&self, text: &str, font: FontKey, size: f32) -> Arc<ShapedRun>;
+    /// Takes the bytes of a face a page declared (`FontFace`, `@font-face`) to draw with as
+    /// `family`; answers whether they were a font it can use. The faces are the page's: another
+    /// page does not see the name. A measurer with no fonts at all takes any bytes, as
+    /// [`HeadlessMeasurer`] does.
+    fn add_face(&self, _family: &str, _weight: f32, _italic: bool, _bytes: Arc<[u8]>) -> bool {
+        false
+    }
     /// The measurer a page uses: its own faces, over what the measurer shares among pages (the
     /// text system and its caches). A measurer with nothing per page is its own.
     fn for_page(self: Arc<Self>) -> Arc<dyn TextMeasurer>;
@@ -67,12 +74,6 @@ pub trait TextMeasurer: Send + Sync + 'static {
     /// `WindowTextSystem::finish_frame` once that is public). Called at the end of every
     /// [`crate::LayoutEngine::update`] that laid out again, and of every placing again.
     fn finish_layout(&self) {}
-    /// Takes the bytes of a face a page declared (`FontFace`, `@font-face`) to draw with as
-    /// `family`; answers whether they were a font it can use. What a measurer without fonts
-    /// takes nothing of.
-    fn add_face(&self, _family: &str, _weight: f32, _italic: bool, _bytes: Arc<[u8]>) -> bool {
-        false
-    }
 }
 
 /// The measurer for headless runs and tests: no fonts, so every character is half an em wide and
@@ -104,6 +105,11 @@ impl TextMeasurer for HeadlessMeasurer {
             x_height: size * 0.5,
             cap_height: size * 0.7,
         }
+    }
+
+    fn add_face(&self, _family: &str, _weight: f32, _italic: bool, _bytes: Arc<[u8]>) -> bool {
+        // No fonts to refuse a face: a headless page's fonts all load, and measure the same.
+        true
     }
 
     fn shape(&self, text: &str, font: FontKey, size: f32) -> Arc<ShapedRun> {
