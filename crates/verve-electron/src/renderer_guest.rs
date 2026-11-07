@@ -561,7 +561,11 @@ impl Guest for RendererGuest {
             update: Some(update),
             wants_frame: self.document.wants_frame(),
             cursor: None,
-            ime_rect: self.document.caret_rect(),
+            ime_rect: self
+                .document
+                .focused()
+                .and_then(|field| list.caret_of(field))
+                .or_else(|| self.document.caret_rect()),
             drop_effect: self.drop_effect,
             display_list: Some(list),
             images,

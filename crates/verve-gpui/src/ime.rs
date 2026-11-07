@@ -184,10 +184,11 @@ impl EntityInputHandler for ImeBridge {
             .is_some_and(|(snapshot, id)| {
                 snapshot.dom.get(id).and_then(|n| n.tag()) == Some("input")
             });
-        // GPUI puts the candidate window at the middle of the height it is given. For the whole
-        // box of a one-line field that is half way down the box, so the field's bottom edge is
-        // given instead, as a zero-height rect, which puts it under the field.
-        let (y, height) = if single_line {
+        // GPUI puts the candidate window at the middle of the height it is given. A caret has no
+        // width, and the window goes just under it: its bottom edge, as a zero-height rect. For
+        // the whole box of a one-line field (no caret to give) that is half way down the box, so
+        // the field's bottom edge is given the same way.
+        let (y, height) = if single_line || rect.width <= 0. {
             (rect.y + rect.height, 0.)
         } else {
             (rect.y, rect.height)

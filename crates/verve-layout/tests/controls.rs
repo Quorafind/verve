@@ -266,3 +266,21 @@ fn an_appearance_none_field_keeps_its_caret() {
         assert!(close(caret(&field, "a").x, 4. + 20. / 3.));
     });
 }
+
+#[test]
+fn the_caret_of_a_scrolled_textarea_moves_with_the_scroll() {
+    on_page(|| {
+        let mut field = page(
+            "<textarea id=t rows=2></textarea>",
+            "var t=document.getElementById('t'); t.value='1\\n2\\n3\\n4\\n5\\n6'; t.focus(); t.setSelectionRange(11,11);",
+        );
+        field.scroll_to("t", 0., 1000.);
+        let [_, y, _, height] = field.rect("t");
+        let node = field.node("t");
+        let in_window = field.list().caret_of(node).expect("a caret");
+        assert!(
+            in_window.y >= y && in_window.y + in_window.height <= y + height + 0.02,
+            "{in_window:?} in {y} {height}"
+        );
+    });
+}

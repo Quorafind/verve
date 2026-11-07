@@ -126,6 +126,27 @@ impl DisplayList {
         self.walk(offset_of).placed
     }
 
+    /// The caret of the text field `node` in the window, as wide as the caret is: where the
+    /// shell puts a candidate window. `None` when the field has none (it has no focus).
+    pub fn caret_of(&self, node: NodeId) -> Option<Rect> {
+        let is_it = |item: &PaintItem| matches!(item, PaintItem::Control { node: n, kind: ControlKind::TextField { caret: Some(_), .. }, .. } if *n == node);
+        if !self.items.iter().any(is_it) {
+            return None;
+        }
+        self.placed(&|_| None)
+            .into_iter()
+            .find_map(|placed| match placed.item {
+                PaintItem::Control {
+                    kind:
+                        ControlKind::TextField {
+                            caret: Some(caret), ..
+                        },
+                    ..
+                } if is_it(placed.item) => Some(placed.in_window(*caret)),
+                _ => None,
+            })
+    }
+
     /// [`DisplayList::placed`], and the table of the frames the items are in.
     fn walk(&self, offset_of: &dyn Fn(NodeId) -> Option<[f32; 2]>) -> Walk<'_> {
         let offsets: HashMap<NodeId, [f32; 2]> = self
