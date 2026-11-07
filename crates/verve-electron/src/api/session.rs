@@ -4,8 +4,8 @@
 //! A [`Session`] is the part of a partition every thread reads (the schemes its main process
 //! answers, its user agent); the object a script holds is made here, the first time the session
 //! is asked for, and is the same one thereafter. This file has what a session answers by itself —
-//! its user agent and where it keeps its files — the rest of Electron's session (cookies,
-//! `webRequest`, permissions, proxy, downloads) is added by the packages that carry it.
+//! its user agent, where it keeps its files, its `fetch` — the rest of Electron's session
+//! (cookies, `webRequest`, permissions, proxy, downloads) is added by the packages that carry it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -14,8 +14,8 @@ use std::sync::Arc;
 use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
 use verve::native::{self, ClassSpec, NewOnly, arg, js_text};
 
-use super::app;
 use super::define::{self, Args, Kind};
+use super::{app, net};
 use crate::hub::Session;
 use crate::msg::SessionId;
 
@@ -68,6 +68,8 @@ fn session_class(context: &mut Context) -> JsResult<JsObject> {
                 ("setUserAgent", 1, set_user_agent),
                 ("getStoragePath", 0, get_storage_path),
                 ("isPersistent", 0, is_persistent),
+                ("fetch", 1, fetch),
+                ("resolveHost", 1, resolve_host),
             ],
             new_only: Some(NewOnly::Native),
             ..ClassSpec::default()
@@ -110,6 +112,18 @@ fn get_storage_path(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsR
 
 fn is_persistent(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     Ok(session_of(this, context)?.is_persistent().into())
+}
+
+/// `session.fetch(input, init)`: `net.fetch` through this session.
+fn fetch(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let session = session_of(this, context)?;
+    net::fetch(context, &session, &arg(args, 0), &arg(args, 1))
+}
+
+fn resolve_host(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    session_of(this, context)?;
+    let host = Args::new(args).string(0, "host", context)?;
+    net::resolve_host(context, &host)
 }
 
 // ─── The module ─────────────────────────────────────────────────────────────────────────────

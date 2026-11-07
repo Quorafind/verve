@@ -16,11 +16,13 @@ pub(crate) mod dialog;
 pub(crate) mod input_events;
 pub(crate) mod ipc_main;
 pub(crate) mod ipc_renderer;
+pub(crate) mod main_net;
 pub(crate) mod message_port_main;
 pub(crate) mod mime;
 pub(crate) mod native_image;
 pub(crate) mod native_theme;
 pub(crate) mod navigation;
+pub(crate) mod net;
 pub(crate) mod notification;
 pub(crate) mod page_calls;
 pub(crate) mod page_events;
@@ -171,8 +173,9 @@ fn main_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
     exports.set(js_string!("BrowserWindow"), window, false, context)?;
     exports.set(js_string!("app"), app::make(context)?, false, context)?;
     ipc_main::add_exports(context, &exports)?;
-    let modules: [(&str, ModuleMaker); 14] = [
+    let modules: [(&str, ModuleMaker); 15] = [
         ("session", session::make),
+        ("net", net::make),
         ("webContents", web_contents::make_module),
         ("webFrameMain", web_frame_main::make_module),
         ("dialog", dialog::make),
