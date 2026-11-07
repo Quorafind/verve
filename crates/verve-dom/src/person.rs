@@ -45,6 +45,13 @@ fn motion(pointer: &Pointer, pointer_event: bool) -> Vec<(&'static str, JsValue)
     init
 }
 
+/// What a person did, which every trusted press, release and key says once, at its start.
+pub(crate) enum Act<'a> {
+    Press,
+    Release,
+    Key(&'a Key),
+}
+
 impl Document {
     /// The pointer moved over `target` (found by the caller): the elements it left and the ones it
     /// came onto hear their events, a `:hover` rule follows, and `target` hears `pointermove` and
@@ -135,9 +142,18 @@ impl Document {
         allowed
     }
 
-    /// A pointer was pressed: the next focus the page asks for shows its ring only on a field.
-    pub(crate) fn pointer_used(&self) {
-        self.state.borrow_mut().dom.last_input = LastInput::Pointer;
+    /// The one entry point of a person's input. It gives transient activation (a script may copy
+    /// and cut for a few seconds, [`Document::activate`]) and says which input the page last had
+    /// (the focus ring, [`LastInput`]): two pieces of state that mean different things, input
+    /// modality and a time-limited permission, with different filters (a lone modifier is not
+    /// keyboard use for the ring but is a press for activation).
+    pub(crate) fn person(&self, act: Act) {
+        self.activate();
+        match act {
+            Act::Press => self.state.borrow_mut().dom.last_input = LastInput::Pointer,
+            Act::Release => {}
+            Act::Key(key) => self.keyboard_used(key),
+        }
     }
 
     /// A pointer was pressed on nothing that takes the focus: Chromium then shows the ring of the
@@ -167,16 +183,28 @@ impl Document {
 
     /// [`Document::key_down`], and whether the page left the key alone: neither prevented it nor
     /// used it for something other than typing a character. A menu accelerator acts on such a key
-    /// (Electron 39.8.10: Ctrl+B in a plain input is the menu's, Ctrl+A in one is not).
+    /// (Electron 39.8.10: Ctrl+B in a plain input is the menu's, Ctrl+A in one is not). What the
+    /// default action did is read from the action itself ([`Document::acted`]): a copy or cut that
+    /// copied something, a paste, an undo that changed something, an editing key in a region. A
+    /// keydown that cancelled a drag (Escape) returns `false` from `key_down` and counts as handled.
     pub fn key_down_unhandled(&self, runtime: &mut verve::Runtime, key: &Key) -> bool {
         let target = self.key_target();
-        let acts = self.default_acts(target, key);
+        self.state.borrow_mut().key_acted = false;
         let allowed = self.key_down(runtime, key);
-        allowed && !acts
+        let acted = self.state.borrow().key_acted || self.default_acts(target, key);
+        allowed && !acted
     }
 
-    /// Whether the keydown's default action at `target` does something besides typing: moves the
-    /// caret, deletes, selects, submits, presses, moves the focus, or is the clipboard's.
+    /// The keydown's default action did something besides type: see [`Document::key_down_unhandled`].
+    pub(crate) fn acted(&self, did: bool) {
+        if did {
+            self.state.borrow_mut().key_acted = true;
+        }
+    }
+
+    /// Whether the keydown's default action at `target` does something besides typing that the
+    /// default action does not report itself: in a text field the caret's keys, delete, select all,
+    /// Enter, and Tab, which moves the focus; a press of a button or a link.
     fn default_acts(&self, target: NodeId, key: &Key) -> bool {
         let held = key.modifiers;
         let chord = held.ctrl || held.meta;
@@ -192,7 +220,6 @@ impl Document {
         match name {
             "Tab" => true,
             "a" | "A" if chord => true,
-            "c" | "C" | "x" | "X" | "v" | "V" if chord => typing,
             "Backspace" | "Delete" | "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown"
             | "Home" | "End" => typing,
             "Enter" => typing || self.is_button_like(target) || self.is_link(target),

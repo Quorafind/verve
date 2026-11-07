@@ -229,6 +229,8 @@ pub struct State {
     /// write the clipboard for a few seconds ([`State::has_activation`], set by
     /// `Document::activate`). Menu and keybinding commands do not need it.
     pub activation: Option<std::time::Instant>,
+    /// Whether the keydown being handled did something besides type (see `Document::key_down_unhandled`).
+    pub key_acted: bool,
     /// The rectangles of the lines an inline box is broken over, as the drawer reported them;
     /// `getClientRects` answers these over the one border box.
     pub fragments: HashMap<NodeId, Vec<crate::Rect>>,
@@ -313,6 +315,7 @@ impl State {
             hidden: false,
             window_focused: true,
             activation: None,
+            key_acted: false,
             fragments: HashMap::new(),
             history_at: 0,
             base_cache: Default::default(),

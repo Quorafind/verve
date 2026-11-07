@@ -85,6 +85,7 @@ pub use state::FrameClock;
 pub use storage::{FileStorage, StorageBackend};
 pub use world::{create_world, insert_stylesheet, remove_stylesheet};
 
+use person::Act;
 use state::{Shared, SheetOwner, SheetRecord, State, shared};
 use verve::native::js_text;
 
@@ -760,9 +761,8 @@ impl Document {
     }
 
     fn press_down(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) -> bool {
-        self.activate();
+        self.person(Act::Press);
         self.hover_node(runtime, Some(target), pointer);
-        self.pointer_used();
         let held = match pointer.button {
             1 => 4,
             2 => 2,
@@ -845,7 +845,7 @@ impl Document {
     }
 
     fn release(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) -> bool {
-        self.activate();
+        self.person(Act::Release);
         if let Some(dropped) = self.drag_released(runtime, pointer) {
             return dropped;
         }
@@ -980,14 +980,13 @@ impl Document {
     /// `input`), Backspace and Delete, the caret's keys, Enter submitting a form or pressing a
     /// button, Tab moving the focus. Answers whether nothing prevented it.
     pub fn key_down(&self, runtime: &mut verve::Runtime, key: &Key) -> bool {
-        self.activate();
+        self.person(Act::Key(key));
         if let Some(allowed) = self.composing_key(runtime, key, true) {
             return allowed;
         }
         if key.key == "Escape" && self.drag_cancel(runtime) {
             return false;
         }
-        self.keyboard_used(key);
         let target = self.key_target();
         let allowed = self.fire(
             runtime,
@@ -1072,6 +1071,7 @@ impl Document {
             && let Some(host) = self.editable_host(target)
             && self.edit_key(runtime, host, key)
         {
+            self.acted(key.key.chars().count() != 1 || key.modifiers.ctrl || key.modifiers.meta);
             return;
         }
         let chord = key.modifiers.ctrl || key.modifiers.meta;
@@ -1082,13 +1082,15 @@ impl Document {
             let lower = key.key.to_ascii_lowercase();
             let shift = key.modifiers.shift;
             if (lower == "c" || lower == "x") && !shift {
-                self.clipboard_command(runtime, |cx| {
+                let done = self.clipboard_command(runtime, |cx| {
                     clipboard::copy_or_cut(cx, lower == "x", true)
                 });
+                self.acted(done);
                 return;
             }
             if lower == "v" {
                 self.request_paste(runtime, shift);
+                self.acted(true);
                 return;
             }
         }

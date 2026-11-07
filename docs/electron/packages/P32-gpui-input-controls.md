@@ -265,6 +265,14 @@ pub enum ControlKind {
   - 把 `Page.window` 之类死字段、`RendererView.cursor` 字段本身删掉：字段保留（避免动 P24 也在改的 `RendererView`），文档里标为不再使用。
   - GPUI `test-support`：阶段 2。
 
+**第三轮（与 P24 阶段 2 合并）**
+
+- 壳给了目标的指针路径也走 P24 的钩子：`pointer_move_on` 先问 `drag_moved`（拖动中只有拖动听到移动），移动后调 `drag_may_start`（鼠标选区与拖动起点）；`wheel_on`、`pointer_down_on`/`pointer_up_on` 本来就经过 `press_down`/`release`。
+- `Document::person(Act)` 是人的输入的唯一入口：给瞬时激活（`activate`，P24）并记录 `LastInput`（焦点环，P32）；两者是不同的状态（输入方式与限时的许可），过滤规则也不同（单独的修饰键不算键盘使用，但算一次按下）。`press_down`、`release`、`key_down` 开头各调一次。
+- `key_down_unhandled` 现在看默认动作实际做了什么（`Document::acted`）：复制/剪切真的复制了东西、粘贴、真的撤销了什么（没有可撤销的 Ctrl+Z 仍是菜单的）、可编辑区里的编辑键；Escape 取消拖动时 `key_down` 返回 `false`，算已处理。文本框里的方向键、删除、Enter、Tab 仍按静态规则。
+- `pointer_init(pointer, buttons)` 只用于鼠标类事件（`detail` 是点击数）；P24 的拖动事件（`dragstart` 等）改用 `person::fields(pointer, buttons, 0)`：`detail` 为 0、`buttons` 取指针此刻按住的键（`dragstart` 为 1）。拖动事件的 `detail` 没有在 Chromium 上观察，按其他非点击事件取 0。
+- `lib.rs` 1571 行（上限 1661）。
+
 **给 GPUI 测试平台的发现**：GPUI 的 `test-support` 特性有 `TestAppContext`/`VisualTestContext`（`simulate_event`、`simulate_keystrokes`、`simulate_input`、
 `simulate_mouse_down` 等），在内存里驱动窗口，不碰桌面。把 `DomView` 放进测试窗口、注入 `MouseDownEvent` 和输入法调用，就能自动测 `ImeBridge` 和
 `KeyRoute`（现在这两个只能靠手测）。代价：给 `verve-gpui` 的 dev-dependencies 加 `gpui` 的 `test-support`（拉进 `collections`/`http_client` 的测试支持，编译时间变长），

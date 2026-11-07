@@ -488,3 +488,27 @@ fn trace(page: &mut Page) -> String {
     page.eval("trace.length = 0");
     heard
 }
+
+#[test]
+fn a_paste_and_an_undo_that_changed_something_are_handled_and_one_with_nothing_to_undo_is_not() {
+    on_page(|| {
+        let mut page = page();
+        let name = page.find("#name");
+        page.document.focus(&mut page.runtime, Some(name));
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        // Ctrl+V asks for the clipboard: the keydown's default action is the paste.
+        let pasted = page
+            .document
+            .key_down_unhandled(&mut page.runtime, &chord("v", ctrl));
+        assert!(!pasted);
+        // Ctrl+Z in an input with nothing to undo does nothing: the menu's (observed in
+        // Electron 39.8.10, menu-order probes).
+        let undone = page
+            .document
+            .key_down_unhandled(&mut page.runtime, &chord("z", ctrl));
+        assert!(undone);
+    });
+}
