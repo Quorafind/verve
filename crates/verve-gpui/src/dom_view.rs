@@ -12,6 +12,7 @@ use verve_layout::DisplayList;
 
 use crate::app_region::{self, AppRegion};
 use crate::dom_element::DomElement;
+use crate::pictures::Pictures;
 use crate::plan::{self, Plan};
 
 /// What is called as each frame of a window is built.
@@ -23,6 +24,7 @@ pub(crate) struct DomState {
     pub list: Option<Arc<DisplayList>>,
     /// What the list comes to, for the list it was made for.
     plan: Option<(Arc<DisplayList>, Rc<Plan>)>,
+    pub pictures: Pictures,
 }
 
 impl DomState {

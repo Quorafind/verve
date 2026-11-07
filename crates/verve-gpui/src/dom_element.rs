@@ -3,15 +3,16 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     App, Background, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Edges, Element,
     ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
-    LayoutId, Pixels, Style, Window, linear_color_stop, linear_gradient, point, px, size,
-    transparent_black,
+    LayoutId, Pixels, RenderImage, Style, Window, linear_color_stop, linear_gradient, point, px,
+    size, transparent_black,
 };
 use verve_dom::Rect;
-use verve_layout::{Cursor, Rgba};
+use verve_layout::{Cursor, DisplayList, ImageKey, Rgba};
 
 use crate::dom_view::DomState;
 use crate::plan::{Command, Paint, Shape};
@@ -102,17 +103,37 @@ impl Element for DomElement {
         for (hitbox, style) in hitboxes.iter() {
             window.set_cursor_style(*style, hitbox);
         }
-        let plan = self.state.borrow_mut().plan();
-        if let Some(plan) = plan {
+        let (list, plan) = {
+            let mut state = self.state.borrow_mut();
+            (state.list.clone(), state.plan())
+        };
+        if let (Some(list), Some(plan)) = (list, plan) {
+            self.give_back_pictures(window);
             for command in &plan.commands {
-                self.paint_command(command, bounds.origin, window);
+                self.paint_command(command, &list, bounds.origin, window);
             }
+            self.state.borrow_mut().pictures.end_frame();
         }
     }
 }
 
 impl DomElement {
-    fn paint_command(&self, command: &Command, origin: gpui::Point<Pixels>, window: &mut Window) {
+    /// Gives the pictures that no list asks for any more back to GPUI's atlas.
+    fn give_back_pictures(&self, window: &mut Window) {
+        let retired = self.state.borrow_mut().pictures.take_retired();
+        for picture in retired {
+            // An error is a picture GPUI never had.
+            let _ = window.drop_image(picture);
+        }
+    }
+
+    fn paint_command(
+        &self,
+        command: &Command,
+        list: &DisplayList,
+        origin: gpui::Point<Pixels>,
+        window: &mut Window,
+    ) {
         let mask = command.clip.map(|clip| ContentMask {
             bounds: in_window(origin, clip),
         });
@@ -121,7 +142,7 @@ impl DomElement {
                 bounds,
                 radii,
                 paint,
-            } => self.fill(*bounds, *radii, paint, origin, window),
+            } => self.fill(*bounds, *radii, paint, list, origin, window),
             Shape::Border {
                 bounds,
                 radii,
@@ -180,6 +201,7 @@ impl DomElement {
         bounds: Rect,
         radii: [f32; 4],
         paint: &Paint,
+        list: &DisplayList,
         origin: gpui::Point<Pixels>,
         window: &mut Window,
     ) {
@@ -191,12 +213,31 @@ impl DomElement {
                 linear_color_stop(hsla(from.0), from.1),
                 linear_color_stop(hsla(to.0), to.1),
             ),
-            // A gradient the renderer asked the shell to rasterise is not drawn yet.
-            Paint::Raster { .. } => return,
+            Paint::Raster { key, alpha } => {
+                if let Some(picture) = self.picture(*key, *alpha, list, window) {
+                    // An error is a picture GPUI could not take; the box stays as it is.
+                    let _ = window.paint_image(at, at, corners(radii), picture, 0, false);
+                }
+                return;
+            }
         };
         let mut quad = gpui::fill(at, background);
         quad.corner_radii = corners(radii);
         window.paint_quad(quad);
+    }
+
+    /// The picture of a gradient the renderer asked the shell to rasterise, for the window's scale
+    /// and the opacity it is shown with.
+    fn picture(
+        &self,
+        key: ImageKey,
+        alpha: f32,
+        list: &DisplayList,
+        window: &Window,
+    ) -> Option<Arc<RenderImage>> {
+        let spec = list.rasters.iter().find(|spec| spec.key == key)?;
+        let scale = window.scale_factor().ceil().max(1.);
+        self.state.borrow_mut().pictures.get(spec, scale, alpha)
     }
 }
 

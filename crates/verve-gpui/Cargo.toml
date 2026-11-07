@@ -22,6 +22,8 @@ verve-electron = { path = "../verve-electron" }
 verve-dom = { path = "../verve-dom" }
 # The boxes of a page and the display list a window draws.
 verve-layout = { path = "../verve-layout" }
+# The pictures GPUI paints (a rasterised gradient is one): the version GPUI itself uses.
+image = { workspace = true }
 # The system's handle of a GPUI window, for the parts of a window GPUI does not do.
 raw-window-handle = "0.6"
 # `file://` addresses are decoded the way the rest of the app does.
