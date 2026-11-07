@@ -24,6 +24,7 @@ use crate::{ElectronOptions, MainGuest};
 mod records;
 mod renderers;
 mod shell;
+mod text;
 mod windows;
 
 pub use records::ConsoleLine;
@@ -97,6 +98,10 @@ pub struct Hub {
     /// process is up is still there when `screen` is first asked.
     displays: Mutex<Vec<Display>>,
     theme: Mutex<Theme>,
+    /// What the pages' text is laid out with: the shell's, once it is up.
+    measurer: Mutex<Option<Arc<dyn verve_layout::TextMeasurer>>>,
+    /// A page has been given its measurer (whichever it was).
+    measurer_taken: AtomicBool,
 }
 
 impl Hub {
@@ -122,6 +127,8 @@ impl Hub {
             observer: Mutex::new(None),
             displays: Mutex::new(Vec::new()),
             theme: Mutex::new(theme),
+            measurer: Mutex::new(None),
+            measurer_taken: AtomicBool::new(false),
         })
     }
 

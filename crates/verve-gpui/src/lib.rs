@@ -16,6 +16,7 @@ mod capture;
 mod dialog;
 mod dom_element;
 mod dom_view;
+mod font_name;
 mod frame_stats;
 mod menu;
 mod native;
@@ -27,6 +28,7 @@ mod report;
 pub mod screenshot;
 mod shell;
 mod shortcut;
+mod text_measurer;
 mod tray;
 mod wheel;
 mod window;
@@ -43,6 +45,7 @@ use verve_electron::ids::WindowId;
 use verve_electron::msg::{AppEvent, ToShell};
 
 pub use app_region::{AppRegion, drag_area};
+pub use text_measurer::GpuiMeasurer;
 
 use crate::capture::Capture;
 use crate::shell::{Inbox, Item, Shell};
@@ -135,6 +138,8 @@ fn run_inner(
         }
     });
     application.run(move |cx: &mut App| {
+        // Pages are laid out with GPUI's own text system, whose font ids the windows draw with.
+        app.set_text_measurer(Arc::new(GpuiMeasurer::new(Arc::clone(cx.text_system()))));
         let mut shell = Shell::new(Arc::clone(&app), inbox.clone());
         if let Some(path) = screenshot {
             shell.capture(Capture::new(path, capture_failed));

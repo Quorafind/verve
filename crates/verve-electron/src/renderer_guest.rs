@@ -82,7 +82,7 @@ impl RendererGuest {
         )
         .expect("a page's document installs");
         preload::prepare(&mut runtime, &document, &prefs, &outbox, hub.overlay());
-        let layout = PageLayout::install(&document);
+        let layout = PageLayout::install(&document, hub.text_measurer().for_page());
         Self {
             runtime,
             document,

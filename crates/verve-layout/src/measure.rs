@@ -67,6 +67,12 @@ pub trait TextMeasurer: Send + Sync + 'static {
     /// `WindowTextSystem::finish_frame` once that is public). Called at the end of every
     /// [`crate::LayoutEngine::update`] that laid out again, and of every placing again.
     fn finish_layout(&self) {}
+    /// Takes the bytes of a face a page declared (`FontFace`, `@font-face`) to draw with as
+    /// `family`; answers whether they were a font it can use. What a measurer without fonts
+    /// takes nothing of.
+    fn add_face(&self, _family: &str, _weight: f32, _italic: bool, _bytes: Arc<[u8]>) -> bool {
+        false
+    }
 }
 
 /// The measurer for headless runs and tests: no fonts, so every character is half an em wide and

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use verve::Runtime;
 use verve_dom::{Document, Layout, Request, ScrollRequest};
-use verve_layout::{DisplayList, HeadlessMeasurer, LayoutEngine};
+use verve_layout::{DisplayList, LayoutEngine, TextMeasurer};
 
 /// The layout of one page.
 pub(crate) struct PageLayout {
@@ -21,10 +21,10 @@ pub(crate) struct PageLayout {
 }
 
 impl PageLayout {
-    /// Lays `document` out from now on, measuring text with the headless measurer: P31 brings
-    /// the shell's real one.
-    pub(crate) fn install(document: &Document) -> Self {
-        let engine = Rc::new(RefCell::new(LayoutEngine::new(Arc::new(HeadlessMeasurer))));
+    /// Lays `document` out from now on, measuring text with `measurer`: the shell's over GPUI's
+    /// text system, or the headless one.
+    pub(crate) fn install(document: &Document, measurer: Arc<dyn TextMeasurer>) -> Self {
+        let engine = Rc::new(RefCell::new(LayoutEngine::new(measurer)));
         let provider = Rc::clone(&engine);
         document.set_layout_provider(Some(Box::new(move |update| {
             let mut engine = provider.borrow_mut();
