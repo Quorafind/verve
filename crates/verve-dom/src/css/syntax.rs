@@ -117,7 +117,7 @@ pub(super) fn matching_parenthesis(text: &str, open: usize) -> Option<usize> {
 
 /// A quoted string with its escapes read: `"\f101"` is the character of that code point, and
 /// `"\n"` is an `n`. `None` for text that is not quoted.
-pub(super) fn unquote(text: &str) -> Option<String> {
+pub fn unquote(text: &str) -> Option<String> {
     let text = text.trim();
     let quote = text.chars().next().filter(|c| matches!(c, '"' | '\''))?;
     let inner = text.strip_prefix(quote)?.strip_suffix(quote)?;

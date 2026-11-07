@@ -57,7 +57,7 @@ use boa_engine::{Context, JsResult, JsValue, js_string};
 
 pub use css::{Computed, Environment, Style};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
-pub use field::Draft;
+pub use field::{Draft, utf8_offset_to_utf16, utf16_offset_to_utf8};
 pub use input::{Key, Modifiers, Pointer};
 pub use load::{Destination, LoadError, LoadEvent, LoadRequest, LoadResult, Loader, Ready};
 pub use media::{

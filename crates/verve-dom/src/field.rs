@@ -441,7 +441,7 @@ impl From<String> for Draft {
 }
 
 /// UTF-8 byte offset to UTF-16 code unit offset, clamped onto the text and onto a boundary.
-fn utf8_offset_to_utf16(text: &str, offset: usize) -> usize {
+pub fn utf8_offset_to_utf16(text: &str, offset: usize) -> usize {
     let mut offset = offset.min(text.len());
     while !text.is_char_boundary(offset) {
         offset -= 1;
@@ -450,7 +450,7 @@ fn utf8_offset_to_utf16(text: &str, offset: usize) -> usize {
 }
 
 /// The way back. An offset past the end lands on the end.
-fn utf16_offset_to_utf8(text: &str, offset: usize) -> usize {
+pub fn utf16_offset_to_utf8(text: &str, offset: usize) -> usize {
     let mut utf16 = 0;
     for (index, character) in text.char_indices() {
         if utf16 >= offset {
