@@ -386,19 +386,19 @@ pub enum ControlKind {
 - **契约**（见上“第二阶段契约变更”）：`ControlKind`/`SelectOption`/`DateKind`/`ControlLook`、`ToRendererInput::Choose`、回显与文件拖入的映射。
   与草案不同处：文字不进 `ControlKind`（布局把字段的值当盒子里的生成文字排版），几何由布局给出；`PaintItem::Control` 另带 `look: ControlLook { accent, color, disabled }`
   （契约文字里写的是“`disabled` 不进 `ControlKind`”，实现把它放进 `look`，因为壳画勾、滑块时要降低对比）。
-- **尺寸**：Electron 39.8.10 的实测在 `SCRATCH\p32b\size-1.json`/`size-1.25.json`（探针 `p32b\size`），固定尺寸进 `USER_AGENT_SHEET`，随字体和属性变的在 `verve-layout/src/controls.rs`
+- **尺寸**：Electron 39.8.10 的实测在 `SCRATCH\p32b\size-1.json`/`size-1.25.json`（探针 `p32b\size`），边距、边框、字体进 `USER_AGENT_SHEET`，尺寸（复选框、range、date 等也是）随字体和属性变的在 `verve-layout/src/controls.rs`
   （`size`、`cols`、`rows`、`<select>` 最宽的选项）。文字字段的字符宽 7px、加 29px、行高 15px 都是 13.3333px Arial 下的测得值，按字号等比。
   DPR 1.25 下文字相关的尺寸会差一点（Chromium 对物理像素取整），没有复现。
 - **绘制**：`verve-gpui/src/controls.rs` 把 `Control` 降为 `Fill`/`Border`/新的 `Shape::Caret`，窗口和软件绘制器（`screenshot.rs`）用同一份：勾、箭头、滑块、进度条、仪表（颜色按 HTML 标准）、
-  色块、选区（`::selection` 同色）、组字下划线（1px，字段文字色，`<input>` 和 `<textarea>` 都有）、光标（530 ms 闪烁，移动后先常亮；失焦时布局不给光标，所以停止）。
+  色块、选区（固定的高亮色，和页面选区同值；`::selection` 没有支持）、组字下划线（1px，字段文字色，`<input>` 和 `<textarea>` 都有）、光标（530 ms 闪烁，移动后先常亮；失焦时布局不给光标，所以停止）。
 - **候选框**：`RendererView.ime_rect` 现在是焦点字段的光标矩形（`DisplayList::caret_of`，经滚动帧换算），`bounds_for_range` 把候选窗放在光标正下方
   （单行输入框和 `<textarea>` 一样，水平跟着光标）。
 - **字段撤销**：`field_undo.rs`：每个字段一份历史（上限 1000），连续输入合成一步（在上一个字符停下的地方继续打），删除和选区替换单独成步；Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y，
   发 `beforeinput`/`input`（`historyUndo`/`historyRedo`）；有可撤销的才算“已处理”（没有则仍交给菜单，与 `keys2` 的观察一致）。
-- **`Choose`**：渲染器收到后调 `Document::choose`（`input` 然后 `change`；值没变什么都不发）。
+- **`Choose`**：带选项的序号（两个选项可以同值）；渲染器收到后调 `Document::choose_option`（`input` 然后 `change`；禁用的、已选中的什么都不发）。
 - 测试：`cargo test -p verve-electron --test forms`（复选框点击、`<select>` 选择、字段撤销、`forms` 夹具的几何）；`field_undo`、`controls`（两处）的单测。
 - 夹具 `tests/electron/apps/forms/`：`expected-geometry.json` 和 `expected-chromium.png` 取自 Electron 39.8.10（隐藏窗口，临时 profile，480×270，DPR 1）。几何逐项比较：
-  固定尺寸的控件精确（0.01px），随文字变的（按钮、`<select>`、日期、文件、`<textarea>`）容差 0.75px。
+  比较见第二轮：随文字变的控件和孪生 `<span>` 比差值，其余精确到 0.02px，y 用每行的零尺寸标记量。
 
 **没做（留给第二部分）**
 
@@ -410,11 +410,55 @@ pub enum ControlKind {
 - 步骤 8：文字上的 I-beam（先观察 Chromium）、三份“能输入文字”判断合并、GPUI `test-support` 测试文件；
 - 步骤 9 的像素比较（夹具和 `expected-chromium.png` 在，比较没写）；
 - 文字字段的横向/纵向滚动（光标出界时不会滚进来：`<input>` 是 `overflow:hidden`，长文字的光标矩形在盒外）；
-- `type=file` 和 `date` 的内部文字（“Choose File / No file chosen”、日历图标）：布局没有为它们生成文字；
+- `type=file` 的内部文字（“Choose File / No file chosen”）和日历图标：布局没有为它们生成文字（`date` 显示 `mm/dd/yyyy` 或值）；
 - `<select multiple>`/`size>1` 的列表框不画选项（只画一个空盒子）；`<button>`/`submit` 用 UA 的 `2px outset` 边框，不是 Chromium 的圆角平面外观；
 - “作者给了背景或边框就按普通盒子画”：只实现了 `appearance: none`；
-- 组字时的回显、提交 `Draft` 的撤销（`edit_field` 和输入法提交不进字段历史，只有按键输入、粘贴经 `insert_into` 的进了）；
-- 暗色：UA 样式表有 `prefers-color-scheme: dark` 的字段/按钮颜色，复选框等画法没有分深浅。
+- 组字时的回显；
+- 暗色：`color-scheme` 没有支持。Electron 39.8.10 里没有 `color-scheme` 时控件在暗色系统主题下仍是白底黑字，所以 UA 样式表**没有**暗色规则（第一部分误加了，已删）。
+
+### 阶段 2 第一部分，第二轮修正（审查的 9 条 MUST、集中测试的两项和多数 SHOULD）
+
+**做了**
+
+- **尺寸模型（MUST 3）**：`adjust` 不再把固有尺寸写进 `width`/`height`。在 flex/grid 容器里样式保持 `auto`，固有内容尺寸放在 `BoxProps.intrinsic`，由该盒的 `Ifc::measure`
+  当作内容尺寸给 taffy，所以输入框、textarea、select、按钮（和复选框）又会拉伸，在窄的行里仍保持自己的宽度；在普通流里仍写进样式。有固有尺寸的控件即使没有文字也持有一个 `Ifc`。
+  固定尺寸（复选框 13、range 129×16、color、date/time/file 随字号）从 UA 样式表移到 `adjust`；`select` 的 19px 高、列表行（行高 + 2）、`<textarea>` 的列宽（"0" 的宽）也在这里；`line-height` 进高度（`line-height: 30px` 的输入框 36 高）；`appearance: none` 的复选框是 0 × 0。
+- **光标与选区的框架（MUST 5）**：`TextField` 的 `Control` 项现在从 `inline_content` 里字段自己的裁剪与滚动帧内发出（`Painter::text_field`），所以长值的光标被裁剪，滚动后的 `<textarea>` 里光标和 `ime_rect` 跟着滚动。
+  选区改为布局画的 `Box`（`Painter::selection`，在文字之下），`TextField` 不再带 `selection`；没有焦点的字段不画选区；有选区时不给光标；窗口不活动时不闪烁；下一次翻转安排在 `BLINK − 已过 % BLINK`。
+- **按字节的位置（MUST 6）**：生成文字的 `Stop.byte` 现在是生成串里的字节（原来是 0），`Segment` 的末尾字节也补上了；字段用 `inline/query.rs` 的 `x_at`（现为 `pub(crate)`）找光标、选区和组字的横坐标。
+  密码框把值的第 n 个字符映射到第 3n 个字节（`•` 三字节）。`\n` 之后的光标在下一行（空行，或结尾换行下面的一行）。
+- **基线（MUST 7）**：`BoxProps.baseline`：文本输入、按钮、select、date 取文字基线（即使 `overflow: hidden` 裁剪），空字段取文字放在控件高度正中的基线；复选框、单选框、range 取边框盒的下沿。
+- **`appearance: none`（MUST 8）**：文本字段总是出 `TextField`。契约文字已恢复。
+- **暗色（MUST 4）**：删去 UA 样式表里的暗色块；`color-scheme` 未支持。
+- **UA 样式表**：`line-height`/`font-weight`/`font-style`/`text-transform`/`text-indent`/`word-spacing` 在控件上复位；`input[type=image]` 无 padding 和边框；按钮背景 `#f0f0f0`；禁用的输入框和 textarea 用 Chromium 的颜色。
+- **撤销（MUST 9）**：(a) 脚本改过值之后（字段文字与历史末尾的文字不同）历史作废，之后键入从新值开始；(b) 输入法提交记为一步，第一次提交并入之前的键入，之后每次提交单独一步（"ab"、加、载：Ctrl+Z → "ab加" → ""）。
+  另：连续的退格/Delete 合成一步；字段被释放时历史随 `forget_nodes` 清掉。
+- **第二部分的接口**：`Choose` 带选项序号；`SelectOption` 不含隐藏选项，`<optgroup disabled>` 里的选项禁用；`Document::choose_option`（原来的 `choose` 按值，留给 React 测试）。
+- **夹具（MUST 1、2）**：用 `appendSwitch('lang', 'en-US')` 重录 `expected-geometry.json` 和 PNG（隐藏窗口，Electron 39.8.10）；测试用孪生 `<span>`（按钮、submit、select、列表框、textarea）比较“控件 − 孪生”，其余按字号定的尺寸精确比较（1/64 容差），y 在 2px 内。
+  观察到：submit 57.5 × 21，textarea 168 × 36，date 116.33 × 21.33，time 98 × 24，file 253 × 21（zh-CN 下 submit 是“提交”）。
+- **中心的两项**：选区跨两行的单测改成 `tests/controls.rs` 里的布局测试（第二行 13.33 宽是对的：两个字符，旧期望 7 是错的）；两处 clippy（`is_multiple_of`，`Caret` 分支拆成 `caret`）。
+
+**没做 / 偏差**（原因）
+
+- **文本字段的宽度按字体算**（SHOULD）：仍是 13.3333px Arial 的常量按字号等比。Chromium 的 `20·round(avg) + round(max) − round(avg)` 要字体的平均与最大字符宽，`TextMeasurer` 没有；Arial 16px 的 Verve 值 211 对 203，等宽字体 177 对 163。需要给 `TextMeasurer` 加这两个度量，另做。
+- **文字在高输入框、select、按钮里垂直居中**（SHOULD）：没做（行仍在顶部）。
+- **按钮背景/边框的计算值**：背景改成 `rgb(240,240,240)`，边框颜色仍是 `#767676`（Chromium 的计算值是黑色，但它是主题绘制的；Verve 按 CSS 画边框，黑色的 outset 边框会明显变丑）。color 输入的边框同。
+- **`webContents.undo()`、Undo 菜单角色、`execCommand('undo')` 触及焦点字段**：没做（它们走 `editing.rs` 的 `travel`，只服务 contenteditable）。
+- **撤销历史存差量**（SHOULD）：没做，每步仍是整份 `Draft`（上限 1000）。
+- **与 Chromium 有意的差别**：Chromium 的历史是每个文档一份（在字段 B 或 body 上 Ctrl+Z 会撤销 A 并把焦点移回 A）；这里每个字段一份，Ctrl+Z 只作用于有焦点的字段。
+- **`<fieldset disabled>`、`indeterminate` 的绘制、下划线用 `caret-color`**：没做。`look.color` 仍先取 `caret-color`。
+- **文本字段宽度、监测的 20px 下的 select 高**：select 单行高在 20px 下 Verve 给 27，Chromium 26（行高 + 4 的公式差 1）。
+- **提交的历史**：把 `ControlLook.color` 并入 3010fb3d8 的修正单（fixup）已做，但“把 Choose 和撤销的测试移进各自的提交”没做（它们在 309fddcae 里一并加入）；`forms.rs` 复制自 `input.rs` 的 `Page`/`launch`/`send`/`key`/`eval` 没有移到 `tests/support`。
+
+**第四轮补充**（审查 2 的 MUST A–D 和中心的两项）
+
+- date/time/datetime-local 的尺寸是**内容盒**：边框盒 116.33 × 21.33 减去 padding 1 和边框 4 → 内容 `10 + 7.6·字号` × `2 + 1.15·字号`（time `6.975·字号` × `1.5·字号`，datetime-local `13.75·字号`）。
+- 基线：color 在边框盒下沿上 6px，`<select multiple>`/`size>1` 在最后一行（下沿上 3px），file 取文字基线（`BaselineRule::FromBottom` 和 `Text`）。
+- 光标跨换行：取最后一个在光标之前结束的文字片段，再按其间的 `\n` 个数往下数行（空行、结尾换行下面的一行）。
+- 字段文字取字段自己的字体、颜色、字距、大小写、`line-height`、`white-space`（生成文字只读交给它的样式）；单行字段总是 `pre`，`<textarea>` 的 `normal` 当 `pre-wrap`、`nowrap` 当 `pre`。
+- flex/grid 里的字段 `min-width/min-height: auto` = 固有尺寸，所以窄行里不收缩；`<input>` 的 `overflow` 为 `clip !important`；`<textarea>` 列数取 ceil。
+- 夹具 y 用每行的零尺寸标记（它的上沿是基线）比较控件到标记的距离。
+- 撤销：Ctrl+Backspace 单独成步。**没做**：脚本把值改回同样文字时清空历史（要节点上的值版本号，现在只比文字）；`choose_option` 之外的 `Choose` 路径无变化。
 
 **手测清单（第二部分做完后一起）**：复选框切换；`<select>` 鼠标和键盘；`range` 拖动；Tab 在控件间移动并出现焦点环；文件输入打开系统对话框；
 微软拼音在 `<input>` 和 `<textarea>` 里带下划线、候选框在光标下；字段里 Ctrl+Z；页面忙时输入。
