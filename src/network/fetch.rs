@@ -20,7 +20,9 @@
 //! network.
 //!
 //! A realm whose host set a [`BrowserNet`](crate::browser_net::BrowserNet) has each request shown
-//! to it, which may answer the address itself. Without one nothing here changes.
+//! to it: it may answer the address itself, change the request before it is sent or the
+//! response head when it is back, and is told how the request ends. Without one nothing here
+//! changes.
 
 use boa_engine::{
     Context, JsData, JsError, JsObject, JsResult, JsString, JsValue,
@@ -30,7 +32,10 @@ use boa_gc::{Finalize, Trace};
 use std::io::Write;
 use std::rc::Rc;
 
-use crate::browser_net::{BrowserNet, NetError, RequestHead, ResourceType, fresh_id, gate};
+use crate::browser_net::{
+    BrowserNet, Decision, Gate, NetError, NetEvent, RequestHead, ResourceType, ResponseDecision,
+    ResponseHead, fresh_id, gate,
+};
 use crate::fetch::{Fetched, FetchedBody, OutgoingBody};
 use crate::native::{arg, closure, get, hidden, invoke, js_text, list_of, object, text_of};
 use crate::streams::{error_value, pending, reject, resolve, when};
@@ -126,6 +131,9 @@ struct Fetch {
     stream: Option<JsObject>,
     #[unsafe_ignore_trace]
     hop: Hop,
+    /// The host's watch over the request, when the realm has a hook.
+    #[unsafe_ignore_trace]
+    gate: Option<Gate>,
 }
 
 fn with<R>(fetch: &JsObject, f: impl FnOnce(&mut Fetch) -> R) -> R {
@@ -181,6 +189,11 @@ fn begin(
                 paused: false,
                 decoders: Vec::new(),
             },
+            gate: how.net.map(|net| Gate {
+                net,
+                head,
+                response: None,
+            }),
         },
     );
     if signal.is_object() {
@@ -321,12 +334,13 @@ fn send(fetch: &JsObject, cx: &mut Context) {
 }
 
 fn start(fetch: &JsObject, cx: &mut Context) -> JsResult<()> {
-    let (url, method, headers, body) = with(fetch, |f| {
+    let (url, method, headers, body, hop) = with(fetch, |f| {
         (
             f.hop.url.clone(),
             f.hop.method.clone(),
             f.hop.headers.clone(),
             f.hop.body.clone(),
+            f.hop.redirects,
         )
     });
     let https = url.scheme() == "https";
@@ -352,8 +366,92 @@ fn start(fetch: &JsObject, cx: &mut Context) -> JsResult<()> {
         super::tcp::put(&refusal, "resource", js_text(&resource), cx)?;
         return Err(JsError::from_opaque(refusal));
     }
-    let wire = wire_list(&headers, &method, body.as_deref());
-    dispatch(fetch, wire, cx)
+    let agent = with(fetch, |f| f.gate.as_ref().and_then(|g| g.net.user_agent()));
+    let wire = wire_list(&headers, &method, body.as_deref(), agent.as_deref());
+    // A request the host watches waits for its say before it is sent.
+    let watch = with(fetch, |f| {
+        let gate = f.gate.as_mut()?;
+        gate.head.url = url.to_string();
+        gate.head.method = method;
+        gate.head.headers = wire.clone();
+        gate.response = None;
+        Some((Rc::clone(&gate.net), gate.head.clone()))
+    });
+    let Some((net, head)) = watch else {
+        return dispatch(fetch, wire, cx);
+    };
+    let waiting = fetch.clone();
+    gate::ask_request(cx, &net, (head, body), move |decision, cx| {
+        resume(&waiting, hop, decision, cx);
+    });
+    Ok(())
+}
+
+/// The host has decided about this hop's request: it goes out, is refused or goes elsewhere.
+fn resume(fetch: &JsObject, hop: u32, decision: Option<Decision>, cx: &mut Context) {
+    if stale(fetch, hop) {
+        return;
+    }
+    let sent = match decision {
+        Some(Decision::Cancel) => return fail(fetch, gate::blocked(cx), cx),
+        Some(Decision::Redirect(to)) => return redirect_to(fetch, &to, cx),
+        Some(Decision::Continue(head)) => {
+            let headers = crate::browser_net::lowercase(head.headers);
+            with(fetch, |f| {
+                if let Some(gate) = f.gate.as_mut() {
+                    gate.head.headers.clone_from(&headers);
+                }
+            });
+            headers
+        }
+        None => {
+            with(fetch, |f| f.gate.as_ref().map(|g| g.head.headers.clone())).unwrap_or_default()
+        }
+    };
+    match dispatch(fetch, sent, cx) {
+        Ok(()) => watch(fetch, cx, Gate::sent),
+        Err(error) => {
+            let cause = error_value(error, cx);
+            fail(fetch, cause, cx);
+        }
+    }
+}
+
+/// The host sent the request to `to` instead: the next hop, as a redirect makes it.
+fn redirect_to(fetch: &JsObject, to: &str, cx: &mut Context) {
+    let moved = with(fetch, |f| {
+        let hop = &mut f.hop;
+        let next = url::Url::parse(to).map_err(|_| format!("invalid redirect location '{to}'"))?;
+        if !matches!(next.scheme(), "http" | "https") {
+            return Err("URL scheme must be a HTTP(S) scheme".to_owned());
+        }
+        if hop.redirects >= MAX_REDIRECTS {
+            return Err("redirect count exceeded".to_owned());
+        }
+        hop.redirects += 1;
+        hop.url = next;
+        Ok(())
+    });
+    match moved {
+        Ok(()) => {
+            let internal = ResponseHead {
+                status: 307,
+                status_text: "Internal Redirect".to_owned(),
+                headers: vec![("location".to_owned(), to.to_owned())],
+            };
+            note_redirect(fetch, internal, to, cx);
+            send(fetch, cx);
+        }
+        Err(message) => {
+            let cause = plain_error(cx, &message, None);
+            fail(fetch, cause, cx);
+        }
+    }
+}
+
+/// Tells the host the request is being sent on to `to`, as `response` said or the host asked.
+fn note_redirect(fetch: &JsObject, response: ResponseHead, to: &str, cx: &mut Context) {
+    watch(fetch, cx, |gate| gate.redirected(response, to));
 }
 
 /// Puts the request on the wire with these headers.
@@ -421,11 +519,13 @@ type BodyListener = fn(&JsValue, &[JsValue], &JsObject, &mut Context) -> JsResul
 
 /// The request's headers as `http.request` takes them, with what undici adds when they are not
 /// there: `accept`, `accept-language`, `accept-encoding` (what this module decodes),
-/// `user-agent`, and the body's `content-length`. A name sent twice is joined.
+/// `user-agent` (the host's, else `Verve`), and the body's `content-length`. A name sent twice
+/// is joined.
 fn wire_list(
     list: &[(String, String)],
     method: &str,
     body: Option<&[u8]>,
+    agent: Option<&str>,
 ) -> Vec<(String, String)> {
     let mut joined: Vec<(String, String)> = Vec::new();
     for (name, value) in list {
@@ -446,7 +546,7 @@ fn wire_list(
         ("accept", Some("*/*".to_owned())),
         ("accept-language", Some("*".to_owned())),
         ("sec-fetch-mode", Some("cors".to_owned())),
-        ("user-agent", Some("Verve".to_owned())),
+        ("user-agent", Some(agent.unwrap_or("Verve").to_owned())),
         ("accept-encoding", Some("gzip, deflate, br".to_owned())),
         ("content-length", length.map(|n| n.to_string())),
     ];
@@ -552,8 +652,56 @@ fn on_response(
             text_of(&pair[1], cx)?.trim().to_owned(),
         ));
     }
-    proceed(fetch, &message, status, status_text, headers, cx)?;
+    let head = ResponseHead {
+        status,
+        status_text,
+        headers,
+    };
+    let watch = with(fetch, |f| {
+        f.gate.as_ref().map(|g| (Rc::clone(&g.net), g.head.clone()))
+    });
+    let Some((net, request)) = watch else {
+        proceed(fetch, &message, head, cx)?;
+        return Ok(JsValue::undefined());
+    };
+    // The host sees the head first, and the message waits unread meanwhile.
+    let (waiting, hop) = ((fetch.clone(), message, head.clone()), *hop);
+    gate::ask_response(cx, &net, &request, head, move |decision, cx| {
+        let (fetch, message, original) = waiting;
+        host_decided(&fetch, hop, message, original, decision, cx);
+    });
     Ok(JsValue::undefined())
+}
+
+/// The host has decided about a response head: it goes on, as it was or changed, or the request
+/// is refused.
+fn host_decided(
+    fetch: &JsObject,
+    hop: u32,
+    message: JsValue,
+    original: ResponseHead,
+    decision: Option<ResponseDecision>,
+    cx: &mut Context,
+) {
+    let outcome = if stale(fetch, hop) {
+        drain(&message, cx)
+    } else {
+        match decision {
+            Some(ResponseDecision::Cancel) => {
+                let blocked = gate::blocked(cx);
+                drain(&message, cx).map(|()| fail(fetch, blocked, cx))
+            }
+            Some(ResponseDecision::Continue(head)) => {
+                let headers = crate::browser_net::lowercase(head.headers);
+                proceed(fetch, &message, ResponseHead { headers, ..head }, cx)
+            }
+            None => proceed(fetch, &message, original, cx),
+        }
+    };
+    if let Err(error) = outcome {
+        let cause = error_value(error, cx);
+        fail(fetch, cause, cx);
+    }
 }
 
 /// The response head is settled: a redirect is followed, returned or refused, anything else is
@@ -561,17 +709,17 @@ fn on_response(
 fn proceed(
     fetch: &JsObject,
     message: &JsValue,
-    status: u16,
-    status_text: String,
-    headers: Vec<(String, String)>,
+    head: ResponseHead,
     cx: &mut Context,
 ) -> JsResult<()> {
-    let location = headers
+    let location = head
+        .headers
         .iter()
         .find(|(n, _)| n == "location")
         .map(|(_, v)| v.clone());
     let mode = with(fetch, |f| f.hop.redirect);
-    if let Some(location) = location.filter(|_| matches!(status, 301 | 302 | 303 | 307 | 308)) {
+    if let Some(location) = location.filter(|_| matches!(head.status, 301 | 302 | 303 | 307 | 308))
+    {
         match mode {
             Redirect::Manual => {}
             Redirect::Error => {
@@ -582,8 +730,12 @@ fn proceed(
             }
             Redirect::Follow => {
                 drain(message, cx)?;
-                match follow(fetch, status, &location) {
-                    Ok(()) => send(fetch, cx),
+                match follow(fetch, head.status, &location) {
+                    Ok(()) => {
+                        let to = with(fetch, |f| f.hop.url.to_string());
+                        note_redirect(fetch, head, &to, cx);
+                        send(fetch, cx);
+                    }
                     Err(message) => {
                         let cause = plain_error(cx, &message, None);
                         fail(fetch, cause, cx);
@@ -593,7 +745,7 @@ fn proceed(
             }
         }
     }
-    respond(fetch, message, status, status_text, headers, cx)
+    respond(fetch, message, head, cx)
 }
 
 /// Reads and drops a message the fetch has no use for, so its connection can go back to the
@@ -653,11 +805,15 @@ fn follow(fetch: &JsObject, status: u16, location: &str) -> Result<(), String> {
 fn respond(
     fetch: &JsObject,
     message: &JsValue,
-    status: u16,
-    status_text: String,
-    headers: Vec<(String, String)>,
+    head: ResponseHead,
     cx: &mut Context,
 ) -> JsResult<()> {
+    let ResponseHead {
+        status,
+        status_text,
+        headers,
+    } = head.clone();
+    watch(fetch, cx, |gate| gate.started(head));
     let (method, mut url, redirects) = with(fetch, |f| {
         (f.hop.method.clone(), f.hop.url.clone(), f.hop.redirects)
     });
@@ -666,6 +822,7 @@ fn respond(
     let body = if null_body {
         drain(message, cx)?;
         finish(fetch, cx)?;
+        watch(fetch, cx, Gate::completed);
         None
     } else {
         let encodings = headers
@@ -772,6 +929,7 @@ fn on_body_end(
                 crate::streams::source_enqueue(cx, &stream, chunk)?;
             }
             finish(fetch, cx)?;
+            watch(fetch, cx, Gate::completed);
             crate::streams::source_close(cx, &stream)?;
         }
         Err(error) => {
@@ -813,10 +971,23 @@ fn cancel_body(
     cx: &mut Context,
 ) -> JsResult<JsValue> {
     if !with(fetch, |f| f.hop.done) {
+        watch(fetch, cx, |gate| gate.failed(NetError::from_code(-3)));
         finish(fetch, cx)?;
         teardown(fetch, cx)?;
     }
     Ok(JsValue::undefined())
+}
+
+/// Lets the host's watch over the request, if it has one, note something.
+fn watch(fetch: &JsObject, cx: &mut Context, note: impl FnOnce(&mut Gate) -> Option<NetEvent>) {
+    let told = with(fetch, |f| {
+        let gate = f.gate.as_mut()?;
+        Some((Rc::clone(&gate.net), note(gate)?))
+    });
+    // Outside the borrow: the host's listener may run scripts that reach this fetch again.
+    if let Some((net, event)) = told {
+        net.notify(event, cx);
+    }
 }
 
 // ─── Endings ────────────────────────────────────────────────────────────────────────────────
@@ -828,6 +999,7 @@ fn on_abort(_: &JsValue, _: &[JsValue], fetch: &JsObject, cx: &mut Context) -> J
     }
     let signal = with(fetch, |f| f.signal.clone());
     let reason = get(&signal, "reason", cx)?;
+    watch(fetch, cx, |gate| gate.failed(NetError::from_code(-3)));
     end_with(fetch, reason, cx);
     Ok(JsValue::undefined())
 }
@@ -838,11 +1010,16 @@ fn fail(fetch: &JsObject, cause: JsValue, cx: &mut Context) {
     if with(fetch, |f| f.hop.done) {
         return;
     }
+    let style = with(fetch, |f| f.gate.as_ref().map(|g| g.net.failure_style()));
+    let error = style.map(|_| gate::net_error_of(&cause, cx));
+    if let Some(error) = error.clone() {
+        watch(fetch, cx, |gate| gate.failed(error));
+    }
     let answered = with(fetch, |f| f.resolvers.is_none());
-    let reason = if answered {
-        type_error_with_cause(cx, "terminated", cause)
-    } else {
-        fetch_failed(cx, cause)
+    let reason = match (answered, style, error) {
+        (true, ..) => type_error_with_cause(cx, "terminated", cause),
+        (false, Some(style), Some(error)) => gate::failure(cx, style, cause, &error),
+        _ => fetch_failed(cx, cause),
     };
     end_with(fetch, reason, cx);
 }

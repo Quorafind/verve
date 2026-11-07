@@ -1,5 +1,5 @@
-//! The browser's network: a hook that lets an embedder answer what the WHATWG `fetch` sends,
-//! and nothing else. Chromium keeps a page's network apart from Node's, and
+//! The browser's network: a hook that lets an embedder answer, watch and change what the
+//! WHATWG `fetch` sends, and nothing else. Chromium keeps a page's network apart from Node's, and
 //! so does this: `http`, `https` and `net` never consult a [`BrowserNet`], only `fetch` (and what is
 //! built on it, a page's `XMLHttpRequest` and subresources) does.
 //!
@@ -9,10 +9,13 @@
 //! comes back through a [`Responder`], head first and then the body a chunk at a time. The body is
 //! pulled, not pushed: the response's `ReadableStream` calls [`BrowserNet::pull`] when its reader
 //! wants a chunk, and the host sends the next one only then, so a reader that stops reading stops
-//! the host's producer.
+//! the host's producer. Any other `http(s)` request is offered to [`BrowserNet::before_send`] before it goes
+//! out and [`BrowserNet::headers_received`] when its head is back, each answering through a
+//! [`Decider`] that may change, cancel or (before sending) redirect it, and the host is told how it
+//! ended with [`BrowserNet::notify`].
 //!
-//! Nothing here waits. A [`Responder`] may be used from any thread, at any time after it was
-//! handed over, even inside the call that handed it; what it says is queued for the
+//! Nothing here waits. A [`Responder`] or [`Decider`] may be used from any thread, at any time
+//! after it was handed over, even inside the call that handed it; what it says is queued for the
 //! realm and heard on the host's next beat ([`crate::Runtime::run_due`]), which the realm's waker
 //! asks for.
 
@@ -30,6 +33,7 @@ pub(crate) mod gate;
 
 pub use crate::network::fetch::{InternalFetch, fetch_internal};
 pub(crate) use custom::begin as begin_custom;
+pub(crate) use gate::Gate;
 
 /// What a request is for, by the names of Electron's `webRequest` `resourceType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,10 +146,72 @@ impl NetError {
         }
     }
 
+    /// The error a failure Node reports as `code` stands for: a refused connection, a name that
+    /// does not resolve; any other is `net::ERR_FAILED`.
+    pub(crate) fn from_node_code(code: &str) -> Self {
+        Self::from_code(match code {
+            "ECONNREFUSED" => -102,
+            "ENOTFOUND" | "EAI_AGAIN" => -105,
+            "ECONNRESET" => -101,
+            "ETIMEDOUT" => -118,
+            "ERR_ACCESS_DENIED" => -10,
+            "ERR_BLOCKED_BY_CLIENT" => -20,
+            _ => -2,
+        })
+    }
+
     /// The name without its `net::`: the `code` of the `Error` `fetch` fails with.
     pub fn short_name(&self) -> &str {
         self.name.strip_prefix("net::").unwrap_or(&self.name)
     }
+}
+
+/// What the host decides about a request about to be sent.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Decision {
+    /// Send it with these headers (the rest of the head is the kernel's and is ignored).
+    Continue(RequestHead),
+    /// Fail it with `net::ERR_BLOCKED_BY_CLIENT`.
+    Cancel,
+    /// Send it to this address instead, as a redirect would.
+    Redirect(String),
+}
+
+/// What the host decides about a response whose head has arrived.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResponseDecision {
+    /// Go on with this status line and these headers.
+    Continue(ResponseHead),
+    /// Fail the request with `net::ERR_BLOCKED_BY_CLIENT`.
+    Cancel,
+}
+
+/// How a request ended or moved, told to the host without waiting for it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NetEvent {
+    /// The request is on its way, with the headers it is sent with.
+    Sent(RequestHead),
+    /// The response head is in and goes on to the caller.
+    Started {
+        request: RequestHead,
+        response: ResponseHead,
+    },
+    /// The response is a redirect, followed to `to`.
+    Redirected {
+        request: RequestHead,
+        response: ResponseHead,
+        to: String,
+    },
+    /// The body has been read to its end.
+    Completed {
+        request: RequestHead,
+        response: ResponseHead,
+    },
+    /// The request failed or was given up on.
+    Failed {
+        request: RequestHead,
+        error: NetError,
+    },
 }
 
 /// How a failed request rejects `fetch`'s promise.
@@ -183,9 +249,40 @@ pub trait BrowserNet {
     /// The reader of request `id`'s response, or the code that made it, gave up: the host may stop.
     fn cancel(&self, _id: u64, _cx: &mut Context) {}
 
+    /// A request is about to go to the network: change it, cancel it or send it elsewhere. `body`
+    /// is what it will send. The default sends it unchanged.
+    fn before_send(
+        &self,
+        head: RequestHead,
+        _body: Option<&[u8]>,
+        decide: Decider<Decision>,
+        _cx: &mut Context,
+    ) {
+        decide.decide(Decision::Continue(head));
+    }
+
+    /// A response's head is in: change it or fail the request. The default lets it through.
+    fn headers_received(
+        &self,
+        _request: &RequestHead,
+        response: ResponseHead,
+        decide: Decider<ResponseDecision>,
+        _cx: &mut Context,
+    ) {
+        decide.decide(ResponseDecision::Continue(response));
+    }
+
+    /// A request moved or ended. Nothing is awaited.
+    fn notify(&self, _event: NetEvent, _cx: &mut Context) {}
+
     /// How a failure rejects the promise of a request this hook watches.
     fn failure_style(&self) -> FailureStyle {
         FailureStyle::Undici
+    }
+
+    /// The `user-agent` a request is sent with when its caller set none; `None` is the runtime's.
+    fn user_agent(&self) -> Option<String> {
+        None
     }
 }
 
@@ -197,6 +294,9 @@ pub(crate) enum Inbound {
     Chunk(Vec<u8>),
     End,
     Fail(NetError),
+    /// A [`Decision`]; `None` when the [`Decider`] was dropped, which lets the request pass as it was.
+    Request(Option<Decision>),
+    Response(Option<ResponseDecision>),
 }
 
 /// The realm's mailbox: what other threads say about its requests, and a way to wake it.
@@ -270,6 +370,31 @@ impl Drop for Responder {
     }
 }
 
+/// The host's decision about a request or response, given once. Dropped without one, the
+/// request goes on as it was.
+pub struct Decider<T> {
+    ticket: u64,
+    inbox: Arc<Inbox>,
+    wrap: fn(Option<T>) -> Inbound,
+    decided: bool,
+}
+
+impl<T> Decider<T> {
+    /// Says what to do.
+    pub fn decide(mut self, decision: T) {
+        self.decided = true;
+        self.inbox.push(self.ticket, (self.wrap)(Some(decision)));
+    }
+}
+
+impl<T> Drop for Decider<T> {
+    fn drop(&mut self) {
+        if !self.decided {
+            self.inbox.push(self.ticket, (self.wrap)(None));
+        }
+    }
+}
+
 // ─── What the realm keeps ───────────────────────────────────────────────────────────────────
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -279,18 +404,30 @@ pub(crate) fn fresh_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// What is waiting for a host's decision.
+pub(crate) enum Waiting {
+    Request(RequestThen),
+    Response(ResponseThen),
+}
+
+/// What happens when the host has decided about a request.
+pub(crate) type RequestThen = Box<dyn FnOnce(Option<Decision>, &mut Context)>;
+/// What happens when the host has decided about a response head.
+pub(crate) type ResponseThen = Box<dyn FnOnce(Option<ResponseDecision>, &mut Context)>;
+
 /// A realm's browser network: the hook, and the requests that wait on the host.
 #[derive(Default)]
 pub(crate) struct State {
     pub net: Option<Rc<dyn BrowserNet>>,
     inbox: Option<Arc<Inbox>>,
+    waiting: HashMap<u64, Waiting>,
     pub custom: HashMap<u64, custom::Custom>,
 }
 
 impl State {
     /// How many requests wait on the host.
     pub fn pending(&self) -> usize {
-        self.custom.len()
+        self.waiting.len() + self.custom.len()
     }
 }
 
@@ -333,7 +470,29 @@ pub(crate) fn deliver(cx: &mut Context) -> usize {
             return heard;
         };
         heard += 1;
-        custom::heard(ticket, what, cx);
+        match what {
+            Inbound::Request(decision) => {
+                let waiting = crate::shared(cx)
+                    .browser
+                    .borrow_mut()
+                    .waiting
+                    .remove(&ticket);
+                if let Some(Waiting::Request(then)) = waiting {
+                    then(decision, cx);
+                }
+            }
+            Inbound::Response(decision) => {
+                let waiting = crate::shared(cx)
+                    .browser
+                    .borrow_mut()
+                    .waiting
+                    .remove(&ticket);
+                if let Some(Waiting::Response(then)) = waiting {
+                    then(decision, cx);
+                }
+            }
+            reply => custom::heard(ticket, reply, cx),
+        }
         // A job that fails reports itself; there is nothing for this beat to do about it.
         let _ = cx.run_jobs();
     }
@@ -350,4 +509,12 @@ impl crate::Runtime {
     pub fn set_browser_net(&mut self, net: Option<Rc<dyn BrowserNet>>) {
         crate::shared(&self.context).browser.borrow_mut().net = net;
     }
+}
+
+/// The header names lowercased, as `fetch` keeps them.
+pub(crate) fn lowercase(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+    headers
+        .into_iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value))
+        .collect()
 }

@@ -1,29 +1,49 @@
 //! The browser's network hook (`verve::browser_net`): a host that answers an address itself,
-//! pulled a chunk at a time. A realm with no hook fetches as `tests/fetch_network.rs` shows;
-//! these tests are the realm with one.
+//! pulled a chunk at a time, and one that watches the requests that go to the network. A realm
+//! with no hook fetches as `tests/fetch_network.rs` shows; these tests are the realm with one.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::io::{Read, Write};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use boa_engine::object::builtins::JsPromise;
 use boa_engine::{Context, JsValue, js_string};
 use verve::browser_net::{
-    BrowserNet, FailureStyle, InternalFetch, NetError, RequestHead, Responder, fetch_internal,
+    BrowserNet, Decider, Decision, FailureStyle, InternalFetch, NetError, NetEvent, RequestHead,
+    Responder, ResponseDecision, ResponseHead, fetch_internal,
 };
 use verve::{ListenPermission, NetworkRule, Permissions, Runtime};
+
+/// What the fake host does with the requests it is asked about.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Watch {
+    /// Everything passes unchanged.
+    #[default]
+    Pass,
+    /// A header is added to the request and one to the response.
+    Edit,
+    /// The request is cancelled.
+    Cancel,
+    /// The request is sent to `/second` instead.
+    Redirect,
+    /// The response is cancelled.
+    CancelResponse,
+}
 
 /// A request the host was asked to handle, with its body.
 type Seen = (RequestHead, Option<Vec<u8>>);
 /// An unfinished answer: its responder and the chunks it still owes.
 type Owing = (Responder, VecDeque<Vec<u8>>);
 
-/// A host answering `app:` itself.
+/// A host answering `app:` itself, and watching the rest.
 #[derive(Default)]
 struct Fake {
+    watch: Watch,
     style: FailureStyle,
-    /// What happened, in order: `handle`, `pull` and `cancel` lines.
+    /// What happened, in order: `handle`, `pull`, `cancel`, `notify` lines.
     log: Rc<RefCell<Vec<String>>>,
     /// The requests that were asked to be handled, with their bodies.
     seen: Rc<RefCell<Vec<Seen>>>,
@@ -99,8 +119,65 @@ impl BrowserNet for Fake {
         self.open.borrow_mut().remove(&id);
     }
 
+    fn before_send(
+        &self,
+        mut head: RequestHead,
+        _: Option<&[u8]>,
+        decide: Decider<Decision>,
+        _: &mut Context,
+    ) {
+        self.note(format!("before_send {}", head.url));
+        decide.decide(match self.watch {
+            Watch::Cancel => Decision::Cancel,
+            Watch::Redirect if !head.url.ends_with("/second") => {
+                Decision::Redirect(head.url.replace("/first", "/second"))
+            }
+            Watch::Edit => {
+                head.headers.push(("x-added".into(), "by-host".into()));
+                Decision::Continue(head)
+            }
+            _ => Decision::Continue(head),
+        });
+    }
+
+    fn headers_received(
+        &self,
+        request: &RequestHead,
+        mut response: ResponseHead,
+        decide: Decider<ResponseDecision>,
+        _: &mut Context,
+    ) {
+        self.note(format!(
+            "headers_received {} {}",
+            request.url, response.status
+        ));
+        decide.decide(match self.watch {
+            Watch::CancelResponse => ResponseDecision::Cancel,
+            Watch::Edit => {
+                response.headers.push(("x-edited".into(), "yes".into()));
+                ResponseDecision::Continue(response)
+            }
+            _ => ResponseDecision::Continue(response),
+        });
+    }
+
+    fn notify(&self, event: NetEvent, _: &mut Context) {
+        let line = match event {
+            NetEvent::Sent(_) => "sent".to_owned(),
+            NetEvent::Started { response, .. } => format!("started {}", response.status),
+            NetEvent::Redirected { to, .. } => format!("redirected {to}"),
+            NetEvent::Completed { .. } => "completed".to_owned(),
+            NetEvent::Failed { error, .. } => format!("failed {}", error.name),
+        };
+        self.note(line);
+    }
+
     fn failure_style(&self) -> FailureStyle {
         self.style
+    }
+
+    fn user_agent(&self) -> Option<String> {
+        Some("Hosted/1.0".into())
     }
 }
 
@@ -146,13 +223,16 @@ fn run(net: &Rc<Fake>, body: &str) -> String {
     verve::print(&rt.eval("JSON.stringify(globalThis.result)").unwrap())
 }
 
-fn fake() -> Rc<Fake> {
-    Rc::new(Fake::default())
+fn fake(watch: Watch) -> Rc<Fake> {
+    Rc::new(Fake {
+        watch,
+        ..Fake::default()
+    })
 }
 
 #[test]
 fn an_address_the_host_claims_is_answered_by_the_host_a_chunk_per_pull() {
-    let net = fake();
+    let net = fake(Watch::Pass);
     let result = run(
         &net,
         "const r = await fetch('app://bundle/chunks');
@@ -174,7 +254,7 @@ fn an_address_the_host_claims_is_answered_by_the_host_a_chunk_per_pull() {
 
 #[test]
 fn a_reader_that_reads_everything_gets_everything_in_order() {
-    let net = fake();
+    let net = fake(Watch::Pass);
     let result = run(
         &net,
         "const r = await fetch('app://bundle/many');
@@ -186,7 +266,7 @@ fn a_reader_that_reads_everything_gets_everything_in_order() {
 
 #[test]
 fn a_reader_that_stops_reading_stops_the_hosts_pulls() {
-    let net = fake();
+    let net = fake(Watch::Pass);
     let result = run(
         &net,
         "const r = await fetch('app://bundle/many');
@@ -209,7 +289,7 @@ fn a_reader_that_stops_reading_stops_the_hosts_pulls() {
 
 #[test]
 fn a_host_that_fails_fails_the_fetch_with_the_net_error_as_cause() {
-    let net = fake();
+    let net = fake(Watch::Pass);
     let result = run(&net, "await fetch('app://bundle/fail');");
     assert_eq!(
         result,
@@ -244,7 +324,7 @@ fn a_failure_rejects_in_the_style_the_host_asks_for() {
 
 #[test]
 fn the_request_reaches_the_host_whole_and_a_null_body_status_has_no_body() {
-    let net = fake();
+    let net = fake(Watch::Pass);
     let result = run(
         &net,
         "const r = await fetch('app://bundle/echo', { method: 'POST', headers: { 'X-A': 'b' }, body: 'payload' });
@@ -267,7 +347,7 @@ fn the_request_reaches_the_host_whole_and_a_null_body_status_has_no_body() {
 
 #[test]
 fn cancelling_the_body_or_aborting_tells_the_host_to_stop() {
-    let net = fake();
+    let net = fake(Watch::Pass);
     let result = run(
         &net,
         "const r = await fetch('app://bundle/many');
@@ -288,6 +368,130 @@ fn cancelling_the_body_or_aborting_tells_the_host_to_stop() {
         .filter(|line| *line == "cancel")
         .count();
     assert_eq!(cancels, 2);
+}
+
+// ─── The requests that go to the network ────────────────────────────────────────────────────
+
+/// A server on a Rust thread that answers every request with its own request head as the body
+/// (`/first` and `/second` too), and `x-server` in the head; answers its port and the heads it saw.
+fn echo_server(connections: usize) -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let heads = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&heads);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(connections) {
+            let mut stream = stream.unwrap();
+            let mut seen = Vec::new();
+            let mut buffer = [0; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buffer).unwrap();
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&buffer[..n]);
+            }
+            let head = String::from_utf8_lossy(&seen).into_owned();
+            kept.lock().unwrap().push(head.clone());
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nx-server: 1\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{head}",
+                head.len()
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+        }
+    });
+    (port, heads)
+}
+
+#[test]
+fn the_host_edits_the_request_and_the_response_of_a_network_fetch() {
+    let (port, heads) = echo_server(1);
+    let net = fake(Watch::Edit);
+    let result = run(
+        &net,
+        &format!(
+            "const r = await fetch('http://127.0.0.1:{port}/first', {{ headers: {{ 'X-Own': '1' }} }});
+             const text = await r.text();
+             result = [r.status, r.headers.get('x-edited'), r.headers.get('x-server'), text.includes('x-added: by-host'), text.includes('user-agent: Hosted/1.0'), text.includes('x-own: 1')];"
+        ),
+    );
+    assert_eq!(result, r#"[200,"yes","1",true,true,true]"#);
+    assert!(
+        heads.lock().unwrap()[0]
+            .to_lowercase()
+            .contains("x-added: by-host")
+    );
+    let log = net.log.borrow();
+    let stages: Vec<_> = log
+        .iter()
+        .map(|line| line.split(' ').next().unwrap())
+        .collect();
+    assert_eq!(
+        stages,
+        [
+            "before_send",
+            "sent",
+            "headers_received",
+            "started",
+            "completed"
+        ],
+        "{log:?}"
+    );
+    assert_eq!(log[0], format!("before_send http://127.0.0.1:{port}/first"));
+}
+
+#[test]
+fn the_host_cancels_a_request_before_it_is_sent_or_a_response_after() {
+    let (port, heads) = echo_server(1);
+    let net = fake(Watch::Cancel);
+    let result = run(
+        &net,
+        &format!("await fetch('http://127.0.0.1:{port}/first');"),
+    );
+    assert_eq!(
+        result,
+        r#"["threw","TypeError: fetch failed","ERR_BLOCKED_BY_CLIENT"]"#
+    );
+    assert!(
+        heads.lock().unwrap().is_empty(),
+        "a cancelled request is never sent"
+    );
+    assert!(
+        net.log
+            .borrow()
+            .contains(&"failed net::ERR_BLOCKED_BY_CLIENT".to_owned())
+    );
+    let net = fake(Watch::CancelResponse);
+    let result = run(
+        &net,
+        &format!("await fetch('http://127.0.0.1:{port}/first');"),
+    );
+    assert_eq!(
+        result,
+        r#"["threw","TypeError: fetch failed","ERR_BLOCKED_BY_CLIENT"]"#
+    );
+}
+
+#[test]
+fn the_host_sends_a_request_to_another_address() {
+    let (port, heads) = echo_server(1);
+    let net = fake(Watch::Redirect);
+    let result = run(
+        &net,
+        &format!(
+            "const r = await fetch('http://127.0.0.1:{port}/first'); result = [r.status, r.redirected, r.url];"
+        ),
+    );
+    assert_eq!(
+        result,
+        format!(r#"[200,true,"http://127.0.0.1:{port}/second"]"#)
+    );
+    assert!(heads.lock().unwrap()[0].starts_with("GET /second "));
+    let log = net.log.borrow();
+    assert!(
+        log.iter()
+            .any(|line| line.starts_with("before_send") && line.ends_with("/second"))
+    );
 }
 
 // ─── An explicit hook ───────────────────────────────────────────────────────────────────────
@@ -324,7 +528,7 @@ fn settled(rt: &mut Runtime, promise: boa_engine::JsObject) -> String {
 #[test]
 fn a_fetch_the_host_makes_takes_its_own_hook_and_none_means_the_realms_own_ways() {
     let mut rt = Runtime::new();
-    let net = fake();
+    let net = fake(Watch::Pass);
     let how = |net: Option<Rc<dyn BrowserNet>>| InternalFetch {
         net,
         resource_type: verve::browser_net::ResourceType::Other,

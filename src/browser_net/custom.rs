@@ -124,6 +124,7 @@ pub(crate) fn heard(id: u64, what: Inbound, cx: &mut Context) {
             fail(id, &error, cx);
             Ok(())
         }
+        Inbound::Request(_) | Inbound::Response(_) => Ok(()),
     };
     if let Err(error) = result {
         let reason = error_value(error, cx);
