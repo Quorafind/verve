@@ -21,6 +21,7 @@ mod platform;
 mod raster;
 mod report;
 mod shell;
+mod wheel;
 mod window;
 
 use std::sync::Arc;

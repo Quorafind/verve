@@ -1,5 +1,6 @@
 //! The GPUI element that draws a page: it fills its parent, puts the page's hitboxes into the
-//! frame with their cursors, and replays the [plan](crate::plan) of the display list.
+//! frame with their cursors, replays the [plan](crate::plan) of the display list, and turns the
+//! wheel into a scroll ([`crate::wheel`]).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -8,14 +9,15 @@ use std::sync::Arc;
 use gpui::{
     App, Background, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Edges, Element,
     ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
-    LayoutId, Pixels, RenderImage, Style, Window, linear_color_stop, linear_gradient, point, px,
-    size, transparent_black,
+    LayoutId, Pixels, RenderImage, ScrollWheelEvent, Style, Window, linear_color_stop,
+    linear_gradient, point, px, size, transparent_black,
 };
 use verve_dom::Rect;
 use verve_layout::{Cursor, DisplayList, ImageKey, Rgba};
 
 use crate::dom_view::DomState;
 use crate::plan::{Command, Paint, Shape};
+use crate::wheel;
 
 /// The page of a window, drawn from the state it shares with its view.
 pub(crate) struct DomElement {
@@ -114,6 +116,13 @@ impl Element for DomElement {
             }
             self.state.borrow_mut().pictures.end_frame();
         }
+        let state = Rc::clone(&self.state);
+        let origin = bounds.origin;
+        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, _| {
+            if phase.bubble() {
+                wheel::turned(&state, event, origin, window);
+            }
+        });
     }
 }
 

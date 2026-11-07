@@ -185,8 +185,10 @@ impl Window {
         );
         let themed = inbox.clone();
         let (native, painted) = (Rc::clone(&self.native), Rc::clone(&self.reporter));
+        let told = Rc::clone(&self.reporter);
         // An error is a window that is gone before it was set up, and it needs nothing then.
         let _ = self.handle.update(cx, move |view, window, cx| {
+            view.on_input(Rc::new(move |input| told.input(input)));
             view.on_draw(Rc::new(move |window| {
                 if let Some(look) = native.looked(window) {
                     painted.sync(look);

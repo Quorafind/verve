@@ -1,13 +1,20 @@
-//! One window's page: the display list its renderer published, drawn by [`DomElement`].
+//! One window's page: the display list its renderer published, drawn by [`DomElement`], and
+//! scrolled ahead of the renderer by the wheel.
 //!
 //! The renderer lays the page out on its own thread (`verve-layout`) and says what to draw as a
-//! [`DisplayList`]. The view keeps the last one it was given.
+//! [`DisplayList`]. The view keeps the last one it was given. A wheel turned over it moves the
+//! nearest container that can move at once (the offset kept here is the *prediction*, and the
+//! frames of the list are moved by it), and is told to the renderer as
+//! [`ToRendererInput::Wheel`]; the renderer's own offsets arrive with its next list and win.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{Context, IntoElement, ParentElement, Render, Rgba, Styled, Window, div, rgb};
+use verve_dom::NodeId;
+use verve_electron::msg::ToRendererInput;
 use verve_layout::DisplayList;
 
 use crate::app_region::{self, AppRegion};
@@ -18,27 +25,44 @@ use crate::plan::{self, Plan};
 /// What is called as each frame of a window is built.
 type Drawn = Rc<dyn Fn(&Window)>;
 
+/// What a window tells the page under it: the wheel, for now.
+pub(crate) type Tell = Rc<dyn Fn(ToRendererInput)>;
+
 /// What the view and its element share.
 #[derive(Default)]
 pub(crate) struct DomState {
     pub list: Option<Arc<DisplayList>>,
-    /// What the list comes to, for the list it was made for.
-    plan: Option<(Arc<DisplayList>, Rc<Plan>)>,
+    /// The offsets the wheel scrolled containers to since the list came.
+    pub predicted: HashMap<NodeId, [f32; 2]>,
+    /// Counts the changes of `predicted`, so a plan is made again only when it must be.
+    generation: u64,
+    /// What the list comes to under the predicted offsets, for the list and the generation it was
+    /// made for.
+    plan: Option<(Arc<DisplayList>, u64, Rc<Plan>)>,
     pub pictures: Pictures,
+    pub tell: Option<Tell>,
 }
 
 impl DomState {
-    /// What the list comes to: kept from the frame before while the list is the same, since the
-    /// frame is built from it twice (hitboxes, shapes).
+    /// The wheel moved `node` to `to`.
+    pub(crate) fn predict(&mut self, node: NodeId, to: [f32; 2]) {
+        self.predicted.insert(node, to);
+        self.generation += 1;
+    }
+
+    /// What the list comes to now: kept from the frame before while the list and the predicted
+    /// offsets are the same, since the frame is built from it twice (hitboxes, shapes).
     pub(crate) fn plan(&mut self) -> Option<Rc<Plan>> {
         let list = self.list.clone()?;
-        if let Some((seen, plan)) = &self.plan
+        if let Some((seen, generation, plan)) = &self.plan
             && Arc::ptr_eq(seen, &list)
+            && *generation == self.generation
         {
             return Some(Rc::clone(plan));
         }
-        let made = Rc::new(plan::plan(&list, &|_| None));
-        self.plan = Some((list, Rc::clone(&made)));
+        let predicted = &self.predicted;
+        let made = Rc::new(plan::plan(&list, &|node| predicted.get(&node).copied()));
+        self.plan = Some((list, self.generation, Rc::clone(&made)));
         Some(made)
     }
 }
@@ -46,8 +70,10 @@ impl DomState {
 /// What showing a list changed.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Shown {
-    /// The list was the one already shown.
+    /// The list was the one already shown, and no prediction was waiting to be undone.
     Unchanged,
+    /// The list was the same, and the renderer's offsets took the place of a prediction.
+    Redraw,
     /// A list that was not shown before.
     New,
 }
@@ -89,16 +115,32 @@ impl DomView {
         self.drawn = Some(drawn);
     }
 
-    /// Draws `list` from the next frame on.
+    /// Tells the page what a person does to the window with `tell`.
+    pub(crate) fn on_input(&mut self, tell: Tell) {
+        self.state.borrow_mut().tell = Some(tell);
+    }
+
+    /// Draws `list` from the next frame on. The renderer's offsets win over the ones the wheel
+    /// predicted, so every list that arrives ends the prediction, also the one that is already
+    /// shown: that is what a wheel the page prevented, or one that moved nothing, publishes.
     pub fn show(&mut self, list: Arc<DisplayList>) -> Shown {
         let mut state = self.state.borrow_mut();
+        let predicted = !state.predicted.is_empty();
+        if predicted {
+            state.predicted.clear();
+            state.generation += 1;
+        }
         // Lists are numbered across the process, so one number is one list.
         if state
             .list
             .as_ref()
             .is_some_and(|seen| seen.revision == list.revision)
         {
-            return Shown::Unchanged;
+            return if predicted {
+                Shown::Redraw
+            } else {
+                Shown::Unchanged
+            };
         }
         state.list = Some(list);
         Shown::New
@@ -148,14 +190,28 @@ mod tests {
     }
 
     #[test]
-    fn the_plan_is_made_again_only_when_the_list_changed() {
+    fn every_list_that_arrives_ends_the_prediction() {
+        let mut view = DomView::new(None);
+        view.show(list(1));
+        view.state.borrow_mut().predict(7, [0., 40.]);
+        // The renderer prevented the wheel and published the list it had: the view is not left
+        // scrolled by a prediction nobody confirmed.
+        assert_eq!(view.show(list(1)), Shown::Redraw);
+        assert!(view.state.borrow().predicted.is_empty());
+        view.state.borrow_mut().predict(7, [0., 40.]);
+        assert_eq!(view.show(list(2)), Shown::New);
+        assert!(view.state.borrow().predicted.is_empty());
+    }
+
+    #[test]
+    fn the_plan_is_made_again_only_when_the_list_or_the_prediction_changed() {
         let mut view = DomView::new(None);
         view.show(list(1));
         let first = view.state.borrow_mut().plan().expect("a plan");
         let again = view.state.borrow_mut().plan().expect("a plan");
         assert!(Rc::ptr_eq(&first, &again));
-        view.show(list(2));
-        let next = view.state.borrow_mut().plan().expect("a plan");
-        assert!(!Rc::ptr_eq(&first, &next));
+        view.state.borrow_mut().predict(7, [0., 40.]);
+        let moved = view.state.borrow_mut().plan().expect("a plan");
+        assert!(!Rc::ptr_eq(&first, &moved));
     }
 }
