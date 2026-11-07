@@ -32,13 +32,17 @@
 ### 1. 实时 Range 与 Selection（`selection.rs`，需新增，替换 `bind/platform.rs` 的 JS 属性实现）
 
 ```rust
-pub struct Boundary { pub node: NodeId, pub offset: u32 }     // offset：文本节点内 UTF-16 码元，其他节点内子节点下标
+// 复用 P31 的类型（layout_provider.rs），不再另定义：offset 是文本节点内 UTF-16 码元，其他节点内为子节点下标。
+pub type Boundary = (NodeId, usize);
 pub struct RangeData { pub start: Boundary, pub end: Boundary }
-/// Every live Range a script holds (weakly), and the document's selection.
-pub struct Ranges { /* slab<Weak, RangeData> */ }
-pub struct SelectionData { pub anchor: Boundary, pub focus: Boundary, pub direction: Direction }
+/// 住在 `Dom` 里（`dom/ranges.rs`）：脚本持有的每个 Range（弱引用，对象被回收时槽位释放）与文档的选区。
+pub struct Ranges { /* slab of (RangeData, refs), selection slot, direction */ }
 ```
 
+- 实时 Range 的数据放在 `Dom` 里而不是 `State`：`Dom` 的每个变更入口（`detach`、`place`、`empty`、`set_text`、`replace_data`、`split_text`、
+  `normalize`）直接调整边界，快照克隆 `Dom` 时选区随之带走（`Ranges` 的 `Clone` 只留选区，不复制脚本持有的其余 Range，也不共享回收队列），
+  所以 `SnapshotData` 不另加 `selection` 字段——P31 实际经 `Document::selection_boundaries` 现读选区（`Snapshot.dom.selection()` 也可用），光标用 `Snapshot.dom.selection_focus()`
+  （一个 `Boundary`；是否可见由 P32 的闪烁决定）。没有 `Caret` 类型。
 - `Range` 对象内部持有 slab 下标；`startContainer/startOffset/…` 为访问器，读 Rust 状态。
 - **随 DOM 变更更新**（DOM 规范"live range"规则）：插入/删除节点、`splitText`、文本替换（`CharacterData.replaceData`）、
   `normalize`——在 `Dom` 的变更入口统一调用 `Ranges::on_*`（P23 的 `tree_revision` 处一并接入）。
@@ -51,8 +55,7 @@ pub struct SelectionData { pub anchor: Boundary, pub focus: Boundary, pub direct
   line 粒度需要布局——用 P31 回报的行盒，未回报时按段落近似）、`toString`、`getComposedRanges`。
 - `selectionchange` 事件（`document` 上，异步合并）；`selectstart`。
 - 输入框内的选区仍在 `Draft` 里（与浏览器一致：`<input>` 的选区不出现在 `getSelection()` 中，`selectionStart/End` 读 Draft）。
-- **快照**（需新增）：`SnapshotData.selection: Option<SelectionData>` 与 `SnapshotData.caret: Option<Caret { node, offset, visible }>`，
-  P31 画选区高亮与 contenteditable 的光标；`::selection` 样式由 P22 提供。
+- **快照**：见上，选区在 `Dom` 里；`::selection` 样式由 P22 提供。
 
 ### 2. contenteditable 编辑（`editing.rs`，需新增）
 
@@ -75,8 +78,13 @@ pub struct SelectionData { pub anchor: Boundary, pub focus: Boundary, pub direct
 | Tab | — | 默认移动焦点（与浏览器一致，不插入制表符） |
 
 - `plaintext-only`：只插入纯文本、Enter 插入 `\n` 或 `<br>`（以 Chrome 实测为准）。
-- 撤销栈：每个可编辑宿主（和每个文本框，`Draft` 已有的也要接上 `historyUndo`）记录 DOM 变更序列（用 MutationRecord 同款数据），
+- 撤销栈：每个可编辑宿主一份（Chromium 是每文档一份，差异记在状态里；上限 1000 步；分组按"开放键入"规则）（和每个文本框，`Draft` 已有的也要接上 `historyUndo`）记录 DOM 变更序列（用 MutationRecord 同款数据），
   合并连续键入；脚本对 DOM 的直接修改不入栈（与浏览器一致——这正是编辑器自己管理撤销的原因）。
+- **Electron 39.8.10 实测（冻结在 tests/editing.rs、tests/ime.rs 头注）**：脚本调用 `execCommand` 只发 `input`（不发 `beforeinput`，
+  `inputType` 见表：`bold→formatBold`、`strikeThrough→formatStrikeThrough`（产生 `<strike>`）、`createLink→insertLink`（`data` 为地址）、
+  `removeFormat→formatRemove`，`unlink/insertHTML/formatBlock` 的 `inputType` 为空串），`selectAll` 只发 `selectstart`/`selectionchange`；
+  键盘路径是 `keydown → keypress → beforeinput → textInput → input → keyup`，`selectionchange` 在之后异步到达（晚于微任务、早于 `setTimeout(0)`）；
+  行首/行尾空格写成 `&nbsp;`；`plaintext-only` 的 `getTargetRanges()` 恒为 `[]`，Enter 插入 `\n` 文本，`inputType` 为 `insertLineBreak`。
 - `execCommand`（`bind/document.rs` 扩展）：`insertText`、`insertHTML`、`delete`、`forwardDelete`、`insertParagraph`、`insertLineBreak`、
   `bold/italic/underline/strikeThrough`（包 `<b>/<i>/<u>/<s>`，`styleWithCSS` 为 false）、`createLink/unlink`、`formatBlock`、
   `insertOrderedList/insertUnorderedList`、`selectAll`、`undo/redo`、`copy/cut/paste`（`paste` 只在受信任的用户手势中、
@@ -102,9 +110,16 @@ impl Document {
 - 事件序列（以 Chrome on Windows 实测冻结）：第一次 `compose` → `compositionstart` → `beforeinput(insertCompositionText)` →
   `compositionupdate` → 文本变化 → `input(insertCompositionText, isComposing: true)`；后续 `compose` 无 `compositionstart`；
   `commit_composition` → `beforeinput` → `compositionupdate`? → `input(isComposing: true)` → `compositionend` →（Chrome 不再发额外 input）。
-  组合期间的 `keydown` 有 `isComposing: true`、`key: "Process"`、`keyCode: 229`。
+  组合期间的 `keydown`/`keyup` 有 `isComposing: true`（实测）；`keydown` 的 `key: "Process"`、`keyCode: 229` 取自 UI Events 与 Chromium 的
+  `VKEY_PROCESSKEY`，探针里是探针自己发的这两个值、Electron 原样回显，**不是实测**。
 - 文本框：用 `Draft::replace_and_mark_utf16` / `replace_utf16` / `unmark`（已有）。contenteditable：组合文本作为选区处的临时文本节点
   （Chromium 直接改 DOM，脚本可见），提交后保留，取消时删除。
+- Electron 39.8.10 实测（`webContents.debugger` 的 `Input.imeSetComposition`/`Input.insertText`；输入框、文本域、contenteditable 相同）：
+  首次更新 `compositionstart(data "")` → `compositionupdate` → `beforeinput(insertCompositionText, isComposing: true, 不可取消)` → `input`；
+  提交 `compositionupdate(提交文本)` → `beforeinput` → `textInput` → `input(isComposing: true)` → `compositionend`，没有 `insertText` 的 `input`；
+  取消（空串）同样先 `compositionupdate("")`、`beforeinput(data "")`、`textInput("")`、`input(data null)`，再 `compositionend("")`；
+  组合期间 `keydown`/`keyup` 的 `isComposing` 为 true（`key: "Process"`、`keyCode: 229` 是探针自己发的值，Electron 回显，未独立观察）；
+  contenteditable 的 `getTargetRanges()` 是上一次组合文本的范围。
 - P02 的 `ToRendererInput::Composition(CompositionEvent)` 定义为：
 
 ```rust
@@ -175,7 +190,7 @@ impl Document {
   - `tests/selection.rs`：插入/删除节点后 Range 边界按规范移动；`extractContents/surroundContents`；`Selection.modify('extend','forward','word')`；
   - `tests/editing.rs`：contenteditable 中 `type_text("你好")`、Enter 产生新 `<div>`、Backspace 跨块合并、`beforeinput` 被 `preventDefault` 时 DOM 不变、
     撤销恢复、`execCommand('bold')` 产生 `<b>` 与对应 inputType；
-  - `tests/ime.rs`：文本框与 contenteditable 的组合事件序列与 Chrome on Windows 冻结值一致（`isComposing`、`keyCode 229`）、取消时内容恢复、`caret_rect` 有值；
+  - `tests/ime.rs`：文本框与 contenteditable 的组合事件序列与 Chrome on Windows 冻结值一致（`isComposing`；`Process`/229 取自规范，见上）、取消时内容恢复、`caret_rect` 有值；
   - `tests/drag.rs`：页面内拖放事件序列；`ExternalDrag` 两个文件 → `drop` 中 `files.length === 2`、`webUtils.getPathForFile` 返回路径（此项在 verve-electron 测）；
   - `tests/clipboard.rs`：选中文本后 `EditCommand::Copy` 产生 `WriteClipboard{ text, html }`；`copy` 监听器 `setData` 覆盖默认；`paste` 插入文本框与 contenteditable。
 - **真实编辑器**（`#[ignore]`，`verve::npm` 取包，参考 `tests/dsh.rs`）：
