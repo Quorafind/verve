@@ -14,12 +14,14 @@ use std::sync::Arc;
 
 use crate::field::Draft;
 
+mod edit;
 mod marks;
 mod names;
 mod ranges;
 mod reclaim;
 mod shadow;
 
+pub(crate) use edit::Edit;
 pub use names::{camel_name, css_name, parse_style};
 pub(crate) use ranges::{Contents, Ranges, utf16_len};
 pub use ranges::{Direction, RangeData, RangeError};

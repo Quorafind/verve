@@ -30,6 +30,7 @@ pub mod canvas;
 mod cookies;
 pub mod css;
 pub mod dom;
+mod editing;
 pub mod field;
 pub mod html;
 mod inner_text;
@@ -62,6 +63,7 @@ use boa_engine::{Context, JsResult, JsValue, js_string};
 
 pub use cookies::CookieBackend;
 pub use css::{Computed, Environment, Style};
+pub use dom::{Direction, RangeData, RangeError};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
 pub use field::{Draft, utf8_offset_to_utf16, utf16_offset_to_utf8};
 pub use input::{Key, Modifiers, Pointer};
@@ -209,6 +211,7 @@ pub(crate) fn install_classes(context: &mut Context, options: &Options) -> JsRes
     bind::animation::install(context)?;
     bind::traversal::install(context)?;
     bind::events::install_handlers(context)?;
+    editing::install(context)?;
     let document_id = shared(context).borrow().dom.document;
     let document = bind::node::wrap(context, document_id);
     context.register_global_property(
@@ -1093,6 +1096,12 @@ impl Document {
 
     fn key_default(&self, runtime: &mut verve::Runtime, target: NodeId, key: &Key) {
         let field = self.is_text_field(target);
+        if !field
+            && let Some(host) = self.editable_host(target)
+            && self.edit_key(runtime, host, key)
+        {
+            return;
+        }
         let chord = key.modifiers.ctrl || key.modifiers.meta;
         let printable = key.key.chars().count() == 1 && !chord;
         if printable {
@@ -1381,6 +1390,8 @@ impl Document {
         let target = self.key_target();
         if self.is_text_field(target) {
             self.insert_into(runtime, target, text, "insertText");
+        } else if let Some(host) = self.editable_host(target) {
+            self.insert_into_host(runtime, host, text);
         }
         runtime.run_microtasks();
     }

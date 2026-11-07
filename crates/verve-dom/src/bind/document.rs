@@ -282,33 +282,27 @@ const DOCUMENT_METHODS: &[Method] = &[
         Ok(this.clone())
     }),
     ("close", 0, |_, _, _| Ok(JsValue::undefined())),
-    // The old editing commands: answered as a page without a focused editable region answers.
+    // The old editing commands: see `editing.rs`.
     ("execCommand", 3, |_, args, cx| {
-        let command = arg_text(args, 0, cx)?.to_ascii_lowercase();
-        if command == "copy" {
-            let selected = super::call_method(&super::range::selection(cx)?, "toString", &[], cx)?;
-            let selected = text_of(&selected, cx)?;
-            if !selected.is_empty() {
-                shared(cx)
-                    .borrow_mut()
-                    .requests
-                    .push(crate::Request::CopyText(selected));
-                return Ok(true.into());
-            }
-        }
-        Ok(false.into())
+        let command = arg_text(args, 0, cx)?;
+        let value = opt_string(args, 2, cx)?.unwrap_or_default();
+        Ok(crate::editing::exec_command(cx, &command, &value, false)?.into())
     }),
     ("queryCommandSupported", 1, |_, args, cx| {
-        let command = arg_text(args, 0, cx)?.to_ascii_lowercase();
-        Ok(matches!(
-            command.as_str(),
-            "copy" | "cut" | "paste" | "inserttext" | "delete" | "selectall" | "undo" | "redo"
-        )
-        .into())
+        Ok(crate::editing::supported(&arg_text(args, 0, cx)?).into())
     }),
-    ("queryCommandEnabled", 1, |_, _, _| Ok(true.into())),
-    ("queryCommandState", 1, |_, _, _| Ok(false.into())),
-    ("queryCommandValue", 1, |_, _, _| Ok(js_text(""))),
+    ("queryCommandEnabled", 1, |_, args, cx| {
+        let command = arg_text(args, 0, cx)?;
+        Ok(crate::editing::enabled(cx, &command).into())
+    }),
+    ("queryCommandState", 1, |_, args, cx| {
+        let command = arg_text(args, 0, cx)?;
+        Ok(crate::editing::command_state(cx, &command).into())
+    }),
+    ("queryCommandValue", 1, |_, args, cx| {
+        let command = arg_text(args, 0, cx)?;
+        Ok(js_text(&crate::editing::command_value(cx, &command)))
+    }),
     ("startViewTransition", 1, |_, args, cx| {
         let update = arg(args, 0);
         if update.is_callable() {
@@ -561,8 +555,18 @@ const DOCUMENT_ACCESSORS: &[Accessor] = &[
     ),
     (
         "designMode",
-        Some(|_, _, _| Ok(js_text("off"))),
-        Some(|_, _, _| Ok(JsValue::undefined())),
+        Some(|_, _, cx| {
+            Ok(js_text(if read_dom(cx, |dom| dom.design_mode) {
+                "on"
+            } else {
+                "off"
+            }))
+        }),
+        Some(|_, args, cx| {
+            let on = arg_text(args, 0, cx)?.eq_ignore_ascii_case("on");
+            with_dom(cx, |dom| dom.design_mode = on);
+            Ok(JsValue::undefined())
+        }),
     ),
     (
         "dir",

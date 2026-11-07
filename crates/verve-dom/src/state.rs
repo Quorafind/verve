@@ -174,6 +174,8 @@ pub struct State {
     pub laid: Option<(u64, (f32, f32))>,
     pub scroll_offsets: HashMap<NodeId, [f32; 2]>,
     pub requests: Vec<Request>,
+    /// What editing keeps between calls: the undo histories and the composition.
+    pub editing: crate::editing::EditState,
     /// The selection's revision the page was last told of, and whether telling it is queued.
     pub selection_seen: u64,
     pub selection_queued: bool,
@@ -266,6 +268,7 @@ impl State {
             laid: None,
             scroll_offsets: HashMap::new(),
             requests: Vec::new(),
+            editing: Default::default(),
             selection_seen: 0,
             selection_queued: false,
             media: crate::media::MediaStore::default(),
