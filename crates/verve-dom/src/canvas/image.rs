@@ -133,15 +133,27 @@ pub fn unpremultiply(pixels: &mut [u8]) {
     }
 }
 
-/// An SVG's size from its header: `width`/`height`, else the `viewBox`'s, else the 300×150 the
-/// CSS default object size gives a drawing with no intrinsic size.
+/// An SVG's size from its header: `width` and `height` in pixels or `em`, else the 300×150 the
+/// CSS default object size, fitted to the `viewBox`'s ratio if there is one, for a drawing with no
+/// intrinsic size. Observed in Electron 39.8.10 (`p35-review4\ratio\out.json`), an `<img>` of
+/// `viewBox="0 0 40 20"` alone has natural size 300 by 150, `0 0 24 24` is 150 by 150, `0 0 90 30`
+/// is 300 by 100, `width="4em" height="2em"` is 64 by 32, and `stroke-width="2"` before `width`
+/// does not set the width. (Laid out by `width` alone, an `<img>` follows that ratio.)
 fn svg_size(bytes: &[u8]) -> Option<(u32, u32)> {
     let head = &bytes[..bytes.len().min(4096)];
-    let text = std::str::from_utf8(head).ok()?;
+    // A character cut by the end of the head ends the text there.
+    let text = match std::str::from_utf8(head) {
+        Ok(text) => text,
+        Err(cut) => std::str::from_utf8(&head[..cut.valid_up_to()]).ok()?,
+    };
     let start = text.find("<svg")?;
     let tag = &text[start..text[start..].find('>').map(|end| start + end)?];
     let attribute = |name: &str| -> Option<&str> {
-        let at = tag.find(name)?;
+        // The name starts an attribute: after white space, not the end of `stroke-width`.
+        let at = tag
+            .match_indices(name)
+            .map(|(at, _)| at)
+            .find(|at| tag[..*at].ends_with(|c: char| c.is_whitespace()))?;
         let rest = tag[at + name.len()..].trim_start();
         let rest = rest.strip_prefix('=')?.trim_start();
         let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
@@ -150,12 +162,22 @@ fn svg_size(bytes: &[u8]) -> Option<(u32, u32)> {
     };
     let length = |value: Option<&str>| -> Option<f32> {
         let value = value?.trim();
-        let number = value.trim_end_matches("px").trim_end_matches("pt").trim();
-        number.parse::<f32>().ok().filter(|n| *n > 0.)
+        let (number, scale) = match value.strip_suffix("em") {
+            Some(number) => (number, 16.),
+            None => (value.trim_end_matches("px").trim_end_matches("pt"), 1.),
+        };
+        number
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|n| *n > 0.)
+            .map(|n| n * scale)
     };
     if let (Some(width), Some(height)) = (length(attribute("width")), length(attribute("height"))) {
         return Some((width.round() as u32, height.round() as u32));
     }
+    // Only a `viewBox`: the 300 by 150 default is fitted to its ratio (150 by 150 for a square,
+    // 300 by 100 for 3:1), as Chromium sizes it.
     if let Some(view) = attribute("viewBox") {
         let numbers: Vec<f32> = view
             .split([' ', ','])
@@ -165,7 +187,17 @@ fn svg_size(bytes: &[u8]) -> Option<(u32, u32)> {
             && width > 0.
             && height > 0.
         {
-            return Some((width.round() as u32, height.round() as u32));
+            let (default_width, default_height) = DEFAULT_OBJECT_SIZE;
+            let (default_width, default_height) = (default_width as f32, default_height as f32);
+            let fitted = if width / height >= default_width / default_height {
+                (default_width, default_width * height / width)
+            } else {
+                (default_height * width / height, default_height)
+            };
+            return Some((
+                fitted.0.round().max(1.) as u32,
+                fitted.1.round().max(1.) as u32,
+            ));
         }
     }
     Some(DEFAULT_OBJECT_SIZE)
@@ -413,5 +445,37 @@ impl ImageStore {
             .iter()
             .filter_map(|(url, entry)| Some((url.clone(), image(entry)?)))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod svg_sizes {
+    use super::svg_size;
+
+    // Electron 39.8.10: the natural sizes of an `<img>` of each of these.
+    #[test]
+    fn an_svgs_intrinsic_size_is_what_chromium_gives_it() {
+        let size = |text: &str| svg_size(text.as_bytes());
+        assert_eq!(size(r#"<svg viewBox="0 0 40 20">"#), Some((300, 150)));
+        assert_eq!(size(r#"<svg viewBox="0 0 24 24">"#), Some((150, 150)));
+        assert_eq!(size(r#"<svg viewBox="0 0 90 30">"#), Some((300, 100)));
+        assert_eq!(
+            size(r#"<svg width="100%" viewBox="0 0 40 20">"#),
+            Some((300, 150))
+        );
+        assert_eq!(size(r#"<svg width="4em" height="2em">"#), Some((64, 32)));
+        assert_eq!(
+            size(r#"<svg stroke-width="2" width="40" height="20">"#),
+            Some((40, 20))
+        );
+    }
+
+    #[test]
+    fn a_character_cut_by_the_end_of_the_head_does_not_hide_the_svg() {
+        // The head is 4096 bytes: an odd-length prefix puts the cut inside a two-byte character.
+        let mut text = String::from(r#"<svg width="5" height="6"><!--x"#);
+        text.push_str(&"é".repeat(2100));
+        assert!(std::str::from_utf8(&text.as_bytes()[..4096]).is_err());
+        assert!(svg_size(text.as_bytes()).is_some());
     }
 }
