@@ -192,6 +192,24 @@ pub fn closure<T: boa_gc::Trace + 'static>(
     .into()
 }
 
+/// A function a [`closure`] runs: the receiver, the arguments, its captures, the context.
+pub type ClosureFn<T> = fn(&JsValue, &[JsValue], &T, &mut Context) -> JsResult<JsValue>;
+
+/// `promise.then(ok, err)` where both reactions hold `captures`: `ok` runs with the value the
+/// promise is fulfilled with, `err` with the reason it is rejected with. Answers the promise
+/// `then` made.
+pub fn then<T: boa_gc::Trace + Clone + 'static>(
+    context: &mut Context,
+    promise: &JsValue,
+    ok: ClosureFn<T>,
+    err: ClosureFn<T>,
+    captures: T,
+) -> JsResult<JsValue> {
+    let ok = closure(context, "", 1, ok, captures.clone());
+    let err = closure(context, "", 1, err, captures);
+    invoke(promise, "then", &[ok.into(), err.into()], context)
+}
+
 /// A property that is there but not listed: a method, or state kept on an object.
 pub fn hidden(
     target: &JsObject,
