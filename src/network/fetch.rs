@@ -18,6 +18,9 @@
 //! errors its body with the signal's `reason`, and closes the connection. A request body that is
 //! a stream is read whole before sending. `data:` and `blob:` addresses are answered without any
 //! network.
+//!
+//! A realm whose host set a [`BrowserNet`](crate::browser_net::BrowserNet) has each request shown
+//! to it, which may answer the address itself. Without one nothing here changes.
 
 use boa_engine::{
     Context, JsData, JsError, JsObject, JsResult, JsString, JsValue,
@@ -25,7 +28,9 @@ use boa_engine::{
 };
 use boa_gc::{Finalize, Trace};
 use std::io::Write;
+use std::rc::Rc;
 
+use crate::browser_net::{BrowserNet, NetError, RequestHead, ResourceType, fresh_id, gate};
 use crate::fetch::{Fetched, FetchedBody, OutgoingBody};
 use crate::native::{arg, closure, get, hidden, invoke, js_text, list_of, object, text_of};
 use crate::streams::{error_value, pending, reject, resolve, when};
@@ -39,14 +44,48 @@ const MAX_REDIRECTS: u32 = 20;
 /// The global `fetch`.
 pub(crate) fn create(context: &mut Context) -> JsObject {
     crate::native::function(context, "fetch", 1, |_, args, cx| {
-        let (promise, resolvers) = pending(cx);
-        // Nothing is thrown: every failure, even a bad argument, is the promise's.
-        if let Err(error) = begin(&arg(args, 0), &arg(args, 1), &resolvers, cx) {
-            let reason = error_value(error, cx);
-            reject(&resolvers, reason, cx);
-        }
-        Ok(promise.into())
+        let how = InternalFetch::of_realm(cx);
+        Ok(fetch_internal(cx, &arg(args, 0), &arg(args, 1), how).into())
     })
+}
+
+/// How a fetch the host makes differs from the global one a script calls.
+pub struct InternalFetch {
+    /// The hook it asks about the request; `None` fetches as a realm with no
+    /// [`BrowserNet`] does.
+    pub net: Option<Rc<dyn BrowserNet>>,
+    /// What the request is for, as the hook is told.
+    pub resource_type: ResourceType,
+    /// The origin of the page that makes it.
+    pub initiator: Option<String>,
+}
+
+impl InternalFetch {
+    /// What the realm's own `fetch` is: asked of the realm's hook, as an `xhr`.
+    pub fn of_realm(cx: &Context) -> Self {
+        Self {
+            net: crate::browser_net::runtime_net(cx),
+            resource_type: ResourceType::Xhr,
+            initiator: None,
+        }
+    }
+}
+
+/// `fetch(input, init)` for the host: the global `fetch`, with the hook, the resource type and
+/// the initiator the caller gives instead of the realm's. Answers the promise of the response;
+/// nothing is thrown, every failure, even a bad argument, is the promise's.
+pub fn fetch_internal(
+    context: &mut Context,
+    input: &JsValue,
+    init: &JsValue,
+    how: InternalFetch,
+) -> JsObject {
+    let (promise, resolvers) = pending(context);
+    if let Err(error) = begin(input, init, &resolvers, how, context) {
+        let reason = error_value(error, context);
+        reject(&resolvers, reason, context);
+    }
+    promise
 }
 
 // ─── One fetch ──────────────────────────────────────────────────────────────────────────────
@@ -97,6 +136,7 @@ fn begin(
     input: &JsValue,
     init: &JsValue,
     resolvers: &ResolvingFunctions,
+    how: InternalFetch,
     cx: &mut Context,
 ) -> JsResult<()> {
     let outgoing = crate::fetch::outgoing(input, init, cx)?;
@@ -108,7 +148,12 @@ fn begin(
     }
     let url = url::Url::parse(&outgoing.url)
         .map_err(|_| crate::native::type_error(format!("Invalid URL: {}", outgoing.url)))?;
-    if answered_without_network(&outgoing.method, &url, resolvers, cx)? {
+    let head = request_head(&outgoing, &url, how.resource_type, how.initiator.clone());
+    if let Some(net) = how.net.clone().filter(|net| net.custom(&url)) {
+        let body = outgoing.body;
+        return crate::browser_net::begin_custom(net, head, body, signal, resolvers.clone(), cx);
+    }
+    if answered_without_network(&outgoing.method, &url, how.net.as_ref(), resolvers, cx)? {
         return Ok(());
     }
     let redirect = match outgoing.redirect.as_str() {
@@ -178,11 +223,30 @@ fn begin(
     Ok(())
 }
 
+/// The request as the host sees it.
+fn request_head(
+    outgoing: &crate::fetch::Outgoing,
+    url: &url::Url,
+    resource_type: ResourceType,
+    initiator: Option<String>,
+) -> RequestHead {
+    RequestHead {
+        id: fresh_id(),
+        method: outgoing.method.clone(),
+        url: url.to_string(),
+        headers: outgoing.headers.clone(),
+        resource_type,
+        referrer: String::new(),
+        initiator,
+    }
+}
+
 /// Answers a `data:` or `blob:` address, and rejects any scheme but `http(s)`, without a network;
 /// `false` when the address is for the network.
 fn answered_without_network(
     method: &str,
     url: &url::Url,
+    net: Option<&Rc<dyn BrowserNet>>,
     resolvers: &ResolvingFunctions,
     cx: &mut Context,
 ) -> JsResult<bool> {
@@ -200,7 +264,13 @@ fn answered_without_network(
         }
         scheme => {
             let cause = plain_error(cx, &format!("unknown scheme '{scheme}:'"), None);
-            let reason = fetch_failed(cx, cause);
+            let reason = match net {
+                Some(net) => {
+                    let error = NetError::from_code(-302);
+                    gate::failure(cx, net.failure_style(), cause, &error)
+                }
+                None => fetch_failed(cx, cause),
+            };
             reject(resolvers, reason, cx);
         }
     }
@@ -822,7 +892,7 @@ fn teardown(fetch: &JsObject, cx: &mut Context) -> JsResult<()> {
 // ─── Errors ─────────────────────────────────────────────────────────────────────────────────
 
 /// An `Error` with `message`, and Node's `code` when there is one.
-fn plain_error(cx: &mut Context, message: &str, code: Option<&str>) -> JsValue {
+pub(crate) fn plain_error(cx: &mut Context, message: &str, code: Option<&str>) -> JsValue {
     match code {
         Some(code) => crate::native::coded_error_value(cx, message, code),
         None => crate::native::construct_global(cx, "Error", &[js_text(message)])
@@ -831,7 +901,7 @@ fn plain_error(cx: &mut Context, message: &str, code: Option<&str>) -> JsValue {
     }
 }
 
-fn type_error_with_cause(cx: &mut Context, message: &str, cause: JsValue) -> JsValue {
+pub(crate) fn type_error_with_cause(cx: &mut Context, message: &str, cause: JsValue) -> JsValue {
     let options = object(cx);
     let _ = options.set(js_string!("cause"), cause, false, cx);
     crate::native::construct_global(cx, "TypeError", &[js_text(message), options.into()])
@@ -853,7 +923,7 @@ fn undici_cause(error: JsValue, cx: &mut Context) -> JsResult<JsValue> {
 }
 
 /// `TypeError: fetch failed`, as undici rejects with for any network error.
-fn fetch_failed(cx: &mut Context, cause: JsValue) -> JsValue {
+pub(crate) fn fetch_failed(cx: &mut Context, cause: JsValue) -> JsValue {
     type_error_with_cause(cx, "fetch failed", cause)
 }
 

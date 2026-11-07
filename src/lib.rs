@@ -27,6 +27,7 @@ pub use boa_gc;
 
 mod assert;
 pub mod blob;
+pub mod browser_net;
 mod buffer;
 mod child_process;
 mod cjs_exports;
@@ -253,6 +254,8 @@ struct Shared {
     blobs: RefCell<HashMap<String, Vec<u8>>>,
     /// The workers this realm started.
     network: RefCell<network::State>,
+    /// The host's say over `fetch`: see [`browser_net`].
+    browser: RefCell<browser_net::State>,
     workers: RefCell<Vec<worker::WorkerSlot>>,
     /// In a worker's own realm: its messages, coming and going.
     port: RefCell<Option<worker::Port>>,
@@ -555,6 +558,7 @@ impl Runtime {
             echo: std::env::var_os("VERVE_ECHO").is_some(),
             blobs: RefCell::new(HashMap::new()),
             network: RefCell::new(network::State::default()),
+            browser: RefCell::default(),
             workers: RefCell::new(Vec::new()),
             port: RefCell::new(None),
             idb: RefCell::new(indexeddb::IdbState::default()),

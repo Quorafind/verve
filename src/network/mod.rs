@@ -154,7 +154,7 @@ pub(crate) fn diagnostics(cx: &Context) -> NetworkDiagnostics {
 }
 
 pub(crate) fn poll(cx: &mut Context, deadline: Option<std::time::Instant>) -> usize {
-    let mut count = 0;
+    let mut count = crate::browser_net::deliver(cx);
     let mut drained = false;
     // Bound a beat even when JS and I/O keep producing work.
     for _ in 0..1024 {
@@ -236,7 +236,10 @@ pub(crate) fn queued(cx: &Context) -> bool {
 pub(crate) fn active(cx: &Context) -> bool {
     let shared = crate::shared(cx);
     let state = shared.network.borrow();
-    !state.targets.is_empty() || !state.dns.pending.is_empty() || !state.revoked.is_empty()
+    !state.targets.is_empty()
+        || !state.dns.pending.is_empty()
+        || !state.revoked.is_empty()
+        || crate::browser_net::active(cx)
 }
 
 /// `ref()` and `unref()` on a socket or server: whether it keeps a process waiting for it.
