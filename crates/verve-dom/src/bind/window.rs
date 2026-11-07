@@ -522,7 +522,10 @@ pub(crate) fn schedule_frame(context: &mut Context) {
     let due = {
         let state = shared(context);
         let state = state.borrow();
-        state.frame_clock == FrameClock::Timer && state.frame_timer.is_none()
+        // A window that is not drawn runs no frames (Electron 39.8.10: a window with
+        // `paintWhenInitiallyHidden: false` that was never shown ran 0 animation frames in 1.2 s);
+        // they start again when it is.
+        state.frame_clock == FrameClock::Timer && state.frame_timer.is_none() && !state.hidden
     };
     if !due {
         if shared(context).borrow().frame_clock == FrameClock::Host {

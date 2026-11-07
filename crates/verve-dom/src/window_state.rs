@@ -161,6 +161,10 @@ impl Document {
         if let Err(error) = bind::events::fire(context, &target, "Event", "visibilitychange", &[]) {
             verve::report(context, &error);
         }
+        // Frames asked for while it was hidden start now.
+        if !hidden && !self.state.borrow().frames.is_empty() {
+            bind::window::schedule_frame(context);
+        }
         runtime.run_microtasks();
     }
 
