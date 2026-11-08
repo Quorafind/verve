@@ -216,6 +216,14 @@ pub enum ControlKind {
   | progress / meter | `10em × 1em` / `5em × 1em`（16px 字体下 160 × 16 / 80 × 16；13.3333px 下 133.33 × 13.33 / 66.66 × 13.33） | |
 
   `font: 13.3333px Arial`（`textarea` 为 monospace）、上面的 padding 和边框进 UA 样式表，作者的 CSS 照常覆盖。
+- **字段里的点击与滚动**（第二部分；观察：Electron 39.8.10，探针 `p32c/click`、`p32c-review/fld-out.json`）：
+  - verve-dom 新增 `FieldPositionProvider = Box<dyn Fn(NodeId, f32, f32) -> Option<(usize, usize)>>`，经 `Document::set_field_position_provider` 装上；
+    `Document::field_offset_at(field, x, y)`（视口坐标）答出字段值里离该点最近的字节，和点所在字符的字节（双击取词用）；没有提供者或字段没有盒子时为 `None`，此时按下不改字段的选区。
+    verve-electron 的 `PageLayout` 用 `LayoutEngine::field_offset_at(node, x, y)` 实现它：`<input>` 只有一行，不论 y 在哪；`<textarea>` 把 y 夹到最后一行再按 x 取。
+  - `LayoutEngine::reveal_caret(node)` 把焦点字段滚到光标可见，返回动了的盒子（和 `apply_scroll` 一样，调用者报给文档）。`Document::field_mark()` 答出焦点字段的节点和它的
+    文字、光标、锚点的指纹；渲染器只在一条消息前后指纹变了时才调 `PageLayout::follow_caret`（鼠标移动、单独的 Shift 不会把滚走的字段拉回光标）。
+  - `PageLayout::follow_focus`：`<input>` 失去焦点时 `scrollLeft` 归零，再次得到焦点时恢复；`<textarea>` 的滚动保持。
+  - 双击选词后继续拖动按词延伸（`Draft::extend_by_words`），按下时页面自己的选区折成字段前的光标。
 - **`ToRendererInput::Choose { select: NodeId, index: usize }`**，追加在枚举末尾（P02 汇总表那一行早已写了它，这次才有变体）。渲染器收到后调
   `Document::choose_option`（`index` 按 `SelectOption` 的顺序、不含隐藏选项；选项禁用、序号越界或本来就是选中的则什么都不发，否则 `input` + `change`）；节点已不在文档里则丢掉。
 - **乐观回显**：Shell 给每个发往渲染器的输入记下 `Isolate::send` 返回的任务号（`Hub::input` 改为返回它）。焦点字段的编辑键、文字和组字会在 Shell
