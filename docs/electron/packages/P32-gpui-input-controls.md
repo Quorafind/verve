@@ -481,3 +481,56 @@ pub enum ControlKind {
 **手测清单（第二部分做完后一起）**：复选框切换；`<select>` 鼠标和键盘；`range` 拖动；Tab 在控件间移动并出现焦点环；文件输入打开系统对话框；
 微软拼音在 `<input>` 和 `<textarea>` 里带下划线、候选框在光标下；字段里 Ctrl+Z；页面忙时输入。
 目前已可手测：光标闪烁、选区、组字下划线与候选框位置、Ctrl+Z/Ctrl+Y、复选框/单选框/滑块/进度条/仪表/色块的外观。
+
+### 阶段 2 第二部分（做了一半：字段里的点击与滚动、`<select>` 弹层与列表框、range、文件拖入；其余未做；第二轮修正已做）
+
+**做了**
+
+- **字段里的点击**（观察：Electron 39.8.10，隐藏窗口；探针 `p32c/click`，`p32c-review/fld-out.json`、`fld3-out.json`，拖动用 CDP `Input.dispatchMouseEvent`，因为 `sendInputEvent` 的移动不会扩选）：
+  布局的 `LayoutEngine::field_offset_at` 把窗口点换成字段值里的字节（最近的边界，和点所在字符的字节），经 `Document::set_field_position_provider` 给 verve-dom（`field_click.rs`）。
+  - 单击放光标：`<input>` 只有一行，不论 y 在哪（上、下 padding 里也是）；`<textarea>` 把 y 夹到最后一行再按 x（`ta` 底部点在 "four" 上，x 在行尾之后是 13）；行尾之后到行尾；
+    点在开头的空行上是那一行（不是文本末尾）；只有末尾换行留下的空行之下才是文本末尾。Shift+单击从旧锚点延伸。按下时页面自己的选区折成字段前的光标（类型 Caret）。
+  - 双击取词（`Draft::word_span`、`select_word_around`，旧的 `select_word_at` 已删）：字母数字和 `_`，`'` 在两个字母之间、`.`/`,` 在两个数字之间也算词内（`foo_bar `、`don't `、`3.14 ` 各是一个词，
+    `a.b`、`e.g.` 在点处分开），加后面的空格和制表符；孤立的标点连后面的空格；空格段、换行单独。**与 Chromium 的差别**：Chromium 的 CJK 按词典分词（你好 / 世界 / 中文 / 输入），这里整段字母是一个词。
+  - 双击后继续拖动按词延伸（`extend_by_words`；观察：`hello world foo bar baz` 里双击 `world` 得 6–12，拖到 `hello` 是 0–11 反向，拖到 `foo` 是 6–15，词后的空格不算）。
+    三击在 `<input>` 全选、在 `<textarea>` 选一行连换行。拖到字段外：夹到最近边界（`<input>` 里拖到下方在同一列；`<textarea>` 下方取最后一行的 x），和观察一致。
+- **光标滚动**：`<input>` 打字超过右缘后 `scrollLeft = 光标 x + 左右 padding − clientWidth`；`<textarea>` 光标行的下沿超出时 `scrollTop = padding 顶 + 光标行下沿 − clientHeight`，上沿超出时回到 `padding 顶 + 光标行上沿`（2）。
+  `LayoutEngine::reveal_caret` 做这件事，但**只在一条消息前后焦点字段的文字、光标或锚点变了时**才调 `PageLayout::follow_caret`（`Document::field_mark`；观察：滚到 100 的 textarea 在鼠标移动、单独的 Shift、Ctrl+C 之后
+  仍是 100，只有方向键和打字才拉回光标），所以滚轮或脚本滚走的字段不会被下一次鼠标移动拉回，也不再每次移动都克隆值并排版。
+  `PageLayout::follow_focus`：`<input>` 失去焦点时 `scrollLeft` 归零，再聚焦时恢复（观察 140→0→140）；`<textarea>` 保持 `scrollTop`（52）。
+- **`<select>` 弹层**（`verve-gpui/src/popup.rs`）：由文档决定何时开（`Document::take_open_select`，追加在 `RendererView.open_select`）：没被取消的 `mousedown`（按钮 0）、没有 Alt 和 Ctrl 的 F4、Alt+Up、Alt+Down、
+  `keypress` 之后的 Space（1 秒内没打字时）和 Enter；页面照常听到触发键的 `keydown`；被取消的不开（观察：`sel3-out.json`、`sel4-out.json`，每个用例一个新窗口，以"下一个 Down 有没有到页面"判断弹层开没开）。
+  壳在同一个视图的显示列表上打开；每次状态变化（悬停、按键、点选、滚轮）后 `window.refresh()`；它的 select 不在了、被禁用、没有焦点，页面导航、窗口失焦、窗口改变大小时关闭；选项或位置变了就跟着更新；滚轮只在指针位于弹层上时转它；
+  弹层先于窗口的拖动区接按下。弹层本身：`Popup` 是纯数据，`deferred(..).with_priority(100)` 画，向下展开，不够时向上或变矮并滚动，水平夹在窗口内；悬停、点选、点外面关闭、Up/Down/Home/End/PageUp/PageDown、
+  共用的预输入、Enter/Space/Tab 选定。**观察到页面听到的、但没在可见窗口里确认**：在弹层里用键移动不发事件，Esc（移动之后）、Enter、Alt+Down 选定高亮项并发 `input`、`change`；Enter 之后 Chromium 还发一个 `click`，这里没发。
+- **关着的 select 的按键**（`select_keys.rs`）：Up/Down/Left/Right/Home/End、字母立即改选项，发 `input` 然后 `change`，跳过禁用项；PageUp/PageDown 是 ±3 个选项（按全部选项算，落在禁用项上则往前走）；
+  预输入（`verve_dom::TypeAhead`，和弹层共用）：1 秒内的字母成前缀（`b a n d` 到 Bandana），同一字母循环（`b b` 到下一个 B）。字符在 `keypress` 没被取消之后才到这里（原来走不到）。
+- **列表框**（契约：`ControlKind::Select` 的 `list: Option<f32>`，在自己的 docs 提交里）：选项作为生成文字一行一项排在框里，`overflow: clip`（`select[multiple], select[size]`），每个选中的行罩半透明的蓝，没有选择时一行都不罩；不画箭头。
+  **没做**：列表框的交互（点选、Ctrl/Shift 多选，要追加的 `ToRendererInput` 变体）和框内滚动。
+- **range**（观察：`p32c/rng`、`fld2-out.json`）：`range_drag.rs`。`Dom::value` 对 range 返回清洗后的值（此前 `draft` 先于 range 判断，一直是 ""）；人或脚本设的值存在 `draft`（脏值），`value` 属性仍是默认值（`reset()` 会回到它），
+  拖动不再写属性。默认值取中点并吸附到 step；按下立即设值并发 `input`，拖动每次变化发 `input`，松开时值变了才发 `change`；方向键 ±step、PageUp/PageDown ±(范围/10)（至少一个 step）、Home/End；
+  `step="any"` 时方向键是范围的 1/100（0 到 1 的 0.5 之后是 0.51；0 到 50 的 10 之后是 10.5、11）。值按 JavaScript 的数字写法（`boa_engine::JsString::from(f64)`），小数位数取 step 和 min 的位数，不再 `×1e9`。
+- **文件拖入**（`verve-gpui/src/drop.rs`）：同前；另外 GPUI 把文件拖动同时变成左键按下的 `MouseMove` 和 `Submit` 时的 `MouseUp`，所以 `input::mouse_move`/`mouse_up` 在 `cx.has_active_drag()` 时跳过，
+  页面只听到 `dragenter`/`dragover`/`drop`，没有多出来的 `mousemove` 和第二个 `dragover`。（`drop.rs` 的单测看不到这一层；靠下面的手测。）
+- 小处：`key_default` 的复制/剪切/粘贴键移到 `clipboard_key`；`list_row` 和 `line_height` 的文档各回各处；`kind_of` 的 range 用 `range_limits`；`forms.rs` 的 `press` 不再和 `click` 重复。
+- 测试：`forms.rs`（点击放光标、输入框下方和开头空行的点击、鼠标移动不把滚走的字段拉回、双击/Shift/三击/拖动、打字滚动、关着的 select 的按键、range）；`verve-dom/tests/select.rs`（PageUp/PageDown、预输入、何时开弹层）；
+  `field.rs` 的单测（词规则的观察用例、CJK、按词拖动）、`range_drag.rs`、`popup.rs`、`drop.rs` 的单测。
+
+**没做（留给下一位）**
+
+- `<textarea wrap=off>`（`white-space: pre`）的水平方向光标追随：`reveal_caret` 只管竖向；
+- 弹层压在窗口拖动区上时，系统层面的拖动区仍按整个区域算（按下会被系统当作标题栏）：壳里已先让弹层接按下，但要真的可点，得在弹层打开时把它的矩形从 `set_drag_area` 里减掉；
+- 步骤 3 之外的：`type=file` 经 P14 打开对话框（`VERVE_NO_SYSTEM_DIALOGS` 的答复）和内部文字（"Choose File / No file chosen"）、`color`/`date` 的弹层和日历部分；
+- 乐观回显（步骤 6）：`Hub::input` 返回任务号、壳里的 `Echo`、忙时组字的处理，都没开始；
+- 步骤 7 的零碎：`webContents.undo()`/Undo 角色/`execCommand('undo')` 触及字段、脚本把值设回同样文字时清空历史、`<fieldset disabled>`、`indeterminate` 的绘制、
+  `caret-color` 给组字下划线、文本字段宽度按字体平均/最大字符宽算、颜色和复选框的作者 padding、20px 下 select 高 27 对 26、输入框/select/按钮里文字的垂直居中；
+- 步骤 8：文字上的 I-beam、三份"能输入文字"判断合并、GPUI `test-support` 测试文件（`ImeBridge`、`KeyRoute`、弹层和 range 的鼠标路径、回显）；
+- 步骤 9：夹具的像素比较；
+- `character_index_for_point`（输入法）仍是 `None`：现在有 `field_offset_at`，接上即可（`ime.rs` 里要经渲染器问一次）。
+
+**手测清单（第二部分，加在第一部分的后面；弹层在隐藏窗口里不显示，下面带 * 的只能在可见窗口里看）**：在字段里点击放光标，点在 `<input>` 上下 padding 里和 `<textarea>` 最后一行之下；双击选词、三击、Shift+点击；
+双击后按住向左右拖（按词扩选）；从字段里按住拖出去再回来；在 `<input>` 里打字超过右缘会滚，点到别处再点回来滚动位置恢复；滚轮滚走一个 `<textarea>` 后移动鼠标不会跳回；
+\*`<select>` 的弹层：按下左键打开、Alt+Down、F4、Space、Enter 各打开一次；鼠标悬停时高亮跟着动；Up/Down 键移动高亮；Esc 关闭（移动之后 Esc 是否改选项，Chromium 的可见窗口里要确认）；
+点弹层外面关闭；弹层打开时缩放窗口或切到别的窗口会关；弹层压在 `-webkit-app-region: drag` 的区域上时能不能点（上面"没做"）；关着的 select 上按字母、多字母前缀、PageUp/PageDown、Up/Down；
+列表框（`size=4`）里选中项罩着蓝，没选时不罩；range 拖动、方向键、`step=any` 的方向键；\*从资源管理器把文件拖进窗口再放下、拖进再拖出（页面只听到 drag 事件，没有 `mousemove`/`mouseup`）；
+`type=file` 的对话框和页面忙时打字（这两项的实现未做）。
