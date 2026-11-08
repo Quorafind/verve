@@ -1397,6 +1397,10 @@ impl Dom {
         if node.tag() == Some("textarea") && !node.dirty_value {
             return self.text_content(id);
         }
+        // A range keeps what was set in its draft apart from the default in its attribute.
+        if node.tag() == Some("input") && crate::bind::element::input_type(self, id) == "range" {
+            return self.range_value(id);
+        }
         if let Some(draft) = &node.draft {
             return draft.text().to_owned();
         }

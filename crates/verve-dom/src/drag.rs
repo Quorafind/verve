@@ -112,6 +112,11 @@ pub(crate) struct DragState {
     /// The word a double click took in that field (without the spaces after it): dragging on
     /// extends the selection by words.
     pub(crate) words: Option<std::ops::Range<usize>>,
+    /// The range input whose thumb is held, and its value at the press.
+    pub(crate) range: Option<(NodeId, String)>,
+    /// A range input let go with a value that is not the one it was pressed at: its `change` is
+    /// owed after the `mouseup`.
+    pub(crate) changed: Option<NodeId>,
 }
 
 #[derive(Default)]
@@ -245,6 +250,10 @@ impl Document {
         self.view.borrow_mut().drag.anchor = None;
         self.view.borrow_mut().drag.field = None;
         self.view.borrow_mut().drag.words = None;
+        self.view.borrow_mut().drag.range = None;
+        if !armed && pointer.button == 0 && placed && self.range_pressed(runtime, target, pointer) {
+            return;
+        }
         if !armed && pointer.button == 0 {
             self.begin_selecting(runtime, target, pointer, placed);
         }
@@ -336,7 +345,7 @@ impl Document {
 
     /// The pointer moved with a selecting press down: the selection reaches to it.
     fn extend_selecting(&self, runtime: &mut verve::Runtime, pointer: &Pointer) {
-        if self.drag_in_field(runtime, pointer) {
+        if self.range_moved(runtime, pointer) || self.drag_in_field(runtime, pointer) {
             return;
         }
         let Some(anchor) = self.view.borrow().drag.anchor else {
@@ -493,6 +502,7 @@ impl Document {
         let Some(mut active) = self.take_active() else {
             self.view.borrow_mut().drag.anchor = None;
             self.view.borrow_mut().drag.field = None;
+            self.range_released();
             let mut phase = self.phase();
             if matches!(*phase, Phase::Pressed(_)) {
                 *phase = Phase::Idle;

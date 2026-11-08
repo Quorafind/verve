@@ -623,17 +623,11 @@ pub(crate) fn kind_of(
             list: is_list(snapshot, node).then(|| list_row(snapshot, node)),
         },
         Sort::Range => {
-            let (min, max) = (number("min").unwrap_or(0.), number("max").unwrap_or(100.));
-            let max = max.max(min);
-            let value = dom
-                .value(node)
-                .trim()
-                .parse::<f64>()
-                .unwrap_or((min + max) / 2.);
+            let (min, max, _) = dom.range_limits(node);
             ControlKind::Range {
                 min,
                 max,
-                value: value.clamp(min, max),
+                value: dom.value(node).trim().parse().unwrap_or(min),
             }
         }
         Sort::Progress => {

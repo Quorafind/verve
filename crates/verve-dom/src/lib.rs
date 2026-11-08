@@ -46,6 +46,7 @@ mod media;
 mod options;
 mod permissions;
 mod person;
+mod range_drag;
 mod rect;
 mod schemes;
 mod select_keys;
@@ -877,6 +878,7 @@ impl Document {
                 state.dom.mark(active);
             }
         }
+        self.range_changed(runtime);
         let pressed = self.view.borrow_mut().pressed.take();
         // The click goes to what both the press and the release were in.
         let clicked = match pressed {
@@ -1149,6 +1151,13 @@ impl Document {
                 let backward = key.key == "Backspace";
                 self.delete_in(runtime, target, backward, word);
                 self.acted(true);
+            }
+            "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "Home" | "End" | "PageUp"
+            | "PageDown"
+                if self.is_range(target) =>
+            {
+                let moved = self.range_key(runtime, target, &key.key);
+                self.acted(moved);
             }
             "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "Home" | "End" | "PageUp"
             | "PageDown"

@@ -13,7 +13,8 @@ const PAGE: &str = r#"<style>html,body{margin:0}input,select{display:block;margi
 <input id="f" type="text" value="abcd efgh"><textarea id="ta" rows="3" cols="8">one
 two
 
-four</textarea><span id="w" style="font:13.3333px Arial;white-space:pre">abc</span>"#;
+four</textarea><span id="w" style="font:13.3333px Arial;white-space:pre">abc</span>
+<input id="r" type="range" min="0" max="1" step="0.1" style="display:block;width:200px">"#;
 
 const LISTEN: &str = r#"globalThis.heard = [];
 for (const kind of ['click', 'input', 'change']) {
@@ -545,4 +546,60 @@ fn the_keys_of_a_closed_select_change_its_choice_at_once() {
     // Page Down is three options on, which is the end of two.
     page.key("PageDown", Modifiers::default());
     page.until(value, "\"b\"");
+}
+
+#[test]
+fn a_range_follows_the_pointer_in_steps_and_says_change_when_it_is_let_go() {
+    let page = launch();
+    let value = "document.getElementById('r').value";
+    // Electron 39.8.10: no attribute gives the middle; a press moves the thumb and says `input`.
+    page.until(value, "\"0.5\"");
+    let [left, top, width, height] = page.rect("r");
+    let at = |share: f32| (left + 6. + (width - 12.) * share, top + height / 2.);
+    page.eval("heard.length = 0");
+    let down = |x: f32, y: f32| ToRendererInput::Pointer {
+        kind: PointerKind::Down,
+        pointer: Pointer {
+            x,
+            y,
+            count: 1,
+            buttons: 1,
+            ..Pointer::default()
+        },
+        target: None,
+    };
+    page.send(down(at(0.32).0, at(0.32).1));
+    page.until(value, "\"0.3\"");
+    page.until("heard.join(' ')", "\"input#r\"");
+    // Dragging past the end goes to the end, with `input` for each change and no `change` yet.
+    page.drag_to((left + width + 40., top + height / 2.));
+    page.until(value, "\"1\"");
+    assert!(!page.eval("heard.join(' ')").contains("change"));
+    page.send(ToRendererInput::Pointer {
+        kind: PointerKind::Up,
+        pointer: Pointer {
+            x: left + width + 40.,
+            y: top + height / 2.,
+            count: 1,
+            buttons: 0,
+            ..Pointer::default()
+        },
+        target: None,
+    });
+    page.until(
+        "heard.join(' ').startsWith('input#r input#r change#r')",
+        "true",
+    );
+    // Keys: a step, a tenth of the range, and the ends.
+    page.eval("heard.length = 0; document.getElementById('r').focus(); 0");
+    page.key("ArrowLeft", Modifiers::default());
+    page.until(value, "\"0.9\"");
+    page.key("PageDown", Modifiers::default());
+    page.until(value, "\"0.8\"");
+    page.key("Home", Modifiers::default());
+    page.until(value, "\"0\"");
+    page.until(
+        "heard.join(' ')",
+        "\"input#r change#r input#r change#r input#r change#r\"",
+    );
 }
