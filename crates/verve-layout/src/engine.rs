@@ -318,6 +318,64 @@ impl LayoutEngine {
             .unwrap_or_default()
     }
 
+    /// Where in the value of the text field `node` the point `(x, y)` of the window falls: the
+    /// byte nearest to it, and the byte of the character it is over. `None` for a node that is
+    /// not a field with a box.
+    pub fn field_offset_at(&self, node: NodeId, x: f32, y: f32) -> Option<(usize, usize)> {
+        let state = self.state.as_ref()?;
+        let index = *state.tree.by_node.get(&node)?;
+        let lines = state.tree.inline[index].as_deref()?;
+        let rect = state.placed.rect[index];
+        let [top, _, _, left] = state.laid.border[index];
+        let [pad_top, _, _, pad_left] = state.laid.padding[index];
+        let offset = state.placed.offset[index];
+        let at = (
+            x - (rect.x + left + pad_left) + offset[0],
+            y - (rect.y + top + pad_top) + offset[1],
+        );
+        crate::controls::field_hit(&state.snapshot, node, lines, at)
+    }
+
+    /// Scrolls the focused text field `node` just far enough that its caret shows, as typing
+    /// does. A single line follows the caret sideways (the caret at the right edge once it is
+    /// past it, with the paddings after it), a `<textarea>` follows it down the lines (the line
+    /// at the bottom edge, from the padding box's top); both as Electron 39.8.10 left
+    /// `scrollLeft` and `scrollTop` (`p32c/click`). Answers the boxes that moved, as
+    /// [`LayoutEngine::apply_scroll`] does.
+    pub fn reveal_caret(&mut self, node: NodeId) -> Vec<(NodeId, [f32; 2])> {
+        let Some(state) = &self.state else {
+            return Vec::new();
+        };
+        let Some(&index) = state.tree.by_node.get(&node) else {
+            return Vec::new();
+        };
+        let lines = state.tree.inline[index].as_deref();
+        let Some(caret) = crate::controls::caret_spot(&state.snapshot, node, lines) else {
+            return Vec::new();
+        };
+        let [pad_top, pad_right, _, pad_left] = state.laid.padding[index];
+        let client = state.laid.client(index);
+        let current = state.placed.offset[index];
+        let multiline = state.snapshot.dom.get(node).and_then(|n| n.tag()) == Some("textarea");
+        let mut wanted = current;
+        if multiline {
+            let top = pad_top + caret.y;
+            wanted[1] = nearest_scroll(current[1], top, top + caret.height - client[1]);
+        } else {
+            let right = caret.x + pad_left + pad_right - client[0];
+            wanted[0] = nearest_scroll(current[0], caret.x, right);
+        }
+        if wanted == current {
+            return Vec::new();
+        }
+        let request = ScrollRequest::To {
+            node,
+            left: Some(wanted[0]),
+            top: Some(wanted[1]),
+        };
+        self.apply_scroll(&request)
+    }
+
     /// Does a scroll a script asked for: the offset clamped to what the box can scroll to.
     /// Answers the boxes that moved, with their new offsets. The caller reports them to the
     /// document ([`verve_dom::Document::set_scroll_offsets`]).
@@ -539,6 +597,18 @@ fn aligned(align: Align, start: f32, length: f32, port: f32, current: f32) -> f3
         }
         Align::Nearest if start + length > port && start > 0. => current + start,
         Align::Nearest => current,
+    }
+}
+
+/// The offset closest to `current` that is at most `most` and at least `least`: a caret already
+/// in sight moves nothing.
+fn nearest_scroll(current: f32, most: f32, least: f32) -> f32 {
+    if current > most {
+        most
+    } else if current < least {
+        least
+    } else {
+        current
     }
 }
 

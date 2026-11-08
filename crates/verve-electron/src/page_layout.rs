@@ -6,11 +6,12 @@
 //! does the scrolling scripts ask for.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use verve::Runtime;
-use verve_dom::{Document, FontData, Layout, Request, ScrollRequest};
+use verve_dom::{Document, FontData, Layout, NodeId, Request, ScrollRequest};
 use verve_layout::{DisplayList, LayoutEngine, TextMeasurer};
 
 /// The layout of one page.
@@ -18,6 +19,10 @@ pub(crate) struct PageLayout {
     engine: Rc<RefCell<LayoutEngine>>,
     /// The revision of the display list the shell was last given.
     published: u64,
+    /// The field that had the focus when the page was last published.
+    focus: Option<NodeId>,
+    /// How far a one-line field was scrolled when it lost the focus, by field.
+    parked: HashMap<NodeId, f32>,
 }
 
 impl PageLayout {
@@ -50,6 +55,10 @@ impl PageLayout {
         document.set_position_provider(Some(Box::new(move |x, y| {
             positions.borrow().text_position_at(x, y)
         })));
+        let fields = Rc::clone(&engine);
+        document.set_field_position_provider(Some(Box::new(move |field, x, y| {
+            fields.borrow().field_offset_at(field, x, y)
+        })));
         // The bytes of a font the page declared go to the measurer; the layout then takes the face
         // by its family, and the document is laid out again.
         let fonts = Rc::clone(&engine);
@@ -69,6 +78,8 @@ impl PageLayout {
         Self {
             engine,
             published: 0,
+            focus: None,
+            parked: HashMap::new(),
         }
     }
 
@@ -131,13 +142,71 @@ impl PageLayout {
 
     fn scroll(&self, runtime: &mut Runtime, document: &Document, request: &ScrollRequest) {
         document.ensure_layout();
-        let (moved, rects) = {
-            let mut engine = self.engine.borrow_mut();
-            let moved = engine.apply_scroll(request);
-            (moved, engine.rects().collect::<Vec<_>>())
-        };
+        let moved = self.engine.borrow_mut().apply_scroll(request);
+        self.settle_scroll(runtime, document, moved);
+    }
+
+    /// Tells the document the boxes that a scroll moved.
+    fn settle_scroll(
+        &self,
+        runtime: &mut Runtime,
+        document: &Document,
+        moved: Vec<(NodeId, [f32; 2])>,
+    ) {
+        let rects = self.engine.borrow().rects().collect::<Vec<_>>();
         document.set_layout(runtime, rects);
         document.set_scroll_offsets(runtime, moved);
+    }
+
+    /// An `<input>` that loses the focus is scrolled back to its start and gets its scroll back
+    /// when it has the focus again; a `<textarea>` keeps its scroll. Observed in Electron
+    /// 39.8.10 (`p32c-review/fld-out.json`, `fld3-out.json`): `scrollLeft` went 140 to 0 on blur
+    /// and back to 140 on a script's `focus()`, and a text area's `scrollTop` stayed 52.
+    pub(crate) fn follow_focus(&mut self, runtime: &mut Runtime, document: &Document) {
+        let now = document.focused();
+        let before = std::mem::replace(&mut self.focus, now);
+        if before == now {
+            return;
+        }
+        let one_line =
+            |node: NodeId| document.dom().get(node).and_then(|n| n.tag()) == Some("input");
+        let mut moved = Vec::new();
+        if let Some(old) = before.filter(|old| one_line(*old)) {
+            let from = self.engine.borrow().scroll_offset(old)[0];
+            if from != 0. {
+                self.parked.insert(old, from);
+                let to_start = ScrollRequest::To {
+                    node: old,
+                    left: Some(0.),
+                    top: None,
+                };
+                moved.extend(self.engine.borrow_mut().apply_scroll(&to_start));
+            }
+        }
+        if let Some(back) = now.and_then(|new| Some((new, self.parked.remove(&new)?))) {
+            let request = ScrollRequest::To {
+                node: back.0,
+                left: Some(back.1),
+                top: None,
+            };
+            moved.extend(self.engine.borrow_mut().apply_scroll(&request));
+        }
+        if !moved.is_empty() {
+            self.settle_scroll(runtime, document, moved);
+        }
+    }
+
+    /// Scrolls the focused text field, if there is one, until its caret shows: after a key, text,
+    /// composition or press that may have moved it.
+    pub(crate) fn follow_caret(&self, runtime: &mut Runtime, document: &Document) {
+        let Some(field) = document.focused() else {
+            return;
+        };
+        document.ensure_layout();
+        let moved = self.engine.borrow_mut().reveal_caret(field);
+        if !moved.is_empty() {
+            self.settle_scroll(runtime, document, moved);
+        }
     }
 }
 

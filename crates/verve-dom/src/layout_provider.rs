@@ -55,6 +55,12 @@ pub type PositionProvider = Box<dyn Fn(f32, f32) -> Option<Boundary>>;
 
 pub(crate) type PositionHook = Rc<dyn Fn(f32, f32) -> Option<Boundary>>;
 
+/// The bytes of a text field's value nearest a point of the viewport, and over it: where a click
+/// puts the caret, and the character a double click takes the word of.
+pub type FieldPositionProvider = Box<dyn Fn(NodeId, f32, f32) -> Option<(usize, usize)>>;
+
+pub(crate) type FieldHook = Rc<dyn Fn(NodeId, f32, f32) -> Option<(usize, usize)>>;
+
 impl Document {
     /// Makes `provider` the one that works the geometry out whenever a script reads it
     /// (`getBoundingClientRect`, `offset*`, `client*`, `scroll*`, `elementFromPoint`) or a
@@ -97,6 +103,21 @@ impl Document {
     pub fn set_position_provider(&self, provider: Option<PositionProvider>) {
         self.state.borrow_mut().position_hook =
             provider.map(|provider| Rc::from(provider) as PositionHook);
+    }
+
+    /// Makes `provider` the one [`Document::field_offset_at`] asks. `None` takes it away.
+    pub fn set_field_position_provider(&self, provider: Option<FieldPositionProvider>) {
+        self.state.borrow_mut().field_hook =
+            provider.map(|provider| Rc::from(provider) as FieldHook);
+    }
+
+    /// The bytes of the value of the text field `field` that the point `(x, y)` of the viewport
+    /// is nearest to and over, after the layout is brought up to date. `None` without a field
+    /// position provider, or for a field with no box.
+    pub fn field_offset_at(&self, field: NodeId, x: f32, y: f32) -> Option<(usize, usize)> {
+        refresh(&self.state);
+        let hook = self.state.borrow().field_hook.clone()?;
+        hook(field, x, y)
     }
 
     /// The text position nearest the point `(x, y)` of the viewport: a text node and a UTF-16

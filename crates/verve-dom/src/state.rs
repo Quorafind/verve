@@ -165,6 +165,9 @@ pub struct State {
     /// Answers the text position under a point, if the page's layout can
     /// ([`crate::Document::set_position_provider`]).
     pub position_hook: Option<crate::layout_provider::PositionHook>,
+    /// Answers the value bytes of a text field under a point, if the page's layout can
+    /// ([`crate::Document::set_field_position_provider`]).
+    pub field_hook: Option<crate::layout_provider::FieldHook>,
     /// Takes the bytes of a font a page declared, if the page's text can use them
     /// ([`crate::Document::set_font_provider`]).
     pub font_hook: Option<crate::window_state::FontHook>,
@@ -281,6 +284,7 @@ impl State {
             layout_hook: None,
             range_hook: None,
             position_hook: None,
+            field_hook: None,
             font_hook: None,
             scroll_extents: HashMap::new(),
             laid: None,

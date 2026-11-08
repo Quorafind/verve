@@ -10,6 +10,14 @@ use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+/// What a character is to a double click.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Word {
+    Letters,
+    Blanks,
+    Other,
+}
+
 /// A name being typed, the caret typing it, and what is selected around it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Draft {
@@ -99,13 +107,95 @@ impl Draft {
         self.caret = self.boundary(at);
     }
 
-    /// Selects the word `at` falls in — a double click. A click on a run of spaces takes the
-    /// spaces, so every position in the field selects something.
-    pub fn select_word_at(&mut self, at: usize) {
+    /// The run of letters and digits, of spaces and tabs, or the one other character that the
+    /// character at byte `under` is in, without the blanks after a word or a mark. Observed in
+    /// Electron 39.8.10 (`p32c-review/fld-out.json`): `foo_bar`, `don't` and `3.14` are one word
+    /// each, `a.b` and `e.g.` are split at their dots. So `_` is a letter, `'` joins two letters,
+    /// and `.` or `,` joins two digits. Chromium cuts CJK text into the words of a dictionary
+    /// (你好 / 世界 / 中文 / 输入); there is none here, and a run of such letters is one word.
+    pub fn word_span(&self, under: usize) -> Range<usize> {
+        let chars: Vec<(usize, char)> = self.text.char_indices().collect();
+        let Some(at) = chars.iter().position(|(byte, _)| *byte >= under) else {
+            return self.text.len()..self.text.len();
+        };
+        let class = |i: usize| {
+            let c = chars[i].1;
+            let around = |j: Option<usize>| j.and_then(|j| chars.get(j)).map(|(_, c)| *c);
+            let (before, after) = (around(i.checked_sub(1)), around(Some(i + 1)));
+            match (c, before, after) {
+                (c, ..) if c.is_alphanumeric() || c == '_' => Word::Letters,
+                (' ' | '\t', ..) => Word::Blanks,
+                ('\'', Some(b), Some(a)) if b.is_alphabetic() && a.is_alphabetic() => Word::Letters,
+                ('.' | ',', Some(b), Some(a)) if b.is_numeric() && a.is_numeric() => Word::Letters,
+                _ => Word::Other,
+            }
+        };
+        let kind = class(at);
+        let (mut low, mut high) = (at, at);
+        if kind != Word::Other {
+            while low > 0 && class(low - 1) == kind {
+                low -= 1;
+            }
+            while high + 1 < chars.len() && class(high + 1) == kind {
+                high += 1;
+            }
+        }
+        let end = chars[high].0 + chars[high].1.len_utf8();
+        chars[low].0..end
+    }
+
+    /// Selects the word the character at byte `under` is in, as a double click does on Windows
+    /// (Electron 39.8.10): [`Draft::word_span`], and for a word or a mark the spaces and tabs
+    /// after it too.
+    pub fn select_word_around(&mut self, under: usize) {
+        self.marked = None;
+        let under = self.boundary(under);
+        let span = self.word_span(under);
+        let Some(first) = self.text[span.start..].chars().next() else {
+            self.anchor = self.text.len();
+            self.caret = self.anchor;
+            return;
+        };
+        let blank = |c: &char| *c == ' ' || *c == '\t';
+        let mut end = span.end;
+        if first != '\n' && !blank(&first) {
+            end += (self.text[end..].chars().take_while(blank))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        }
+        self.anchor = span.start;
+        self.caret = end;
+    }
+
+    /// The pointer dragged on after a double click that took the word `base` (a
+    /// [`Draft::word_span`]): the selection reaches the whole word under `under`, from the
+    /// other end of `base`. Observed in Electron 39.8.10 (`p32c-review/fld3-out.json`) on `hello
+    /// world foo bar baz` after a double click on `world` (6 to 12): dragged to `hello` it is 0 to
+    /// 11 backward, dragged to `foo` 6 to 15, so the spaces after a word are left out.
+    pub fn extend_by_words(&mut self, base: &Range<usize>, under: usize) {
+        let under = self.boundary(under);
+        let word = self.word_span(under);
+        if word.start < base.start {
+            self.marked = None;
+            self.anchor = base.end;
+            self.caret = word.start;
+        } else if word.end > base.end {
+            self.marked = None;
+            self.anchor = base.start;
+            self.caret = word.end;
+        } else {
+            self.select_word_around(base.start);
+        }
+    }
+
+    /// Selects the line `at` is on, with its line break: a triple click in a `<textarea>`.
+    pub fn select_line_at(&mut self, at: usize) {
         self.marked = None;
         let at = self.boundary(at);
-        self.anchor = self.word_start_before(at);
-        self.caret = self.word_end_after(at);
+        self.anchor = self.text[..at].rfind('\n').map_or(0, |i| i + 1);
+        self.caret = self.text[at..]
+            .find('\n')
+            .map_or(self.text.len(), |i| at + i + 1);
     }
 
     /// Ctrl+A. Nothing is selected when there is nothing there: an empty field would otherwise
@@ -631,11 +721,55 @@ mod tests {
         assert_eq!(draft.split(), ("https", "://example./dav"));
     }
 
+    /// What a double click on the character at `at` selects of `text`.
+    fn double_click(text: &str, at: usize) -> String {
+        let mut draft = Draft::new(text);
+        draft.select_word_around(at);
+        draft.selected_text().to_owned()
+    }
+
     #[test]
     fn a_double_click_takes_the_word_under_it() {
-        let mut draft = Draft::new("https://example.com/dav");
-        draft.select_word_at("https://exa".len());
-        assert_eq!(draft.selected_text(), "example");
+        let url = "https://example.com/dav";
+        assert_eq!(double_click(url, "https://exa".len()), "example");
+    }
+
+    /// Electron 39.8.10 (`p32c-review/fld-out.json`): a word with the spaces after it, an
+    /// underscore and an apostrophe between letters and a dot between digits inside the word, and
+    /// every other dot a word of its own.
+    #[test]
+    fn a_word_holds_underscores_apostrophes_between_letters_and_dots_between_digits() {
+        assert_eq!(double_click("foo_bar baz", 1), "foo_bar ");
+        assert_eq!(double_click("don't stop", 4), "don't ");
+        assert_eq!(double_click("pi 3.14 e", 5), "3.14 ");
+        assert_eq!(double_click("1,000 yen", 2), "1,000 ");
+        assert_eq!(double_click("a.b c", 0), "a");
+        assert_eq!(double_click("a.b c", 1), ".");
+        assert_eq!(double_click("e.g. x", 0), "e");
+        assert_eq!(double_click("e.g. x", 3), ". ");
+        assert_eq!(double_click("it's 'quoted'", 5), "'");
+    }
+
+    /// Chromium cuts these into 你好 / 世界 and so on by a dictionary. Here a run of letters is one
+    /// word, which is the one place the rule is knowingly different.
+    #[test]
+    fn a_run_of_cjk_letters_is_one_word() {
+        assert_eq!(double_click("你好世界 中文", 0), "你好世界 ");
+    }
+
+    #[test]
+    fn a_drag_after_a_double_click_goes_by_words_and_leaves_out_the_spaces_after_them() {
+        let text = "hello world foo bar baz";
+        let mut draft = Draft::new(text);
+        draft.select_word_around(7);
+        let base = draft.word_span(7);
+        assert_eq!((draft.selection(), base.clone()), (6..12, 6..11));
+        draft.extend_by_words(&base, 1);
+        assert_eq!((draft.selection(), draft.is_reversed()), (0..11, true));
+        draft.extend_by_words(&base, 13);
+        assert_eq!((draft.selection(), draft.is_reversed()), (6..15, false));
+        draft.extend_by_words(&base, 8);
+        assert_eq!(draft.selection(), 6..12);
     }
 
     /// The spellings on the way to å è½½, each standing where the last one stood. A field that

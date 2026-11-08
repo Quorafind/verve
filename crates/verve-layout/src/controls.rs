@@ -737,6 +737,34 @@ pub(crate) fn field_selection(
     Field::of(snapshot, node, Some(lines), draft.text()).span(selection.start, selection.end)
 }
 
+/// The bytes of the value of the field `node` that the point `(x, y)` (from the left and top of
+/// its content, scroll included) is nearest to and over.
+pub(crate) fn field_hit(
+    snapshot: &Snapshot,
+    node: NodeId,
+    lines: &InlineLayout,
+    (x, y): (f32, f32),
+) -> Option<(usize, usize)> {
+    let draft = snapshot.dom.get(node)?.draft.as_ref()?;
+    Some(Field::of(snapshot, node, Some(lines), draft.text()).hit(x, y))
+}
+
+/// Where the caret of the focused field `node` stands, from the left and top of its content: a
+/// zero-width box. A selection has the caret at its moving end.
+pub(crate) fn caret_spot(
+    snapshot: &Snapshot,
+    node: NodeId,
+    lines: Option<&InlineLayout>,
+) -> Option<Rect> {
+    let dom = &snapshot.dom;
+    let draft = dom.get(node)?.draft.as_ref()?;
+    if dom.focused != Some(node) {
+        return None;
+    }
+    let spot = Field::of(snapshot, node, lines, draft.text()).caret(draft.caret());
+    Some(Rect::new(spot.x, spot.top, 0., spot.height))
+}
+
 /// The text a field shows, laid out, and how the bytes of its value map to that text.
 struct Field<'a> {
     lines: Option<&'a InlineLayout>,
@@ -744,6 +772,8 @@ struct Field<'a> {
     /// What is shown: the value, or a bullet for each character of a password.
     shown: String,
     password: bool,
+    /// Whether it is an `<input>`: one row, wherever a point is vertically.
+    single: bool,
     value: &'a str,
     /// The height of a line when there is none yet.
     fallback: f32,
@@ -764,6 +794,7 @@ impl<'a> Field<'a> {
         value: &'a str,
     ) -> Self {
         let password = matches!(sort_of(snapshot, node), Some(Sort::Text { password: true }));
+        let single = matches!(sort_of(snapshot, node), Some(Sort::Text { .. }));
         let shown = if password {
             BULLET.repeat(value.chars().count())
         } else {
@@ -774,6 +805,7 @@ impl<'a> Field<'a> {
             owner: node,
             shown,
             password,
+            single,
             value,
             fallback: line_height(snapshot, node, font_size(snapshot, node)),
         }
@@ -873,6 +905,108 @@ impl<'a> Field<'a> {
                     height,
                 }
             }
+        }
+    }
+
+    /// The value byte nearest the point `(x, y)` (from the content's origin) and the value byte
+    /// of the character the point is over, which a double click selects the word of. A point
+    /// above the first line is on it and a point beyond the end of a line is at its end. A
+    /// single-line field has one row, whatever `y` is; a text area takes a `y` below its last line
+    /// as that line, and goes by `x` (Electron 39.8.10, `p32c-review/fld-out.json`), but a point
+    /// under the empty line a trailing break leaves is at the end of the text.
+    fn hit(&self, x: f32, y: f32) -> (usize, usize) {
+        let lines = self.lines.map_or(&[][..], |layout| &layout.lines[..]);
+        let end = self.value.len();
+        let row = if self.single {
+            0
+        } else {
+            match lines
+                .iter()
+                .position(|line| y < line.rect.y + line.rect.height)
+            {
+                Some(row) => row,
+                None if self.shown.ends_with('\n') => return (end, self.under_end()),
+                None => lines.len().saturating_sub(1),
+            }
+        };
+        let pieces: Vec<_> = self.pieces().collect();
+        let on_row = pieces.iter().filter(|(at, ..)| *at == row);
+        let near = on_row.min_by(|a, b| {
+            let gap = |piece: &TextFragment| (piece.x - x).max(x - piece.x - piece.width).max(0.);
+            gap(a.2).total_cmp(&gap(b.2))
+        });
+        let Some(&(_, _, piece)) = near else {
+            let behind = pieces.iter().rev().find(|(at, ..)| *at < row);
+            let from = behind.map_or((0, row), |(at, _, p)| {
+                (p.stops.last().map_or(0, |s| s.byte as usize), row - at)
+            });
+            let spot = self.after_breaks(from.0, from.1);
+            return (self.value_byte(spot), self.value_byte(spot));
+        };
+        let local = x - piece.x;
+        let nearest = (piece.stops.iter())
+            .min_by(|a, b| (a.x - local).abs().total_cmp(&(b.x - local).abs()))
+            .map_or(0, |stop| stop.byte as usize);
+        let last = piece.stops.last().map_or(0, |stop| stop.byte as usize);
+        // A line that ends in a break: its end is before the break, not after it.
+        let nearest = if nearest == last && last > 0 && self.shown[..last].ends_with('\n') {
+            last - 1
+        } else {
+            nearest
+        };
+        let before = piece.stops.iter().rev().find(|stop| stop.x <= local);
+        let mut under = before.map_or(0, |stop| stop.byte as usize);
+        if under >= last {
+            under = if self.shown[last..].starts_with('\n') {
+                last
+            } else {
+                piece
+                    .stops
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .map_or(0, |s| s.byte as usize)
+            };
+        }
+        (self.value_byte(nearest), self.value_byte(under))
+    }
+
+    /// The character at the end of the text: the last one.
+    fn under_end(&self) -> usize {
+        self.value
+            .char_indices()
+            .next_back()
+            .map_or(0, |(at, _)| at)
+    }
+
+    /// The byte after the `count`th line break at or after `from` of the shown text: where an
+    /// empty line is.
+    fn after_breaks(&self, from: usize, count: usize) -> usize {
+        if count == 0 {
+            return from;
+        }
+        let tail = self.shown.get(from..).unwrap_or("");
+        let mut seen = 0;
+        for (at, character) in tail.char_indices() {
+            if character == '\n' {
+                seen += 1;
+                if seen == count {
+                    return from + at + 1;
+                }
+            }
+        }
+        self.shown.len()
+    }
+
+    /// The byte of the value that byte `byte` of the shown text stands for.
+    fn value_byte(&self, byte: usize) -> usize {
+        if self.password {
+            self.value
+                .char_indices()
+                .nth(byte / BULLET.len())
+                .map_or(self.value.len(), |(at, _)| at)
+        } else {
+            byte
         }
     }
 

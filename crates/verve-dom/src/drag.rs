@@ -107,6 +107,11 @@ pub(crate) struct DragState {
     phase: Phase,
     /// Where a press that selects text began: the selection follows the pointer from here.
     anchor: Option<Boundary>,
+    /// The text field a press selected in: the selection follows the pointer in it.
+    pub(crate) field: Option<NodeId>,
+    /// The word a double click took in that field (without the spaces after it): dragging on
+    /// extends the selection by words.
+    pub(crate) words: Option<std::ops::Range<usize>>,
 }
 
 #[derive(Default)]
@@ -238,6 +243,8 @@ impl Document {
         self.arm(target, pointer);
         let armed = matches!(*self.phase(), Phase::Pressed(_));
         self.view.borrow_mut().drag.anchor = None;
+        self.view.borrow_mut().drag.field = None;
+        self.view.borrow_mut().drag.words = None;
         if !armed && pointer.button == 0 {
             self.begin_selecting(runtime, target, pointer, placed);
         }
@@ -274,6 +281,9 @@ impl Document {
             }
             found
         };
+        if placed && pointer.button == 0 && self.press_in_field(runtime, target, pointer) {
+            return;
+        }
         if in_control || !placed {
             return;
         }
@@ -326,6 +336,9 @@ impl Document {
 
     /// The pointer moved with a selecting press down: the selection reaches to it.
     fn extend_selecting(&self, runtime: &mut verve::Runtime, pointer: &Pointer) {
+        if self.drag_in_field(runtime, pointer) {
+            return;
+        }
         let Some(anchor) = self.view.borrow().drag.anchor else {
             return;
         };
@@ -479,6 +492,7 @@ impl Document {
     ) -> Option<bool> {
         let Some(mut active) = self.take_active() else {
             self.view.borrow_mut().drag.anchor = None;
+            self.view.borrow_mut().drag.field = None;
             let mut phase = self.phase();
             if matches!(*phase, Phase::Pressed(_)) {
                 *phase = Phase::Idle;

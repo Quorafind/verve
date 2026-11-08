@@ -34,6 +34,7 @@ pub mod dom;
 mod drag;
 mod editing;
 pub mod field;
+mod field_click;
 mod field_undo;
 pub mod html;
 mod ime;
@@ -55,7 +56,9 @@ mod update;
 mod window_state;
 mod world;
 
-pub use layout_provider::{Boundary, Layout, LayoutProvider, PositionProvider, RangeProvider};
+pub use layout_provider::{
+    Boundary, FieldPositionProvider, Layout, LayoutProvider, PositionProvider, RangeProvider,
+};
 pub use update::{Changes, Update};
 pub use window_state::{Align, FontData, FontFaceId, FontOutcome, FontProvider, ScrollRequest};
 

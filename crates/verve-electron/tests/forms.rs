@@ -9,7 +9,11 @@ use verve_electron::msg::{PointerKind, ToRendererInput};
 
 /// A checkbox at the top left (13 by 13), a select and a text field under it.
 const PAGE: &str = r#"<style>html,body{margin:0}input,select{display:block;margin:0}</style>
-<input id="c" type="checkbox"><select id="s"><option value="a">A</option><option value="b">B</option></select><input id="t" type="text">"#;
+<input id="c" type="checkbox"><select id="s"><option value="a">A</option><option value="b">B</option></select><input id="t" type="text">
+<input id="f" type="text" value="abcd efgh"><textarea id="ta" rows="3" cols="8">one
+two
+
+four</textarea><span id="w" style="font:13.3333px Arial;white-space:pre">abc</span>"#;
 
 const LISTEN: &str = r#"globalThis.heard = [];
 for (const kind of ['click', 'input', 'change']) {
@@ -67,21 +71,8 @@ impl Page {
         self.app.eval_renderer(self.contents, js)
     }
 
-    fn click(&self, (x, y): (f32, f32)) {
-        for kind in [PointerKind::Down, PointerKind::Up] {
-            let buttons = u16::from(kind == PointerKind::Down);
-            self.send(ToRendererInput::Pointer {
-                kind,
-                pointer: Pointer {
-                    x,
-                    y,
-                    count: 1,
-                    buttons,
-                    ..Pointer::default()
-                },
-                target: None,
-            });
-        }
+    fn click(&self, at: (f32, f32)) {
+        self.press(at, 1, false);
     }
 
     fn key(&self, key: &str, modifiers: Modifiers) {
@@ -94,6 +85,69 @@ impl Page {
             };
             self.send(ToRendererInput::Key { down, key });
         }
+    }
+
+    /// The border box of the element with this `id`: left, top, width, height.
+    fn rect(&self, id: &str) -> [f32; 4] {
+        let js = format!(
+            "JSON.stringify((r => [r.x, r.y, r.width, r.height])(document.getElementById('{id}').getBoundingClientRect()))"
+        );
+        let text: String = serde_json::from_str(&self.eval(&js)).expect("a string");
+        serde_json::from_str(&text).expect("four numbers")
+    }
+
+    /// One press and release at `(x, y)` with the button count a click number gives.
+    fn press(&self, (x, y): (f32, f32), count: u32, shift: bool) {
+        let modifiers = Modifiers {
+            shift,
+            ..Modifiers::default()
+        };
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            let pointer = Pointer {
+                x,
+                y,
+                count,
+                buttons: u16::from(kind == PointerKind::Down),
+                modifiers,
+                ..Pointer::default()
+            };
+            self.send(ToRendererInput::Pointer {
+                kind,
+                pointer,
+                target: None,
+            });
+        }
+    }
+
+    /// The pointer moved to `(x, y)` with the primary button held.
+    fn drag_to(&self, (x, y): (f32, f32)) {
+        let pointer = Pointer {
+            x,
+            y,
+            buttons: 1,
+            ..Pointer::default()
+        };
+        self.send(ToRendererInput::Pointer {
+            kind: PointerKind::Move,
+            pointer,
+            target: None,
+        });
+    }
+
+    /// Where a click lands in the text `chars` characters from the left of the field `id`: the
+    /// field's border, padding and the width of that many characters of the page's font, and the
+    /// middle of the row. The character width and the height of a line are the twin `<span>`'s,
+    /// which the page's own layout gave (Chromium's 15 and 17 are not the headless measurer's).
+    fn at_chars(&self, id: &str, chars: usize, row: usize) -> (f32, f32) {
+        let [left, top, ..] = self.rect(id);
+        let twin = "document.getElementById('w').getBoundingClientRect().width / 3";
+        let each: f32 = self.eval(twin).parse().expect("a width");
+        let (border, padding) = if id == "ta" { (1., 2.) } else { (2., 2.) };
+        let line = self.rect("w")[3];
+        (
+            left + border + padding + each * chars as f32 + 0.1,
+            top + border + padding + line * (row as f32 + 0.5),
+        )
     }
 
     /// Waits until `js` answers `want`.
@@ -338,4 +392,131 @@ fn the_forms_fixture_has_the_geometry_chromium_gave_it() {
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+#[test]
+fn a_click_in_a_field_puts_the_caret_at_the_nearest_boundary() {
+    let page = launch();
+    page.press(page.at_chars("f", 3, 0), 1, false);
+    page.until(
+        "document.activeElement.id + document.getElementById('f').selectionStart",
+        "\"f3\"",
+    );
+    // Past the end of the text, and left of the start.
+    let [left, top, width, height] = page.rect("f");
+    page.press((left + width - 3., top + height / 2.), 1, false);
+    page.until("document.getElementById('f').selectionStart", "9");
+    page.press((left + 1., top + height / 2.), 1, false);
+    page.until("document.getElementById('f').selectionStart", "0");
+    // A click in the third line of a text area, which is empty, and at the bottom of its box,
+    // which is on the last line it shows ("four", of which x is past the end): the end of that
+    // line (Electron 39.8.10, `p32c-review/fld-out.json`).
+    page.press(page.at_chars("ta", 1, 2), 1, false);
+    page.until("document.getElementById('ta').selectionStart", "8");
+    let [tx, ty, tw, th] = page.rect("ta");
+    page.press((tx + tw / 2., ty + th - 1.), 1, false);
+    page.until("document.getElementById('ta').selectionStart", "13");
+}
+
+#[test]
+fn a_click_below_the_text_of_an_input_goes_by_x_and_one_on_a_leading_empty_line_is_there() {
+    let page = launch();
+    // The padding under the row of an input is still its row: 3 characters in is 3, not the end.
+    let (x, _) = page.at_chars("f", 3, 0);
+    let [_, top, _, height] = page.rect("f");
+    page.press((x, top + height - 0.5), 1, false);
+    page.until("document.getElementById('f').selectionStart", "3");
+    page.press((x, top + 0.5), 1, false);
+    page.until("document.getElementById('f').selectionStart", "3");
+    // A text area that starts with two empty lines: a click on the second is at 1, not the end.
+    page.eval("document.getElementById('ta').value = '\\n\\nabc'; 0");
+    page.press(page.at_chars("ta", 2, 1), 1, false);
+    page.until("document.getElementById('ta').selectionStart", "1");
+    page.press(page.at_chars("ta", 2, 0), 1, false);
+    page.until("document.getElementById('ta').selectionStart", "0");
+}
+
+#[test]
+fn a_mouse_move_does_not_scroll_a_field_back_to_its_caret() {
+    let page = launch();
+    let lines = "Array.from({ length: 12 }, (_, i) => 'line ' + i).join('\\n')";
+    page.eval(&format!(
+        "const ta = document.getElementById('ta'); ta.value = {lines}; ta.focus(); ta.setSelectionRange(0, 0); ta.scrollTop = 30; 0"
+    ));
+    page.until("document.getElementById('ta').scrollTop", "30");
+    // Electron 39.8.10: a scrolled text area with the caret out of sight stays so through mouse
+    // moves; only typing or the arrows bring the caret back.
+    let [x, y, ..] = page.rect("ta");
+    page.send(ToRendererInput::Pointer {
+        kind: PointerKind::Move,
+        pointer: Pointer {
+            x: x + 5.,
+            y: y + 5.,
+            ..Pointer::default()
+        },
+        target: None,
+    });
+    assert_eq!(page.eval("document.getElementById('ta').scrollTop"), "30");
+    // The caret's line is revealed from the padding box's top (2px of padding).
+    page.key("ArrowRight", Modifiers::default());
+    page.until("document.getElementById('ta').scrollTop", "2");
+}
+
+#[test]
+fn double_click_takes_a_word_with_its_spaces_and_shift_click_and_drag_extend() {
+    let page = launch();
+    page.press(page.at_chars("f", 1, 0), 1, false);
+    page.press(page.at_chars("f", 1, 0), 2, false);
+    // Electron 39.8.10: the word under the pointer and the space after it.
+    page.until("document.getElementById('f').value.slice(document.getElementById('f').selectionStart, document.getElementById('f').selectionEnd)", "\"abcd \"");
+    page.press(page.at_chars("f", 1, 0), 1, false);
+    page.press(page.at_chars("f", 6, 0), 1, true);
+    page.until("document.getElementById('f').selectionStart + ',' + document.getElementById('f').selectionEnd", "\"1,6\"");
+    // Triple click selects the whole input; in a text area, the line.
+    page.press(page.at_chars("f", 2, 0), 3, false);
+    page.until("document.getElementById('f').selectionEnd", "9");
+    page.press(page.at_chars("ta", 1, 1), 3, false);
+    page.until("document.getElementById('ta').selectionStart + ',' + document.getElementById('ta').selectionEnd", "\"4,8\"");
+    // A drag from the second character to beyond the right edge reaches the end.
+    let from = page.at_chars("f", 1, 0);
+    let [left, _, width, _] = page.rect("f");
+    page.send(ToRendererInput::Pointer {
+        kind: PointerKind::Down,
+        pointer: Pointer {
+            x: from.0,
+            y: from.1,
+            count: 1,
+            buttons: 1,
+            ..Pointer::default()
+        },
+        target: None,
+    });
+    page.drag_to(page.at_chars("f", 4, 0));
+    page.until("document.getElementById('f').selectionStart + ',' + document.getElementById('f').selectionEnd", "\"1,4\"");
+    page.drag_to((left + width + 40., from.1 + 30.));
+    page.until("document.getElementById('f').selectionEnd", "9");
+}
+
+#[test]
+fn typing_past_the_edge_scrolls_the_field_to_the_caret_and_home_scrolls_back() {
+    let page = launch();
+    page.press(page.at_chars("f", 9, 0), 1, false);
+    page.send(ToRendererInput::Text("0123456789".repeat(8)));
+    page.until("document.getElementById('f').scrollLeft > 0", "true");
+    // The caret is at the right edge, with the paddings after it: 89 characters in, less the
+    // field's client width. (`scrollWidth` is rounded and `scrollLeft` is not, so they are not
+    // compared.) The client width is the border box less its 2px borders, taken by hand:
+    // verve-dom's `clientWidth` is still the border box for every element, a bug of its own.
+    page.until(
+        "(e => Math.abs(e.scrollLeft - (89 * document.getElementById('w').getBoundingClientRect().width / 3 + 4 - (e.getBoundingClientRect().width - 4))) < 1)(document.getElementById('f'))",
+        "true",
+    );
+    page.key("Home", Modifiers::default());
+    page.until("document.getElementById('f').scrollLeft", "0");
+    // A text area follows the caret down its lines.
+    page.press(page.at_chars("ta", 0, 0), 1, false);
+    for _ in 0..8 {
+        page.key("Enter", Modifiers::default());
+    }
+    page.until("document.getElementById('ta').scrollTop > 0", "true");
 }

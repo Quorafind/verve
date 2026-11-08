@@ -342,7 +342,21 @@ impl RendererGuest {
                     .settle_clipboard(&mut self.runtime, call, &data);
             }
             other => {
+                let moves_caret = matches!(
+                    other,
+                    ToRendererInput::Key { down: true, .. }
+                        | ToRendererInput::Text(_)
+                        | ToRendererInput::Composition(_)
+                        | ToRendererInput::Pointer { .. }
+                );
+                let before = moves_caret.then(|| self.document.field_mark());
                 let heard = page_script::person(&mut self.runtime, &self.document, other);
+                // Only a message that changed the focused field's text or caret brings the
+                // caret into view: one that left it alone (a mouse move, a lone Shift) does not
+                // undo a scroll by the wheel or by the page.
+                if before.is_some_and(|before| before != self.document.field_mark()) {
+                    self.layout.follow_caret(&mut self.runtime, &self.document);
+                }
                 if let Some(message) = heard {
                     self.outbox.borrow_mut().push(message);
                 }
@@ -544,6 +558,7 @@ impl Guest for RendererGuest {
         // What a task drew in a canvas is a change the layout has to hear of.
         self.document.commit_canvases();
         self.document.ensure_layout();
+        self.layout.follow_focus(&mut self.runtime, &self.document);
         self.layout
             .show_selection(&mut self.runtime, &self.document);
         let update = self.document.update();
