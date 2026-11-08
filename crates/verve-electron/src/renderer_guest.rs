@@ -571,7 +571,9 @@ impl Guest for RendererGuest {
         );
         let (images, new_images) = self.images.table();
         let (list, moved) = self.images.animate(&list, Instant::now());
-        (ran || changed || new_list || new_images || moved).then(|| RendererView {
+        let open_select = self.document.take_open_select();
+        let wanted = ran || changed || new_list || new_images || moved || open_select.is_some();
+        wanted.then(|| RendererView {
             applied,
             update: Some(update),
             wants_frame: self.document.wants_frame(),
@@ -584,6 +586,7 @@ impl Guest for RendererGuest {
             drop_effect: self.drop_effect,
             display_list: Some(list),
             images,
+            open_select,
         })
     }
 

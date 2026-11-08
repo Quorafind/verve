@@ -30,6 +30,7 @@ mod native;
 mod pictures;
 mod plan;
 mod platform;
+mod popup;
 mod raster;
 mod report;
 pub mod screenshot;

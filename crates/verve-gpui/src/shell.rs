@@ -404,6 +404,7 @@ impl Shell {
             let Some(view) = self.hub.renderer_view(window.contents) else {
                 continue;
             };
+            window.note_document(generation, cx);
             if let Some(update) = &view.update {
                 window.show_page(update.snapshot.clone(), view.ime_rect, cx);
             }
@@ -414,6 +415,10 @@ impl Shell {
                 .page(window.contents, generation, view.update, list.clone(), cx);
             if let Some(list) = list {
                 window.show_list(list, cx);
+            }
+            // After the list: the pop-up hangs from the select's box in it.
+            if let Some(select) = view.open_select {
+                window.open_popup(select, cx);
             }
         }
     }

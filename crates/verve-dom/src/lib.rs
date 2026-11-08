@@ -48,6 +48,7 @@ mod permissions;
 mod person;
 mod rect;
 mod schemes;
+mod select_keys;
 pub mod selection;
 mod snapshot;
 mod state;
@@ -84,6 +85,7 @@ pub use media::{
 pub use options::Options;
 pub use permissions::PermissionBackend;
 pub use rect::Rect;
+pub use select_keys::TypeAhead;
 pub use snapshot::{Snapshot, SnapshotData};
 pub use state::FrameClock;
 pub use storage::{FileStorage, StorageBackend};
@@ -304,6 +306,8 @@ pub(crate) struct View {
     pressed: Option<NodeId>,
     /// The element the pointer was last over.
     over: Option<NodeId>,
+    /// The letters typed at a drop-down, and the pop-up the shell is to open.
+    select: select_keys::SelectState,
     /// The drag and drop the document is in the middle of.
     drag: drag::DragState,
 }
@@ -829,6 +833,10 @@ impl Document {
         // After the focus has moved: Chromium focuses before it selects.
         if allowed {
             self.drag_pressed(runtime, target, (pointer, placed));
+            // The pop-up of a drop-down opens on a press `mousedown` did not prevent.
+            if let Some(select) = self.dropdown_under(target).filter(|_| pointer.button == 0) {
+                self.open_select(select);
+            }
         }
         runtime.run_microtasks();
         allowed
@@ -1086,24 +1094,12 @@ impl Document {
             return;
         }
         let chord = key.modifiers.ctrl || key.modifiers.meta;
-        // Copy and cut are done here. A paste needs the clipboard, which is the shell's: it is
-        // asked for, and pasted when the answer comes ([`Document::request_paste`]). Either way
-        // the page has heard the `keydown` and could cancel it, as in Chromium.
-        if chord && !key.modifiers.alt {
-            let lower = key.key.to_ascii_lowercase();
-            let shift = key.modifiers.shift;
-            if (lower == "c" || lower == "x") && !shift {
-                let done = self.clipboard_command(runtime, |cx| {
-                    clipboard::copy_or_cut(cx, lower == "x", true)
-                });
-                self.acted(done);
-                return;
-            }
-            if lower == "v" {
-                self.request_paste(runtime, shift);
-                self.acted(true);
-                return;
-            }
+        if self.clipboard_key(runtime, key) {
+            return;
+        }
+        if self.is_dropdown(target) && self.select_opener(runtime, target, key) {
+            self.acted(true);
+            return;
         }
         let printable = key.key.chars().count() == 1 && !chord && !key.modifiers.alt;
         if printable {
@@ -1117,6 +1113,8 @@ impl Document {
             );
             if allowed && field {
                 self.insert_into(runtime, target, &key.key, "insertText");
+            } else if allowed && self.is_dropdown(target) {
+                self.select_typed(runtime, target, &key.key);
             }
             return;
         }
@@ -1151,6 +1149,13 @@ impl Document {
                 let backward = key.key == "Backspace";
                 self.delete_in(runtime, target, backward, word);
                 self.acted(true);
+            }
+            "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "Home" | "End" | "PageUp"
+            | "PageDown"
+                if self.is_dropdown(target) =>
+            {
+                let moved = self.select_key(runtime, target, &key.key);
+                self.acted(moved);
             }
             "ArrowUp" | "ArrowDown" if field => self.acted(true),
             "ArrowLeft" | "ArrowRight" | "Home" | "End" if field => {

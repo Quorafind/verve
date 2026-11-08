@@ -54,9 +54,9 @@ impl DomElement {
             }
         });
         let state = Rc::clone(&self.state);
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, _| {
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, _| {
             if phase.bubble() {
-                input::mouse_move(&state, event, origin);
+                input::mouse_move(&state, event, origin, window);
             }
         });
         let state = Rc::clone(&self.state);
@@ -133,7 +133,13 @@ impl Element for DomElement {
         if let Some(stats) = state.stats.as_mut() {
             stats.begin();
         }
-        state.viewport = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let viewport = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        // A window that was resized does not keep a pop-up where it was.
+        if std::mem::replace(&mut state.viewport, viewport) != viewport
+            && state.popup.take().is_some()
+        {
+            window.refresh();
+        }
         let Some(plan) = state.plan() else {
             return Vec::new();
         };

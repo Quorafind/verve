@@ -101,6 +101,8 @@ impl RendererSlot {
 /// view with no update keeps the unread one, and with one it has the changes of both. The nodes
 /// the unread view freed are said once, however many views pass before the shell looks.
 fn carry_changes(unread: RendererView, newer: &mut RendererView) {
+    // A pop-up asked for is not forgotten because a newer view came before the shell looked.
+    newer.open_select = newer.open_select.or(unread.open_select);
     let Some(old) = unread.update else {
         return;
     };
@@ -445,6 +447,7 @@ mod tests {
             drop_effect: None,
             display_list: None,
             images: std::sync::Arc::default(),
+            open_select: None,
         }
     }
 

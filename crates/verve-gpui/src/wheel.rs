@@ -86,6 +86,11 @@ pub(crate) fn turned(
     }
     let (x, y) = input::local(event.position, origin);
     let delta = scroll_by(event.modifiers.shift, page_delta(event));
+    let lines = (delta[1] / 40.).round().clamp(-3., 3.) as i32;
+    if crate::popup::on_wheel(&mut state, (x, y), lines) {
+        window.refresh();
+        return;
+    }
     let target = input::hit(&mut state, x, y).map(|(node, _)| node);
     if !event.modifiers.control
         && let Some(list) = state.list.clone()

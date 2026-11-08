@@ -520,3 +520,29 @@ fn typing_past_the_edge_scrolls_the_field_to_the_caret_and_home_scrolls_back() {
     }
     page.until("document.getElementById('ta').scrollTop > 0", "true");
 }
+
+#[test]
+fn the_keys_of_a_closed_select_change_its_choice_at_once() {
+    let page = launch();
+    page.eval("document.getElementById('s').focus(); 0");
+    let value = "document.getElementById('s').value";
+    // Electron 39.8.10: Down, Up, End, Home and a letter each change the value with `input` and
+    // `change`, and Home on the first option changes nothing.
+    page.key("ArrowDown", Modifiers::default());
+    page.until(value, "\"b\"");
+    page.until("heard.join(' ')", "\"input#s change#s\"");
+    page.key("ArrowUp", Modifiers::default());
+    page.until(value, "\"a\"");
+    page.key("End", Modifiers::default());
+    page.until(value, "\"b\"");
+    page.key("a", Modifiers::default());
+    page.until(value, "\"a\"");
+    // Home and Up on the first option change nothing, and say nothing.
+    page.eval("heard.length = 0");
+    page.key("Home", Modifiers::default());
+    page.key("ArrowUp", Modifiers::default());
+    assert_eq!(page.eval("heard.join(' ')"), "\"\"");
+    // Page Down is three options on, which is the end of two.
+    page.key("PageDown", Modifiers::default());
+    page.until(value, "\"b\"");
+}

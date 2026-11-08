@@ -22,7 +22,7 @@ use verve_electron::ids::ContentsId;
 use verve_electron::msg::{FromShell, PageEvent, PointerKind, ToRendererInput};
 
 use crate::dom_view::DomState;
-use crate::{cursor, keymap, link};
+use crate::{cursor, keymap, link, popup};
 
 /// What the shell remembers of a person's hands between events.
 #[derive(Default)]
@@ -41,6 +41,8 @@ pub(crate) struct Input {
     /// A press began in a drag area of the window: the system moves the window and eats the
     /// release, so the page hears neither.
     area_press: bool,
+    /// A press went to the pop-up of a drop-down: the page hears neither it nor its release.
+    popup_press: bool,
     /// The pointer is in a drag area, where the page has been told it left.
     in_area: bool,
     /// The characters keys typed that the system will send again as text, oldest first: they are
@@ -317,6 +319,13 @@ pub(crate) fn mouse_down(
         return;
     }
     let (x, y) = local(event.position, origin);
+    // An open pop-up takes the press: it chooses, or it closes and the page hears nothing. It
+    // comes before the window's drag regions, so that a pop-up over one can be clicked.
+    if popup::on_press(&mut state, x, y) {
+        state.input.popup_press = true;
+        window.refresh();
+        return;
+    }
     if in_drag_area(&state, x, y) {
         state.input.area_press = true;
         return;
@@ -338,6 +347,10 @@ pub(crate) fn mouse_up(state: &Rc<RefCell<DomState>>, event: &MouseUpEvent, orig
         return;
     }
     let (x, y) = local(event.position, origin);
+    // The release of a press the pop-up took (it chose, or closed) is the pop-up's too.
+    if std::mem::take(&mut state.input.popup_press) {
+        return;
+    }
     if std::mem::take(&mut state.input.area_press) {
         state.input.buttons &= !button_mask(event.button);
         return;
@@ -353,6 +366,7 @@ pub(crate) fn mouse_move(
     state: &Rc<RefCell<DomState>>,
     event: &MouseMoveEvent,
     origin: Point<Pixels>,
+    window: &mut Window,
 ) {
     let mut state = state.borrow_mut();
     if state.picking {
@@ -360,6 +374,10 @@ pub(crate) fn mouse_move(
     }
     state.input.buttons = event.pressed_button.map_or(0, button_mask);
     let (x, y) = local(event.position, origin);
+    if popup::on_move(&mut state, x, y) {
+        window.refresh();
+        return;
+    }
     if in_drag_area(&state, x, y) {
         // One `Leave`, not a stream of moves: the page's hover ends where the window is dragged.
         if !std::mem::replace(&mut state.input.in_area, true) {
@@ -400,18 +418,22 @@ pub(crate) fn mouse_exit(state: &Rc<RefCell<DomState>>, _: &MouseExitEvent) {
     report_hover(&mut state, None);
 }
 
-/// A key went down or came up.
+/// A key went down or came up. Answers whether an open pop-up took it, which means that the
+/// window is to be drawn again.
 pub(crate) fn key(
     state: &Rc<RefCell<DomState>>,
     stroke: &Keystroke,
     (down, held, prefer_character_input): (bool, bool, bool),
     now: &gpui::Modifiers,
-) {
+) -> bool {
     let Some(heard) = key_event(stroke, held, now, prefer_character_input) else {
-        return;
+        return false;
     };
     let route = {
         let mut state = state.borrow_mut();
+        if popup::on_key(&mut state, &heard.key, down, std::time::Instant::now()) {
+            return true;
+        }
         // The system sends a typed character as text only when a field takes text.
         let takes_text = (state.snapshot.as_ref()).is_some_and(crate::ime::accepts_ime);
         if let (true, true, Some(text)) = (down, takes_text, heard.types) {
@@ -422,6 +444,7 @@ pub(crate) fn key(
     if let Some(route) = route {
         route(down, heard.key);
     }
+    false
 }
 
 /// A modifier went down or came up: the page hears its key.

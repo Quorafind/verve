@@ -229,6 +229,13 @@ impl Window {
                     painted.painted();
                 }
             }));
+            // A pop-up does not outlive the window's focus.
+            cx.observe_window_activation(window, |view, window, cx| {
+                if !window.is_window_active() && view.close_popup() {
+                    cx.notify();
+                }
+            })
+            .detach();
             window
                 .observe_window_appearance(move |window, _| {
                     themed.push_item(Item::Theme(is_dark(window.appearance())));
@@ -417,6 +424,25 @@ impl Window {
         let _ = self.handle.update(cx, |view, window, cx| {
             if view.set_page(snapshot, caret) {
                 window.invalidate_character_coordinates();
+                cx.notify();
+            }
+        });
+    }
+
+    /// The page now shows the document `generation`; a pop-up of an earlier one is closed.
+    pub fn note_document(&self, generation: u64, cx: &mut AsyncApp) {
+        let _ = self.handle.update(cx, |view, _, cx| {
+            if view.note_document(generation) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Opens the pop-up of the drop-down `<select>` the page asked for, from the list it was
+    /// handed. The window is drawn again.
+    pub fn open_popup(&self, select: verve_dom::NodeId, cx: &mut AsyncApp) {
+        let _ = self.handle.update(cx, |view, _, cx| {
+            if view.open_popup(select) {
                 cx.notify();
             }
         });

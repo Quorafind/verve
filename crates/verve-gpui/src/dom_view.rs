@@ -29,6 +29,7 @@ use crate::inspector::model::Highlight;
 use crate::inspector::overlay::{self, Picker};
 use crate::pictures::Pictures;
 use crate::plan::{self, Plan};
+use crate::popup;
 
 /// What is called as each frame of a window is built.
 type Drawn = Rc<dyn Fn(&Window)>;
@@ -77,6 +78,11 @@ pub(crate) struct DomState {
     pub drag_area: Vec<verve_electron::msg::Rect>,
     /// When the caret of the focused field last moved.
     pub blink: crate::controls::Blink,
+    /// The pop-up of a drop-down that is open.
+    pub popup: Option<crate::popup::Popup>,
+    /// The document the page shows, by the number the hub gives it: the node numbers of a pop-up's
+    /// select mean nothing in another one.
+    pub document: u64,
 }
 
 impl DomState {
@@ -200,7 +206,29 @@ impl DomView {
         state.snapshot = Some(snapshot);
         let moved = state.ime_rect != caret;
         state.ime_rect = caret;
-        moved || before != Some(after)
+        // The select of an open pop-up may have lost the focus, or be gone.
+        let popup = state.popup.is_some();
+        popup::sync(&mut state);
+        moved || popup || before != Some(after)
+    }
+
+    /// The page shows the document `generation`: a pop-up that belongs to an earlier one goes.
+    /// Answers whether one did.
+    pub(crate) fn note_document(&mut self, generation: u64) -> bool {
+        let mut state = self.state.borrow_mut();
+        let changed = std::mem::replace(&mut state.document, generation) != generation;
+        changed && state.popup.take().is_some()
+    }
+
+    /// Opens the pop-up of the drop-down `select`, which the page asked for. Answers whether it
+    /// opened.
+    pub(crate) fn open_popup(&mut self, select: NodeId) -> bool {
+        popup::open_under(&mut self.state.borrow_mut(), select)
+    }
+
+    /// Closes the pop-up, if one is open. Answers whether one was.
+    pub(crate) fn close_popup(&mut self) -> bool {
+        self.state.borrow_mut().popup.take().is_some()
     }
 
     /// Where the keys and what the pointer shows go.
@@ -244,6 +272,15 @@ impl DomView {
     /// predicted, so every list that arrives ends the prediction, also the one that is already
     /// shown: that is what a wheel the page prevented, or one that moved nothing, publishes.
     pub fn show(&mut self, list: Arc<DisplayList>) -> Shown {
+        let shown = self.show_list(list);
+        if shown != Shown::Unchanged {
+            // An open pop-up follows its select to where the new list has it.
+            popup::sync(&mut self.state.borrow_mut());
+        }
+        shown
+    }
+
+    fn show_list(&mut self, list: Arc<DisplayList>) -> Shown {
         let mut state = self.state.borrow_mut();
         let predicted = !state.predicted.is_empty();
         if predicted {
@@ -317,7 +354,9 @@ impl Render for DomView {
                 .key_context("VervePage")
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, _| {
                     let kind = (true, event.is_held, event.prefer_character_input);
-                    input::key(&this.state, &event.keystroke, kind, &window.modifiers());
+                    if input::key(&this.state, &event.keystroke, kind, &window.modifiers()) {
+                        window.refresh();
+                    }
                 }))
                 .on_key_up(cx.listener(|this, event: &KeyUpEvent, window, _| {
                     let kind = (false, false, false);
@@ -333,6 +372,9 @@ impl Render for DomView {
         let mut page = page
             .child(DomElement::new(Rc::clone(&self.state)))
             .child(app_region::layer(&self.regions));
+        if let Some(popup) = self.state.borrow().popup.as_ref() {
+            page = page.child(popup::layer(popup));
+        }
         if let Some(highlight) = self.highlight {
             page = page.child(overlay::highlight_layer(Rc::clone(&self.state), highlight));
         }

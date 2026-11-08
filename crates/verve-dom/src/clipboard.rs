@@ -399,6 +399,30 @@ impl Document {
         runtime.run_microtasks();
     }
 
+    /// Ctrl/Cmd+C, X and V in a `keydown` the page let be. Copy and cut are done here. A paste
+    /// needs the clipboard, which is the shell's: it is asked for, and pasted when the answer
+    /// comes ([`Document::request_paste`]). Either way the page has heard the `keydown` and could
+    /// cancel it, as in Chromium. Answers whether the key was one of these.
+    pub(crate) fn clipboard_key(&self, runtime: &mut verve::Runtime, key: &crate::Key) -> bool {
+        let chord = key.modifiers.ctrl || key.modifiers.meta;
+        if !chord || key.modifiers.alt {
+            return false;
+        }
+        let lower = key.key.to_ascii_lowercase();
+        let shift = key.modifiers.shift;
+        if (lower == "c" || lower == "x") && !shift {
+            let done = self.clipboard_command(runtime, |cx| copy_or_cut(cx, lower == "x", true));
+            self.acted(done);
+            return true;
+        }
+        if lower == "v" {
+            self.request_paste(runtime, shift);
+            self.acted(true);
+            return true;
+        }
+        false
+    }
+
     /// Ctrl/Cmd+V, or the menu's Paste: the clipboard is the shell's, so the document asks for it
     /// ([`Request::ReadClipboard`]) and pastes what [`Document::settle_clipboard`] is handed.
     /// `plain` pastes the text alone (`pasteAndMatchStyle`, Ctrl+Shift+V).

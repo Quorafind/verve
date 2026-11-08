@@ -122,4 +122,8 @@ pub struct RendererView {
     /// The pictures the page has decoded, which the display list names by key (P35). The same
     /// `Arc` until a picture arrives or leaves.
     pub images: std::sync::Arc<verve_layout::ImageTable>,
+    /// The drop-down `<select>` whose pop-up a person asked for with this view's input (a press
+    /// `mousedown` did not prevent, F4, Alt+Up or Alt+Down, Space or Enter), for the shell to
+    /// open from the list of the same view (P32).
+    pub open_select: Option<verve_dom::NodeId>,
 }
