@@ -228,6 +228,14 @@ pub enum ControlKind {
   - 双击选词后继续拖动按词延伸（`Draft::extend_by_words`），按下时页面自己的选区折成字段前的光标。
 - **`ToRendererInput::Choose { select: NodeId, index: usize }`**，追加在枚举末尾（P02 汇总表那一行早已写了它，这次才有变体）。渲染器收到后调
   `Document::choose_option`（`index` 按 `SelectOption` 的顺序、不含隐藏选项；选项禁用、序号越界或本来就是选中的则什么都不发，否则 `input` + `change`）；节点已不在文档里则丢掉。
+- **`<select>` 弹层的打开与关闭**（第二部分；观察：Electron 39.8.10 隐藏窗口，`p32c-review/sel3-out.json`、`sel4-out.json`，每个用例一个新窗口）：
+  - 何时打开由文档决定，在默认动作里：没被 `preventDefault` 的 `mousedown`（按钮 0）、没有 Alt 和 Ctrl 的 F4、Alt+Up、Alt+Down、`keypress` 之后的 Space（前 1 秒内没打字时）和 Enter。
+    页面照常听到触发键的 `keydown`；被取消的 `mousedown`/`keydown` 不开，Ctrl+F4 不开。
+  - 决定经 `Document::take_open_select() -> Option<NodeId>` 取出，并**追加**在 `RendererView` 末尾：`open_select: Option<NodeId>`（该视图的输入要求打开的下拉框；
+    后一个视图代替前一个未读的视图时保留它）。壳在同一个视图的显示列表上打开弹层，不再自己判断何时打开。
+  - 弹层的生命期在壳里：它的 select 不在了、被禁用、不再是下拉框或没有焦点，页面导航（节点号可能重复），窗口失去焦点或改变大小，都关闭；选项或位置变了则跟着更新；
+    滚轮只在指针位于弹层上时转它；每次状态变化后重画窗口。
+  - `verve_dom::TypeAhead` 是关着的 select 和弹层共用的预输入（1 秒内的字母成前缀，同一字母循环）；PageUp/PageDown 在关着的 select 上是 ±3 个选项（跳过禁用项）。
 - **乐观回显**：Shell 给每个发往渲染器的输入记下 `Isolate::send` 返回的任务号（`Hub::input` 改为返回它）。焦点字段的编辑键、文字和组字会在 Shell
   的本地副本 `Echo { node, text, caret, anchor, marked, from }` 上同样应用，`from` 是最后一个未被看到的输入号；每个快照到达时：`RendererView.applied >= from`
   则丢掉副本，用快照里的字段；否则重画时把副本叠在快照上（只改这个字段的文字和光标矩形，用 `Draft` 的编辑方法），并且仍在忙。
