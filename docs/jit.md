@@ -129,8 +129,8 @@ calls JavaScript or reads `frame.pc`. A panic in one is caught, kept, and turned
 | `PushFromRegister` (up to three in a row, one call) | push a clone; the registers' address is reloaded, the stack may have moved |
 | `PopIntoRegister`, `SetAccumulator`, `GetArgument`, `CheckReturn` | as the handler, when there is a value to pop / the frame is not a constructor's |
 | `GetName`, `GetNameGlobal` | when `find_runtime_binding` would leave the binding where the bytecode compiler put it (declarative current environment, no `with`, not poisoned by `eval`, not deleted): read it as `get_binding` does; a binding on the global object through the instruction's inline cache |
-| `GetPropertyByName`, `SetPropertyByName` | a hit of the instruction's inline cache on a data property (own or, for a read, on the prototype); fills the access's site cache |
-| `GetLengthProperty` | an array's `length`, a string's, or as `GetPropertyByName` |
+| `GetPropertyByName`, `SetPropertyByName` | a hit of the instruction's inline cache on a data property (own or, for a read, on the prototype, which must still have the shape the entry recorded); fills the access's site cache |
+| `GetLengthProperty` | an array's `length`, a string's, a typed array's (through the access's guard cache, below), or as `GetPropertyByName` |
 | `GetPropertyByValue`, `SetPropertyByValue` | a dense array by an `int32` index, as `get_dense_property` and `set_dense_property` |
 
 ### Property caches and elements
@@ -148,6 +148,52 @@ the site's, no collection has run since the site was filled, and the slot is in 
 they read or write the slot, counting references inline when the old or new value is an object
 (any other pointer — a string, a symbol, a bigint — takes the helper). On a miss the helper runs,
 and fills the site.
+
+**The interpreter's cache and a property of the prototype.** An entry is the receiver's shape and
+a slot. For a property found on the receiver's prototype it also records the *prototype's* shape,
+and a hit needs the prototype to have that shape now (`CacheEntry::holder`); a prototype that
+changed shape drops the entry, which the next access records again. Before, the entry was keyed
+by the receiver's shape alone, and a hit read the slot out of a prototype that had since lost,
+gained or re-kinded properties: the getter function instead of its result, another property's
+value after a `delete`, or a panic past the end of the storage. Why the two shapes are enough:
+
+- **A shared shape is immutable**: every change (add, delete, attributes, prototype) goes to
+  another shape, so the same shape has the same table, slots and kinds. The receiver's shape also
+  holds its prototype object. So the receiver's and the prototype's shapes pin the slot, its kind
+  (data, or accessor with its `get`/`set` bits), that the prototype is that object, and that the
+  receiver has no own property of the name (its table is its shape's).
+- **A unique shape** (the builtin prototypes, the global object, an object past 1024 transitions)
+  keeps its identity when it gains a property and changes it for everything else: a delete, a
+  change of kind, a change of prototype and, since this fix, a change of attributes that keeps the
+  kind (`unique_shape.rs` changed those in place, with a `TODO: invalidate the pointer`: a
+  getter-only accessor gaining a setter, or a data property turning read-only, kept a stale
+  slot's bits). Gaining a property leaves the slots already there alone, so for a *prototype*
+  with a unique shape the same shape still means the same slot. For a *receiver* it does not: the
+  property gained can shadow the prototype's, with the shape unchanged. So a slot in a prototype
+  is **not recorded for a unique receiver** (the slow path reads it); an own slot of a unique
+  receiver is recorded as before.
+- **Only the direct prototype is cached.** A property found further up has the `PROTOTYPE` bit
+  set twice, which makes the slot not cacheable, so nothing is cached whose answer a nearer
+  prototype's new property could change; adding one just misses.
+- **The entry is checked when it is made**: the slot comes from a lookup that may have run a
+  getter, which can change objects before `InlineCache::set`. The entry is recorded only if the
+  shape that holds the slot answers the same slot (index and attributes) for the name now.
+- **A cached setter** is called only if the storage holds a function there. A setter set to
+  `undefined` keeps the accessor's bits, and `[[Set]]` then fails (a strict function throws), so
+  that is a miss.
+- **The last guard**: storage is read with `get`, so a slot out of range is a miss and never a
+  panic. The checks above make it unreachable; the guard does not replace them.
+
+**A property an assignment creates** (`this.x = v` on an object without `x`) has a cache of its own
+per site, `AddCache` in `vm/inline_cache/add.rs`: up to four entries, each the receiver's shape, the
+shape after the insert, the slot, and the prototype chain as *stamps* (a prototype's shape and, for a
+unique shape, its number of properties). A hit swaps the shape and pushes the value. "Results (P78)"
+has the argument for why that is all `[[Set]]` would have done, and the measurements.
+
+Compiled code follows the same entries (`InlineCache::slot_for`). It reads a prototype's slot only
+through the helper and fills its site cache only for an own slot of a shared shape, so the
+machine code needed no change. `tests_prototype_cache.rs` runs 45 scenarios in the three modes
+against Node's output.
 
 **Why the count of collections**: a shape is freed only by a collection, and its address may then
 be taken by a new shape. `boa_gc` counts collections (`boa_gc::raw::collections`), before anything
@@ -169,6 +215,86 @@ Everything is checked on each thread, the first time it compiles, against a real
 borrow flag in each state, the shape's words, the storage, the vtable, `extensible`, each kind of
 elements). If anything does not match, property and element accesses are compiled as helper calls
 only.
+
+**A typed array's `length`** is not a property of the array: it is the getter on
+`%TypedArray%.prototype`, and the interpreter's shortcut (`typed_array_length_guard` and
+`typed_array_length_read`) skips calling it when the guard holds: the receiver has no `length` of its
+own, nothing between it and `%TypedArray%.prototype` has one, and the accessor found is the
+intrinsic getter. The guard is three property lookups per read, and at one site its answer is
+nearly always the one it gave last time, so the site remembers it (`typed_length.rs`, fields
+appended to the site cache) and the helper compares instead of looking up. Nothing of the read
+is cached: a detached buffer, or a resizable one that shrank, changes the length without changing
+any object.
+
+The site holds, for the receiver and for each prototype down to the one with the accessor (at
+most three: `Float64Array.prototype`, `%TypedArray%.prototype`, and one more for a subclass), the
+shape and the length of the property storage; the accessor's slot; and the accessor's bits. It is
+filled when the guard accepts a receiver and used while the count of collections is the one it
+was filled at. Why that is enough:
+
+- **A shared shape never changes.** Adding, removing or redefining a property, or changing the
+  prototype, moves the object to another shape. So an object with the shape it had still has no
+  `length` of its own.
+- **The builtin prototypes have unique shapes**, which are not the same story: the shape is a
+  table that changes in place. Removing a property, changing a property between data and accessor,
+  and changing the prototype all make a new unique shape (the old one is invalidated on purpose,
+  for the interpreter's caches). Adding a property changes the table in place, and takes a slot of the
+  object's storage, so comparing the length of the storage catches it: an own `length`
+  defined on `Float64Array.prototype` after the site was filled is a longer storage. Changing the
+  attributes of a property of the same width (an accessor to an accessor) also stays in place;
+  the only such property the site relies on is the accessor, whose value is checked next. Each of the two checks is needed:
+  with either one removed, `tests_typed_length.rs` fails (tried).
+- **The chain is the chain.** A shape holds its prototype, so the receiver's shape fixes the first
+  prototype, and each prototype's shape fixes the next. The site keeps the prototypes' addresses
+  and reads them without a lookup, which is sound for the same reason the shape addresses are:
+  an object is alive while a shape that holds it is, and nothing is freed before the count of
+  collections changes.
+- **The slot's value is checked each time**, by its bits against the intrinsic getter's. A shape does
+  not fix it: `Object.defineProperty` of another getter keeps the shape and the length of the
+  storage.
+- **A receiver with the same shape need not be a typed array** (`Object.create(Float64Array.prototype)`
+  has it): the read refuses it, and the access takes its ordinary path, which throws as the
+  getter does.
+
+Anything the site cannot hold (an accessor more than three prototypes up) is the guard's every
+time; any mismatch is a miss that runs the guard and fills the site again.
+
+**A typed array's elements** are read and written in machine code (`typed_elements.rs`,
+`compiler/typed.rs`), for an `int32` index that is not negative, when every guard below holds;
+otherwise the access is the helper, which runs the interpreter's shortcuts
+(`typed_array_element_get_shortcut`, `typed_array_element_set_shortcut`) and stays the reference. Each
+guard reads the objects at each access, nothing is cached, so a detach, a resize or a write by
+other code is seen:
+
+- the object's vtable is the typed arrays' (so its data is a `TypedArray`: no other object has that
+  vtable), and neither the view nor its buffer is borrowed mutably (a write needs the buffer not
+  borrowed at all, as the helper's `borrow_mut` does);
+- the buffer is an `ArrayBuffer`, not a `SharedArrayBuffer` (excluded: its length is atomic and its
+  accesses are `AtomicSlice`s, which the helper handles), and it is not detached (the pointer to
+  its bytes is zero);
+- the view has a fixed length (`[[ArrayLength]]` is not `auto`: the payload of an `Option::None` is
+  not specified, so the word that says `Some` is tested first). A length-tracking view is the
+  helper's;
+- the kind is one of the eight number kinds. `BigInt64`/`BigUint64` allocate and `Float16` converts,
+  so they are the helper's;
+- the view lies within the buffer *as it is now* (`byteOffset + length * size <= bytes`, the
+  `IsTypedArrayOutOfBounds` test, which a shrunk resizable buffer fails) and the index is below the
+  length. Both are compared each time, so no byte outside the view is touched; an index outside
+  gets `undefined` (or no effect) from the helper;
+- a write needs a value that is a number, so there is no `ToNumber` and no user code (a `valueOf` that
+  detaches the buffer stays in the helper, which converts before it looks at the buffer, as the
+  specification does).
+
+A read boxes the element as the interpreter does (`TypedArrayElement` into `JsValue`): every number
+kind is an `f64` value, not an `int32` one, with `NaN` the canonical one. A write is the one the
+shortcut makes: `Float64` the number; `Float32` the number rounded to `f32` (`fdemote`, the
+instruction `as f32` is); the integer kinds the low bits of `ToInt32` of the number (`int32_of`,
+which leaves a finite float of 2^63 or more to the helper, since the 64-bit truncation
+saturates there);
+`Uint8Clamped` an `int32` clamped to 0..255 (a float, whose rounding is the helper's, is the
+helper's). The offsets of the fields (`TypedArray`'s buffer, kind, offset and length; `BufferObject`'s
+two words; `ArrayBuffer`'s pointer and length) are found by looking at real objects, and checked
+with the rest of `layout.rs`: if they do not match, typed arrays stay with the helper.
 
 Two builtins got the same kind of shortcut, in the interpreter as much as in compiled code:
 `Array.prototype.push` and `Array.prototype.fill` on a *plain dense array* — the realm's array
@@ -396,7 +522,7 @@ JavaScript:
 | `boa_engine::vm::jit_unavailable()` | `Some(CompilerPanicked \| NoExecutableMemory)` once the JIT has switched itself off for the process. |
 | `Runtime::set_jit_enabled(bool)`, `Runtime::jit_enabled()` | Always present; without the feature, off and a no-op. |
 | `Runtime::jit_options_mut()`, `Runtime::jit_stats()` | With the feature. |
-| `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>` | Read when a `Context` is made. |
+| `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>`, `BOA_JIT_TYPED_ALL=1` (the typed-array element path in every function) | Read when a `Context` is made. |
 | `VERVE_JIT=0`, `VERVE_JIT_THRESHOLD=<n>` | Read when a `Runtime` is made, after Boa's. `verve run` and every isolate obey them. |
 
 With the feature built, the JIT is on unless switched off.
@@ -424,7 +550,30 @@ With the feature built, the JIT is on unless switched off.
     ones made);
   - generators (`yield*`, `return()`, `throw()`) and async functions and generators, with their
     promise jobs run;
-  - `push` and `fill`, against Node's output.
+  - `push` and `fill`, against Node's output;
+  - typed-array `length` (`tests_typed_length.rs`), against Node's output: the eleven kinds and
+    subclasses of them, buffers detached in the middle of the loop, resizable buffers that shrink
+    and grow (tracking views, fixed views, views with an offset), an own `length` defined before
+    and during the loop, `%TypedArray%.prototype`'s `length` replaced by another accessor, a data
+    property, `undefined` or deleted (before and during), `length` added to the kind's prototype,
+    prototypes inserted in the chain with and without a `length`, chains too deep for the site,
+    `Object.setPrototypeOf` of the receiver, one site seeing typed arrays, arrays, strings and
+    objects, an object with a typed array's shape, a prototype made dictionary-mode, and
+    collections in the loop; the site's fills are counted;
+  - phase 2.5 (`tests_elements.rs`, `tests_calls.rs`): appending stores and every array that must
+    refuse them (frozen, sealed, non-extensible, fixed length, holes, setters and elements on
+    the prototypes, subclasses, proxies, array-likes), against Node's output; `/` over 26 values;
+    stores through `super[key]`, whose receiver is not the object; typed arrays of every kind
+    (wrong value types, a `valueOf` that detaches the buffer, resizable buffers that shrink, a
+    `length` that is shadowed, patched or overridden); arguments missing, extra and rest, `this`
+    in sloppy and strict functions, exceptions through chains of calls, the recursion limit, and
+    chains through generators, async functions and `map`/`reduce` callbacks;
+  - P70 (`tests_iterators.rs`): `for…of`, spread and destructuring over the six kinds of iterator;
+    arrays appended to, cut short and resized during the loop; `Array.prototype[Symbol.iterator]`
+    and `%ArrayIteratorPrototype%.next` rewritten before and inside the loop, and a built-in
+    `next` on an object of another type; proxies, accessors, holes, detached and shrinking typed
+    arrays; `break`/`return`/`throw`/`continue` closing the iterator, a `return` that throws or
+    answers a non-object; generators and `yield*` over built-in iterators.
 - **A generated-program fuzzer**: random expressions over every type, in loops, with exceptions
   caught, compared the same way. It runs 150 programs by default; `BOA_JIT_FUZZ_COUNT=3000` runs
   more. It found a real interpreter bug on its first long run: `i32::MIN % -1` panicked in builds
@@ -541,6 +690,725 @@ Correctness at the end of phase 2:
 | Verve (322 tests, 10 ignored) | Passes at defaults, forced (`VERVE_JIT_THRESHOLD=0`) and off, with the `jit` feature. The `fetch_network` tests time out on a heavily loaded machine in every mode, JIT or not, and pass otherwise. |
 | test262 | 52,095 results compared one by one between interpreted and JIT-forced runs: **0 differ** but for two timing-dependent `Atomics.notify` tests (different ones on each run) that time out under load and pass in both modes when rerun alone. 49,895 pass in both. |
 
+## Why the baseline barely moved
+
+`docs/electron/perf-js.md` measures the JIT at 1.0–1.25× the interpreter on the loop-shaped tests of
+the P60 suite, where the micro-benchmarks above show 3–12×. The JIT works as designed on these
+tests. What differs is where their time goes. Measured on the release `verve` with the `jit` feature
+(`6335a760`, Windows x86-64, Ryzen 9 7950X), one process per run, N=5, median (best), milliseconds;
+the machine was shared, at 15–31% load during this table's pass.
+
+| test | Node | interpreter | JIT | JIT / interpreter |
+|---|---|---|---|---|
+| `fib(30)` | 5.4 | 358.2 (352.5) | 287.6 (284.6) | 1.25× |
+| `oo` (1M `a = a.add(b)`) | 2.9 | 1274.9 (1240.3) | 1264.2 (1205.4) | 1.01× |
+| `typed` (`Float64Array`, 1M × 5) | 4.2 | 3426.0 (3362.2) | 3265.0 (3228.3) | 1.05× |
+| `alloc` (300k × 3 objects) | 11.1 | 334.3 (304.5) | 301.7 (285.2) | 1.11× |
+| `vdom` | 4.3 | 81.1 (75.3) | 70.9 (69.9) | 1.14× |
+| `closure` (1M map/filter/reduce) | 20.4 | 645.9 (643.9) | 623.7 (607.9) | 1.04× |
+
+### What is not the reason
+
+- **Tiering.** Every hot function was compiled and none rejected (`jit_stats`: `compiled` 1, 4, 1,
+  1, 3 and 4 for the six tests in the order above; `rejected` 0). The profitability rule passed
+  every one of them. `VERVE_JIT_THRESHOLD=0` changes nothing, within the spread of five runs (`fib`
+  336.8 against 353.3, `oo` 1449 against 1386, `typed` 3278 against 3286, medians of one pass).
+- **OSR.** It enters. `typed` and `alloc` run their whole hot loop in one call of an arrow
+  function, and each was entered twice (the warm-up and the timed run), at the instruction after
+  the first `IncrementLoopIteration`; `closure` the same. The inner loops of `typed` are inside
+  that one compiled body.
+- **Compile time.** 4–8 ms per test, 21 ms for the three functions of `vdom` (in the warm-up run).
+- **Nesting.** In `fib`, `oo`, `closure` and `vdom` the callees run nested in compiled code
+  (5.4M entries for `fib`'s two runs, one per call).
+
+### What the hot loops are made of
+
+Counted with temporary counters in `jit_step`, the fast helpers and the interpreter's loop (not
+committed): the instructions of each hot loop, by how they ran.
+
+| test | hot loop | inline | fast helper, hit | fast helper, miss, then `jit_step` | `jit_step` only |
+|---|---|---|---|---|---|
+| `typed` | 22 instructions per iteration | 18 | 0 | 4: `GetLengthProperty`, 2 × `GetPropertyByValue`, `SetPropertyByValue`, every time | 0 |
+| `fib` | 18.5 per call | 6.5 | 10 instructions in 10 helper calls (`PushFromRegister` ×4, `PopIntoRegister` ×2, `GetName`, `GetArgument`, `SetAccumulator`, `CheckReturn`) | 0 | 2: `Call`, `Return` |
+| `oo` | 50 per iteration, over three calls | 16 | 23 instructions in 19 helper calls | 2: `SetPropertyByName` of `this.x = x`, and `CheckReturn` of the constructor, every time | 9: 2 × `Call`, `New`, 3 × `This`, 3 × `Return` |
+| `alloc` | 25 per iteration | 11 | 4 instructions in 3 helper calls (3 pushes, 1 property read) | 0 | 10: 2 × `StoreEmptyObject`, 4 × `DefineOwnPropertyByName`, `StoreLiteral`, `Add` (string concatenation), `Call` of `push`, `Pop` |
+| `vdom` | recursive diff, `for-of` loops | most | `GetPropertyByName`, pushes | 0 | `GetIterator`, `IteratorNext`, `IteratorDone`, `IteratorValue`, `IteratorReturn`, `Add`, `DefineOwnPropertyByName`, `StoreEmptyObject`, `StoreNewArray`, `New`, `Call` |
+| `closure` | three callbacks of about 10 instructions, an initialising loop | all but `Return` | all | 1: `SetPropertyByValue` of `values[i] = i` on `new Array(n)`, every time | `Return`; the calls to `map`, `filter`, `reduce` |
+
+Each `jit_step` costs the interpreter's own handler plus about 8 ns (a stepped `Div` is 11.8 ns
+against 3.3 ns for an inline `Add`); the interpreter dispatches a cheap instruction in about 3.7
+ns (an empty loop of four instructions is 14.7 ns, against 1.7 ns compiled). So compiling saves
+about 3 ns per cheap instruction and nothing on the instructions that matter, which run the same
+handlers either way.
+
+### Where the time goes
+
+Differential micro-probes: the same process, one loop body each, ns per iteration, median of five
+processes, JIT then interpreter. The loop's own cost (1.7 and 14.7) is included.
+
+| body | JIT | interpreter |
+|---|---|---|
+| `s = id(i)` (a JavaScript call) | 93.7 | 119.5 |
+| `s = zero()` | 90.0 | 109.1 |
+| `s = b.get()` (method on the prototype) | 140.3 | 191.4 |
+| `Math.abs(i)` (a native call) | 78.3 | 152.5 |
+| `new E()` (`function E() {}`) | 261.5 | 266.3 |
+| `new F(i)` (`this.x = x`) | 579.4 | 555.2 |
+| `new C0()` (an empty class) | 609.6 | 641.4 |
+| `{}`, `{ i }`, `{ i, j: i }` | 90.4, 225.3, 338.7 | 103.7, 238.9, 343.7 |
+| `'k' + i` | 111.7 | 121.8 |
+| `a.push(i)` | 96.1 | 134.6 |
+| `a[i] = i` appending to `[]`, and on `new Array(n)` | 167.8, 210.5 | 187.2, 236.9 |
+| `arr[k]` read, dense array | 17.2 | 80.0 |
+| `f64[k]` read, `Float64Array` | 60.6 | 98.8 |
+| `f64[k] = v` | 65.9 | 97.1 |
+| `f64.length` | 347.2 | 367.2 |
+| `arr.length` | 12.5 | 49.4 |
+| read–modify–write, dense array and `Float64Array` | 48.7 and 193.6 | 196.2 and 264.0 |
+| `for (const v of arr)`, per element | 369.3 | 379.3 |
+| `for (k < arr.length) arr[k]`, per element | 26.3 | 102.7 |
+| `v.map(x => x * 3 + 1)`, per element | 227.9 | 230.6 |
+
+The rows come from two passes, at 22–34% and at 31–59% load; each is compared only within its pass.
+
+The three causes, with how each was established:
+
+1. **The instructions that cost something still run the interpreter's handlers.** *Measured.* In
+   `typed`, `f64.length` is 347 ns, a typed-array element access is 43 ns more than a dense
+   array's, and the other 18 instructions of the loop come to about 25 ns; the three stepped
+   kinds are about 95% of an iteration. Cycle counts per handler agree (`length` 61%, element
+   read 12%, element write 11% of the run, probe included). The fast helpers answer *slow* every
+   time for a typed array (12.0M, 20.0M and 12.0M helper calls, and the same numbers of steps),
+   so each access pays the helper's refusal on top of the handler. The same shape holds in
+   `alloc` (eight of the ten stepped instructions are allocation, property definition, string
+   concatenation and a native call, at 359–621 cycles each; the other two are 31), in `oo` (`New` 3,742 cycles and
+   `this.x = x` 1,090, against 259 for `Call` and 136 for `Return`) and in `vdom` (`GetIterator`
+   3,161 cycles, `IteratorNext` 1,241; a `for-of` element costs 369 ns against 26 ns by index).
+   A dense-array loop with the same body as `typed` is 4.0× faster compiled (48.7 ns against
+   196.2), so the JIT does deliver where the fast helpers apply.
+2. **A call costs the same machinery with or without the JIT.** *Measured.* A JavaScript call is
+   about 90 ns compiled and 105 interpreted (`zero()`: 90.0 and 109.1, less the loops' own 1.7
+   and 14.7). In `fib` every call is two stepped instructions, `Call` (180 cycles in the handler,
+   which pushes the frame) and `Return` (101 cycles, which pops it), plus about ten fast-helper
+   calls and `prepare`'s hotness check (33 cycles). The cycle counts include the probe's own cost,
+   about 25–30 cycles per timed region, so the two handlers are at least 150 and 75 cycles: more
+   than half of a call. `fib`'s 107 ns per call compiled against 133 interpreted is the 1.25×.
+   The three calls per iteration of `oo` and the 4.5M callbacks of `closure` pay the same. This
+   is the roadmap's item 1.
+3. **Much of what these tests do is neither dispatch nor property access.** *Measured; the split
+   of `closure` is inferred.* `new` is 262 ns for an empty function and 579 ns with one
+   `this.x = x`: the first property defined on a fresh object costs about 318 ns and a second
+   about 257 ns (`new F(i, i)`: 836 ns), which is a shape transition that neither tier caches.
+   `{}` is 90 ns and each property of a literal another 115–135 ns. A native callback into
+   JavaScript (`map`) is about 228 ns per element, and `values[i] = i` on `new Array(n)` is
+   210 ns. None of these is a Boa dispatch cost. About a third of `closure` is the initialising
+   loop (210 ns × 1M) and two thirds the native callbacks, from these probes.
+
+What P65 changes in the interpreter (typed-array named reads, first-property defines, `new`)
+reaches compiled code where compiled code runs the same handler. What is left for the JIT is the
+part it must do itself: skip the helper's refusal and the handler for typed arrays, cache shape
+transitions, enter calls without the frame machinery, and iterate arrays without the iterator
+protocol.
+
+## Results (phase 2.5)
+
+Phase 2.5 acts on the causes found above that the JIT can reach without changing how objects are
+constructed or how iterators are built: element stores that append, `/`, the stack operations of
+a call, calling a compiled function without the generic path, and typed arrays. Release `verve`
+with the `jit` feature, Windows x86-64; `docs/electron-plan` at `a5409ef8` (P65 merged) against
+the same plus this branch, built by `cargo build --release --features jit --bin verve`;
+milliseconds, median (best) of 5 processes, the two binaries and both modes interleaved in one
+round (load 1–6% before and after).
+
+| test | before, JIT | after, JIT | after, interpreter | after, JIT / interpreter | target |
+|---|---|---|---|---|---|
+| `fib(30)` | 273.6 (271.6) | 241.5 (225.4) | 355.7 (350.6) | 1.47× | ≤ 180 |
+| `oo` | 1043.2 (1023.0) | 1041.5 (996.3) | 1104.2 (1067.9) | 1.06× | ≤ 600 |
+| `typed` | 1020.6 (991.2) | 608.3 (604.5) | 1262.5 (1259.3) | 2.08× | ≤ 450 |
+| `alloc` | 251.6 (249.0) | 260.7 (258.2) | 277.4 (267.1) | 1.06× | ≤ 220 |
+| `vdom` | 63.8 (63.0) | 63.7 (63.1) | 68.5 (67.0) | 1.08× | ≤ 55 |
+| `closure` | 581.4 (576.8) | 417.7 (413.5) | 627.6 (618.9) | 1.50× | ≤ 430 |
+
+Only `closure` is within its target. The compiled column is faster than the interpreter on every
+test. `alloc` read 3–6% slower than before in this round; a later round with the last change in
+(a call to a native function leaves `jit_call` sooner) read 253.2 against 254.6, so it is
+noise-sized, and the micro-probes show no cost on the paths `alloc` runs.
+
+The micro-probes (the same process alternating nothing but the loop body; ns per iteration,
+median of five processes; JIT before, JIT after):
+
+| body | before | after | what changed |
+|---|---|---|---|
+| `a[i] = i` appending to `[]` | 135.6 | 33.7 | append in the fast helper |
+| `a[i] = i` on `new Array(n)` | 185.8 | 32.1 | the same |
+| `i / 3` | 9.6 | 3.9 | `/` inline |
+| `f64[k]` read | 46.6 | 23.3 | the interpreter's shortcut in the helper |
+| `f64[k] = v` | 41.9 | 26.2 | the same |
+| `f64.length` | 79.0 | 65.6 | the same |
+| `f64[k] = f64[k] * 1.0001 + 1; s += f64[k]` | 135.3 | 76.6 | the same |
+| `s = id(i)` | 92.4 | 78.6 | stack operations inline, `jit_call` |
+| `s = zero()` | 87.5 | 74.8 | the same |
+| `fib(20)`, per call | 104.6 | 87.7 | the same |
+| `Math.abs(i)` | 68.0 | 71.7 | a native call now also asks `jit_call` |
+| `new F(i)` (`this.x = x`) | 424.9 | 419.8 | nothing |
+| `for (const v of arr)`, per element | 324.0 | 323.6 | nothing |
+
+"Before" is `docs/electron-plan` (P65's interpreter, phase 2's JIT) in every row.
+
+What each change did:
+
+- **Appending stores** (`a[i] = x` with `i` the count of a plain dense array's elements, the shape
+  of every loop that builds an array): the fast helper pushes the element and grows `length`,
+  under the conditions `push` and `fill` already use (`Array::plain_dense_array`). It is 4–6×
+  faster per store, and `closure` loses about 160 ms of the 580 it took (its initialising loop
+  writes 1M elements of a `new Array(n)`).
+- **`/`**: an exact `int32` quotient stays an `int32`, any other quotient of numbers is an `f64`
+  division; a dividend of `0` is left to the interpreter, whose `0 / -5` is `0` where JavaScript's
+  is `-0`.
+- **Stack operations**: `PushFromRegister`, `PopIntoRegister`, `GetArgument` and `CheckReturn`
+  are machine code over the VM stack's `Vec` (found by looking at a real one, like the object
+  layout). Each was a fast-helper call of about 4 ns, ten per call of `fib`.
+- **Calling a compiled function**: `jit_call` pushes the frame with `enter_ordinary_function`
+  (the half of `function_call` that builds it), not through the callee's internal method and a
+  pending call value. Measured alone against the build without it, it saves 4–6 ns of a call of
+  about 75 (`id(i)` 80.7 to 76.4, `zero()` 78.7 to 72.3, `closure_call` 71.4 to 69.5), and costs a
+  native call 3–4 ns, which asks and is refused. The rest of a call is the frame itself: `Call`
+  and `Return` are the interpreter's handlers (about 35 and 20 ns), and a leaner `CallFrame` is
+  what is left.
+- **Typed arrays**: the helpers call the interpreter's own shortcuts
+  (`typed_array_length_shortcut`, `typed_array_element_get_shortcut`,
+  `typed_array_element_set_shortcut`), so the guards are in one place and a failed helper no
+  longer adds its cost to the handler's. `typed` goes from 1020 to 608 ms; `f64.length`, 65 ns
+  of the 140 ns an iteration takes, is now most of what is left: the shortcut walks the prototype
+  chain (three property lookups) on each read. A site cache keyed by the shapes of the chain would
+  need the shortcut's guard split into the walk and the read, which is P65's code.
+- **Stores whose receiver is not the object** (`super[key] = value`) are the interpreter's: the
+  instruction has a receiver register, the inline dense store ignored it as the interpreter's
+  dense fast path does, and compiled code now refuses a store whose receiver register is not the
+  object's.
+
+What phase 2.5 did not do, and why:
+
+- **`for…of` over arrays** costs the same compiled as interpreted (323.6 and 340.4 ns per
+  element). An element is `IteratorNext` (a native call of `next` and a result object, about 275
+  ns), `IteratorDone` and `IteratorValue`. That was an interpreter change with a gain for both
+  tiers, not a JIT one, and became P70 (below).
+- **`new` and object literals**: `new F(i)` (419.8) costs the same compiled as interpreted
+  (415.3): the cost is `function_construct` and the frame it builds (`new E()` of an empty function
+  is 228 ns), which the JIT runs unchanged. A shape-transition cache for `this.x = x` would save
+  the helper's refusal and the handler's lookup, about 20 ns of 419.
+- **A cache for typed-array `length`** (above) and a leaner `CallFrame` (`fib` 241 against its
+  180 ms, `oo` 1041 against 600) are the two items that would move the remaining targets.
+
+Correctness: `boa_engine` (1239 tests and the integration tests) passes at defaults and with
+`BOA_JIT_THRESHOLD=0`; the 3000 generated programs match; Verve passes without the feature, with
+it, forced and switched off (`VERVE_JIT=0`; one network test, `tcp_socket_options`, failed once
+with `EIO` and passed on the rerun, with the JIT off); `tests/jit.rs` passes. test262, every
+directory except `staging`, interpreted (`BOA_JIT=0`) against forced (`BOA_JIT_THRESHOLD=0`):
+52,095 results compared one by one, **0 differ** but for `Atomics/notify/bigint/notify-all-on-loc.js`
+(a timing test: it failed interpreted and passed forced).
+
+## Results (P70: iterators without result objects)
+
+`IteratorRecord` remembers when its `next` is the untouched built-in one of an array, map, set or
+string iterator in the running realm, and `IteratorStep` then takes the next value directly
+instead of making a `{ value, done }` object to read it back (a direct `it.next()` still makes
+one). Compiled code runs `IteratorNext`, `IteratorDone` and `IteratorValue` with fast helpers
+(`jit_iterator_next`, `jit_iterator_done`, `jit_iterator_value`) instead of `jit_step`. The
+helper for `IteratorNext` answers only when stepping cannot run JavaScript or fail: a map, set or
+string iterator, or a value iterator over a plain array with an integer `length` and a dense
+element; a hole, a proxy, a typed array, `keys()`/`entries()` and every other record take the
+interpreter's handler. Per element of `for (const x of source)`, 1M elements, ns, median of 5
+processes, `verve` base against after in the same round (`docs/electron/packages/P70-iterators.md`
+has the loads):
+
+| source | before, JIT | after, JIT | before, interp | after, interp |
+|---|---|---|---|---|
+| array | 413.8 | 22.2 | 431.4 | 71.8 |
+| `Set` | 611.9 | 24.0 | 546.9 | 46.9 |
+| `Map` (entries) | 1317.1 | 546.5 | 1172.8 | 566.1 |
+| string | 501.6 | 72.8 | 578.2 | 98.8 |
+| generator | 432.9 | 430.8 | 454.8 | 441.6 |
+| user-written iterator | 648.5 | 661.6 | 678.0 | 678.1 |
+
+A `Map` element is a fresh `[key, value]` array, which is most of what is left of its cost; the
+generator and the user iterator are not built-in, so nothing changes for them.
+
+## Results (typed-array `length`, P72)
+
+The site cache for a typed array's `length` ("Property caches and elements"). Release `verve` with
+the `jit` feature, Windows x86-64, `docs/electron-plan` at `345f1645` (P71 merged) against the same
+plus this branch, built by `cargo build --release --features jit --bin verve`; the suite ran the two
+binaries back to back and the probe alternated them, one round each, milliseconds, median (best) of 5 processes. Round 1 (suite), machine load
+13.4, 14.7, 19.6, 15.4, 15.3% before and 16.5, 12.2, 11.4, 10.4, 14.4% after; round 2 (probe),
+13.4, 15.7, 17.8, 11.7, 13.5% before and 28, 57, 60, 61, 62% after (other workers started
+building at the end, and no probe process ran after that).
+
+| test (P60 suite) | before | after | target |
+|---|---|---|---|
+| `typed`, JIT | 643.9 (618.5) | 368.2 (365.9) | <= 450 |
+| `typed`, interpreter | 1304.1 (1291.0) | 1308.3 (1291.5) | |
+
+The probe is nothing but the loop body, ns per iteration (`s += f.length` for a `Float64Array`;
+the loop itself, `s += 1`, is 3.3 ns of each):
+
+| body | before | after |
+|---|---|---|
+| `s += f.length` | 55.7 (54.5) | 17.0 (16.5) |
+| `s += f[i & 511]` | 15.2 (15.1) | 15.3 (15.1) |
+| `f[i & 511] = i` | 17.6 (17.4) | 17.8 (17.4) |
+| `s += a.length`, a dense array | 5.5 (5.4) | 5.3 (5.2) |
+
+`typed` meets its target (368 against 450 ms); `f64.length` is 17.0 ns against a target of 15, 2 ns
+short. What is left is the helper call itself (inferred: an element read, which is the same call with
+a shortcut of similar weight, costs 15.3 in the same probe, 12 over the loop), the borrows of the
+receiver and of the prototypes, and the read of the buffer's length; getting under 15 means the
+guard compared in machine code and a helper for the read alone, which was not tried. The
+interpreter is untouched (1304 and 1308 ms). The array and element rows are within noise.
+
+The element rows say what the same treatment of element reads and writes could be worth (it was
+not done): both are a helper call that runs the interpreter's shortcut, 11.9 and 14.5 ns over an
+empty loop, against 2.0 ns for a dense array's `length`, which is inline. Of the 61 ns an iteration
+of `typed` takes now (inferred from 368 ms over 6M iterations), a `length`, two reads and a write
+are about 52 together (13.7 + 2 x 11.9 + 14.5 over the loop); inline elements might bring the reads and the write to a few ns each
+(inferred, not measured), which would put `typed` near 200 ms.
+
+## Results (typed-array elements, P76)
+
+Element reads and writes of typed arrays in machine code ("Property caches and elements"). Release `verve` with the `jit` feature, Windows x86-64,
+`docs/electron-plan` at `0cc1fa94` against the same plus this branch; the suite and probe numbers are in `docs/electron/perf-js.md` (`typed` 356.1 to
+211.0 ms, target 280 and stretch 220; a read 14.5 to 8.5 ns and a write 16.5 to 6.5 ns on a loop of 4.0).
+
+Where the time of one access went, before (a release build, one thread, best of five runs of 20M, `typed_array_element_get_shortcut` and its
+parts, in ns over an empty loop of 0.2):
+
+| part | ns |
+|---|---|
+| recognise the receiver (`downcast_ref::<TypedArray>`) | 0.7 |
+| borrow the buffer, get its pointer and length | 0.8 |
+| bounds (`validate_index_u64`) | 0.5 |
+| load by kind and box (`get_value`, `JsValue::from`) | 3.5 |
+| the shortcut in all | 5.5 |
+| the set shortcut in all (convert by kind, `borrow_mut`, store) | 8.4 |
+
+The helper call measured 11 ns over the loop in JavaScript (read) and 12.5 (write), so about half was the helper around the shortcut: `catch_unwind`, the
+closure, reading and cloning registers, `set_register`. Inline code does the five guard loads, three branches, the class dispatch and the load or store:
+4.5 ns over the loop for a read, 2.5 for a write (a write has no register to set).
+
+What a compile costs. A function of 40 element accesses (the same four-line body repeated; 60 or 400 such functions called once each at threshold 0,
+`VERVE_JIT_THRESHOLD=0`) compiles 55 to 60 % slower with the typed paths in than without: 13.1 to 16.9 s against 20.0 to 23.7 s for 400. Folding the guards into three
+branches and sharing the array path's register store changed that by about 5 %. P81 compiles the typed paths only into functions that have met a typed array; see Risks.
+
+## Where a call goes
+
+Phase 2.5 left a JavaScript call at about 70 ns compiled, `new` at 230–450 ns, and a callback from
+native code at 120–145 ns, all in machinery that the interpreter and compiled code share. This
+section takes that machinery apart in both tiers. Nothing here changes the engine: the
+instruments were temporary patches, kept outside the repository.
+
+Release `verve` with the `jit` feature, Windows x86-64, Ryzen 9 7950X (the TSC runs at 4.5 GHz),
+`docs/electron-plan` at `05f26157` (P66 merged). The machine was shared by four builders; every
+table is from one round and compared within it only. Three instruments:
+
+- **Differential micro-probes** on the unmodified build: the same process, one loop body each,
+  ns per iteration, median (best) of five processes, the loop's own cost (1.8 compiled, 15.8
+  interpreted) included. Load 30% before the round, 20% after.
+- **Eight-times probes.** A piece of the call (a clone, the limits check, a stack push) is done
+  eight more times in place with the state restored; the run's time less the plain run's, over
+  eight, is what the piece costs when hot. Median of 3–10 processes, load 15–45%. A piece that
+  does nothing reads 1.1 ns (not subtracted). These are costs in isolation: in a real call the
+  pieces overlap, so their sum is an upper bound on what removing them saves.
+- **`rdtsc` timers, one enabled per run.** A bare timer pair reads 30 cycles (6.7 ns) around
+  nothing. Nested timers hid each other's work in their own latency (every small region read 30
+  cycles), so each region was read alone, less 30 cycles; under about 50 cycles a reading is a
+  lower bound.
+
+The instrumented build with every timer off is slower than the clean one on the compiled call
+path: `zero()` 84.3 against 69.3 ns compiled and 102.5 against 101.3 interpreted, `new E()` 266
+against 232 compiled (one round, five processes each). Compiled timer readings add up to more than
+the clean wall time, so read them as shares.
+
+### A JavaScript call
+
+| body, ns per iteration | compiled | interpreted |
+|---|---|---|
+| `zero()` (`function zero() {}`) | 69.3 (63.2) | 101.3 (85.6) |
+| `id(i)` | 73.6 (69.7) | 116.6 (110.8) |
+| `ar()` (an arrow function) | 66.1 (64.9) | 96.2 (93.0) |
+| `obj.m()` (own method) | 81.6 (80.0) | 144.6 (140.7) |
+| `pinst.get()` (method on the prototype) | 118.2 (112.5) | 168.7 (159.8) |
+| `bound()` | 102.0 (92.5) | 118.9 (105.6) |
+| `Math.abs(i)` (a native call) | 80.4 (73.8) | 144.1 (138.9) |
+
+A counter shows `zero()` interpreted runs 11 instructions an iteration, 4 of them the loop's, so
+a call is 7 dispatches (the pushes of `this` and the function, `Call`, the callee's body and
+`Return`, taking the result). Compiled, it is `jit_call` and one stepped instruction, the callee's
+`Return`.
+
+The interpreted call, `zero()` less the loop: 85 ns (best 71). Timers, except the dispatch, which
+is inferred from the 3.7 ns an instruction costs in the empty loop:
+
+| part | ns |
+|---|---|
+| dispatch of the 7 instructions | ≈ 26 (inferred) |
+| `Call` handler | 30.8 |
+| – `__call__` (builds the pending call) and `resolve` | 8.6 |
+| – `function_call`: limits check, downcast, four clones | 7.6 |
+| – `enter_ordinary_function` | 14.6, of it `push_frame` 4.4 |
+| `Return` → `handle_return` | 15.7, of it `pop_frame` 1.6 and the rest (truncating the stack, dropping the `CallFrame`) 14.1 |
+| not attributed | 13 against the median, about 0 against the best |
+
+The compiled call, from the instrumented build (shares, not absolute): `jit_call` 73.2 ns from
+the call to the callee's return, of which `compiled_callee` (the checks and the four clones) 4.6,
+`enter_ordinary_function` 15.6 (`push_frame` 7.1), and `finish` 33.4, in which `prepare` is 0.9
+and the nested `execute` 27.3, of which the callee's `Return` step 17.2 (`handle_return` 16.0).
+About 20 ns is left: the `catch_unwind` wrappers, entering and leaving compiled code, the callee's
+body (inferred; the isolated cost of the state build, 0.9, and of a `catch_unwind`, 1.3, are
+small). Call and return come to about 45 ns interpreted and, compiled, the three timed parts are
+37 with the rest in that 20: both tiers run the same `function_call` and `handle_return`.
+
+Eight-times probes on `zero()`, ns, compiled / interpreted:
+
+| piece | cost |
+|---|---|
+| clone and drop of the four handles the frame owns | 12.3 / 13.0 |
+| – each alone: code block 3.0 / 2.0, realm 3.6 / 2.4, environments 2.5 / 2.5, script or module 2.8 / 2.3 | |
+| the callee object cloned into the pending call | 2.1 / 1.7 |
+| the `SourceInfo` cloned for the shadow stack, alone | 2.7 / 3.0 |
+| the function value pushed and popped on the VM stack | 3.3 / 3.2 |
+| `check_runtime_limits` | 5.5 / 6.3 (its timer reads 0.6–3: a lower bound) |
+| `this` read and written | 3.0 / 4.2 |
+| registers extended and truncated | 1.2 / 3.4 |
+| return value set and taken | 1.8 / 3.1 |
+| the shadow stack pushed and popped, that clone included | 2.1 / 3.2 |
+| the pending call built and dropped | 3.1 / 3.4 |
+| `downcast_ref::<OrdinaryFunction>` | 2.2 / 2.2 |
+| `CallFrame::new` from the four clones | 9.5 / 9.5: the frame itself costs nothing |
+| the frame (104 bytes) popped and pushed | −0.2 / 1.6 |
+
+A call clones and drops seven handles: realm, code block, environments, script or module, the
+callee (in the pending call), the `SourceInfo`, and the function value on the stack. At 2–3 ns a
+pair that is 15–20 ns, which is what the roadmap's leaner `CallFrame` can take and no more. With
+the limits check, the shadow stack, `this`, the registers, the return value, the pending call and
+the downcast, the isolated pieces come to about 37 ns of the compiled call's 67 and 45 of the
+interpreter's 85.
+
+### `new`
+
+| body, ns per iteration | compiled | interpreted |
+|---|---|---|
+| `new E()` (`function E() {}`) | 231.5 (217.3) | 308.0 (233.0) |
+| `new F(i)` (`this.x = x`) | 413.2 (392.7) | 558.0 (408.1) |
+| `new G(i, i)` | 565.4 (539.7) | 686.4 (543.3) |
+| `new C0()` (`class C0 {}`) | 450.4 (423.9) | 541.1 (445.8) |
+| `new CX(i)` (`constructor(x) { this.x = x }`) | 678.8 (636.7) | 849.3 (634.6) |
+| `new D0()` (`class D0 extends Base {}`) | 785.9 (741.9) | 786.2 (725.7) |
+| `new D1()` (`constructor() { super() }`) | 821.3 (786.6) | 853.7 (776.5) |
+| `new DX(i)` (derived, `super(x)` into `CX`) | 1075.9 (1019.9) | 1105.1 (998.7) |
+
+The interpreted medians of this round are noisy; the best is the better guide. In `new E()` the
+`New` handler is 200.8 ns compiled and 194.8 interpreted (timers), `function_construct` 179.4 and
+185.0 of it, and in `function_construct`:
+
+| piece | timer, compiled / interpreted | eight-times probe |
+|---|---|---|
+| `get_prototype_from_constructor` | 66.1 / 65.6 | 70.2 / 68.8 |
+| the object (`from_proto_and_data_with_shared_shape`, then dropped) | 84.7 / 82.6 | 91.6 / 92.0 |
+| `initialize_instance_elements` (nothing to initialise) | | 3.4 / 3.7 |
+| the four handles | 1.1 / 0.8 | 13.6 / 12.6 |
+| `push_frame` | 6.3 / 5.3 | |
+
+So 150 of the 180 ns are two things: reading `prototype` off the constructor with a generic `Get`
+(that `Get` alone is 66.3 / 68.3 in the probe), and allocating the object, which includes
+whatever the collector does for it. Every `new` does both again, with the answers the last one
+found.
+
+A class constructor adds, per constructor frame:
+
+| piece | compiled / interpreted |
+|---|---|
+| `push_function` and the pop of the function environment | 187.8 / 184.3 |
+| cloning the frame's `EnvironmentStack` | 28.4 / 34.4 (a plain function's: 3.2 / 2.8) |
+| the four handles together | 32.6 / 34.8 (a plain function's: 12.3 / 13.5) |
+
+`new C0()` less `new E()` is 219 ns compiled, and the environment push with the dearer clone (one
+clone at construction, a drop at return) accounts for it. The compiler gives every class
+constructor a function scope (`bytecompiler/class.rs` sets `HAS_FUNCTION_SCOPE` for explicit and
+default constructors alike), which the frame then builds as collected objects. A counter shows
+`zero()` and `new E()` build none, `new C0()` one and `new D0()` two (the derived constructor's and
+`Base`'s); the push probe on `new D1()` reads 408 ns, two frames' worth. How the 188 ns divides
+between the allocations and the walk that decides whether the environment is poisoned was not
+measured. Why a class constructor's environments clone is nine times a function's was not found
+(inferred: a non-empty `private_stack`, which is a `ThinVec` and allocates when cloned).
+
+The rest is not call machinery: `new F(i)` less `new E()` is 182 ns compiled (250 interpreted)
+and `new CX(i)` less `new C0()` 228 (308), the first property defined on a fresh object, a shape
+transition neither tier caches (P65 measured 319). In `oo` an iteration is two method calls
+(`add`, `get`: 118 each by the prototype-method probe) and one `new CX(i)` (679): 915 of its
+1041 ns.
+
+### A callback from native code
+
+| body, ns per element or call | compiled | interpreted |
+|---|---|---|
+| `zero.call(null)` | 144.6 (142.1) | 174.7 (174.5) |
+| `Reflect.apply(zero, null, [])` | 197.6 (184.1) | 242.1 (211.6) |
+| `arr.forEach(Math.abs)`, 100 elements, a native callback | 72.0 (70.6) | 80.9 (71.0) |
+| `arr.forEach(zero)` | 117.5 (115.9) | 101.5 (93.3) |
+| `arr.forEach(() => 0)` | 117.3 (116.2) | 114.8 (105.3) |
+| `arr.map(zero)` | 237.9 (230.0) | 220.6 (204.1) |
+| `arr.map(() => 0)` | 234.0 (230.3) | 244.0 (219.0) |
+| `arr.filter(zero)` | 137.2 (130.3) | 111.8 (104.8) |
+| `arr.reduce(id, 0)` | 127.9 (121.4) | 123.2 (115.2) |
+| `sort` comparator `(a, b) => a - b`, per comparison | 122 | 137 |
+
+The `sort` figure is the probe's time less building the array, over the 852 comparisons a
+reversed array of 100 takes (counted by a comparator that counts).
+
+`JsObject::call`, as `zero.call(null)` runs it (timers, compiled / interpreted):
+
+| part | ns |
+|---|---|
+| pushes of `this`, the function and the arguments | 0.9 / 0.8 (five values, in `forEach`: 7.9 / 8.0) |
+| `__call__` and `resolve`: `function_call` and the frame | 29.3 / 30.1 |
+| `context.run()` | 37.6 / 10.5 |
+| – entering the loop, the `run_depth` bookkeeping | 0.4 / 0.5 |
+| – `jit_poll`: `try_enter`, `execute` of compiled code | 28.1 / 0.4 |
+| `pop_frame`, which drops the `CallFrame` | 13.4 / 12.6 |
+
+That is 81 ns compiled and 54 interpreted besides the callee's own work (the interpreted `run`
+includes the callee's one instruction and its `Return`). Two things are in it: the same
+`function_call` as a call from JavaScript (29 ns) and a frame drop (13), and, compiled, about
+27 ns more than interpreting a callee of one instruction. That 27 is entering and leaving
+compiled code for a callee that runs a few instructions; the state build and a `catch_unwind` are
+under 2 ns each in isolation and the rest was not split (inferred: the entry stub, the callee's
+`Return` step with its `finish`, the return through `execute`). It is why `forEach(zero)`
+compiled (117.5) is slower than interpreted (101.5), as are `filter(zero)` (137.2 against 111.8)
+and `map(zero)`: **for callbacks of a few instructions the compiled column loses to the
+interpreter's**, which the suite's callbacks (about ten instructions) do not show.
+
+### What the suite pays
+
+`fib(30)` is 2,692,537 calls: 242.5 ms compiled and 364.5 interpreted (median of 5, load 35%
+before and 24% after) is 90 and 135 ns a call, of which `zero()`'s 67 and 85 are the call and the
+rest the body. `oo` (1096 compiled, 1258 interpreted) is a million iterations of two calls and one
+`new CX(i)`. `closure` (457 and 688) is about 2.25M callbacks (a million each for `map` and
+`filter`, a quarter million for `reduce`) and the 32 ms of its initialising loop.
+
+The causes, by what they cost in the suite:
+
+1. **The function environment of a class constructor**: 188 ns, and about 28 more to clone the
+   frame's environments, per constructor frame. *Measured.* About 215 of `oo`'s 1041 ns an
+   iteration, and twice that in a derived class.
+2. **`new` finds the prototype and allocates the object afresh**: 66–70 and 85–92 ns, 150 of the
+   180 ns of `function_construct` for a plain function. *Measured.*
+3. **The callback from native code**: 81 ns compiled and 54 interpreted, against 67 and 85 for a
+   call from JavaScript; compiled code pays about 27 ns to enter and leave. *Measured; the cause
+   of the 27 is inferred.*
+4. **The frame's bookkeeping in every call**: seven handles at 2–3 ns a pair, the limits check at
+   5–6 and about 15 more in the shadow stack, `this`, the registers, the return value,
+   the pending call and the downcast: 37 ns compiled and 45 interpreted, in isolation. *Measured.*
+   Building the `CallFrame` costs nothing and is not a cause.
+5. **Dispatch of the call's instructions**: 26 ns interpreted. *Inferred.* Not the frame's.
+
+A leaner `CallFrame` alone is therefore worth at most 15–20 ns of a compiled call of 67: `fib`
+reaches 180 ms only if nearly all of the bookkeeping goes, and `oo` cannot reach 600 ms without
+the environment, the prototype lookup and the first-property define all going.
+
+## Results (P69: the cost of calls and construction)
+
+What "Where a call goes" measured, acted on where the measurement said it would pay. Release `verve`
+with the `jit` feature, `docs/electron-plan` at `c91b2938` against the same plus this branch, built by
+`cargo build --release --features jit --bin verve`, `CARGO_BUILD_JOBS=6`; median (best) of 5 processes,
+milliseconds, the two binaries interleaved per test (load 15% before the suite and 8% after; the
+probes 9% and 9%).
+
+| test | before, JIT | after, JIT | before, interp | after, interp | target |
+|---|---|---|---|---|---|
+| `fib(30)` | 243.5 (240.0) | 236.5 (234.8) | 369.9 (364.6) | 363.2 (362.1) | ≤ 195, stretch 180: not met |
+| `oo` | 1106.4 (1067.5) | 724.8 (718.0) | 1205.7 (1180.1) | 850.1 (777.8) | ≤ 750: met; stretch 600: not met |
+| `closure` | 450.5 (439.3) | 436.9 (432.3) | 667.7 (642.2) | 649.6 (634.2) | ≤ 350, stretch 330: not met |
+
+The micro-probes, ns per iteration (per element for the callbacks), same round, JIT then interpreter:
+
+| body | before | after |
+|---|---|---|
+| `new E()` | 216.2 / 243.7 | 169.7 / 173.7 |
+| `new C0()` (empty class) | 424.1 / 453.9 | 206.5 / 214.5 |
+| `new CX(i)` (`this.x = x`) | 624.0 / 736.9 | 389.5 / 388.6 |
+| `new D0()` (derived, default) | 762.1 / 800.4 | 552.9 / 509.8 |
+| `new DX(i)` (derived, `super(x)`) | 1043.7 / 1121.1 | 818.8 / 792.5 |
+| `zero()` | 64.1 / 91.6 | 62.2 / 84.2 |
+| `pinst.get()` | 116.6 / 164.2 | 109.0 / 158.7 |
+| `arr.forEach(zero)` | 114.8 / 103.3 | 93.3 / 91.8 |
+| `arr.forEach(ar)` (an arrow function) | 117.3 / 127.0 | 105.9 / 106.9 |
+| `arr.filter(zero)` | 130.8 / 127.9 | 112.0 / 109.8 |
+| `arr.map(zero)` | 225.3 / 242.7 | 202.7 / 201.0 |
+| `arr.reduce(id, 0)` | 126.5 / 129.2 | 115.3 / 112.3 |
+| `sort` comparator `(a, b) => a - b`, per comparison | 123.5 / 129.3 | 116.2 / 127.3 |
+| `zero.call(null)` | 143.8 / 168.5 | 119.1 / 167.4 |
+
+What each change did:
+
+- **A base class constructor builds a function environment only when a function would** (a direct
+  `eval`, an escaping `this`, `super` or `new.target` in the body, a captured binding). The analyzer
+  forced one for every class constructor and the default base constructor carried an empty one;
+  each cost 188 ns, two collected objects, and its clone and drop another 28. A derived constructor
+  keeps it, since its `this` binding lives there. `new C0()` goes from 424 to 207 compiled.
+- **`function_construct` reads `prototype` through a one-entry cache** keyed on the constructor's
+  shared shape, instead of the generic `[[Get]]` (66–70 ns): `new E()` 216 to 170. A proxy, an
+  accessor, a unique shape or a value that is not an object take the generic path.
+- **A function that native code calls stays interpreted when its bytecode is at most 40 bytes**
+  (`() => 0` is 24, `x => x` 37, `v => v + 1` 55, a function with an empty body 2): entering and
+  leaving compiled code costs more than such a callee takes interpreted, so `forEach(zero)`
+  and `filter(zero)` were slower compiled than interpreted (114.8 against 103.3, 130.8 against 127.9;
+  `map(zero)` 225.3 against 242.7, ahead) and all three are now equal within 2% (93.3 against 91.8,
+  112.0 against 109.8, 202.7 against 201.0); the `sort` comparator is faster compiled (1312 against
+  1394 per element of the probe). A loop in such a callee is still entered by OSR. Callbacks of about
+  ten instructions, as in `closure`, are compiled as before: the crossover is between 24 and 55 bytes.
+- **Entering a function no longer sets the return value twice or clones `this` for a frame that has
+  no function environment**: 1.5–2.5 ns a call (`zero()` 64.1 to 62.2), `fib` 243.5 to 236.5.
+
+What was not done, with the numbers:
+
+- **A leaner `CallFrame`.** The measured ceiling is the seven handle pairs at 2–3 ns, 15–20 ns of a
+  call of 62, and the realm, the active runnable, the `SourceInfo` and the callee in the pending call
+  are the four that could go. `frame.realm` has 39 uses and the frame owns its code block and
+  environments, so it is a redesign of `CallFrame`, not a trim. At most 10–12 ns a call: `fib`
+  to about 205–210 ms, which is short of 195.
+- **Native→JS re-entry** beyond the tiny-callback rule. A second round of timers put the compiled
+  run itself at about 28 cycles and `try_enter` at about 90, so the 27 ns of "Where a call goes" is
+  mostly the machinery around the entry, not the entry stub, and no single piece measured above 2 ns.
+  `closure` at 437 has 2.25M callbacks; taking the remaining 16 ns of entry and 12 ns of frame off
+  each would give about 375, not 350.
+- **`this` allocated with the constructor's initial shape**, the path to `oo` at 600: `new CX(i)` less
+  `new C0()` is still 183 ns (the first property's shape transition), which is what separates 725
+  from about 575–600. Done in P78, not as an allocation but as a cache of the transition
+  ("Results (P78)").
+- **The JIT follow-up** (compiled code calling compiled code without `finish`): the unattributed 20 ns
+  of the compiled call was not split further, so there is no number to act on.
+
+Correctness: `boa_engine` (1266 tests and the integration tests) passes at defaults and with
+`BOA_JIT_THRESHOLD=0`; the 3000 generated programs match; Verve passes without the feature, with it,
+forced and switched off, and `tests/jit.rs` passes. The new differential tests are
+`constructors_match_the_interpreter` and `tiny_callbacks_match_the_interpreter` in `tests_calls.rs`
+(interpreted, compiled eagerly, compiled when hot) and two in `tests/class.rs`; a script of 30
+constructor cases (`this`, `new.target`, `Reflect.construct` with another `newTarget`, derived
+classes without `super()`, returns of objects and primitives, private members, field initialisers,
+`super.x`, bound and proxy constructors, generators and async methods, the recursion limit,
+`error.stack`) prints the same under the interpreter, the JIT and forced compilation, and the same
+as the build before the branch. test262, every directory except `staging`, interpreted against forced:
+**0 differ**, but for `Atomics/notify/notify-all-on-loc.js`, `notify-two.js` and
+`bigint/notify-all-on-loc.js`, timing tests that failed interpreted and passed forced, as the one
+before them did.
+
+## Results (P78: the shape a constructor's assignments lead to)
+
+`new CX(i)` was 183 ns dearer than `new C0()`, all of it the constructor's `this.x = x`. This section
+takes that apart, and says what was done about it and what was not.
+
+Release `verve` with the `jit` feature, Windows x86-64, `docs/electron-plan` at `c28e026c` (P75
+merged) against the same plus this branch, built by `cargo build --release --features jit --bin
+verve`, `CARGO_BUILD_JOBS=6`, `VERVE_CODE_CACHE=0`, a throwaway profile folder.
+
+**Where the 183 ns went.** Rdtsc timers around adjacent pieces of the interpreter's `SetPropertyByName`
+handler (one build, 4M assignments of one property to a fresh object, each reading less 30 cycles;
+load 26–49 %, so read the shares), ns per assignment:
+
+| piece | ns |
+|---|---|
+| `cached_set`: the inline cache has no entry, a creating assignment never fills one | 3.2 |
+| `ic.name.clone()` into a `PropertyKey` | 4.6 |
+| the receiver: methods ordinary, extensible, `get(key)` finds nothing | 2.4 |
+| the prototype walk: two borrows, two methods checks, two hash lookups (class prototype, `Object.prototype`) | 19.6 |
+| `PropertyMap::insert`, of which: the shape's `lookup` | 2.3 |
+| the shape transition (`insert_property_transition`: key clone, forward-transition table, weak upgrade) | 12.0 |
+| the storage `push` (the first one allocates, 64 bytes) | 34.1 |
+| the rest of `insert` (descriptor and attribute conversion, the old shape's drop; not split further) | 37.7 |
+| **total in the handler** | **116** |
+
+The other 60 ns or so are outside it: the instruction dispatch and `GetArgument`, and the storage's
+free when the object is collected (inferred, not measured). Switching shapes is not the cost: the
+lookups and the building of the transition are 2 + 12 + 38, the prototype walk 20, and the only
+piece that cannot be skipped is the allocation of the storage.
+
+**Candidates.**
+
+1. *Reserve the storage the constructor ended with.* Measured with a temporary hack on top of the
+   cache (the first creating assignment `reserve_exact(6)`; not committed): `new CX6(i)` (six
+   properties) about 560 to 480 ns, i.e. one reallocation (4 to 8 slots) saved, about 70 ns;
+   `new CX3(i)` unchanged within noise; `new CX(i)` 0 to 25 ns *slower* (a 96-byte block for one
+   property). `oo` has one property, so it gains nothing. A per-constructor count would not make
+   the one-property case slower, but it is state in the function or the code block and a write at
+   every constructor return, for objects of five properties or more. Not done.
+2. *Predict the transition chain so the set cache hits* (chosen, in the form of a cache per site:
+   each `this.x = v` remembers its own transition, and the chain of a constructor is the chain of
+   its sites). `new CX(i)` less `new C0()`: 177 to 83 ns; `new CX3(i)` 690 to 353; `new CX6(i)` 1122
+   to 503; `new F(i)` 349 to 249.
+3. *Allocate `this` with the final shape and `undefined` slots.* Not built, and not buildable as
+   asked: during the constructor `'a' in this`, `hasOwnProperty`, `Object.keys(this)`,
+   `Object.getOwnPropertyNames(this)` and `JSON.stringify(this)` would see properties that do not
+   exist yet, their order would be the previous construction's rather than this one's (a conditional
+   property, a `delete`, a `defineProperty` with another attribute), and `this.a = v` would write
+   the slot instead of finding a setter or a read-only property on the prototype. A proof that none
+   of that is observable needs the whole constructor body, which the call site does not have. The
+   ceiling of what it could add over the chosen cache is the hit itself, about 15 ns a property
+   (inferred).
+
+**Why the chosen one cannot change what a program sees.** The cache is a record of what
+`set_new_own_property` did and checked, replayed when everything it checked is known to be the same:
+
+- It is only used for `receiver === object`, an ordinary object (the four methods that matter are
+  compared by function, as the uncached path does), extensible (read on every hit, as it is not in
+  the shape).
+- The receiver's shape is shared, so it is immutable: it lacks the name, has the recorded
+  prototype, and has the recorded transition to the shape after. A shape holds its prototype, so it
+  pins the nearest prototype *object*; that object's shape pins the next. An object's methods never
+  change after creation, and were ordinary when the entry was made (a proxy in the chain is not
+  recorded).
+- Each prototype's shape is compared, and for a unique shape (the builtin prototypes, a
+  dictionary-mode object) so is its number of properties. A unique shape gains properties in
+  place, which is why identity is not enough; everything else it can do (lose a property, change a
+  property's kind or attributes, change prototype) makes a new shape (`unique_shape.rs`). So a
+  setter or a read-only property added to `Object.prototype` or to any prototype after the entry
+  was made makes the hit fail, and the generic path runs the setter or throws as before.
+- A hit fails when the storage is not as long as the slot says, when a borrow fails, or when the
+  new shape was collected: it is then the uncached path, and the entry is made again.
+
+What is recorded is decided after the uncached insert has succeeded, so every case that did not go
+through it (a setter, a read-only property, a proxy, a non-extensible object, a shape past the
+transition limit that became unique) is not recorded, and a site that sees more than four shapes
+records no more. Constructor cases: a replaced `prototype` is another receiver shape (a miss, then
+another entry); a conditional property gives each distinct shape its own entry; `delete this.a`
+makes the object's shape another one, and the next site misses; a constructor that throws or
+returns another object leaves its entries, which describe a transition that really happened;
+`Reflect.construct` with another `newTarget` has another prototype, so another shape; a derived
+class's base constructor sees one shape per subclass, and past four the site stops recording (a
+miss, never wrong).
+
+**State.** The cache lives in the code block, in the `InlineCache` of the assignment (`AddCache`: a
+`Vec` header, a borrow flag and a flag, 40 bytes for a site that never creates a property; an entry
+is about 150 bytes: two weak shapes, the slot, and up to four stamps of a weak shape and a count).
+It holds weak shapes only, so it keeps no shape or prototype alive, and goes with the code block
+when that is collected. Nothing is kept in the function object, the `Vm` or the object.
+
+**Suite.** The two binaries interleaved per test, `--runs 7`, median (best), ms; the load before
+and after each run is in the package's status.
+
+| test | round 2 before | round 2 after | round 3 before | round 3 after |
+|---|---|---|---|---|
+| `oo`, JIT | 721.9 (710.1) | 590.5 (574.5) | 708.6 (692.8) | 608.9 (591.0) |
+| `oo`, interpreter | 811.6 (797.3) | 684.4 (683.7) | 789.1 (776.5) | 690.4 (676.1) |
+| `alloc`, JIT | 254.2 (232.8) | 249.7 (244.4) | 245.7 (240.1) | 253.4 (245.7) |
+| `vdom`, JIT | 48.3 (47.5) | 52.2 (50.8) | 52.7 (48.3) | 50.4 (48.8) |
+| `closure`, JIT | 437.9 (430.0) | 441.8 (429.8) | 439.4 (434.0) | 429.0 (424.6) |
+| `json`, JIT | 1233.5 (1220.3) | 1237.4 (1208.2) | 1214.0 (1202.6) | 1214.9 (1207.5) |
+
+`oo` is 18 % and 14 % faster: the commitment (650) is met in both rounds, the stretch (600) in the
+first only. `vdom` alone left the ±3 % band in a round (+8.1 and -4.4 %); it builds its tree from
+object literals and has no creating assignment, so a change there is noise, and two more rounds of
+eleven runs gave -3.2 and -2.5 % (`vdom`), +0.4 and +2.7 % (`alloc`).
+
 ## Roadmap
 
 **Phase 1 (done)**: the baseline described above.
@@ -556,19 +1424,22 @@ Correctness at the end of phase 2:
 
 **Phase 2, left over**, in the order the profiles suggest:
 
-1. **The cost of a call itself.** With the rest fast, a call is Boa's frame machinery: in the
+1. **The cost of a call itself** (phase 2.5 took the stack operations and the generic path out;
+   the frame is what is left). With the rest fast, a call is Boa's frame machinery: in the
    `callLoop` profile, `handle_return` (dropping the frame's stack values and the `CallFrame`'s
    handles) 10%, `push_frame` 8%, `function_call` 8%, `CallValue::resolve` 6%, the pushes of
    `this`, the function and the arguments 7%. Options: a leaner `CallFrame` (fewer `Gc` handles
    cloned and dropped per call: realm, active runnable, environments), a direct call path for
    plain functions (no environment, no `arguments`) from compiled code, and keeping `this`/the
    function out of the value stack.
+   P84 did the first two in part ("Results (P84 ...)"); keeping `this` and the function out of the
+   value stack, and a calling convention that skips `execute`, are still open.
 2. **Method calls**: `o.m()` reads `m` from the prototype through the helper and the
-   interpreter's cache; inline prototype reads need a check of the prototype's shape too (the
-   object's shape does not change when its prototype's properties do).
+   interpreter's cache; inline prototype reads need the check of the prototype's shape that the
+   interpreter's entries now have (the object's shape does not change when its prototype's
+   properties do), and the unique-receiver rule.
 3. **Dictionary-mode objects and the global object** (unique shapes) inline: a unique shape keeps
-   its identity when a property is added or its attributes change, so a cache needs a version
-   (`unique_shape.rs` has a `TODO: invalidate the pointer`).
+   its identity when a property is added, so a cache needs a version or the storage length.
 4. **Strings and native calls**: `+` of strings, `length` and indexing of strings, and the cost of
    calling a native function (`native_function_call`: shadow stack, realm swap).
 5. **Constant blinding** of every program-chosen `Store*` immediate (`StoreDouble`, `StoreFloat`,
@@ -599,6 +1470,20 @@ entirely. Background compilation on another thread fits here too, since `CodeBlo
   interpreter boxes a result (for example `div_fast`, which returns `int32` `0` for `0 / -5`, where
   JavaScript gives `-0` — a Boa bug the JIT deliberately does not inline) must be mirrored. The
   differential tests and the fuzzer are the guard; run them on any change to `value/`.
+- **Typed-array element accesses cost compile time.** Each element read or write now carries the
+  typed path as well as the array one (about 35 blocks), and a function of 40 element accesses
+  compiles 55 to 60 % slower (400 such functions at threshold 0: 13.1 to 16.9 s before, 20.0 to
+  23.7 s after; the same ratio with the guards folded into three branches and the register store
+  shared with the array path). Programs with few element accesses in hot functions do not see it.
+  The typed path is therefore compiled only into functions in which the interpreter has met a typed
+  array at an element access (P81; one flag on the code block): the same 400 functions on plain
+  arrays are back at 13.5 s CPU (13.8 s before the typed path, 19.4 s with it everywhere). A
+  function that does meet typed arrays pays the full cost (200 functions of 40 accesses, called six
+  times on a `Float64Array`, threshold 3: 6.8 s without the typed path, 10.2 s with), and one
+  that first meets a typed array after it is compiled stays on the helper for them (no wrong
+  result, 11 ns an access instead of 4). `BOA_JIT_TYPED_ALL=1` compiles the path everywhere.
+  Not done: one shared typed path per function, which would cut the cost for the functions that
+  do use typed arrays.
 - **Compile time** is about 5 ms a function, on the JavaScript thread. The type checks of each
   inline instruction expand into many small blocks, and phase 2 added the property and element
   accesses. A threshold of 1000 and the profitability check keep compiles rare, but a program
@@ -609,12 +1494,21 @@ entirely. Background compilation on another thread fits here too, since `CodeBlo
   by looking, and are all checked against a real object before use, so a change to those types
   either keeps working or turns inline accesses off. What the checks cannot see is a change of
   *meaning* — a new borrow state, a new kind of elements, a shape that changes its properties in
-  place — which needs the JIT changed with it. `layout.rs` lists what is relied on.
+  place — which needs the JIT changed with it. `layout.rs` lists what is relied on, and the typed-array
+  `length` cache (`typed_length.rs`) relies on a unique shape changing in place only by gaining a
+  property.
 - **The interpreter's caches decide.** Fast helpers hit only where the interpreter's inline cache
-  hits, and site caches are filled only from such hits; if the interpreter's cache is wrong (for
-  example a prototype property removed under a cached `PROTOTYPE` slot), compiled code is wrong
-  the same way. That is by design — the differential tests compare the two — but it means a fix
-  to the caches must be made in the interpreter.
+  hits, and site caches are filled only from such hits; if the interpreter's cache is wrong,
+  compiled code is wrong the same way. That is by design — the differential tests compare the
+  two — but it means a fix to the caches must be made in the interpreter. The entry for a
+  property of the prototype was wrong that way (keyed by the receiver's shape alone, so a
+  prototype property deleted or made an accessor was read from its old slot, and the storage
+  could be read out of range: a panic). It now records and compares the prototype's shape, a
+  unique receiver gets no such entry, and a unique shape changes identity for any change of
+  attributes (see "Property caches and elements"). What is still relied on: a unique shape
+  changes in place **only** by gaining a property, and a slot is checked against its holder's
+  shape by name when the entry is made. A new in-place change of a shape, or a farther holder,
+  needs the entry's checks extended with it.
 - **Builtin shortcuts** (`push`, `fill`) are exact only while their preconditions mirror the
   specification's steps; a change to how arrays store `length` or elements must keep them in
   step. Their tests compare against Node's output, not only the interpreter.
@@ -630,3 +1524,124 @@ entirely. Background compilation on another thread fits here too, since `CodeBlo
 - **Hosts without executable memory** (Windows ACG, macOS hardened runtime without the
   entitlement, iOS, AArch64 Linux with `membarrier` denied) run interpreted after one failed
   compile. This is correct, just not faster.
+
+## Results (P82: `for (const [k, v] of map)`)
+
+`IteratorEntry` is compiled inline with a fast helper (`jit_iterator_entry`): when the record's step is a built-in entry and the array protocol is untouched, it
+writes the key, the value and `fast = true` into the three registers; anything else (a different record, or a changed protocol) is the interpreter's handler, which
+makes the array and lets the compiled spec path destructure it. A value or entry iterator over a dense array no longer declines in `advance_dense` for `entries()`.
+Per element (JIT): `Map` 677 -> 107 ns, `map.entries()` 685 -> 107, `arr.entries()` 746 -> 104. `jit_iterator_next` also steps the record in place now, as the
+interpreter does, instead of popping it off the frame's iterator stack and pushing it back.
+
+## Results (P84: a leaner call frame, and compiled code calling compiled code)
+
+The frame of an ordinary function no longer clones the handles it can reach through its callee, the
+shadow stack no longer clones a `SourceInfo` per call, and a compiled `Call` of a compiled function
+enters the callee at once and returns without `jit_step`. Release `verve` with `jit`, Windows x86-64,
+`docs/electron-plan` at `824bcf70` against the branch, built from two worktrees and run alternately
+in one round, `VERVE_CODE_CACHE=0`, a throwaway profile folder. The machine was shared with two other
+workers: CPU load (five 1 s samples) was 25-30 % around the probe rounds, 41 % before and 24 % after
+the suite round, and 70-90 % in an earlier suite round that is not used. Probes: medians (best) of 7
+processes alternating, ns per call in a loop of 3M calls, the loop's own cost (1.7 compiled, 14.5
+interpreted) included.
+
+**What changed.**
+
+1. `Lent<T>` (`vm/call_frame/lent.rs`) is a handle that is either a frame's own or a bitwise copy of
+   one owned by the function on the stack; it adds no count and drops nothing. A frame lends its code
+   block, script or module, realm and (until the first push or pop of an environment) environments
+   from the callee, when the callee is the value in the frame's function slot. The slot keeps it
+   alive, by a counted reference, until the frame is popped, and its `code`, `script_or_module`,
+   `realm` and `environments` are set when it is made, with two exceptions that happen before any
+   script can call it: a lazy function's compiled code replaces `code` before its frame exists, and
+   `PushPrivateEnvironment` adds the private environment to the `environments` of the class
+   constructor that `GetFunction` has just made. A call that comes through another function, a
+   proxy without an `apply`/`construct` trap or a bound function, leaves the forwarder in the
+   slot, and the frame owns its handles then: a revoked proxy no longer refers to its target, which
+   the running call could otherwise outlive (`callee_parts` decides, with one comparison).
+   Whatever can outlive the slot makes the
+   handles its own first: `CallFrame::clone` (a generator's or async function's frame is a clone, and
+   the live frame is made owned before `split_off_frame`), `Context::enter_realm`/`swap_realm`, and
+   a write to the environments (`DerefMut` copies them). Script, module, `eval` and synthetic-module
+   frames own theirs, as before. `swap_realm` does nothing when both realms are the same, which also
+   takes the swap out of every native call in one realm. `Lent` is `Trace`, and joins the root counts
+   only when it counted.
+2. A bytecode entry of the shadow stack lends the code block's `SourceInfo`; the entries copied into
+   a backtrace are owned. `check_runtime_limits` and `runtime_limits_exceeded` are `#[inline]` and the
+   `RangeError` is built out of line. The limits, the order of the checks and the depth at which the
+   error is thrown are unchanged: there was one checkpoint per JavaScript call already (in
+   `function_call`/`function_construct`), and the recursion and stack limits cannot be checked less
+   often without moving the depth.
+3. `jit_call` runs the callee with the compiled code `compiled_callee` already found (no second
+   `prepare`, no `finish`/`run_callees` round in the common case), under the checks `run_callees`
+   makes (nesting cap 64, a quarter of the native stack limit, JIT enabled, no `fuzz` or `trace`);
+   anything else takes the old path. `Return` is compiled as `jit_return`: a frame that does not exit
+   early is popped without the `catch_unwind` and the frame checks of `jit_step`, and compiled code
+   leaves, which is what `finish` answered for it; a frame that exits early takes `jit_step`.
+
+**Per step**, `zero()`, compiled, best of 7 (medians were 2-3 ns higher): base 71.7, step 2 (code
+block, realm, script) 68.6, step 3 (shadow stack, limits) 67.1, step 4 (direct call, `Return`) 66.1;
+interpreted, steps 2 and 3: 99.7 to about 90. The environments (a fifth commit) did not move `zero()`
+and took `oo` from 636 to 561 ms in an alternating round of 9 (compiled). The 5-6 ns that are left of
+the 12-15 the isolated clone costs of "Where a call goes" added up to are what that section said
+overlapped: in a real call the pieces hide each other.
+
+| body, ns per iteration | base, compiled | after, compiled | base, interp | after, interp |
+|---|---|---|---|---|
+| `zero()` | 74.5 (72.2) | 66.0 (65.2) | 102.4 (99.7) | 94.9 (90.7) |
+| `id(i)` (stores the result in a global) | 102.5 (100.7) | 93.8 (91.0) | 160.1 (154.5) | 147.1 (134.1) |
+| `obj.m()` | 76.6 (76.0) | 72.9 (69.7) | 123.3 (116.8) | 111.6 (108.5) |
+| `pinst.get()` (method on the prototype) | 163.4 (158.8) | 120.4 (117.5) | 218.4 (207.4) | 173.7 (167.6) |
+| `bound()` | 104.0 (103.4) | 100.5 (99.9) | 121.2 (117.3) | 112.5 (109.1) |
+| `Math.abs(i)` | 101.3 (99.2) | 99.5 (97.8) | 133.6 (129.1) | 129.1 (124.8) |
+| `arr.forEach(zero)`, per element | 96.7 (93.7) | 90.9 (88.6) | 95.2 (93.9) | 90.0 (89.6) |
+| `arr.filter(zero)` | 109.1 (107.0) | 100.5 (99.0) | 111.1 (104.8) | 103.1 (100.0) |
+| `arr.map(zero)` | 215.8 (204.9) | 204.9 (196.4) | 216.2 (213.0) | 206.4 (204.3) |
+| `arr.map((v) => v * sc + 1)` | 263.6 (253.4) | 250.3 (241.5) | 278.6 (271.0) | 265.9 (256.7) |
+| `sort((a, b) => a - b)`, relative | 171.7 (160.6) | 162.5 (152.3) | 162.4 (158.6) | 155.5 (151.8) |
+| `new E()` (`function E() {}`), 15 processes | 233.3 (219.3) | 223.9 (210.9) | 275.7 (229.2) | 256.0 (235.9) |
+
+On the P69 rule for small callbacks (compiled not slower than interpreted, within 2 %): `forEach`
+90.9 against 90.0 holds; `filter` and `map` are faster compiled; the `sort` comparator is 4.5 %
+slower compiled than interpreted, as it was before (5.7 %), so that part of the rule is still not met.
+The `sort` row divides by a fixed count, so it is comparable between columns, not an absolute.
+
+**The P60 suite**, JIT / interpreter, median (best) of 5 processes alternating, base then branch,
+load 41 % before and 24 % after; the three tests of the package:
+
+| test | base | after | change (JIT / interp) |
+|---|---|---|---|
+| `fib` | 247.2 (238.9) / 388.7 (380.0) | 216.1 (206.8) / 358.7 (340.5) | -12.6 % / -7.7 % |
+| `oo` | 682.8 (631.9) / 847.6 (787.6) | 594.2 (589.0) / 685.0 (679.4) | -13.0 % / -19.2 % |
+| `closure` | 468.8 (460.5) / 695.7 (687.5) | 442.7 (420.9) / 652.6 (645.8) | -5.6 % / -6.2 % |
+
+Nine-process A/B rounds of the same three at 14-36 % load agree: `fib` 243 -> 212 (before the
+environments commit; 261 -> 224 with it in a later, busier round), `oo` 689 -> 647 -> 561 (base, before
+and after the environments), `closure` 455 -> 419 -> 437. The other eleven rows are within the noise of
+the round (`vdom`'s median reads +9 % with identical bests, 53.2 against 52.7; `regex`'s interpreter
+median reads +35 % with bests 24.4 against 23.6; nothing else moves more than 4 %). Targets:
+`fib` <= 210 is 216 (best 207), `oo` <= 520 is 594, `closure` <= 400 is 443; none of the ambitious
+values is reached, and `fib` is a few ms short of the committed one. Where the rest is:
+
+- `oo` is two method calls and a `new CX(i)` of a class constructor, whose function environment
+  (188 ns in "Where a call goes") is built and copied per call; the frame can lend nothing there.
+- `closure` pays the callback from native code, where compiled code still enters and leaves with a
+  fresh `JitState` per callback.
+- The environments commit costs `closure` about 18 ms (437 against 419 without it; the arrow with a
+  captured variable reads 8 ns slower per call): the arrow pushes a function scope, which copies the
+  lent environments as the clone did, so the copy is not new; the extra comparison and the frame
+  growing by eight bytes are all that was found. It gains `oo` 75 ms, and `oo` is the worst ratio in
+  the suite, so it stays.
+
+**What is left of a call.** `zero()` compiled is 65 ns: the pending call, the pushes and pops of
+`this`, the function and the registers, `downcast_ref`, the limits check, the stack truncation of
+`Return`, and entering and leaving compiled code (`execute` builds a 14-field `JitState` per call, an
+`Rc<JitCode>` is cloned, the Cranelift prologue and epilogue). That last block is the largest still
+there, and removing it needs a calling convention between compiled functions that skips `execute`:
+the helpers read the register and frame pointers from the `JitState` of the frame on top, so a callee
+needs its own state, and a deopt from inside it must leave a frame the interpreter can continue at.
+That is a redesign of the entry protocol, and this package did not build it. A direct call that only
+skips `prepare` and the `finish` round, and a `Return` that skips `jit_step`, are what is here: 3.3 ns
+of the call. They keep the nesting cap, the exception path (the callee's `Throw` is `jit_step`, as
+before), the interrupt check (before the call, and at the loop heads of the callee) and the deopt
+fallback (anything the checks refuse is the old path).

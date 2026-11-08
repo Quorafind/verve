@@ -449,3 +449,44 @@ fn backpressure_partial_reads_and_unshift() {
         "{result:?}"
     );
 }
+
+#[test]
+fn once_and_prepend_once_go_through_the_readables_own_on() {
+    let result = run(r#"
+        const { Readable } = require('stream');
+        const log = [];
+        const two = () => new Readable({ read() { this.push('a'); this.push('b'); this.push(null) } });
+        // `once('data')` starts the flow, and hears the first chunk only.
+        two().once('data', d => log.push('once ' + d));
+        // `prependOnceListener('data')` goes ahead of an earlier listener, once.
+        const p = two();
+        p.on('data', d => log.push('on ' + d));
+        p.prependOnceListener('data', d => log.push('first ' + d));
+        // `once('readable')` hears the first `readable`; the wrapper shows in `rawListeners`.
+        const q = new Readable({ read() {} });
+        const f = () => log.push('readable ' + q.read());
+        q.once('readable', f);
+        const raw = q.rawListeners('readable')[0];
+        log.push([raw !== f, raw.listener === f, q.listeners('readable')[0] === f].join());
+        q.push('x'); q.push('y');
+        // `removeListener` with the original takes a once-listener away.
+        const r = two();
+        const g = () => log.push('never');
+        r.once('end', g);
+        r.removeListener('end', g);
+        log.push('count ' + r.listenerCount('end'));
+        exports.later = () => log;
+    "#);
+    assert_eq!(
+        result,
+        [
+            "true,true,true",
+            "count 0",
+            "once a",
+            "first a",
+            "on a",
+            "on b",
+            "readable xy",
+        ]
+    );
+}

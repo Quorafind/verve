@@ -1,0 +1,12 @@
+#!/bin/sh
+# `cc` for the Linux target, from Zig: what cc-rs (ring, and other build scripts) runs when
+# `scripts/linux-check.sh` type-checks the Linux build from another system. cc-rs adds
+# `--target=<rust triple>`, which Zig cannot read; the target is given Zig's way instead.
+for arg in "$@"; do
+    shift
+    case "$arg" in
+        --target=*) ;;
+        *) set -- "$@" "$arg" ;;
+    esac
+done
+exec zig cc -target x86_64-linux-gnu "$@"

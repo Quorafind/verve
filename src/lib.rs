@@ -26,26 +26,39 @@ pub use boa_engine;
 pub use boa_gc;
 
 mod assert;
+pub mod blob;
+pub mod browser_net;
 mod buffer;
+mod child_process;
 mod cjs_exports;
 pub mod cli;
+pub mod clone;
 mod code_cache;
+mod code_cache_load;
+mod code_cache_mark;
+mod code_cache_pack;
+mod code_cache_sweep;
 mod crypto;
+/// AES-GCM and AES-CBC on bytes, for formats an embedder keeps compatible with Chromium's (`safeStorage`).
+pub use crypto::primitives as crypto_primitives;
 pub mod dom_events;
-mod encoding;
+mod embed;
+pub mod encoding;
 mod esm;
 mod esm_resolve;
-mod events;
+pub mod events;
 mod fetch;
 mod fs;
+mod globals;
 mod hooks;
+mod import_map;
 mod indexeddb;
 mod intl;
 pub mod isolate;
-mod messaging;
+pub mod messaging;
 mod module_hooks;
 mod modules;
-mod native;
+pub mod native;
 mod navigator;
 mod network;
 mod node;
@@ -58,20 +71,26 @@ mod path;
 mod permission;
 mod process;
 mod querystring;
+pub use querystring::query_string;
 mod readline;
 mod sockets;
 mod stream;
 mod streams;
 mod string_decoder;
 mod timers;
+#[cfg(feature = "typescript")]
 mod typescript;
+mod uncaught;
 mod url;
 mod url_pattern;
 mod util;
+pub mod vfs;
 mod vm;
+#[cfg(feature = "wasm")]
 mod wasm;
 mod web;
 mod worker;
+mod world;
 mod zlib;
 
 pub use code_cache::CodeCacheStats;
@@ -88,8 +107,21 @@ pub use code_cache::CodeCacheStats;
 pub fn code_cache_user_secret() -> std::io::Result<[u8; 32]> {
     code_cache::user_secret().map(|(secret, _)| secret)
 }
+pub use embed::{ConsoleSink, ModuleSource, SourcePos, inspect_value};
+pub use esm::is_parse_failure;
+pub use import_map::{ImportMap, is_relative, url_like};
+pub use navigator::electron_user_agent;
 pub use network::{ListenPermission, NetworkDiagnostics, NetworkRule, ProxyEnv};
 pub use permission::{FsAccess, Permissions};
+pub use process::{
+    CHROME_VERSION, ELECTRON_VERSION, ExitBehavior, MODULES_VERSION, NODE_VERSION, ProcessInfo,
+    UncaughtBehavior,
+};
+pub use sockets::status_text;
+pub use world::{
+    MAIN_WORLD, WorldId, current_world, in_realm, in_world, make_world, world_global,
+    world_of_global, world_realm,
+};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -97,12 +129,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, Source,
+    Context, JsError, JsNativeError, JsObject, JsResult, JsValue, Source,
     context::ContextBuilder,
     job::{Job, JobExecutor, PromiseJob},
     js_string,
-    object::ObjectInitializer,
-    property::Attribute,
 };
 
 thread_local! {
@@ -120,6 +150,10 @@ pub fn set_thread_stack(bytes: usize) {
 /// What makes a module of a family the host defined; see [`Runtime::define_builtin_family`].
 pub type ModuleMaker = fn(&mut Context, &str) -> JsResult<JsValue>;
 
+/// The sink as the runtime keeps it: [`ConsoleSink`] is what an embedder hands over, and this
+/// is the same function the realm holds, which a console line copies out to call.
+pub(crate) type ConsoleSinkRc = Rc<dyn Fn(Level, &str, Option<&SourcePos>)>;
+
 /// Milliseconds on the host's clock. Only differences between two readings mean anything.
 pub type Millis = f64;
 
@@ -130,6 +164,7 @@ pub struct ConsoleLine {
     pub text: String,
 }
 
+/// The severity a console method gives a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
     Log,
@@ -187,6 +222,11 @@ struct Shared {
     /// Families of built-in modules: every name starting with the prefix is made by the
     /// function, once, and kept with the rest.
     families: RefCell<Vec<(String, ModuleMaker)>>,
+    /// Built-ins made the first time they are required, by the name each answers to.
+    lazy: RefCell<HashMap<String, ModuleMaker>>,
+    /// The lazy globals already made, by name: what a hook may mend without making one that
+    /// nothing has read.
+    lazy_values: RefCell<HashMap<String, JsValue>>,
     /// `require.cache`: the module object of every file run, by its path. A second `require`
     /// of the same file answers the same `module.exports`, as Node's cache does.
     module_cache: JsObject,
@@ -198,6 +238,13 @@ struct Shared {
     /// The working folder `process.cwd()` answers and `process.chdir` changes.
     cwd: RefCell<String>,
     console: RefCell<Vec<ConsoleLine>>,
+    /// Where console lines are pushed to as they are written, when the embedder asked for that
+    /// instead of reading them back; see [`Runtime::set_console_sink`]. Held as an `Rc` so a
+    /// line can copy it out before calling it: a sink that writes to this console again must not
+    /// find the cell borrowed.
+    console_sink: RefCell<Option<ConsoleSinkRc>>,
+    /// The user agent `navigator` answers, when the embedder set one.
+    user_agent: RefCell<Option<String>>,
     /// `console.time`'s labels and when each was started; `console.count`'s counts.
     console_timers: RefCell<HashMap<String, Millis>>,
     console_counts: RefCell<HashMap<String, u64>>,
@@ -208,21 +255,34 @@ struct Shared {
     blobs: RefCell<HashMap<String, Vec<u8>>>,
     /// The workers this realm started.
     network: RefCell<network::State>,
+    /// The host's say over `fetch`: see [`browser_net`].
+    browser: RefCell<browser_net::State>,
     workers: RefCell<Vec<worker::WorkerSlot>>,
     /// In a worker's own realm: its messages, coming and going.
     port: RefCell<Option<worker::Port>>,
     /// IndexedDB's databases, transactions and cursors.
     idb: RefCell<indexeddb::IdbState>,
     /// WebAssembly's modules and instances.
+    #[cfg(feature = "wasm")]
     wasm: RefCell<wasm::WasmState>,
     /// Who to wake when the network or a worker has something for this realm.
     wake: std::sync::Arc<WakeSlot>,
     /// Set when this realm is a process of its own (`verve run`): see `process::Profile`.
     profile: RefCell<Option<Rc<process::Profile>>>,
+    /// What this realm's `process` is, as its embedder described it: see [`ProcessInfo`].
+    process: RefCell<ProcessInfo>,
+    /// The virtual filesystem this realm reads through: see [`vfs`].
+    vfs: RefCell<vfs::Layers>,
     /// Where compiled modules are kept between runs, if anywhere: see `code_cache`.
     code_cache: RefCell<code_cache::Shared>,
     /// 即使 Worker 自身不启用缓存，也会继承这些访问拒绝规则。
     code_cache_protection: RefCell<code_cache::Protection>,
+    /// `verve run`'s default folder before the cache has proved worth keeping: all it holds is what
+    /// this run has loaded.
+    code_cache_deferred: RefCell<Option<code_cache_mark::Deferred>>,
+    /// The `Buffer` class the runtime made, which its own streams, files and network make
+    /// buffers with whatever the global `Buffer` is later: see [`native::buffer_class`].
+    buffer_class: RefCell<Option<JsObject>>,
 }
 
 /// The microtask queue: promise reactions, `queueMicrotask`, `process.nextTick`.
@@ -351,6 +411,7 @@ impl Runtime {
         net.permissions = permissions;
     }
 
+    /// The permissions in force now.
     pub fn permissions(&self) -> Permissions {
         shared(&self.context).network.borrow().permissions.clone()
     }
@@ -397,16 +458,7 @@ impl Runtime {
     /// as they are. See the `proxy` module of `network` for what is proxied and how `NO_PROXY`
     /// matches.
     pub fn set_proxy_env(&mut self, proxy: Option<ProxyEnv>) {
-        let state = shared(&self.context);
-        let mut net = state.network.borrow_mut();
-        net.proxy = proxy.map(|env| {
-            let config = Rc::new(network::proxy::Config::parse(&env));
-            (env, config)
-        });
-        let proxies = network::configured_proxies(&net);
-        if let Some(reactor) = &net.reactor {
-            reactor.send(network::reactor::Command::Proxies(proxies));
-        }
+        network::set_realm_proxy(&self.context, proxy);
     }
 
     /// The proxy [`Runtime::set_proxy_env`] set, if any.
@@ -491,22 +543,32 @@ impl Runtime {
                     .unwrap_or_else(|_| "/".into()),
             ),
             console: RefCell::new(Vec::new()),
+            console_sink: RefCell::new(None),
+            user_agent: RefCell::new(None),
+            lazy: RefCell::new(HashMap::new()),
+            lazy_values: RefCell::new(HashMap::new()),
             console_timers: RefCell::new(HashMap::new()),
             console_counts: RefCell::new(HashMap::new()),
             console_depth: std::cell::Cell::new(0),
             echo: std::env::var_os("VERVE_ECHO").is_some(),
             blobs: RefCell::new(HashMap::new()),
             network: RefCell::new(network::State::default()),
+            browser: RefCell::default(),
             workers: RefCell::new(Vec::new()),
             port: RefCell::new(None),
             idb: RefCell::new(indexeddb::IdbState::default()),
+            #[cfg(feature = "wasm")]
             wasm: RefCell::new(wasm::WasmState::default()),
             wake: std::sync::Arc::default(),
             profile: RefCell::new(None),
+            process: RefCell::new(ProcessInfo::default()),
+            vfs: RefCell::new(vfs::Layers::default()),
             code_cache: RefCell::new(code_cache),
             code_cache_protection: RefCell::new(code_cache_protection),
+            code_cache_deferred: RefCell::default(),
+            buffer_class: RefCell::default(),
         }));
-        install_globals(&mut context).expect("the globals install");
+        globals::install(&mut context).expect("the globals install");
         Self { context }
     }
 
@@ -686,30 +748,42 @@ impl Runtime {
     /// host puts it on `window` itself, if it has one.
     pub fn global_require(&mut self) -> JsValue {
         let cwd = PathBuf::from(shared(&self.context).cwd.borrow().clone());
-        modules::require_function(&mut self.context, &cwd, None)
-            .expect("a require function is made")
+        self.global_require_in(&cwd)
+    }
+
+    /// [`Self::global_require`] resolving relative names against `dir`: a page's `require`
+    /// resolves against the folder of the page.
+    pub fn global_require_in(&mut self, dir: &Path) -> JsValue {
+        modules::require_function(&mut self.context, dir, None).expect("a require function is made")
     }
 
     /// Runs `source` in the Node-selected format at `filename`: CommonJS exports or the
     /// synchronous ESM namespace. Use [`Self::load_esm`] for graphs with top-level await.
     /// A module's own `require` resolves relative names against the folder it is in.
     pub fn load_module(&mut self, filename: &Path, source: &str) -> Result<JsValue, String> {
-        let path = esm::absolute(filename, &self.context);
-        let result = (|| {
-            if esm::is_esm(&path, source, &mut self.context)? {
-                let loader = shared(&self.context).esm.clone();
-                loader.insert_source(&path, source, &mut self.context)?;
-                loader.require(&path, &mut self.context)
-            } else {
-                modules::run_module(&mut self.context, &path, source, None)
-            }
-        })();
-        self.run_microtasks();
-        result.map_err(|error| {
+        self.run_module(filename, source).map_err(|error| {
             // A module that throws as it runs is an uncaught error: on the console with where.
             report(&mut self.context, &error);
             describe(&mut self.context, &error)
         })
+    }
+
+    /// [`Self::load_module`] that hands the error back instead of reporting it, for a host that
+    /// decides what a module that throws means (an Electron app's entry).
+    pub fn run_module(&mut self, filename: &Path, source: &str) -> JsResult<JsValue> {
+        let path = esm::absolute(filename, &self.context);
+        let result = (|| match modules::format(&path, source, &mut self.context)? {
+            modules::Format::Module => {
+                let loader = shared(&self.context).esm.clone();
+                loader.insert_source(&path, source, &mut self.context)?;
+                loader.require(&path, &mut self.context)
+            }
+            modules::Format::CommonJs(script) => {
+                modules::run_module_with(&mut self.context, &path, source, None, script)
+            }
+        })();
+        self.run_microtasks();
+        result
     }
 
     /// Loads native ESM source. The promise fulfills with its namespace; top-level await may
@@ -800,6 +874,7 @@ impl Runtime {
     pub fn run_workers(&mut self) -> bool {
         let busy = network::poll(&mut self.context, None) > 0;
         let busy = worker::run_workers(&mut self.context, None) || busy;
+        let busy = messaging::poll(&mut self.context) || busy;
         self.run_microtasks();
         busy
     }
@@ -809,6 +884,7 @@ impl Runtime {
     pub fn run_workers_until(&mut self, deadline: std::time::Instant) -> bool {
         let busy = network::poll(&mut self.context, Some(deadline)) > 0;
         let busy = worker::run_workers(&mut self.context, Some(deadline)) || busy;
+        let busy = messaging::poll(&mut self.context) || busy;
         self.run_microtasks();
         busy
     }
@@ -852,7 +928,9 @@ impl Runtime {
         let woken = state.wake.is_set();
         // A worker's, on this realm's clock.
         let worker = worker::next_due(&self.context, woken).map(|wait| self.now() + wait);
-        let own = if network::active(&self.context) && (!woken || network::queued(&self.context)) {
+        let looking = network::active(&self.context) && (!woken || network::queued(&self.context))
+            || !woken && messaging::active(&self.context);
+        let own = if looking {
             Some(own.map_or(self.now() + 1., |due| due.min(self.now() + 1.)))
         } else {
             own
@@ -1002,9 +1080,31 @@ pub fn now(context: &Context) -> Millis {
 
 /// Writes a line to the console the host reads with [`Runtime::take_console`].
 pub fn console_line(context: &Context, level: Level, text: String) {
+    console_line_at(context, level, text, None);
+}
+
+/// [`console_line`] for a line that knows where it comes from, as an uncaught error does; with
+/// none, the sink is told the line of the script that called the console.
+pub(crate) fn console_line_at(
+    context: &Context,
+    level: Level,
+    text: String,
+    at: Option<SourcePos>,
+) {
     let state = shared(context);
     if let Some(profile) = state.profile.borrow().as_ref() {
         profile.console(level, &text);
+        return;
+    }
+    // The sink is copied out first: one that writes to this console again must not find the
+    // cell borrowed.
+    let sink = state.console_sink.borrow().clone();
+    if let Some(sink) = sink {
+        sink(
+            level,
+            &text,
+            at.or_else(|| embed::call_site(context)).as_ref(),
+        );
         return;
     }
     if state.echo {
@@ -1015,18 +1115,18 @@ pub fn console_line(context: &Context, level: Level, text: String) {
 
 /// An error nobody caught, written where an uncaught error goes: the console.
 pub fn report(context: &mut Context, error: &JsError) {
+    if vm::interrupted(error) {
+        return;
+    }
     if shared(context).profile.borrow().is_some() {
         process::uncaught(context, error);
         return;
     }
-    let text = describe(context, error);
-    let frames = thrown_at(context, error);
-    let line = if frames.is_empty() {
-        format!("Uncaught {text}")
-    } else {
-        format!("Uncaught {text} ({frames})")
-    };
-    console_line(context, Level::Error, line);
+    if process::heard_by_listeners(context, error) || process::report_to_host(context, error) {
+        return;
+    }
+    let line = uncaught::console_uncaught(context, "Uncaught", error);
+    process::after_uncaught(context, |_| line);
 }
 
 /// Where an error was thrown: the first few frames of its stack, enough to find the line.
@@ -1113,157 +1213,6 @@ pub fn print(value: &JsValue) -> String {
         Some(text) => text.to_std_string_escaped(),
         None => value.display().to_string(),
     }
-}
-
-fn install_globals(context: &mut Context) -> JsResult<()> {
-    let global = context.global_object();
-    context.register_global_property(js_string!("global"), global.clone(), Attribute::all())?;
-
-    // Timers.
-    let functions: [(
-        &str,
-        usize,
-        boa_engine::native_function::NativeFunctionPointer,
-    ); 6] = [
-        ("setTimeout", 2, |_, args, context| {
-            set_timer(args, false, context)
-        }),
-        ("setInterval", 2, |_, args, context| {
-            set_timer(args, true, context)
-        }),
-        ("setImmediate", 1, |_, args, context| {
-            let mut with_zero = vec![args.first().cloned().unwrap_or_default(), 0.into()];
-            with_zero.extend(args.iter().skip(1).cloned());
-            set_timer(&with_zero, false, context)
-        }),
-        ("clearTimeout", 1, clear_timer_native),
-        ("clearInterval", 1, clear_timer_native),
-        ("clearImmediate", 1, clear_timer_native),
-    ];
-    for (name, length, function) in functions {
-        context.register_global_callable(
-            JsString::from(name),
-            length,
-            NativeFunction::from_fn_ptr(function),
-        )?;
-    }
-    context.register_global_callable(
-        js_string!("queueMicrotask"),
-        1,
-        NativeFunction::from_fn_ptr(|_, args, context| {
-            let callback = args.first().cloned().unwrap_or_default();
-            if !callback.is_callable() {
-                return Err(JsNativeError::typ()
-                    .with_message("queueMicrotask: callback is not a function")
-                    .into());
-            }
-            microtask(context, callback, Vec::new());
-            Ok(JsValue::undefined())
-        }),
-    )?;
-
-    // The console.
-    let mut console = ObjectInitializer::new(context);
-    let levels: [(&str, boa_engine::native_function::NativeFunctionPointer); 6] = [
-        ("log", |_, args, context| log(Level::Log, args, context)),
-        ("info", |_, args, context| log(Level::Info, args, context)),
-        ("warn", |_, args, context| log(Level::Warn, args, context)),
-        ("error", |_, args, context| log(Level::Error, args, context)),
-        ("debug", |_, args, context| log(Level::Debug, args, context)),
-        ("trace", |_, args, context| log(Level::Debug, args, context)),
-    ];
-    for (name, function) in levels {
-        console.function(
-            NativeFunction::from_fn_ptr(function),
-            JsString::from(name),
-            0,
-        );
-    }
-    let more: [(&str, boa_engine::native_function::NativeFunctionPointer); 12] = [
-        ("dir", |_, args, context| {
-            log(Level::Log, &args[..args.len().min(1)], context)
-        }),
-        ("table", |_, args, context| log(Level::Log, args, context)),
-        ("assert", |_, args, context| {
-            if args.first().is_some_and(JsValue::to_boolean) {
-                return Ok(JsValue::undefined());
-            }
-            let mut rest = vec![JsValue::from(js_string!("Assertion failed:"))];
-            rest.extend(args.iter().skip(1).cloned());
-            log(Level::Error, &rest, context)
-        }),
-        ("time", |_, args, context| {
-            let label = console_label(args, context)?;
-            let state = shared(context);
-            let now = (state.clock)();
-            state.console_timers.borrow_mut().insert(label, now);
-            Ok(JsValue::undefined())
-        }),
-        ("timeLog", |_, args, context| {
-            console_time(args, context, false)
-        }),
-        ("timeEnd", |_, args, context| {
-            console_time(args, context, true)
-        }),
-        ("count", |_, args, context| {
-            let label = console_label(args, context)?;
-            let count = {
-                let state = shared(context);
-                let mut counts = state.console_counts.borrow_mut();
-                let count = counts.entry(label.clone()).or_default();
-                *count += 1;
-                *count
-            };
-            console_line(context, Level::Log, format!("{label}: {count}"));
-            Ok(JsValue::undefined())
-        }),
-        ("countReset", |_, args, context| {
-            let label = console_label(args, context)?;
-            shared(context).console_counts.borrow_mut().remove(&label);
-            Ok(JsValue::undefined())
-        }),
-        ("group", |_, args, context| console_group(args, context)),
-        ("groupCollapsed", |_, args, context| {
-            console_group(args, context)
-        }),
-        ("groupEnd", |_, _, context| {
-            let state = shared(context);
-            state
-                .console_depth
-                .set(state.console_depth.get().saturating_sub(1));
-            Ok(JsValue::undefined())
-        }),
-        ("clear", |_, _, _| Ok(JsValue::undefined())),
-    ];
-    for (name, function) in more {
-        console.function(
-            NativeFunction::from_fn_ptr(function),
-            JsString::from(name),
-            0,
-        );
-    }
-    let console = console.build();
-    context.register_global_property(js_string!("console"), console, Attribute::all())?;
-
-    intl::install(context)?;
-    encoding::install(context)?;
-    url::install(context)?;
-    url_pattern::install(context)?;
-    web::install(context)?;
-    crypto::install(context)?;
-    streams::install(context)?;
-    fetch::install(context)?;
-    zlib::install(context)?;
-    dom_events::install(context)?;
-    messaging::install(context)?;
-    navigator::install(context)?;
-    worker::install(context)?;
-    indexeddb::install(context)?;
-    wasm::install(context)?;
-    // Node's own modules, which Electron gives a desktop plugin, are made when first required;
-    // `process` is a global too, and an `EventEmitter`.
-    process::install(context)?;
-    Ok(())
 }
 
 pub(crate) fn microtask(context: &mut Context, callback: JsValue, args: Vec<JsValue>) {
@@ -1425,6 +1374,23 @@ fn clear_timer_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     Ok(JsValue::undefined())
 }
 
+/// `VERVE_JIT=0` (also `off`, `false`, `no`) switches the JIT off, and `VERVE_JIT_THRESHOLD=<n>`
+/// sets how hot a function gets before it is compiled (0: before it first runs). Boa's own
+/// `BOA_JIT` and `BOA_JIT_THRESHOLD` apply first.
+#[cfg(feature = "jit")]
+fn jit_from_env(context: &mut Context) {
+    let options = context.jit_options_mut();
+    if let Ok(value) = std::env::var("VERVE_JIT") {
+        options.enabled = !matches!(value.trim(), "0" | "off" | "false" | "no");
+    }
+    if let Some(threshold) = std::env::var("VERVE_JIT_THRESHOLD")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+    {
+        options.threshold = threshold;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1514,22 +1480,5 @@ mod tests {
         assert_eq!(rt.run_due(), 2);
         assert_eq!(print(&rt.eval("n").unwrap()), "1");
         assert!(rt.take_console()[0].text.contains("TypeError: x"));
-    }
-}
-
-/// `VERVE_JIT=0` (also `off`, `false`, `no`) switches the JIT off, and `VERVE_JIT_THRESHOLD=<n>`
-/// sets how hot a function gets before it is compiled (0: before it first runs). Boa's own
-/// `BOA_JIT` and `BOA_JIT_THRESHOLD` apply first.
-#[cfg(feature = "jit")]
-fn jit_from_env(context: &mut Context) {
-    let options = context.jit_options_mut();
-    if let Ok(value) = std::env::var("VERVE_JIT") {
-        options.enabled = !matches!(value.trim(), "0" | "off" | "false" | "no");
-    }
-    if let Some(threshold) = std::env::var("VERVE_JIT_THRESHOLD")
-        .ok()
-        .and_then(|value| value.trim().parse().ok())
-    {
-        options.threshold = threshold;
     }
 }

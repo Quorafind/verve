@@ -551,7 +551,7 @@ impl Context {
     /// Replaces the currently active realm with `realm`, and returns the old realm.
     #[inline]
     pub fn enter_realm(&mut self, realm: Realm) -> Realm {
-        std::mem::replace(&mut self.vm.frame_mut().realm, realm)
+        self.vm.frame_mut().realm.replace(realm)
     }
 
     /// Create a new Realm with the default global bindings.
@@ -686,7 +686,13 @@ impl Context {
 
     /// Swaps the currently active realm with `realm`.
     pub(crate) fn swap_realm(&mut self, realm: &mut Realm) {
-        std::mem::swap(&mut self.vm.frame_mut().realm, realm);
+        let slot = &mut self.vm.frame_mut().realm;
+        // The same realm on both sides: nothing to swap, and nothing to count.
+        if **slot == *realm {
+            return;
+        }
+        let old = slot.replace(realm.clone());
+        *realm = old;
     }
 
     /// Increment and get the parser identifier.
@@ -895,7 +901,7 @@ impl Context {
         // 1. If the execution context stack is empty, return null.
         // 2. Let ec be the topmost execution context on the execution context stack whose ScriptOrModule component is not null.
         // 3. If no such execution context exists, return null. Otherwise, return ec's ScriptOrModule.
-        if let Some(active_runnable) = &self.vm.frame().active_runnable {
+        if let Some(active_runnable) = &*self.vm.frame().active_runnable {
             return Some(active_runnable.clone());
         }
 

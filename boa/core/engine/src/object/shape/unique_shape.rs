@@ -63,6 +63,11 @@ impl UniqueShape {
         &self.inner.property_table
     }
 
+    /// The number of properties in the [`UniqueShape`].
+    pub(crate) fn property_count(&self) -> u32 {
+        self.property_table().borrow().keys.len() as u32
+    }
+
     /// Inserts a new property into the [`UniqueShape`].
     pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> Self {
         let mut property_table = self.property_table().borrow_mut();
@@ -129,7 +134,10 @@ impl UniqueShape {
 
     /// Change the attributes of a property from the [`UniqueShape`].
     ///
-    /// This will cause the current shape to be invalidated, and a new [`UniqueShape`] will be returned.
+    /// This will cause the current shape to be invalidated, and a new [`UniqueShape`] will be returned,
+    /// also when the property keeps its kind: an inline cache keeps the attributes of the slot it
+    /// recorded (writable, getter, setter), and a unique shape that changed in place would keep
+    /// its identity, so the cache would not notice.
     ///
     /// NOTE: This assumes that the property had already been inserted.
     pub(crate) fn change_attributes_transition(
@@ -143,13 +151,14 @@ impl UniqueShape {
 
         let index = *index as usize;
 
-        // If property does not change type, there is no need to shift.
+        // If property does not change type, the other slots stay where they are.
         if slot.attributes.width_match(key.attributes) {
             slot.attributes = key.attributes;
             property_table.keys[index].1.attributes = key.attributes;
-            // TODO: invalidate the pointer.
+            let property_table = std::mem::take(&mut *property_table);
+            let prototype = self.inner.prototype.borrow_mut().take();
             return ChangeTransition {
-                shape: self.clone().into(),
+                shape: Self::new(prototype, property_table).into(),
                 action: ChangeTransitionAction::Nothing,
             };
         }
@@ -248,7 +257,6 @@ pub(crate) struct WeakUniqueShape {
 
 impl WeakUniqueShape {
     /// Whether this is a weak reference to `shape`.
-    #[cfg(feature = "jit")]
     #[inline]
     pub(crate) fn points_to(&self, shape: &UniqueShape) -> bool {
         self.inner.points_to(&shape.inner)

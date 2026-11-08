@@ -7,11 +7,11 @@
 //! for the network.
 
 use boa_engine::{Context, JsObject, JsResult, JsValue, js_string};
-
-use super::{
-    Accessor, ClassSpec, Method, arg, arg_string, call_method, class, closure, get, list,
-    plain_object, set, string, text, type_error,
+use verve::native::{
+    self, arg, arg_text, closure, get, illegal_constructor, js_text, list_of, text_of, type_error,
 };
+
+use super::{Accessor, Method, WebIdlClass, call_method, set, webidl_class};
 use crate::state::shared;
 
 const EVENTS: &[&str] = &[
@@ -33,33 +33,31 @@ fn record(this: &JsValue, context: &mut Context) -> JsResult<JsObject> {
 }
 
 fn construct(new_target: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let target = shared(context)
-        .borrow()
-        .class("EventTarget")
+    let target = crate::state::class_of(context, "EventTarget")
         .expect("made")
         .0;
     let object = target.construct(&[], new_target.as_object().as_ref(), context)?;
-    let hidden = plain_object(context);
-    let headers = super::array(Vec::new(), context);
+    let hidden = native::object(context);
+    let headers = native::array(context, Vec::new());
     set(&hidden, "headers", headers, context)?;
     set(&hidden, "readyState", 0, context)?;
     set(&hidden, "status", 0, context)?;
-    set(&hidden, "statusText", text(""), context)?;
-    set(&hidden, "responseText", text(""), context)?;
-    set(&hidden, "response", text(""), context)?;
-    set(&hidden, "responseURL", text(""), context)?;
-    set(&hidden, "responseHeaders", text(""), context)?;
+    set(&hidden, "statusText", js_text(""), context)?;
+    set(&hidden, "responseText", js_text(""), context)?;
+    set(&hidden, "response", js_text(""), context)?;
+    set(&hidden, "responseURL", js_text(""), context)?;
+    set(&hidden, "responseHeaders", js_text(""), context)?;
     set(&hidden, "aborted", false, context)?;
-    super::hidden(&object, js_string!("__xhr"), hidden, context)?;
+    native::hidden(&object, js_string!("__xhr"), hidden, context)?;
     for (key, value) in [
-        ("responseType", text("")),
+        ("responseType", js_text("")),
         ("timeout", 0.into()),
         ("withCredentials", false.into()),
     ] {
         set(&object, key, value, context)?;
     }
     let upload = target.construct(&[], None, context)?;
-    super::hidden(&object, js_string!("upload"), upload, context)?;
+    native::hidden(&object, js_string!("upload"), upload, context)?;
     Ok(object.into())
 }
 
@@ -125,7 +123,7 @@ const XHR_ACCESSORS: &[Accessor] = &[
         "responseXML",
         Some(|this, _, cx| {
             let body = read(this, "responseText", cx)?;
-            if string(&body, cx)?.is_empty() {
+            if text_of(&body, cx)?.is_empty() {
                 return Ok(JsValue::null());
             }
             let parser = cx.global_object().get(js_string!("DOMParser"), cx)?;
@@ -136,7 +134,7 @@ const XHR_ACCESSORS: &[Accessor] = &[
             call_method(
                 &parser.into(),
                 "parseFromString",
-                &[body, text("text/html")],
+                &[body, js_text("text/html")],
                 cx,
             )
         }),
@@ -147,18 +145,18 @@ const XHR_ACCESSORS: &[Accessor] = &[
 const XHR_METHODS: &[Method] = &[
     ("open", 2, |this, args, cx| {
         let hidden = record(this, cx)?;
-        let method = arg_string(args, 0, cx)?.to_ascii_uppercase();
-        let url = arg_string(args, 1, cx)?;
+        let method = arg_text(args, 0, cx)?.to_ascii_uppercase();
+        let url = arg_text(args, 1, cx)?;
         let resolved = shared(cx)
             .borrow()
-            .url
+            .base_url()
             .join(&url)
             .map(|u| u.to_string())
             .unwrap_or(url);
-        set(&hidden, "method", text(&method), cx)?;
-        set(&hidden, "url", text(&resolved), cx)?;
+        set(&hidden, "method", js_text(&method), cx)?;
+        set(&hidden, "url", js_text(&resolved), cx)?;
         set(&hidden, "aborted", false, cx)?;
-        let headers = super::array(Vec::new(), cx);
+        let headers = native::array(cx, Vec::new());
         set(&hidden, "headers", headers, cx)?;
         ready(this, 1, cx)?;
         Ok(JsValue::undefined())
@@ -166,13 +164,9 @@ const XHR_METHODS: &[Method] = &[
     ("setRequestHeader", 2, |this, args, cx| {
         let hidden = record(this, cx)?;
         let headers = hidden.get(js_string!("headers"), cx)?;
-        let pair = super::array(
-            vec![
-                text(&arg_string(args, 0, cx)?),
-                text(&arg_string(args, 1, cx)?),
-            ],
-            cx,
-        );
+        let name = js_text(&arg_text(args, 0, cx)?);
+        let value = js_text(&arg_text(args, 1, cx)?);
+        let pair = native::array(cx, vec![name, value]);
         call_method(&headers, "push", &[pair], cx)?;
         Ok(JsValue::undefined())
     }),
@@ -187,27 +181,33 @@ const XHR_METHODS: &[Method] = &[
                 "InvalidStateError",
             ));
         }
-        let init = plain_object(cx);
+        let init = native::object(cx);
         set(&init, "method", method.clone(), cx)?;
         let headers = hidden.get(js_string!("headers"), cx)?;
         set(&init, "headers", headers, cx)?;
         let body = arg(args, 0);
-        let method_text = string(&method, cx)?;
+        let method_text = text_of(&method, cx)?;
         if !body.is_null_or_undefined() && method_text != "GET" && method_text != "HEAD" {
             set(&init, "body", body, cx)?;
         }
         fire(this, "loadstart", cx)?;
-        let fetch = cx.global_object().get(js_string!("fetch"), cx)?;
+        let dom_fetch = shared(cx).borrow().load.dom_xhr_fetch.clone();
+        let fetch = match dom_fetch {
+            Some(fetch) => fetch,
+            None => cx.global_object().get(js_string!("fetch"), cx)?,
+        };
         let promise = verve::call(cx, &fetch, &JsValue::undefined(), &[url, init.into()])?;
         let on_response = closure(
             cx,
             "response",
+            0,
             |_, args, xhr: &JsValue, cx| answered(xhr, &arg(args, 0), cx),
             this.clone(),
         );
         let on_error = closure(
             cx,
             "error",
+            0,
             |_, _, xhr: &JsValue, cx| failed(xhr, "error", cx),
             this.clone(),
         );
@@ -221,8 +221,8 @@ const XHR_METHODS: &[Method] = &[
         Ok(JsValue::undefined())
     }),
     ("getResponseHeader", 1, |this, args, cx| {
-        let name = arg_string(args, 0, cx)?.to_ascii_lowercase();
-        let headers = string(&read(this, "responseHeaders", cx)?, cx)?;
+        let name = arg_text(args, 0, cx)?.to_ascii_lowercase();
+        let headers = text_of(&read(this, "responseHeaders", cx)?, cx)?;
         let values: Vec<&str> = headers
             .lines()
             .filter_map(|line| line.split_once(": "))
@@ -232,7 +232,7 @@ const XHR_METHODS: &[Method] = &[
         Ok(if values.is_empty() {
             JsValue::null()
         } else {
-            text(&values.join(", "))
+            js_text(&values.join(", "))
         })
     }),
     ("getAllResponseHeaders", 0, |this, _, cx| {
@@ -264,19 +264,19 @@ fn answered(xhr: &JsValue, response: &JsValue, context: &mut Context) -> JsResul
         .get(js_string!("from"), context)?;
     let pairs = verve::call(context, &array_from, &JsValue::undefined(), &[entries])?;
     let mut lines = String::new();
-    for pair in list(&pairs, context)? {
-        let pair = list(&pair, context)?;
+    for pair in list_of(&pairs, context)? {
+        let pair = list_of(&pair, context)?;
         if let [name, value] = pair.as_slice() {
             lines.push_str(&format!(
                 "{}: {}\r\n",
-                string(name, context)?,
-                string(value, context)?
+                text_of(name, context)?,
+                text_of(value, context)?
             ));
         }
     }
-    set(&hidden, "responseHeaders", text(&lines), context)?;
+    set(&hidden, "responseHeaders", js_text(&lines), context)?;
     ready(xhr, 2, context)?;
-    let kind = string(&get(xhr, "responseType", context)?, context)?;
+    let kind = text_of(&get(xhr, "responseType", context)?, context)?;
     let reader = match kind.as_str() {
         "arraybuffer" => "arrayBuffer",
         "blob" => "blob",
@@ -286,12 +286,14 @@ fn answered(xhr: &JsValue, response: &JsValue, context: &mut Context) -> JsResul
     let on_body = closure(
         context,
         "body",
+        0,
         |_, args, xhr: &JsValue, cx| loaded(xhr, &arg(args, 0), cx),
         xhr.clone(),
     );
     let on_error = closure(
         context,
         "error",
+        0,
         |_, _, xhr: &JsValue, cx| failed(xhr, "error", cx),
         xhr.clone(),
     );
@@ -305,7 +307,7 @@ fn loaded(xhr: &JsValue, body: &JsValue, context: &mut Context) -> JsResult<JsVa
         return Ok(JsValue::undefined());
     }
     ready(xhr, 3, context)?;
-    let kind = string(&get(xhr, "responseType", context)?, context)?;
+    let kind = text_of(&get(xhr, "responseType", context)?, context)?;
     let response = match kind.as_str() {
         "json" => {
             let json = context.intrinsics().objects().json();
@@ -323,7 +325,7 @@ fn loaded(xhr: &JsValue, body: &JsValue, context: &mut Context) -> JsResult<JsVa
                     call_method(
                         &parser.into(),
                         "parseFromString",
-                        &[body.clone(), text("text/html")],
+                        &[body.clone(), js_text("text/html")],
                         context,
                     )?
                 }
@@ -357,9 +359,9 @@ fn failed(xhr: &JsValue, kind: &str, context: &mut Context) -> JsResult<JsValue>
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let (constructor, prototype) = class(
+    let (constructor, prototype) = webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "XMLHttpRequest",
             length: 0,
             construct,
@@ -381,12 +383,12 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         constructor.set(boa_engine::JsString::from(name), value, false, context)?;
         prototype.set(boa_engine::JsString::from(name), value, false, context)?;
     }
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "XMLHttpRequestEventTarget",
             length: 0,
-            construct: super::illegal_constructor,
+            construct: illegal_constructor,
             parent: Some("EventTarget"),
             methods: &[],
             accessors: &[],

@@ -1,0 +1,3 @@
+// Electron 39.8.10 lib/browser/init.ts as compiled into electron.exe: what the main process does with an
+// error nobody caught. Read, not run: running it would put the error box on the screen.
+process.on("uncaughtException",(function(e){process.listenerCount("uncaughtException")>1||t.resolve().then((()=>__webpack_require__("./lib/browser/api/exports/electron.ts"))).then((({dialog:t})=>{const r="Uncaught Exception:\n"+(e.stack?e.stack:`${e.name}: ${e.message}`);t.showErrorBox("A JavaScript error occurred in the main process",r)}))}))

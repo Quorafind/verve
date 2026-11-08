@@ -64,6 +64,10 @@ struct Inner {
     /// Whether the script's global lexical declarations are instantiated.
     #[unsafe_ignore_trace]
     declared: std::cell::Cell<bool>,
+    /// Whether compiling it made a global var binding for a block-level function declaration
+    /// (Annex B.3.2.2), which code read back would not make.
+    #[unsafe_ignore_trace]
+    annex_b_binding: std::cell::Cell<bool>,
     source_text: SourceText,
     loaded_modules: GcRefCell<FxHashMap<JsString, Module>>,
     host_defined: HostDefined,
@@ -118,17 +122,141 @@ impl Script {
 
         let source_text = SourceText::new(source);
 
-        Ok(Self {
+        let script = Self {
             inner: Gc::new(Inner {
                 realm: realm.unwrap_or_else(|| context.realm().clone()),
                 phase: GcRefCell::new(ScriptPhase::Ast(code)),
                 global_scope: scope,
                 global_lexicals,
                 declared: std::cell::Cell::new(false),
+                annex_b_binding: std::cell::Cell::new(false),
                 source_text,
                 loaded_modules: GcRefCell::default(),
                 host_defined: HostDefined::default(),
                 path,
+            }),
+        };
+        // A script from a file is the one a cache keeps: one evaluated from a string, with no
+        // path, is not, and is used as parsed.
+        if script.inner.path.is_some() && crate::code_cache::round_trip() {
+            return script.through_code_cache(context);
+        }
+        Ok(script)
+    }
+
+    /// The script written down and read back, as [`Script::code_cache`] and
+    /// [`Script::from_code_cache`] would across runs: `BOA_CODE_CACHE_ROUNDTRIP=1` makes every
+    /// parse that can be do it, so a whole suite runs code read back from a cache.
+    fn through_code_cache(self, context: &mut Context) -> JsResult<Self> {
+        // A script that cannot be written down is used as parsed: writing it compiles it, and
+        // every function it declares, here rather than when they are first called.
+        if !self.can_be_written_down() {
+            return Ok(self);
+        }
+        // Compiling here, while the script is parsed rather than when it runs, moves what
+        // compiling it does — the global var bindings of Annex B.3.2.2 — to the parse. Only this
+        // test switch compiles so early; a run compiles as it evaluates.
+        let Ok(Some(bytes)) = self.code_cache(context) else {
+            return Ok(self);
+        };
+        let units = self.inner.source_text.code_points().unwrap_or(&[]);
+        let source = String::from_utf16_lossy(units);
+        let path = self.inner.path.clone();
+        let realm = self.inner.realm.clone();
+        Self::from_code_cache(&bytes, &source, path.as_deref(), Some(realm), context).or(Ok(self))
+    }
+
+    /// Whether [`Script::code_cache`] can write this script down: not one that declares
+    /// anything in the global scope, which parsing makes and code read back cannot. Asked of the
+    /// syntax tree, as [`crate::code_cache::write_script`] asks it of the compiled code, so that
+    /// asking costs no compilation.
+    fn can_be_written_down(&self) -> bool {
+        use boa_ast::operations::{lexically_declared_names, var_scoped_declarations};
+        let phase = self.inner.phase.borrow();
+        let ScriptPhase::Ast(source) = &*phase else {
+            return true;
+        };
+        if !lexically_declared_names(source).is_empty()
+            || !var_scoped_declarations(source).is_empty()
+        {
+            return false;
+        }
+        #[cfg(feature = "annex-b")]
+        if !source.strict()
+            && !boa_ast::operations::annex_b_function_declarations_names(source).is_empty()
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Compiles this script, with every function it declares, and answers its code written
+    /// down, for [`Script::from_code_cache`] to read back in a later run instead of parsing and
+    /// compiling the same source text again. `None` for a script that cannot be written down:
+    /// one that declares anything in the global scope, because parsing a script is what makes
+    /// its global declarations and code read back would have to make them again.
+    ///
+    /// The bytes say what the script's code does, so they must be kept where nothing that
+    /// should not run code can change them; see [`code_cache`](crate::code_cache).
+    ///
+    /// # Errors
+    ///
+    /// If compiling the script throws.
+    pub fn code_cache(&self, context: &mut Context) -> JsResult<Option<Vec<u8>>> {
+        let codeblock = self.codeblock_eager(context)?;
+        // A block-level function declaration in a non-strict script makes a global var binding
+        // while the script compiles (Annex B.3.2.2), as its other global declarations are made
+        // while it parses: code read back makes neither.
+        if self.inner.annex_b_binding.get() {
+            return Ok(None);
+        }
+        let source = self.get_source();
+        Ok(crate::code_cache::write_script(
+            &codeblock,
+            source.code_points().unwrap_or(&[]),
+            &self.inner.realm,
+            context.interner(),
+        ))
+    }
+
+    /// The script whose code [`Script::code_cache`] wrote down, compiled from `source` (the same
+    /// text, as given to [`Script::parse`]), read back without parsing or compiling it. It runs
+    /// as the script parsed from `source` at `path` would.
+    ///
+    /// # Errors
+    ///
+    /// If the bytes are refused: not written down from this source text, by this build, against
+    /// this realm's global scope, or not well formed (see [`code_cache`](crate::code_cache)). The
+    /// message says why; parse the source instead.
+    pub fn from_code_cache(
+        bytes: &[u8],
+        source: &str,
+        path: Option<&Path>,
+        realm: Option<Realm>,
+        context: &mut Context,
+    ) -> JsResult<Self> {
+        let realm = realm.unwrap_or_else(|| context.realm().clone());
+        let text = boa_ast::SourceText::from_code_units(source.encode_utf16().collect());
+        let source_text = SourceText::new(text);
+        let codeblock = crate::code_cache::read_script(bytes, &source_text, path, &realm).map_err(
+            |reason| {
+                crate::JsNativeError::error().with_message(format!("code cache refused: {reason}"))
+            },
+        )?;
+        Ok(Self {
+            inner: Gc::new(Inner {
+                global_scope: realm.scope().clone(),
+                realm,
+                phase: GcRefCell::new(ScriptPhase::Codeblock(codeblock)),
+                // A script that declares anything in the global scope is not written down, so
+                // the one read back has nothing to hide and nothing to instantiate.
+                global_lexicals: 0..0,
+                declared: std::cell::Cell::new(true),
+                annex_b_binding: std::cell::Cell::new(false),
+                source_text,
+                loaded_modules: GcRefCell::default(),
+                host_defined: HostDefined::default(),
+                path: path.map(Path::to_path_buf),
             }),
         })
     }
@@ -137,13 +265,23 @@ impl Script {
     ///
     /// This is a no-op if this has been called previously.
     pub fn codeblock(&self, context: &mut Context) -> JsResult<Gc<CodeBlock>> {
+        self.compiled(context, context.lazy_compile())
+    }
+
+    /// Compiles the codeblock of this script, with every function it declares, so that it can
+    /// be written down: a function compiled when first called is compiled later.
+    fn codeblock_eager(&self, context: &mut Context) -> JsResult<Gc<CodeBlock>> {
+        self.compiled(context, false)
+    }
+
+    fn compiled(&self, context: &mut Context, lazy: bool) -> JsResult<Gc<CodeBlock>> {
         // The script's own code finds its global lexical declarations while it compiles; other
         // code only once they are instantiated.
         let declared = self.inner.declared.get();
         if !declared {
             self.declare_global_lexicals()?;
         }
-        let compiled = self.compile(context);
+        let compiled = self.compile(context, lazy);
         if !declared {
             self.inner
                 .global_scope
@@ -168,7 +306,7 @@ impl Script {
             })
     }
 
-    fn compile(&self, context: &mut Context) -> JsResult<Gc<CodeBlock>> {
+    fn compile(&self, context: &mut Context, lazy: bool) -> JsResult<Gc<CodeBlock>> {
         let cb = {
             let phase = self.inner.phase.borrow();
             let source = match &*phase {
@@ -184,9 +322,12 @@ impl Script {
                 self.inner.realm.scope(),
                 context,
             )?;
+            // Each of these made a global var binding as it was found.
+            if !annex_b_function_names.is_empty() {
+                self.inner.annex_b_binding.set(true);
+            }
 
             let spanned_source_text = SpannedSourceText::new_source_only(self.get_source());
-            let lazy_functions = context.lazy_compile();
 
             let mut compiler = ByteCompiler::new(
                 js_string!("<main>"),
@@ -202,7 +343,7 @@ impl Script {
                 self.path().map(Path::to_owned).into(),
             );
 
-            compiler.lazy_functions = lazy_functions;
+            compiler.lazy_functions = lazy;
             #[cfg(feature = "annex-b")]
             {
                 compiler.annex_b_function_names = annex_b_function_names;

@@ -16,6 +16,8 @@ mod job;
 mod lazy;
 mod operators;
 mod promise;
+mod reentrant;
+mod rope;
 mod spread;
 mod to_string;
 

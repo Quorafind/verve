@@ -1,0 +1,11 @@
+<!doctype html><title>t</title><script>
+console.log('plain', 1, { a: 1 });
+console.info('info line');
+console.warn('warn line');
+console.error('error line');
+console.debug('debug line');
+console.log('%s is %d', 'x', 5);
+setTimeout(() => { throw new Error('page boom'); }, 20);
+setTimeout(() => { Promise.reject(new Error('page reject')); }, 40);
+setTimeout(() => { Promise.reject('plain reason'); }, 60);
+</script>

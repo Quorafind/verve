@@ -1,0 +1,345 @@
+//! Laying the boxes out and reading where taffy put them.
+//!
+//! Positions here are in document space: each box's border box from the origin of the initial
+//! containing block, before any scrolling, sticking or `transform`. [`crate::place`] turns them
+//! into what is on the screen.
+
+use taffy::style_helpers::length;
+
+use crate::props::{Follow, Position};
+use crate::tree::BoxTree;
+
+/// Where taffy put each box, by box index.
+pub(crate) struct Laid {
+    pub origin: Vec<[f32; 2]>,
+    pub size: Vec<[f32; 2]>,
+    /// Top, right, bottom, left.
+    pub border: Vec<[f32; 4]>,
+    pub padding: Vec<[f32; 4]>,
+    /// The size of what a box holds, scrolled to the end: taffy's content size.
+    pub extent: Vec<[f32; 2]>,
+}
+
+impl Laid {
+    /// The padding box's size: what a scroll container shows of its content.
+    pub(crate) fn client(&self, index: usize) -> [f32; 2] {
+        let [top, right, bottom, left] = self.border[index];
+        let [width, height] = self.size[index];
+        [
+            (width - left - right).max(0.),
+            (height - top - bottom).max(0.),
+        ]
+    }
+
+    /// `scrollWidth` and `scrollHeight` of a box: its content, and never less than what it shows.
+    pub(crate) fn scroll_size(&self, index: usize) -> [f32; 2] {
+        let client = self.client(index);
+        let extent = self.extent[index];
+        [extent[0].max(client[0]), extent[1].max(client[1])]
+    }
+}
+
+/// Lays the tree out, puts right what taffy gets wrong (a percentage `padding-top`), places the
+/// boxes that follow a ghost where it stood, and reads the result.
+pub(crate) fn settle(tree: &mut BoxTree) -> Laid {
+    tree.compute();
+    let mut laid = read(tree);
+    if resolve_percent_padding(tree, &laid) {
+        tree.compute();
+        laid = read(tree);
+    }
+    if scale_ratio_heights(tree, &laid) {
+        tree.compute();
+        laid = read(tree);
+    }
+    if follow_ghosts(tree, &laid) {
+        tree.compute();
+        laid = read(tree);
+    }
+    laid
+}
+
+fn read(tree: &BoxTree) -> Laid {
+    let count = tree.boxes.len();
+    let mut laid = Laid {
+        origin: Vec::with_capacity(count),
+        size: Vec::with_capacity(count),
+        border: Vec::with_capacity(count),
+        padding: Vec::with_capacity(count),
+        extent: Vec::with_capacity(count),
+    };
+    for (index, node) in tree.boxes.iter().enumerate() {
+        let Ok(layout) = tree.taffy.layout(node.taffy) else {
+            laid.origin.push([0.; 2]);
+            laid.size.push([0.; 2]);
+            laid.border.push([0.; 4]);
+            laid.padding.push([0.; 4]);
+            laid.extent.push([0.; 2]);
+            continue;
+        };
+        let at = match (tree.atom_at[index], node.parent) {
+            // An atomic inline is where its line put it, in the content box of its block.
+            (Some(inside), Some(parent)) => {
+                let [top, _, _, left] = laid.border[parent];
+                let [pad_top, _, _, pad_left] = laid.padding[parent];
+                let from = laid.origin[parent];
+                [
+                    from[0] + left + pad_left + inside[0],
+                    from[1] + top + pad_top + inside[1],
+                ]
+            }
+            _ => {
+                let base = node.parent.map_or([0.; 2], |parent| laid.origin[parent]);
+                [base[0] + layout.location.x, base[1] + layout.location.y]
+            }
+        };
+        laid.origin.push(at);
+        laid.size.push([layout.size.width, layout.size.height]);
+        let b = layout.border;
+        laid.border.push([b.top, b.right, b.bottom, b.left]);
+        let p = layout.padding;
+        laid.padding.push([p.top, p.right, p.bottom, p.left]);
+        let mut extent = [layout.content_size.width, layout.content_size.height];
+        if let Some(lines) = &tree.inline[index] {
+            // Lines reach as far as they do, past the box's edge if they overflow it.
+            extent[0] = extent[0].max(b.left + p.left + lines.width);
+            extent[1] = extent[1].max(b.top + p.top + lines.height);
+        }
+        laid.extent.push(extent);
+    }
+    laid
+}
+
+/// A percentage `padding-top` or `padding-bottom` is of the containing block's width, which taffy
+/// 0.13 takes from its height in a block's list of items. Each such padding is turned into pixels
+/// from the width laid out the first time. Answers whether any box changed.
+fn resolve_percent_padding(tree: &mut BoxTree, laid: &Laid) -> bool {
+    let mut changed = false;
+    for (node, shares) in tree
+        .boxes
+        .iter()
+        .map(|node| (node, node.props.padding_percent))
+        .filter(|(_, shares)| *shares != [None; 2])
+    {
+        let basis = node.parent.map_or(tree.viewport.0, |parent| {
+            let [_, right, _, left] = laid.border[parent];
+            let [_, pad_right, _, pad_left] = laid.padding[parent];
+            let inner = laid.size[parent][0] - left - right;
+            if node.props.position.is_out_of_flow() {
+                inner
+            } else {
+                inner - pad_left - pad_right
+            }
+        });
+        let Ok(mut style) = tree.taffy.style(node.taffy).cloned() else {
+            continue;
+        };
+        if let Some(share) = shares[0] {
+            style.padding.top = length(share * basis);
+        }
+        if let Some(share) = shares[1] {
+            style.padding.bottom = length(share * basis);
+        }
+        changed |= tree.taffy.set_style(node.taffy, style).is_ok();
+    }
+    changed
+}
+
+/// A picture keeps its ratio against the side that was not given. With a width given, the height
+/// is the used width (after `max-width` and the like) over the ratio; with a height given, the
+/// width is the used height times the ratio; with neither, the picture's own size is cut by the
+/// limits on both sides as CSS 2.1 (10.4) has it. The limits on the side worked out apply after.
+/// Answers whether any box changed.
+fn scale_ratio_heights(tree: &mut BoxTree, laid: &Laid) -> bool {
+    let mut changed = false;
+    for (index, node) in tree.boxes.iter().enumerate() {
+        if node.props.follow == Follow::Nothing {
+            continue;
+        }
+        let Ok(mut style) = tree.taffy.style(node.taffy).cloned() else {
+            continue;
+        };
+        let [top, right, bottom, left] = laid.border[index];
+        let [pad_top, pad_right, pad_bottom, pad_left] = laid.padding[index];
+        let around = [
+            left + right + pad_left + pad_right,
+            top + bottom + pad_top + pad_bottom,
+        ];
+        let content = [
+            (laid.size[index][0] - around[0]).max(0.),
+            (laid.size[index][1] - around[1]).max(0.),
+        ];
+        let wanted = match node.props.follow {
+            Follow::Height(ratio) => [content[0], content[0] / ratio],
+            Follow::Width(ratio) => [content[1] * ratio, content[1]],
+            Follow::Natural(size) => {
+                // A percentage limit is of the content width of the block the picture is in.
+                let basis = node.parent.map(|parent| {
+                    let [_, right, _, left] = laid.border[parent];
+                    let [_, pad_right, _, pad_left] = laid.padding[parent];
+                    (laid.size[parent][0] - left - right - pad_left - pad_right).max(0.)
+                });
+                let border_box = style.box_sizing == taffy::BoxSizing::BorderBox;
+                let limit = |dim: taffy::Dimension, share: Option<f32>, side: usize| {
+                    let raw = dim.into_raw();
+                    let px = if raw.tag() == taffy::CompactLength::LENGTH_TAG {
+                        raw.value()
+                    } else if raw.tag() == taffy::CompactLength::PERCENT_TAG {
+                        raw.value() * share?
+                    } else {
+                        return None;
+                    };
+                    Some((px - if border_box { around[side] } else { 0. }).max(0.))
+                };
+                constrain(
+                    size,
+                    [
+                        limit(style.min_size.width, basis, 0),
+                        limit(style.min_size.height, None, 1),
+                    ],
+                    [
+                        limit(style.max_size.width, basis, 0),
+                        limit(style.max_size.height, None, 1),
+                    ],
+                )
+            }
+            Follow::Nothing => continue,
+        };
+        if (content[0] - wanted[0]).abs() <= 0.01 && (content[1] - wanted[1]).abs() <= 0.01 {
+            continue;
+        }
+        let border_box = style.box_sizing == taffy::BoxSizing::BorderBox;
+        let sized = |px: f32, side: usize| length(if border_box { px + around[side] } else { px });
+        style.size.width = sized(wanted[0], 0);
+        style.size.height = sized(wanted[1], 1);
+        changed |= tree.taffy.set_style(node.taffy, style).is_ok();
+    }
+    changed
+}
+
+/// The size of a picture of `natural` size with no width or height given, held between the
+/// limits `min` and `max` of each side (`None` for a side without one) while keeping its ratio,
+/// by the table of CSS 2.1, 10.4.
+fn constrain(natural: [f32; 2], min: [Option<f32>; 2], max: [Option<f32>; 2]) -> [f32; 2] {
+    let [w, h] = natural;
+    let min = min.map(|limit| limit.unwrap_or(0.));
+    let max = max.map(|limit| limit.unwrap_or(f32::INFINITY));
+    let (min_w, min_h, max_w, max_h) = (min[0], min[1], max[0], max[1]);
+    let (wide, narrow) = (w > max_w, w < min_w);
+    let (tall, short) = (h > max_h, h < min_h);
+    let by_width = |width: f32| [width, width * h / w];
+    let by_height = |height: f32| [height * w / h, height];
+    let cut_wide = || {
+        let [width, height] = by_width(max_w);
+        [width, height.max(min_h)]
+    };
+    let cut_tall = || {
+        let [width, height] = by_height(max_h);
+        [width.max(min_w), height]
+    };
+    let raise_narrow = || {
+        let [width, height] = by_width(min_w);
+        [width, height.min(max_h)]
+    };
+    let raise_short = || {
+        let [width, height] = by_height(min_h);
+        [width.min(max_w), height]
+    };
+    match (wide, narrow, tall, short) {
+        (true, _, true, _) => {
+            if max_w / w <= max_h / h {
+                cut_wide()
+            } else {
+                cut_tall()
+            }
+        }
+        (_, true, _, true) => {
+            if min_w / w <= min_h / h {
+                raise_short()
+            } else {
+                raise_narrow()
+            }
+        }
+        (_, true, true, _) => [min_w, max_h],
+        (true, _, _, true) => [max_w, min_h],
+        (true, ..) => cut_wide(),
+        (_, true, ..) => raise_narrow(),
+        (_, _, true, _) => cut_tall(),
+        (_, _, _, true) => raise_short(),
+        _ => natural,
+    }
+}
+
+/// An absolute box laid out in its containing block, with no inset on an axis, is put where it
+/// would have stood in its flat parent: its inset becomes the distance from the containing block's
+/// padding box to the ghost it left. Answers whether any box moved.
+fn follow_ghosts(tree: &mut BoxTree, laid: &Laid) -> bool {
+    let mut moved = false;
+    for index in 0..tree.boxes.len() {
+        let node = &tree.boxes[index];
+        let (Some(ghost), Some(flat)) = (node.ghost, node.flat_parent) else {
+            continue;
+        };
+        let Ok(stand_in) = tree.taffy.layout(ghost) else {
+            continue;
+        };
+        let (location, margin) = (stand_in.location, stand_in.margin);
+        let Ok(mut style) = tree.taffy.style(node.taffy).cloned() else {
+            continue;
+        };
+        let at = [
+            laid.origin[flat][0] + location.x,
+            laid.origin[flat][1] + location.y,
+        ];
+        let pad_origin = node.parent.map_or([0.; 2], |parent| {
+            [
+                laid.origin[parent][0] + laid.border[parent][3],
+                laid.origin[parent][1] + laid.border[parent][0],
+            ]
+        });
+        if node.follows_ghost[0] {
+            style.inset.left = length(at[0] - pad_origin[0] - margin.left);
+        }
+        if node.follows_ghost[1] {
+            style.inset.top = length(at[1] - pad_origin[1] - margin.top);
+        }
+        let target = node.taffy;
+        moved |= tree.taffy.set_style(target, style).is_ok();
+    }
+    moved
+}
+
+/// How far the page scrolls: the viewport, grown to hold every box that is not fixed, not
+/// clipped by an ancestor and not inside something that is.
+pub(crate) fn page_extent(tree: &BoxTree, laid: &Laid) -> [f32; 2] {
+    let mut extent = [tree.viewport.0, tree.viewport.1];
+    let mut counts = vec![true; tree.boxes.len()];
+    for (index, node) in tree.boxes.iter().enumerate() {
+        let inherited = node.parent.is_none_or(|parent| {
+            counts[parent] && (!tree.boxes[parent].props.clips() || Some(parent) == tree.html)
+        });
+        counts[index] = inherited && node.props.position != Position::Fixed;
+        if counts[index] {
+            extent[0] = extent[0].max(laid.origin[index][0] + laid.size[index][0]);
+            extent[1] = extent[1].max(laid.origin[index][1] + laid.size[index][1]);
+        }
+    }
+    extent
+}
+
+#[cfg(test)]
+mod ratio_tests {
+    use super::constrain;
+
+    // The sizes are what Electron 39.8.10 (Chromium 142) laid out at DPR 1 for a 40x20 picture.
+    #[test]
+    fn a_picture_between_limits_keeps_its_ratio_as_chromium_laid_it_out() {
+        let none = [None, None];
+        let natural = [40., 20.];
+        assert_eq!(constrain(natural, none, [Some(10.), None]), [10., 5.]);
+        assert_eq!(constrain(natural, none, [None, Some(10.)]), [20., 10.]);
+        assert_eq!(constrain(natural, [None, Some(40.)], none), [80., 40.]);
+        assert_eq!(constrain(natural, none, [Some(10.), Some(4.)]), [8., 4.]);
+        assert_eq!(constrain(natural, none, [None, None]), natural);
+    }
+}

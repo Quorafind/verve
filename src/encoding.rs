@@ -4,33 +4,29 @@
 //! A `Buffer` is a `Uint8Array`, as Node's is: its prototype is `Buffer.prototype`, which
 //! inherits `Uint8Array.prototype`, so indexing, `length`, `subarray` and the rest are the
 //! engine's own, and only what Node adds is here.
+//!
+//! Base64, percent-decoding and `data:` URLs are public (`verve::encoding`) so that no other
+//! crate writes its own (docs/electron/style.md §1).
 
 use boa_engine::{
     Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string,
     native_function::NativeFunctionPointer,
-    object::{
-        FunctionObjectBuilder,
-        builtins::{JsArrayBuffer, JsUint8Array},
-    },
+    object::builtins::{JsArrayBuffer, JsUint8Array},
     property::Attribute,
 };
 
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
-
-fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
-    Ok(value.to_string(context)?.to_std_string_escaped())
-}
-
-fn type_error(message: impl Into<String>) -> boa_engine::JsError {
-    JsNativeError::typ().with_message(message.into()).into()
-}
+use crate::native::{arg, arg_text, constructor, function, text_of, type_error};
 
 // ─── Base64 and the rest ────────────────────────────────────────────────────────────────────
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// `bytes` as lowercase hexadecimal: the digests and names that are written in hex.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Base64 as `btoa` and Node write it; `url` for the URL-safe alphabet without padding.
 pub fn base64(data: &[u8], url: bool) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
@@ -109,10 +105,106 @@ pub fn bytes_of(value: &JsValue, context: &mut Context) -> JsResult<Option<Vec<u
     Ok(Some(all[offset.min(end)..end].to_vec()))
 }
 
+// ─── data: and percent-encoding ──────────────────────────────────────────────────────────────────────────────────
+
+/// A `data:` address's type and bytes, by the standard's data: URL processor.
+pub fn data_url(url: &url::Url) -> Result<(String, Vec<u8>), String> {
+    data_url_with(url, |body| Ok(percent_decode(body)))
+}
+
+/// [`data_url`] where a malformed `%` escape is an error, as Verve's module loader takes it,
+/// not kept as it is.
+pub fn data_url_strict(url: &url::Url) -> Result<(String, Vec<u8>), String> {
+    data_url_with(url, |body| {
+        percent_decode_strict(body).map_err(str::to_owned)
+    })
+}
+
+fn data_url_with(
+    url: &url::Url,
+    decode: fn(&str) -> Result<Vec<u8>, String>,
+) -> Result<(String, Vec<u8>), String> {
+    if url.scheme() != "data" {
+        return Err("not a data: URL".to_owned());
+    }
+    let mut url = url.clone();
+    url.set_fragment(None);
+    let rest = &url.as_str()["data:".len()..];
+    let (kind, body) = rest
+        .split_once(',')
+        .ok_or_else(|| "invalid data: URL".to_owned())?;
+    let mut kind = kind
+        .trim_matches([' ', '\t', '\n', '\r', '\x0c'])
+        .to_owned();
+    let mut bytes = decode(body)?;
+    let lower = kind.to_ascii_lowercase();
+    if let Some(head) = lower.strip_suffix("base64")
+        && head.trim_end_matches(' ').ends_with(';')
+    {
+        let text: String = String::from_utf8_lossy(&bytes)
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        bytes = unbase64(&text).ok_or_else(|| "invalid base64 in data: URL".to_owned())?;
+        let cut = head.trim_end_matches(' ').len() - 1;
+        kind.truncate(cut);
+    }
+    if kind.starts_with(';') {
+        kind.insert_str(0, "text/plain");
+    }
+    if kind.is_empty() || !kind.contains('/') {
+        kind = "text/plain;charset=US-ASCII".into();
+    }
+    Ok((kind, bytes))
+}
+
+/// `%XX` escapes undone, byte for byte; a `%` that does not start one is kept as it is.
+pub fn percent_decode(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let hex = |b: Option<&u8>| b.and_then(|b| (*b as char).to_digit(16));
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let (Some(high), Some(low)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2)))
+        {
+            out.push((high * 16 + low) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// [`percent_decode`] where a `%` must start two hex digits (nothing else: not a sign), or the
+/// text is refused, naming what is wrong.
+pub fn percent_decode_strict(text: &str) -> Result<Vec<u8>, &'static str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let escape = bytes.get(i + 1..i + 3).ok_or("Incomplete percent escape")?;
+            let digit = |b: u8| (b as char).to_digit(16);
+            match (digit(escape[0]), digit(escape[1])) {
+                (Some(high), Some(low)) => out.push((high * 16 + low) as u8),
+                _ => return Err("Invalid percent escape"),
+            }
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
 // ─── atob and btoa ──────────────────────────────────────────────────────────────────────────
 
 fn atob(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let text = text_of(&arg(args, 0), context)?;
+    let text = arg_text(args, 0, context)?;
     let bytes = unbase64(&text).ok_or_else(|| {
         JsNativeError::error()
             .with_message("atob: the string to be decoded is not correctly encoded")
@@ -123,7 +215,7 @@ fn atob(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValu
 }
 
 fn btoa(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let text = text_of(&arg(args, 0), context)?;
+    let text = arg_text(args, 0, context)?;
     let mut bytes = Vec::with_capacity(text.len());
     for c in text.chars() {
         let code = c as u32;
@@ -335,33 +427,11 @@ fn with_prototype(
 // ─── Buffer ─────────────────────────────────────────────────────────────────────────────────
 
 /// A `Uint8Array` of `bytes`, made a `Buffer` (see `crate::buffer`).
-pub fn make_buffer(context: &mut Context, bytes: Vec<u8>) -> JsResult<JsValue> {
+pub(crate) fn make_buffer(context: &mut Context, bytes: Vec<u8>) -> JsResult<JsValue> {
     crate::buffer::make(context, bytes)
 }
 
-fn function(context: &mut Context, name: &str, length: usize, f: NativeFunctionPointer) -> JsValue {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
-}
-
-fn constructor(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .constructor(true)
-        .build()
-        .into()
-}
-
-pub fn install(context: &mut Context) -> JsResult<()> {
+pub(crate) fn install(context: &mut Context) -> JsResult<()> {
     for (name, f) in [("atob", atob as NativeFunctionPointer), ("btoa", btoa)] {
         context.register_global_callable(
             JsString::from(name),
@@ -385,12 +455,61 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     )?;
 
     crate::buffer::install(context)?;
-    Ok(())
+    crate::native::keep_buffer_class(context)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_urls_decode_as_the_standard_says() {
+        let parse = |s: &str| data_url(&url::Url::parse(s).unwrap()).unwrap();
+        assert_eq!(
+            parse("data:,Hello%2C%20World"),
+            (
+                "text/plain;charset=US-ASCII".into(),
+                b"Hello, World".to_vec()
+            )
+        );
+        assert_eq!(
+            parse("data:text/plain;base64,SGVsbG8=#frag"),
+            ("text/plain".into(), b"Hello".to_vec())
+        );
+        assert_eq!(
+            parse("data:;charset=utf-8,x"),
+            ("text/plain;charset=utf-8".into(), b"x".to_vec())
+        );
+        assert!(data_url(&url::Url::parse("data:;base64,%%%").unwrap()).is_err());
+    }
+
+    #[test]
+    fn the_strict_reading_refuses_only_a_stray_percent() {
+        let parse = |s: &str| data_url_strict(&url::Url::parse(s).unwrap()).unwrap().1;
+        // The fragment is no part of it, the query is, and `base64` is any case.
+        assert_eq!(parse("data:text/javascript;BASE64,SGk=#frag"), b"Hi");
+        assert_eq!(parse("data:,a?b=1#c"), b"a?b=1");
+        // `%+1` is not an escape: the strict reading refuses it, the standard's keeps it.
+        assert!(data_url_strict(&url::Url::parse("data:,%+1").unwrap()).is_err());
+        assert_eq!(
+            data_url(&url::Url::parse("data:,%+1").unwrap()).unwrap().1,
+            b"%+1"
+        );
+    }
+
+    #[test]
+    fn only_a_data_url_is_one() {
+        for other in ["https://h/a,b.js", "a:", "file:///x,y"] {
+            assert!(
+                data_url(&url::Url::parse(other).unwrap()).is_err(),
+                "{other}"
+            );
+            assert!(
+                data_url_strict(&url::Url::parse(other).unwrap()).is_err(),
+                "{other}"
+            );
+        }
+    }
 
     #[test]
     fn base64_reads_both_alphabets_and_round_trips() {

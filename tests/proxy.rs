@@ -552,6 +552,8 @@ fn verve_run(args: &[&str], env: &[(&str, String)]) -> (i32, String, String) {
     ] {
         command.env_remove(name);
     }
+    // Nothing here measures the code cache, and no test may write to the user's own folder.
+    command.env("VERVE_CODE_CACHE", "0");
     for (name, value) in env {
         command.env(name, value);
     }

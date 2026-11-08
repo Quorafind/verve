@@ -10,7 +10,7 @@
 //! [spec]: https://tc39.es/ecma262/#sec-set-objects
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set
 
-mod set_iterator;
+pub(crate) mod set_iterator;
 
 #[cfg(test)]
 mod tests;
@@ -500,19 +500,19 @@ impl Set {
                 let set = set.borrow();
                 let set = set.data();
 
-                if index < set.full_len() {
-                    if let Some(k) = set.get_index(index) {
-                        k.clone()
-                    } else {
-                        continue;
-                    }
-                } else {
+                if index >= set.full_len() {
                     return Ok(());
                 }
+
+                let value = set.get_index(index).cloned();
+                // A tombstone left by a `delete` is not a value to hand out.
+                index += 1;
+                value
             };
 
-            f(v)?;
-            index += 1;
+            if let Some(v) = v {
+                f(v)?;
+            }
         }
     }
 
@@ -600,6 +600,10 @@ impl Set {
             .and_then(|o| o.downcast::<OrderedSet>().ok())
             .ok_or_else(|| js_error!(TypeError: "method `Set.prototype.isDisjointFrom` called on incompatible receiver"))?;
 
+        // The walk reads `this` by index while it calls the other set's `has`, which may delete
+        // enough of `this` to compact it under the walk and skip the value at the next index.
+        let _lock = SetLock::new(&this);
+
         // 3. Let otherRec be ? GetSetRecord(other).
         let other = args.get_or_undefined(0);
         let other_rec = get_set_record(other, context)?;
@@ -683,6 +687,9 @@ impl Set {
             .as_object()
             .and_then(|o| o.downcast::<OrderedSet>().ok())
             .ok_or_else(|| js_error!(TypeError: "method `Set.prototype.isSubsetOf` called on incompatible receiver"))?;
+
+        // See `Set.prototype.isDisjointFrom` for the lock.
+        let _lock = SetLock::new(&this);
 
         // 3. Let otherRec be ? GetSetRecord(other).
         let other = args.get_or_undefined(0);
@@ -929,6 +936,9 @@ impl Set {
             .and_then(|o| o.downcast::<OrderedSet>().ok())
             .ok_or_else(|| js_error!(TypeError: "method `Set.prototype.intersection` called on incompatible receiver"))?;
 
+        // See `Set.prototype.isDisjointFrom` for the lock.
+        let _lock = SetLock::new(&this);
+
         // 3. Let otherRec be ? GetSetRecord(other).
         let other = args.get_or_undefined(0);
         let other_rec = get_set_record(other, context)?;
@@ -1059,11 +1069,10 @@ impl Set {
                     // 2. If inOther is true, then
                     if in_other {
                         // a. Set resultSetData[index] to empty.
-                        result_set.delete(&e);
-
-                        // No need to increment the index, after deletion we're
-                        // in the correct next position.
-                        continue;
+                        //
+                        // The walk reads `resultSetData` by index, so the deletion leaves a
+                        // tombstone in this slot rather than compacting; step iii moves past it.
+                        result_set.delete_in_place(&e);
                     }
                 }
 

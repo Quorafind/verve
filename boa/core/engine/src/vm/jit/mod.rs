@@ -26,14 +26,36 @@
 #[cfg(any(not(target_pointer_width = "64"), feature = "jsvalue-enum"))]
 compile_error!("the `jit` feature needs NaN-boxed values on a 64-bit target");
 
+mod call;
 mod compiler;
 mod helpers;
 mod layout;
 mod memory;
 mod runtime;
+mod stack_layout;
+mod typed_elements;
+mod typed_length;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_call_frame;
+#[cfg(test)]
+mod tests_calls;
+#[cfg(test)]
+mod tests_constructor_shape;
+#[cfg(test)]
+mod tests_elements;
+#[cfg(test)]
+mod tests_entries;
+#[cfg(test)]
+mod tests_iterators;
+#[cfg(test)]
+mod tests_prototype_cache;
+#[cfg(test)]
+mod tests_typed_elements;
+#[cfg(test)]
+mod tests_typed_length;
 
 use std::{
     cell::{Cell, OnceCell},
@@ -41,9 +63,11 @@ use std::{
     ops::ControlFlow,
     panic::{AssertUnwindSafe, catch_unwind},
     rc::Rc,
-    sync::atomic::{AtomicU8, Ordering},
     time::Duration,
 };
+
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::{
     Context,
@@ -53,7 +77,7 @@ use crate::{
 use self::{
     compiler::CompileError,
     memory::{ExecutableCode, LiveCode},
-    runtime::EntryFn,
+    runtime::{EntryFn, may_enter},
 };
 
 /// How the JIT behaves. Set it with [`Context::jit_options_mut`].
@@ -74,6 +98,11 @@ pub struct JitOptions {
     pub max_total_code_bytes: usize,
     /// How many functions a context may compile in its lifetime.
     pub max_compiled_functions: u64,
+    /// Whether every element access is compiled with the inline typed-array path. Off, only the
+    /// accesses at which the interpreter has met a typed array get it (the path costs about 35
+    /// basic blocks for each access, and most code never meets one); the others go through the
+    /// helper, which gives the same results. Tests turn it on.
+    pub typed_elements_everywhere: bool,
 }
 
 impl Default for JitOptions {
@@ -85,13 +114,15 @@ impl Default for JitOptions {
             max_live_code_bytes: 64 * 1024 * 1024,
             max_total_code_bytes: 256 * 1024 * 1024,
             max_compiled_functions: 10_000,
+            typed_elements_everywhere: false,
         }
     }
 }
 
 impl JitOptions {
     /// The defaults, with what the environment overrides: `BOA_JIT=0` (or `off`, `false`)
-    /// disables the JIT, `BOA_JIT_THRESHOLD=<n>` sets [`JitOptions::threshold`].
+    /// disables the JIT, `BOA_JIT_THRESHOLD=<n>` sets [`JitOptions::threshold`],
+    /// `BOA_JIT_TYPED_ALL=1` sets [`JitOptions::typed_elements_everywhere`].
     #[must_use]
     pub fn from_env() -> Self {
         let mut options = Self::default();
@@ -103,6 +134,10 @@ impl JitOptions {
             .and_then(|value| value.trim().parse().ok())
         {
             options.threshold = threshold;
+        }
+        if let Ok(value) = std::env::var("BOA_JIT_TYPED_ALL") {
+            options.typed_elements_everywhere =
+                !matches!(value.trim(), "" | "0" | "off" | "false" | "no");
         }
         options
     }
@@ -147,6 +182,15 @@ pub fn jit_unavailable() -> Option<JitUnavailable> {
         latch::NO_EXECUTABLE_MEMORY => Some(JitUnavailable::NoExecutableMemory),
         _ => None,
     }
+}
+
+/// Whether property and element accesses compile inline on this thread. The layout they read is
+/// checked once per thread against a real object — at that thread's first compile, or at the
+/// first call here, whichever comes first — and the answer is kept. When it is not, compiled
+/// code still runs, and every property access is a call to a fast helper instead.
+#[must_use]
+pub fn object_layout_checked() -> bool {
+    layout::object_layout().is_some()
 }
 
 /// The process-wide switch behind [`jit_unavailable`]. Tests keep it per thread, so a test that
@@ -283,6 +327,11 @@ pub(crate) struct JitSlot {
     hotness: Cell<u32>,
     tier: Cell<Tier>,
     code: OnceCell<Rc<JitCode>>,
+    /// Whether the interpreter has read or written an element of a typed array in this function:
+    /// the compiler gives its element accesses the inline typed-array path only then. (Per
+    /// function, not per site: a function that is entered in the middle of a loop has not run
+    /// the sites after the loop yet, and they would stay with the helper.)
+    saw_typed: Cell<bool>,
 }
 
 impl Default for JitSlot {
@@ -291,6 +340,7 @@ impl Default for JitSlot {
             hotness: Cell::new(0),
             tier: Cell::new(Tier::Interpreted),
             code: OnceCell::new(),
+            saw_typed: Cell::new(false),
         }
     }
 }
@@ -312,10 +362,26 @@ impl fmt::Debug for JitSlot {
 }
 
 impl JitSlot {
+    /// Records that the interpreter met a typed array at an element access of this function: a
+    /// store on a path that already did far more.
+    pub(crate) fn note_typed_element(&self) {
+        self.saw_typed.set(true);
+    }
+
+    /// Whether the interpreter has met a typed array at an element access of this function.
+    pub(crate) fn saw_typed_element(&self) -> bool {
+        self.saw_typed.get()
+    }
+
     /// Whether the loop counter should ask [`try_enter`] about this block: it may yet be
     /// compiled, or it is and could be entered.
     pub(crate) fn wants_entry(&self) -> bool {
         self.tier.get() != Tier::Rejected
+    }
+
+    /// Whether the block's code is compiled and can be run.
+    pub(crate) fn is_compiled(&self) -> bool {
+        self.tier.get() == Tier::Compiled && self.code.get().is_some()
     }
 }
 
@@ -328,20 +394,15 @@ pub(crate) fn try_enter(context: &mut Context) -> Option<ControlFlow<CompletionR
     Some(runtime::execute(context, &code, block))
 }
 
+/// The bytecode size up to which a function that native code calls stays interpreted (a callback
+/// that returns a constant is 24 bytes, `x => x` 37, `v => v + 1` 55): see "Where a call goes".
+const TINY_CALLBACK_BYTES: usize = 40;
+
 /// Counts the frame on top hotter and compiles it when it is hot enough. Returns its compiled
 /// code and the block that starts at its `pc`, if it has both.
 pub(crate) fn prepare(context: &mut Context) -> Option<(Rc<JitCode>, u32)> {
-    // Fuzzing counts instructions, which compiled code does not.
-    if cfg!(feature = "fuzz") {
-        return None;
-    }
-    // Tracing shows every instruction the interpreter runs.
-    #[cfg(feature = "trace")]
-    if context.vm.trace {
-        return None;
-    }
     // The dummy frame at the bottom never runs code.
-    if !context.vm.jit.options.enabled || context.vm.frames.len() <= 1 {
+    if !may_enter(&context.vm) || context.vm.frames.len() <= 1 {
         return None;
     }
     let frame = context.vm.frame();
@@ -349,6 +410,11 @@ pub(crate) fn prepare(context: &mut Context) -> Option<(Rc<JitCode>, u32)> {
     let code_block: *const CodeBlock = &raw const **frame.code_block();
     // SAFETY: the frame on top keeps its code block alive, and nothing here pops it.
     let code_block = unsafe { &*code_block };
+    // A callback that native code calls is entered and left once per call, and compiled code pays
+    // more for that than interpreting a callee of a few instructions costs.
+    if pc == 0 && frame.exit_early() && code_block.bytecode.bytes.len() <= TINY_CALLBACK_BYTES {
+        return None;
+    }
     let slot = &code_block.jit;
     let code = match slot.tier.get() {
         Tier::Rejected => return None,

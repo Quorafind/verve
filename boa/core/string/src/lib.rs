@@ -29,7 +29,7 @@ use crate::display::{JsStrDisplayEscaped, JsStrDisplayLossy, JsStringDebugInfo};
 use crate::iter::CodePointsIter;
 use crate::r#type::{Latin1, Utf16};
 pub use crate::vtable::StaticString;
-use crate::vtable::{SequenceString, SliceString};
+use crate::vtable::{RopeString, SequenceString, SliceString};
 #[doc(inline)]
 pub use crate::{
     builder::{CommonJsStringBuilder, Latin1JsStringBuilder, Utf16JsStringBuilder},
@@ -91,6 +91,10 @@ pub(crate) const fn is_trimmable_whitespace_latin1(c: u8) -> bool {
     )
 }
 
+/// The length, in code units, from which [`JsString::concat_lazy`] builds a rope instead of
+/// copying: below it the copy costs about what the rope node's allocation does.
+pub const ROPE_MIN_LEN: usize = 256;
+
 /// Opaque type of a raw string pointer.
 #[allow(missing_copy_implementations, missing_debug_implementations)]
 pub struct RawJsString {
@@ -114,6 +118,9 @@ pub(crate) enum JsStringKind {
 
     /// A static string that is valid for `'static` lifetime.
     Static = 3,
+
+    /// A lazy concatenation of two strings, flattened on first read. See [`RopeString`].
+    Rope = 4,
 }
 
 /// A Latin1 or UTF-16–encoded, reference counted, immutable string.
@@ -190,6 +197,17 @@ impl JsString {
     #[must_use]
     pub fn to_std_string_lossy(&self) -> String {
         self.display_lossy().to_string()
+    }
+
+    /// Whether two [`JsString`]s are the same allocation, and not merely equal strings.
+    ///
+    /// A caller that derives something from a string — the UTF-16 form of a Latin-1 one, say —
+    /// can keep it for the next call on the same allocation: a string's contents never change,
+    /// so the same allocation always has the same text, and a clone shares it.
+    #[inline]
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
     }
 
     /// Decodes a [`JsString`] into a [`String`], returning an error if the string contains unpaired
@@ -572,6 +590,9 @@ impl JsString {
     #[must_use]
     pub unsafe fn slice_unchecked(data: &JsString, start: usize, end: usize) -> Self {
         // Safety: invariant stated by this whole function.
+        // A flattened rope is sliced through its flat string, so the slice does not keep the node.
+        let data = RopeString::flat_of(data).unwrap_or(data);
+        // SAFETY: Same invariant as above.
         let slice = Box::new(unsafe { SliceString::new(data, start, end) });
 
         Self {
@@ -627,6 +648,70 @@ impl JsString {
     #[must_use]
     pub fn concat(x: JsStr<'_>, y: JsStr<'_>) -> Self {
         Self::concat_array(&[x, y])
+    }
+
+    /// Creates the concatenation of `x` and `y`, copying nothing when it is long.
+    ///
+    /// Short results are built like [`JsString::concat`]. From [`ROPE_MIN_LEN`] code units up the
+    /// result is a rope that reads the two halves only when its content is first needed, so that
+    /// appending to a string in a loop takes linear time overall. Reading the string before every
+    /// append (which flattens it) brings the quadratic cost back.
+    #[inline]
+    #[must_use]
+    pub fn concat_lazy(x: &JsString, y: &JsString) -> Self {
+        if x.is_empty() {
+            return y.clone();
+        }
+        if y.is_empty() {
+            return x.clone();
+        }
+        let Some(len) = x.len().checked_add(y.len()) else {
+            alloc_overflow()
+        };
+        if len < ROPE_MIN_LEN {
+            return Self::concat(x.as_str(), y.as_str());
+        }
+        RopeString::append_short(x, y, len)
+            .unwrap_or_else(|| RopeString::new(x.clone(), y.clone(), len))
+    }
+
+    /// Creates the concatenation of `x` and the decimal digits of `n`, as `x + n` is in
+    /// JavaScript, without building a string for `n` when the result is short.
+    #[inline]
+    #[must_use]
+    pub fn concat_i32(x: &JsString, n: i32) -> Self {
+        Self::concat_digits(x, n, false)
+    }
+
+    /// Creates the concatenation of the decimal digits of `n` and `x`, as `n + x` is in
+    /// JavaScript; see [`JsString::concat_i32`].
+    #[inline]
+    #[must_use]
+    pub fn concat_i32_before(n: i32, x: &JsString) -> Self {
+        Self::concat_digits(x, n, true)
+    }
+
+    fn concat_digits(x: &JsString, n: i32, digits_first: bool) -> Self {
+        let mut buffer = itoa::Buffer::new();
+        let digits = buffer.format(n).as_bytes();
+        let Some(len) = x.len().checked_add(digits.len()) else {
+            alloc_overflow()
+        };
+        // A rope is never shorter than `ROPE_MIN_LEN`, so below it `x` is read without flattening.
+        if len < ROPE_MIN_LEN {
+            let digits = JsStr::latin1(digits);
+            return if digits_first {
+                Self::concat(digits, x.as_str())
+            } else {
+                Self::concat(x.as_str(), digits)
+            };
+        }
+        let digits = Self::from(n);
+        if digits_first {
+            Self::concat_lazy(&digits, x)
+        } else {
+            Self::concat_lazy(x, &digits)
+        }
     }
 
     /// Creates a new [`JsString`] from the concatenation of every element of

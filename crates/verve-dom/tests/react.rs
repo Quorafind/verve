@@ -47,7 +47,7 @@ fn create_root_renders_state_effects_lists_and_conditions() {
         let app = page.find("#app");
         let snapshot = page.document.snapshot();
         assert_eq!(snapshot.style(app, "padding-left"), Some("4px"));
-        assert_eq!(snapshot.style(app, "color"), Some("red"));
+        assert_eq!(snapshot.style(app, "color"), Some("rgb(255, 0, 0)"));
         assert!(page.find("#maybe") > 0);
         assert_eq!(page.console(), "");
     });

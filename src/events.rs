@@ -44,11 +44,19 @@ pub(crate) fn abort_error(context: &mut Context, reason: JsValue) -> JsValue {
     error.into()
 }
 
-/// The `EventEmitter` class, made once for the realm.
-pub(crate) fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
+/// The `EventEmitter` class, made once for the realm: what a host's own emitter classes extend.
+pub fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
     crate::modules::node_module(context, "events")?
         .as_object()
         .ok_or_else(|| crate::native::type_error("EventEmitter is not a class"))
+}
+
+/// `EventEmitter.call(this)`: an object of a class extending [`emitter_class`] set up as an
+/// emitter. The `init` of such a class runs it first.
+pub fn emitter_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResult<()> {
+    let emitter = emitter_class(context)?;
+    crate::call(context, &emitter.into(), &this.clone().into(), &[])?;
+    Ok(())
 }
 
 // ─── Where listeners are kept ────────────────────────────────────────────────────────────────
@@ -137,26 +145,12 @@ fn check_listener(listener: &JsValue, context: &mut Context) -> JsResult<()> {
     if listener.is_callable() {
         return Ok(());
     }
-    Err(coded_type_error(
+    Err(crate::native::invalid_arg_type(
         context,
-        &format!(
-            "The \"listener\" argument must be of type function. Received {}",
-            describe_received(listener)
-        ),
-        "ERR_INVALID_ARG_TYPE",
+        "listener",
+        "of type function",
+        listener,
     ))
-}
-
-fn describe_received(value: &JsValue) -> String {
-    if value.is_undefined() {
-        "undefined".into()
-    } else if value.is_null() {
-        "null".into()
-    } else if value.is_object() {
-        "an instance of Object".into()
-    } else {
-        format!("type {} ({})", value.type_of(), crate::print(value))
-    }
 }
 
 /// `on` / `prependListener`: `newListener` heard first, then the listener kept — and the
@@ -455,10 +449,24 @@ fn remove_all_listeners(
     Ok(this.clone())
 }
 
+/// Emits `name` on `target` with `args`, as `target.emit(name, ...args)` does: every listener
+/// in order, on a copy of the list, and an `error` nobody hears thrown. What a host writing an
+/// `EventEmitter` subclass of its own — `BrowserWindow`, `webContents`, `app` — emits with.
+pub fn emit_event(
+    context: &mut Context,
+    target: &JsValue,
+    name: &str,
+    args: &[JsValue],
+) -> JsResult<JsValue> {
+    let mut all = vec![js_text(name)];
+    all.extend_from_slice(args);
+    emit(target, &all, context)
+}
+
 /// `emit`: every listener of `name`, in order, on a copy of the list — one added or removed
 /// while they are heard changes the next `emit`, not this one. An `error` nobody hears is
 /// thrown.
-pub(crate) fn emit(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn emit(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let name = arg(args, 0);
     let rest = &args[1.min(args.len())..];
     let is_error = name
@@ -529,11 +537,11 @@ const EMITTER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("once", 2, |this, args, cx| {
         let wrapper = once_wrapper(this, &arg(args, 0), &arg(args, 1), cx)?;
-        add_listener(this, &arg(args, 0), &wrapper, false, cx)
+        invoke(this, "on", &[arg(args, 0), wrapper], cx)
     }),
     ("prependOnceListener", 2, |this, args, cx| {
         let wrapper = once_wrapper(this, &arg(args, 0), &arg(args, 1), cx)?;
-        add_listener(this, &arg(args, 0), &wrapper, true, cx)
+        invoke(this, "prependListener", &[arg(args, 0), wrapper], cx)
     }),
     ("off", 2, |this, args, cx| {
         remove_listener(this, &arg(args, 0), &arg(args, 1), cx)

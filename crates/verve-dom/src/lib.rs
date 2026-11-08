@@ -24,99 +24,71 @@
 //! (`createEl`, `setText`, its user agent and `app://obsidian.md`) is left to the embedder,
 //! which can add methods to any class with [`host::extend`].
 
+mod animation;
 mod bind;
+pub mod canvas;
+mod clipboard;
+mod cookies;
 pub mod css;
 pub mod dom;
+mod drag;
+mod editing;
 pub mod field;
+mod field_undo;
 pub mod html;
+mod ime;
+mod inner_text;
+mod input;
+mod layout_provider;
+mod load;
 mod media;
+mod options;
+mod permissions;
+mod person;
+mod rect;
+mod schemes;
+pub mod selection;
+mod snapshot;
 mod state;
+mod storage;
+mod update;
+mod window_state;
+mod world;
+
+pub use layout_provider::{Boundary, Layout, LayoutProvider, PositionProvider, RangeProvider};
+pub use update::{Changes, Update};
+pub use window_state::{Align, FontData, FontFaceId, FontOutcome, FontProvider, ScrollRequest};
 
 use std::cell::{Ref, RefCell};
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
 
+pub use clipboard::ClipboardData;
+pub use cookies::CookieBackend;
 pub use css::{Computed, Environment, Style};
+pub use dom::{Direction, RangeData, RangeError};
 pub use dom::{Dom, Namespace, Node, NodeId, NodeKind};
-pub use field::Draft;
+pub use drag::{DropEffect, ExternalDrag};
+pub use field::{Draft, utf8_offset_to_utf16, utf16_offset_to_utf8};
+pub use input::{Key, Modifiers, Pointer};
+pub use load::{Destination, LoadError, LoadEvent, LoadRequest, LoadResult, Loader, Ready};
 pub use media::{
     MediaCommand, MediaCommandKind, MediaError, MediaSettings, MediaState, MediaUpdate,
 };
+pub use options::Options;
+pub use permissions::PermissionBackend;
+pub use rect::Rect;
+pub use snapshot::{Snapshot, SnapshotData};
 pub use state::FrameClock;
+pub use storage::{FileStorage, StorageBackend};
+pub use world::{create_world, insert_stylesheet, remove_stylesheet};
 
+use person::Act;
 use state::{Shared, SheetOwner, SheetRecord, State, shared};
-
-/// A box, in CSS pixels from the viewport's top left.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.width && y < self.y + self.height
-    }
-
-    pub fn union(&self, other: &Rect) -> Rect {
-        let x = self.x.min(other.x);
-        let y = self.y.min(other.y);
-        Rect {
-            x,
-            y,
-            width: (self.x + self.width).max(other.x + other.width) - x,
-            height: (self.y + self.height).max(other.y + other.height) - y,
-        }
-    }
-
-    pub fn intersection(&self, other: &Rect) -> Option<Rect> {
-        let x = self.x.max(other.x);
-        let y = self.y.max(other.y);
-        let right = (self.x + self.width).min(other.x + other.width);
-        let bottom = (self.y + self.height).min(other.y + other.height);
-        (right >= x
-            && bottom >= y
-            && (right > x || bottom > y || self.width == 0. || self.height == 0.))
-            .then_some(Rect {
-                x,
-                y,
-                width: right - x,
-                height: bottom - y,
-            })
-    }
-}
-
-/// A scroll a script asked for, for the drawer to do (and then report with
-/// [`Document::set_scroll_offsets`]).
-#[derive(Clone, Debug, PartialEq)]
-pub enum ScrollRequest {
-    /// `scrollTo`, or `scrollTop`/`scrollLeft` set: to this offset, on the axes given. The
-    /// document's root element stands for the window.
-    To {
-        node: NodeId,
-        left: Option<f32>,
-        top: Option<f32>,
-    },
-    /// `scrollBy`: this much further.
-    By { node: NodeId, left: f32, top: f32 },
-    /// `scrollIntoView`: whatever scrolls `node`'s box, until `node` is in sight.
-    Reveal(NodeId),
-}
+use verve::native::js_text;
 
 /// What a script asked of the window that only the embedder can do.
 ///
@@ -132,10 +104,31 @@ pub enum Request {
     },
     /// `location.reload()`.
     Reload,
-    /// `window.open(url)`.
-    Open(String),
-    /// `navigator.clipboard.writeText`, `document.execCommand('copy')`.
-    CopyText(String),
+    /// Save what is at `url` instead of showing it: a link with a `download` attribute was
+    /// pressed (`filename` is the attribute's value, if it has one), or a document came with
+    /// `Content-Disposition: attachment`, in which case the load failed with `ERR_FAILED`.
+    Download {
+        url: String,
+        filename: Option<String>,
+    },
+    /// `window.open(url, name, features)`, the address resolved.
+    Open {
+        url: String,
+        name: String,
+        features: String,
+    },
+    /// The clipboard is to hold this: `navigator.clipboard.writeText`/`write`, a copy or a cut.
+    /// `custom` is every other format, by MIME type (`image/png`, a page's own).
+    WriteClipboard {
+        text: Option<String>,
+        html: Option<String>,
+        custom: Vec<(String, Vec<u8>)>,
+    },
+    /// `navigator.clipboard.readText`/`read` (the permission was granted): answer with
+    /// [`Document::settle_clipboard`] for this `call`.
+    ReadClipboard {
+        call: u64,
+    },
     /// `alert`, `confirm` and `prompt`'s message (they answer as a browser that blocked them).
     Alert(String),
     /// `document.title` set.
@@ -147,91 +140,30 @@ pub enum Request {
     Submit(NodeId),
     /// An animation frame is wanted, on [`FrameClock::Host`]: call [`Document::frame`].
     Frame,
-}
-
-/// Where `localStorage` lives between runs.
-pub trait StorageBackend {
-    fn load(&self) -> std::collections::BTreeMap<String, String>;
-    fn save(&self, items: &std::collections::BTreeMap<String, String>);
-}
-
-/// `localStorage` kept as one JSON file.
-pub struct FileStorage(pub PathBuf);
-
-impl StorageBackend for FileStorage {
-    fn load(&self) -> std::collections::BTreeMap<String, String> {
-        std::fs::read_to_string(&self.0)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    }
-
-    fn save(&self, items: &std::collections::BTreeMap<String, String>) {
-        if let Some(parent) = self.0.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(text) = serde_json::to_string(items) {
-            let _ = std::fs::write(&self.0, text);
-        }
-    }
-}
-
-/// What the window is.
-pub struct Options {
-    /// The page's address: `location`, `document.URL`, what relative links resolve against.
-    pub url: String,
-    /// `navigator.userAgent`; `None` keeps Verve's own.
-    pub user_agent: Option<String>,
-    /// `navigator.language`; `None` keeps Verve's own (`en-US`).
-    pub language: Option<String>,
-    /// The viewport, in CSS pixels: `innerWidth`/`innerHeight`, what `@media` and
-    /// `matchMedia` ask of.
-    pub viewport: (f32, f32),
-    pub device_pixel_ratio: f32,
-    /// `prefers-color-scheme: dark`.
-    pub dark: bool,
-    /// How `requestAnimationFrame` is paced.
-    pub frames: FrameClock,
-    /// Whether the user agent's own sheet (`div { display: block }`, the headings' sizes…) is in
-    /// the cascade.
-    pub user_agent_sheet: bool,
-    /// Stylesheets of the embedder's, by name, after the user agent's and before the page's.
-    pub stylesheets: Vec<(String, String)>,
-    /// Where `localStorage` lives between runs; `None` keeps it for this run only.
-    pub storage: Option<Box<dyn StorageBackend>>,
-    /// `document.title` when the page has no `<title>`.
-    pub title: String,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            url: "about:blank".into(),
-            user_agent: None,
-            language: None,
-            viewport: (1280., 800.),
-            device_pixel_ratio: 1.,
-            dark: false,
-            frames: FrameClock::Timer,
-            user_agent_sheet: true,
-            stylesheets: Vec::new(),
-            storage: None,
-            title: String::new(),
-        }
-    }
+    /// A `FontFace` was asked to load (`face.load()`, `document.fonts.load`): fetch `url`, then
+    /// call [`Document::settle_font`].
+    LoadFont {
+        face: FontFaceId,
+        url: String,
+    },
+    /// An `<img src>` needs its bytes: the embedder fetches them and calls
+    /// [`Document::set_image_bytes`] — or [`Document::fail_image`] when there are none.
+    Image(String),
 }
 
 /// Gives the runtime a document: `window` (the global object, made a `Window`), `document`,
 /// and the classes and functions of the web platform (see the README for the list). Answers
 /// the handle whoever draws the document keeps. A runtime has one document; installing again
 /// answers the one it has.
-pub fn install(runtime: &mut verve::Runtime, options: Options) -> Result<Document, String> {
+pub fn install(runtime: &mut verve::Runtime, mut options: Options) -> Result<Document, String> {
     if let Some(document) = Document::of(runtime) {
         return Ok(document);
     }
     let url = url::Url::parse(&options.url)
         .or_else(|_| url::Url::parse("about:blank"))
         .map_err(|e| e.to_string())?;
+    // A page reads no local file until a `file:` document has started loading.
+    runtime.set_local_modules(false);
     let context = runtime.context();
     let state: Shared = Rc::new(RefCell::new(State::new(url)));
     {
@@ -245,20 +177,32 @@ pub fn install(runtime: &mut verve::Runtime, options: Options) -> Result<Documen
         };
         s.frame_clock = options.frames;
         s.title_fallback = options.title.clone();
+        s.navigator = (options.user_agent.clone(), options.language.clone());
+        s.schemes = schemes::Schemes::new(&options.standard_schemes, &options.secure_schemes);
+        s.load.loader = options.loader.take().map(Rc::from);
+        s.cookies = options.cookies.take().map(Rc::from);
+        s.permissions = options.permissions.take().map(Rc::from);
+        s.load.active = s.load.loader.is_some();
+        let document = s.dom.document;
         if options.user_agent_sheet {
             s.sheets.push(SheetRecord {
                 owner: SheetOwner::UserAgent,
                 sheet: css::Sheet::parse(css::USER_AGENT_SHEET),
+                tree: document,
             });
         }
         for (name, text) in &options.stylesheets {
             s.sheets.push(SheetRecord {
                 owner: SheetOwner::Embedder(name.clone()),
                 sheet: css::Sheet::parse(text),
+                tree: document,
             });
         }
     }
     context.insert_data(state.clone());
+    verve::dom_events::set_world_counterpart(context, |target, cx| {
+        Ok(bind::node_id(target).map(|id| bind::node::wrap(cx, id)))
+    });
     install_classes(context, &options).map_err(|error| verve::describe(context, &error))?;
     let storage = options.storage;
     if let Some(storage) = storage {
@@ -270,18 +214,22 @@ pub fn install(runtime: &mut verve::Runtime, options: Options) -> Result<Documen
     Document::of(runtime).ok_or_else(|| "the document did not install".to_owned())
 }
 
-fn install_classes(context: &mut Context, options: &Options) -> JsResult<()> {
+pub(crate) fn install_classes(context: &mut Context, options: &Options) -> JsResult<()> {
     bind::events::install(context)?;
     bind::node::install(context)?;
     bind::element::install(context)?;
     bind::document::install(context)?;
     bind::window::install(context, options)?;
     bind::fetch::install(context)?;
+    load::install(context)?;
     bind::platform::install(context)?;
+    bind::permissions::install(context)?;
     bind::observers::install(context)?;
     bind::xhr::install(context)?;
+    bind::animation::install(context)?;
     bind::traversal::install(context)?;
     bind::events::install_handlers(context)?;
+    editing::install(context)?;
     let document_id = shared(context).borrow().dom.document;
     let document = bind::node::wrap(context, document_id);
     context.register_global_property(
@@ -330,147 +278,6 @@ pub(crate) fn hit_test(state: &State, x: f32, y: f32) -> Vec<NodeId> {
     path
 }
 
-/// What the drawer reads: the document and every node's style, as they were when it was taken.
-/// Cheap to take and to clone — the nodes and styles are shared with the document's own until
-/// they change — and `Send`, for a drawer on another thread.
-#[derive(Clone)]
-pub struct Snapshot(Arc<SnapshotData>);
-
-pub struct SnapshotData {
-    pub dom: Dom,
-    pub styles: Computed,
-    /// Moves whenever anything here may have changed.
-    pub revision: u64,
-    pub viewport: (f32, f32),
-    pub url: String,
-    pub scroll_offsets: std::collections::HashMap<NodeId, [f32; 2]>,
-    /// 活跃媒体代的元数据；移除、空源和回收的节点不在这里，不保存像素。
-    pub media: HashMap<NodeId, MediaState>,
-}
-
-impl std::ops::Deref for Snapshot {
-    type Target = SnapshotData;
-
-    fn deref(&self) -> &SnapshotData {
-        &self.0
-    }
-}
-
-impl Snapshot {
-    /// A node's computed value of `property`.
-    pub fn style(&self, node: NodeId, property: &str) -> Option<&str> {
-        self.styles.get(node, property)
-    }
-
-    /// Whether the node is drawn at all: connected, and neither it nor anything it is in
-    /// `display: none`.
-    pub fn is_rendered(&self, node: NodeId) -> bool {
-        let mut at = Some(node);
-        while let Some(id) = at {
-            if self.styles.get(id, "display") == Some("none") {
-                return false;
-            }
-            at = self.dom.parent(id);
-        }
-        self.dom.is_connected(node)
-    }
-}
-
-/// What changed since the drawer last asked.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Changes {
-    /// Every node changed — its own state (attributes, classes, text, value) or its children.
-    pub nodes: Vec<NodeId>,
-    /// Every node whose computed style is not what it was.
-    pub restyled: Vec<NodeId>,
-    /// The partitions with something new to draw: for each changed or restyled node, the
-    /// partition it is in (and its parent's, for a node that came or went).
-    pub partitions: Vec<NodeId>,
-    /// Nodes freed by [`Document::sweep`]: forget what was kept against them.
-    pub removed: Vec<NodeId>,
-    /// The stylesheets changed, so every style was worked out again.
-    pub restyled_all: bool,
-}
-
-impl Changes {
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
-            && self.restyled.is_empty()
-            && self.removed.is_empty()
-            && !self.restyled_all
-    }
-}
-
-/// A snapshot and what changed since the last: [`Document::update`]'s answer.
-pub struct Update {
-    pub snapshot: Snapshot,
-    pub changes: Changes,
-}
-
-/// The modifier keys held.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Modifiers {
-    pub ctrl: bool,
-    pub shift: bool,
-    pub alt: bool,
-    pub meta: bool,
-}
-
-/// The pointer, where it is and what it pressed.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Pointer {
-    pub x: f32,
-    pub y: f32,
-    /// The button pressed or let go: 0 primary, 1 middle (auxiliary), 2 secondary.
-    pub button: i16,
-    /// How many presses in a row this is: 2 for the second of a double click.
-    pub count: u32,
-    pub modifiers: Modifiers,
-}
-
-/// A key, as `KeyboardEvent` has it: `key` (`"a"`, `"Enter"`, `"ArrowLeft"`) and `code`
-/// (`"KeyA"`, `"Enter"`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Key {
-    pub key: String,
-    pub code: String,
-    pub modifiers: Modifiers,
-    pub repeat: bool,
-}
-
-impl Key {
-    /// The key that types `c`, with its `code`.
-    pub fn char(c: char) -> Self {
-        let code = if c.is_ascii_alphabetic() {
-            format!("Key{}", c.to_ascii_uppercase())
-        } else if c.is_ascii_digit() {
-            format!("Digit{c}")
-        } else if c == ' ' {
-            "Space".to_owned()
-        } else {
-            String::new()
-        };
-        Key {
-            key: c.to_string(),
-            code,
-            modifiers: Modifiers {
-                shift: c.is_ascii_uppercase(),
-                ..Modifiers::default()
-            },
-            repeat: false,
-        }
-    }
-
-    /// A named key: `Key::named("Enter")`, `Key::named("Backspace")`.
-    pub fn named(name: &str) -> Self {
-        Key {
-            key: name.to_owned(),
-            code: name.to_owned(),
-            ..Key::default()
-        }
-    }
-}
-
 /// The handle whoever draws the document keeps. Every method that dispatches events takes the
 /// runtime, runs the microtasks the listeners queued, and leaves the document settled.
 #[derive(Clone)]
@@ -481,17 +288,21 @@ pub struct Document {
 
 /// What the drawer has been told so far.
 #[derive(Default)]
-struct View {
+pub(crate) struct View {
     computed: Computed,
     changed: HashSet<NodeId>,
     restyled: HashSet<NodeId>,
     partitions: HashSet<NodeId>,
     removed: Vec<NodeId>,
     restyled_all: bool,
+    /// What a layout took from the next update ([`Document::set_layout_provider`]).
+    carried: Changes,
     /// The element a button went down on, for the click its release makes.
     pressed: Option<NodeId>,
     /// The element the pointer was last over.
     over: Option<NodeId>,
+    /// The drag and drop the document is in the middle of.
+    drag: drag::DragState,
 }
 
 impl Document {
@@ -517,6 +328,13 @@ impl Document {
         Some(document)
     }
 
+    /// The document installed in the realm of `context`, once its embedder has asked for it.
+    pub(crate) fn at(context: &Context) -> Option<Document> {
+        let state = state::try_shared(context)?;
+        let view = context.get_data::<Rc<RefCell<View>>>().cloned()?;
+        Some(Document { state, view })
+    }
+
     /// The arena itself, as it is now.
     pub fn dom(&self) -> Ref<'_, Dom> {
         Ref::map(self.state.borrow(), |state| &state.dom)
@@ -531,44 +349,6 @@ impl Document {
         self.state.borrow().dom.body
     }
 
-    /// Brings the styles up to date and answers a snapshot, with what changed since the last
-    /// update.
-    pub fn update(&self) -> Update {
-        self.absorb();
-        let snapshot = self.snapshot();
-        let mut view = self.view.borrow_mut();
-        let mut nodes: Vec<NodeId> = view.changed.drain().collect();
-        nodes.sort_unstable();
-        let mut restyled: Vec<NodeId> = view.restyled.drain().collect();
-        restyled.sort_unstable();
-        let mut partitions: Vec<NodeId> = view.partitions.drain().collect();
-        partitions.sort_unstable();
-        let changes = Changes {
-            nodes,
-            restyled,
-            partitions,
-            removed: std::mem::take(&mut view.removed),
-            restyled_all: std::mem::take(&mut view.restyled_all),
-        };
-        Update { snapshot, changes }
-    }
-
-    /// A snapshot of the document and its styles, without taking what changed.
-    pub fn snapshot(&self) -> Snapshot {
-        self.absorb();
-        let state = self.state.borrow();
-        let view = self.view.borrow();
-        Snapshot(Arc::new(SnapshotData {
-            dom: state.dom.clone(),
-            styles: view.computed.clone(),
-            revision: state.dom.revision.wrapping_add(state.revision),
-            viewport: (state.env.width, state.env.height),
-            url: state.url.to_string(),
-            scroll_offsets: state.scroll_offsets.clone(),
-            media: state.media.snapshot(),
-        }))
-    }
-
     /// Every node's style, up to date.
     pub fn computed(&self) -> Ref<'_, Computed> {
         self.absorb();
@@ -576,8 +356,9 @@ impl Document {
     }
 
     /// Styles and partitions brought up to date with what the document says changed.
-    fn absorb(&self) {
+    pub(crate) fn absorb(&self) {
         let mut state = self.state.borrow_mut();
+        let state = &mut *state;
         let styler = state.styler();
         let key = state.sheets_key;
         let changes = state.dom.take_changes();
@@ -594,7 +375,7 @@ impl Document {
         if full {
             view.restyled_all = true;
             for id in dom.subtree(dom.document) {
-                if before.shared(id) != view.computed.shared(id) {
+                if before.cascaded(id) != view.computed.cascaded(id) {
                     restyled.push(id);
                 }
             }
@@ -602,8 +383,8 @@ impl Document {
             for root in &changes.nodes {
                 let root = dom.parent(*root).unwrap_or(*root);
                 for id in dom.subtree(root) {
-                    let old = before.shared(id);
-                    let new = view.computed.shared(id);
+                    let old = before.cascaded(id);
+                    let new = view.computed.cascaded(id);
                     let same = match (&old, &new) {
                         (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
                         (None, None) => true,
@@ -626,6 +407,11 @@ impl Document {
                 }
             }
         }
+        // A box that is not what it was looks different, though its element may not.
+        restyled.extend(view.computed.take_pseudo_changes());
+        let began = animation::restyle(state, &mut view.computed, &styler, &before, &restyled);
+        restyled.extend(began);
+        let dom = &state.dom;
         for id in restyled {
             if dom.exists(id) {
                 view.restyled.insert(id);
@@ -680,30 +466,13 @@ impl Document {
     /// Adds (or replaces) a stylesheet of the embedder's, by name: after the user agent's and
     /// before the page's.
     pub fn set_stylesheet(&self, name: &str, css: &str) {
-        let mut state = self.state.borrow_mut();
-        let sheet = css::Sheet::parse(css);
         let owner = SheetOwner::Embedder(name.to_owned());
-        match state.sheets.iter_mut().find(|r| r.owner == owner) {
-            Some(record) => record.sheet = sheet,
-            None => {
-                let at = state
-                    .sheets
-                    .iter()
-                    .position(|r| {
-                        matches!(r.owner, SheetOwner::Element(_) | SheetOwner::Adopted(_))
-                    })
-                    .unwrap_or(state.sheets.len());
-                state.sheets.insert(at, SheetRecord { owner, sheet });
-            }
-        }
-        state.sheets_changed();
+        self.state.borrow_mut().put_sheet(owner, css);
     }
 
     pub fn remove_stylesheet(&self, name: &str) {
-        let mut state = self.state.borrow_mut();
         let owner = SheetOwner::Embedder(name.to_owned());
-        state.sheets.retain(|r| r.owner != owner);
-        state.sheets_changed();
+        self.state.borrow_mut().drop_sheet(&owner);
     }
 
     // ─── Where things landed ────────────────────────────────────────────────────────────────
@@ -765,6 +534,7 @@ impl Document {
             let mut state = self.state.borrow_mut();
             state.rects.clear();
             state.rects.extend(rects);
+            state.editing.caret = None;
         }
         self.deliver_layout(runtime);
     }
@@ -775,11 +545,18 @@ impl Document {
         runtime: &mut verve::Runtime,
         rects: impl IntoIterator<Item = (NodeId, Rect)>,
     ) {
-        self.state.borrow_mut().rects.extend(rects);
+        {
+            let mut state = self.state.borrow_mut();
+            state.rects.extend(rects);
+            state.editing.caret = None;
+        }
         self.deliver_layout(runtime);
     }
 
-    fn deliver_layout(&self, runtime: &mut verve::Runtime) {
+    /// Tells the resize and intersection observers whose targets moved or changed size. A drawer
+    /// that reports boxes does it with them; a page whose layout is the provider's does it
+    /// itself, after each turn.
+    pub fn deliver_layout(&self, runtime: &mut verve::Runtime) {
         let context = runtime.context();
         if bind::observers::watching_layout(context)
             && let Err(error) = bind::observers::deliver_layout(context)
@@ -800,6 +577,7 @@ impl Document {
         let moved: Vec<NodeId> = {
             let mut state = self.state.borrow_mut();
             let mut moved = Vec::new();
+            state.editing.caret = None;
             for (node, offset) in offsets {
                 if state.scroll_offsets.get(&node) != Some(&offset) {
                     state.scroll_offsets.insert(node, offset);
@@ -844,15 +622,22 @@ impl Document {
     /// callbacks ran.
     pub fn frame(&self, runtime: &mut verve::Runtime, now: f64) -> usize {
         let context = runtime.context();
-        let ran = bind::window::run_frame(context, now);
+        canvas::flush_events(context);
+        // Animations are brought to the frame, and tell what happened, before the callbacks of
+        // the frame run: a callback reads the values it will be drawn with.
+        animation::advance(context, now);
+        runtime.run_microtasks();
+        let ran = bind::window::run_frame(runtime.context(), now);
         runtime.run_microtasks();
         self.deliver_layout(runtime);
         ran
     }
 
-    /// Whether `requestAnimationFrame` callbacks are waiting.
+    /// Whether `requestAnimationFrame` callbacks are waiting, or something is still moving in
+    /// the document, or an animation has something to tell.
     pub fn wants_frame(&self) -> bool {
-        !self.state.borrow().frames.is_empty()
+        let state = self.state.borrow();
+        !state.frames.is_empty() || animation::wants(&state, &self.view.borrow().computed)
     }
 
     /// Reclaims every detached tree nothing can reach any more: no object of a node in it is
@@ -861,41 +646,7 @@ impl Document {
         runtime.run_microtasks();
         runtime.collect_garbage();
         let roots = self.state.borrow().dom.detached_roots();
-        let alive = {
-            let state = self.state.borrow();
-            let mut alive = HashSet::from([state.dom.document]);
-            for root in &roots {
-                if state.dom.subtree(*root).iter().any(|id| {
-                    state.dom.is_pinned(*id) || state.wrappers.get(id).is_some_and(|w| w.is_alive())
-                }) {
-                    alive.insert(*root);
-                }
-            }
-            // 只沿真实所有权边保活附属树；影子根不是永久根，闭合影子树同样可回收。
-            let mut edges = HashMap::<NodeId, Vec<NodeId>>::new();
-            for (host, (root, _)) in &state.shadow_roots {
-                let host = state.dom.root_of(*host);
-                edges.entry(host).or_default().push(*root);
-                edges.entry(*root).or_default().push(host);
-            }
-            for (template, content) in &state.template_contents {
-                edges
-                    .entry(state.dom.root_of(*template))
-                    .or_default()
-                    .push(*content);
-            }
-            let mut pending: Vec<NodeId> = alive.iter().copied().collect();
-            while let Some(root) = pending.pop() {
-                if let Some(next) = edges.get(&root) {
-                    for root in next {
-                        if alive.insert(*root) {
-                            pending.push(*root);
-                        }
-                    }
-                }
-            }
-            alive
-        };
+        let alive = self.state.borrow().reachable(&roots);
         let mut freed_all = Vec::new();
         for root in roots {
             if alive.contains(&root) {
@@ -904,6 +655,7 @@ impl Document {
             let freed = self.state.borrow_mut().dom.free(root);
             freed_all.extend(freed);
         }
+        animation::swept(runtime.context(), &freed_all);
         if freed_all.is_empty() {
             return 0;
         }
@@ -914,44 +666,20 @@ impl Document {
             }
         }
         runtime.run_microtasks();
-        {
-            let mut state = self.state.borrow_mut();
-            for id in &freed_all {
-                state.wrappers.remove(id);
-                state.links.remove(id);
-                state.rects.remove(id);
-                state.scroll_offsets.remove(id);
-                state.custom_nodes.remove(id);
-            }
-            state
-                .template_contents
-                .retain(|t, f| !gone.contains(t) && !gone.contains(f));
-            state
-                .shadow_roots
-                .retain(|host, (root, _)| !gone.contains(host) && !gone.contains(root));
-            state
-                .shadow_hosts
-                .retain(|root, host| !gone.contains(root) && !gone.contains(host));
-            if state.fullscreen.is_some_and(|id| gone.contains(&id)) {
-                state.fullscreen = None;
-            }
-            for observer in &mut state.observers {
-                observer.targets.retain(|t| !gone.contains(&t.node));
-                observer.transient.retain(|(node, _)| !gone.contains(node));
-            }
-            state.observers.retain(|o| {
-                o.object.is_alive() && (!o.targets.is_empty() || !o.records.is_empty())
-            });
-            state.dom.record_mutations = state
-                .observers
-                .iter()
-                .any(|o| o.watch == state::Watch::Mutation && !o.targets.is_empty());
-        }
+        self.state.borrow_mut().forget_nodes(&freed_all, &gone);
         let mut view = self.view.borrow_mut();
         view.computed.forget(&freed_all);
         view.changed.retain(|id| !gone.contains(id));
         view.restyled.retain(|id| !gone.contains(id));
         view.partitions.retain(|id| !gone.contains(id));
+        let carried = &mut view.carried;
+        for nodes in [
+            &mut carried.nodes,
+            &mut carried.restyled,
+            &mut carried.partitions,
+        ] {
+            nodes.retain(|id| !gone.contains(id));
+        }
         view.removed.extend(freed_all.iter().copied());
         freed_all.len()
     }
@@ -961,33 +689,21 @@ impl Document {
     /// The element under `(x, y)`, from what was last painted: what the pointer's events
     /// target. `None` outside every painted box.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
-        hit_test(&self.state.borrow(), x, y).first().copied()
+        hit_test(&self.laid(), x, y).first().copied()
     }
 
     fn pointer_target(&self, pointer: &Pointer) -> NodeId {
-        let state = self.state.borrow();
+        let state = self.laid();
         hit_test(&state, pointer.x, pointer.y)
             .first()
             .copied()
             .unwrap_or(state.dom.body)
     }
 
+    /// The fields of a mouse event for `pointer` with `buttons` held; its `detail` is the click
+    /// count (see `person.rs` for the events that have none).
     fn pointer_init(pointer: &Pointer, buttons: u16) -> Vec<(&'static str, JsValue)> {
-        vec![
-            ("clientX", f64::from(pointer.x).into()),
-            ("clientY", f64::from(pointer.y).into()),
-            ("screenX", f64::from(pointer.x).into()),
-            ("screenY", f64::from(pointer.y).into()),
-            ("pageX", f64::from(pointer.x).into()),
-            ("pageY", f64::from(pointer.y).into()),
-            ("button", pointer.button.into()),
-            ("buttons", buttons.into()),
-            ("ctrlKey", pointer.modifiers.ctrl.into()),
-            ("shiftKey", pointer.modifiers.shift.into()),
-            ("altKey", pointer.modifiers.alt.into()),
-            ("metaKey", pointer.modifiers.meta.into()),
-            ("detail", pointer.count.max(1).into()),
-        ]
+        person::fields(pointer, buttons, pointer.count.max(1))
     }
 
     fn fire(
@@ -1008,17 +724,10 @@ impl Document {
         }
     }
 
-    /// The pointer moved to `pointer`'s place: the elements it left hear `pointerout`/
-    /// `mouseout` and `pointerleave`/`mouseleave`, the ones it came onto `pointerover`/
-    /// `mouseover` and `pointerenter`/`mouseenter`, a `:hover` rule follows, and the element
-    /// under it hears `pointermove` and `mousemove`.
+    /// The pointer moved to `pointer`'s place: see [`Document::pointer_move_on`].
     pub fn pointer_move(&self, runtime: &mut verve::Runtime, pointer: &Pointer) {
         let target = self.pointer_target(pointer);
-        self.hover_node(runtime, Some(target), pointer);
-        let init = Self::pointer_init(pointer, 0);
-        self.fire(runtime, target, "PointerEvent", "pointermove", &init);
-        self.fire(runtime, target, "MouseEvent", "mousemove", &init);
-        runtime.run_microtasks();
+        self.pointer_move_on(runtime, target, pointer);
     }
 
     /// The pointer moved over `node` (or over nothing): that node hears `pointermove` and
@@ -1052,71 +761,12 @@ impl Document {
         runtime.run_microtasks();
     }
 
-    fn hover_node(&self, runtime: &mut verve::Runtime, node: Option<NodeId>, pointer: &Pointer) {
-        let previous = self.view.borrow().over;
-        if previous == node {
-            return;
-        }
-        self.view.borrow_mut().over = node;
-        let path: Vec<NodeId> = {
-            let state = self.state.borrow();
-            match node {
-                Some(node) => {
-                    let mut path = vec![node];
-                    let mut at = state.dom.parent_element(node);
-                    while let Some(parent) = at {
-                        path.push(parent);
-                        at = state.dom.parent_element(parent);
-                    }
-                    path
-                }
-                None => Vec::new(),
-            }
-        };
-        let (left, entered) = self.state.borrow_mut().dom.set_hovered(path);
-        let context = runtime.context();
-        let related = |n: Option<NodeId>, cx: &mut Context| {
-            n.map_or(JsValue::null(), |n| bind::node::wrap(cx, n))
-        };
-        // The pointer's events, then the mouse's, as UI Events orders them: out of the old
-        // element and each element left (innermost first), over the new and each element
-        // entered (outermost first).
-        let mut init = Self::pointer_init(pointer, 0);
-        if let Some(previous) = previous.filter(|p| self.state.borrow().dom.exists(*p)) {
-            let to = related(node, context);
-            init.push(("relatedTarget", to));
-            for (class, out, leave) in [
-                ("PointerEvent", "pointerout", "pointerleave"),
-                ("MouseEvent", "mouseout", "mouseleave"),
-            ] {
-                self.fire(runtime, previous, class, out, &init);
-                for id in &left {
-                    self.fire(runtime, *id, class, leave, &init);
-                }
-            }
-            init.pop();
-        }
-        if let Some(node) = node {
-            let from = related(previous, runtime.context());
-            init.push(("relatedTarget", from));
-            for (class, over, enter) in [
-                ("PointerEvent", "pointerover", "pointerenter"),
-                ("MouseEvent", "mouseover", "mouseenter"),
-            ] {
-                self.fire(runtime, node, class, over, &init);
-                for id in entered.iter().rev() {
-                    self.fire(runtime, *id, class, enter, &init);
-                }
-            }
-        }
-    }
-
     /// A button pressed at `pointer`: `pointerdown` and `mousedown` at the element under it,
     /// `:active`, and — unless `mousedown` was prevented — the focus moving to it (or to what
     /// focusable thing it is in; away, for none). Answers whether nothing prevented it.
     pub fn pointer_down(&self, runtime: &mut verve::Runtime, pointer: &Pointer) -> bool {
         let target = self.pointer_target(pointer);
-        self.press_down(runtime, target, pointer)
+        self.press_down(runtime, target, pointer, true)
     }
 
     /// [`Document::pointer_down`] on `node`, without hit testing.
@@ -1126,18 +776,29 @@ impl Document {
         node: NodeId,
         pointer: &Pointer,
     ) -> bool {
-        self.press_down(runtime, node, pointer)
+        self.press_down(runtime, node, pointer, true)
     }
 
-    fn press_down(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) -> bool {
+    fn press_down(
+        &self,
+        runtime: &mut verve::Runtime,
+        target: NodeId,
+        pointer: &Pointer,
+        placed: bool,
+    ) -> bool {
+        self.person(Act::Press);
         self.hover_node(runtime, Some(target), pointer);
-        let buttons = match pointer.button {
+        let held = match pointer.button {
             1 => 4,
             2 => 2,
+            3 => 8,
+            4 => 16,
             _ => 1,
         };
-        let init = Self::pointer_init(pointer, buttons);
+        let held = held | pointer.buttons;
+        let init = person::fields(pointer, held, 0);
         let pointer_allowed = self.fire(runtime, target, "PointerEvent", "pointerdown", &init);
+        let init = Self::pointer_init(pointer, held);
         let allowed =
             pointer_allowed && self.fire(runtime, target, "MouseEvent", "mousedown", &init);
         {
@@ -1146,13 +807,13 @@ impl Document {
             state.dom.mark(target);
         }
         self.view.borrow_mut().pressed = Some(target);
-        if allowed && pointer.button == 0 {
+        if allowed && pointer.button <= 2 {
             let context = runtime.context();
             let focus = {
                 let mut at = Some(target);
                 let mut found = None;
                 while let Some(node) = at {
-                    if bind::events::focusable(context, node) {
+                    if bind::node::read_dom(context, |dom| bind::events::is_focusable(dom, node)) {
                         found = Some(node);
                         break;
                     }
@@ -1160,6 +821,9 @@ impl Document {
                 }
                 found
             };
+            if focus.is_none() {
+                self.pointer_missed();
+            }
             if let Err(error) = bind::events::set_focus_from(context, focus, true) {
                 verve::report(context, &error);
             }
@@ -1176,6 +840,10 @@ impl Document {
                     });
                 }
             }
+        }
+        // After the focus has moved: Chromium focuses before it selects.
+        if allowed {
+            self.drag_pressed(runtime, target, (pointer, placed));
         }
         runtime.run_microtasks();
         allowed
@@ -1202,8 +870,13 @@ impl Document {
     }
 
     fn release(&self, runtime: &mut verve::Runtime, target: NodeId, pointer: &Pointer) -> bool {
-        let init = Self::pointer_init(pointer, 0);
-        self.fire(runtime, target, "PointerEvent", "pointerup", &init);
+        self.person(Act::Release);
+        if let Some(dropped) = self.drag_released(runtime, target, pointer) {
+            return dropped;
+        }
+        let none = person::fields(pointer, pointer.buttons, 0);
+        self.fire(runtime, target, "PointerEvent", "pointerup", &none);
+        let init = Self::pointer_init(pointer, pointer.buttons);
         self.fire(runtime, target, "MouseEvent", "mouseup", &init);
         {
             let mut state = self.state.borrow_mut();
@@ -1244,11 +917,13 @@ impl Document {
                         self.fire(runtime, clicked, "MouseEvent", "dblclick", &init);
                     }
                 }
-                1 => {
+                1 | 3 | 4 => {
                     allowed = self.fire(runtime, clicked, "PointerEvent", "auxclick", &init);
                 }
                 _ => {
-                    allowed = self.fire(runtime, clicked, "PointerEvent", "contextmenu", &init);
+                    // Chromium says `auxclick` for the secondary button too, ahead of the menu.
+                    self.fire(runtime, clicked, "PointerEvent", "auxclick", &init);
+                    allowed = self.fire(runtime, clicked, "PointerEvent", "contextmenu", &none);
                 }
             }
         }
@@ -1259,20 +934,14 @@ impl Document {
     /// A press on `node` from start to end — down, up, click — as a pointer at its painted
     /// box's middle: for a drawer that hit tests itself, and for tests.
     pub fn press(&self, runtime: &mut verve::Runtime, node: NodeId) -> bool {
-        let rect = self
-            .state
-            .borrow()
-            .rects
-            .get(&node)
-            .copied()
-            .unwrap_or_default();
+        let rect = self.laid().rects.get(&node).copied().unwrap_or_default();
         let pointer = Pointer {
             x: rect.x + rect.width / 2.,
             y: rect.y + rect.height / 2.,
             count: 1,
             ..Pointer::default()
         };
-        self.press_down(runtime, node, &pointer);
+        self.press_down(runtime, node, &pointer, false);
         self.release(runtime, node, &pointer)
     }
 
@@ -1286,12 +955,7 @@ impl Document {
         delta_y: f32,
     ) -> bool {
         let target = self.pointer_target(pointer);
-        let mut init = Self::pointer_init(pointer, 0);
-        init.push(("deltaX", f64::from(delta_x).into()));
-        init.push(("deltaY", f64::from(delta_y).into()));
-        let allowed = self.fire(runtime, target, "WheelEvent", "wheel", &init);
-        runtime.run_microtasks();
-        allowed
+        self.wheel_on(runtime, target, pointer, (delta_x, delta_y))
     }
 
     /// The element with the keyboard.
@@ -1311,8 +975,8 @@ impl Document {
     fn key_init(key: &Key, char_code: u32) -> Vec<(&'static str, JsValue)> {
         let code = key_code(&key.key);
         vec![
-            ("key", bind::text(&key.key)),
-            ("code", bind::text(&key.code)),
+            ("key", js_text(&key.key)),
+            ("code", js_text(&key.code)),
             ("keyCode", code.into()),
             (
                 "which",
@@ -1341,6 +1005,13 @@ impl Document {
     /// `input`), Backspace and Delete, the caret's keys, Enter submitting a form or pressing a
     /// button, Tab moving the focus. Answers whether nothing prevented it.
     pub fn key_down(&self, runtime: &mut verve::Runtime, key: &Key) -> bool {
+        self.person(Act::Key(key));
+        if let Some(allowed) = self.composing_key(runtime, key, true) {
+            return allowed;
+        }
+        if key.key == "Escape" && self.drag_cancel(runtime) {
+            return false;
+        }
         let target = self.key_target();
         let allowed = self.fire(
             runtime,
@@ -1359,6 +1030,9 @@ impl Document {
     /// A key let go: `keyup` — and Space on a button or a box presses it, as it does when let
     /// go in a browser.
     pub fn key_up(&self, runtime: &mut verve::Runtime, key: &Key) -> bool {
+        if let Some(allowed) = self.composing_key(runtime, key, false) {
+            return allowed;
+        }
         let target = self.key_target();
         let allowed = self.fire(
             runtime,
@@ -1418,8 +1092,35 @@ impl Document {
 
     fn key_default(&self, runtime: &mut verve::Runtime, target: NodeId, key: &Key) {
         let field = self.is_text_field(target);
+        if !field
+            && let Some(host) = self.editable_host(target)
+            && self.edit_key(runtime, host, key)
+        {
+            let typed = key.key.chars().count() == 1 && !key.modifiers.ctrl && !key.modifiers.meta;
+            self.acted(!typed && key.key != "Enter");
+            return;
+        }
         let chord = key.modifiers.ctrl || key.modifiers.meta;
-        let printable = key.key.chars().count() == 1 && !chord;
+        // Copy and cut are done here. A paste needs the clipboard, which is the shell's: it is
+        // asked for, and pasted when the answer comes ([`Document::request_paste`]). Either way
+        // the page has heard the `keydown` and could cancel it, as in Chromium.
+        if chord && !key.modifiers.alt {
+            let lower = key.key.to_ascii_lowercase();
+            let shift = key.modifiers.shift;
+            if (lower == "c" || lower == "x") && !shift {
+                let done = self.clipboard_command(runtime, |cx| {
+                    clipboard::copy_or_cut(cx, lower == "x", true)
+                });
+                self.acted(done);
+                return;
+            }
+            if lower == "v" {
+                self.request_paste(runtime, shift);
+                self.acted(true);
+                return;
+            }
+        }
+        let printable = key.key.chars().count() == 1 && !chord && !key.modifiers.alt;
         if printable {
             let char_code = key.key.chars().next().map_or(0, |c| c as u32);
             let allowed = self.fire(
@@ -1456,13 +1157,19 @@ impl Document {
                     let context = runtime.context();
                     let _ = bind::events::click(context, target, &[], true);
                 }
+                // A link is clicked on the keydown; a button, on the `keypress` (Electron 39.8.10,
+                // menu-order `keys3` probe): only the link's is a command of the keydown.
+                self.acted(!self.is_button_like(target));
             }
             "Backspace" | "Delete" if field => {
                 let word = chord || key.modifiers.alt;
                 let backward = key.key == "Backspace";
                 self.delete_in(runtime, target, backward, word);
+                self.acted(true);
             }
+            "ArrowUp" | "ArrowDown" if field => self.acted(true),
             "ArrowLeft" | "ArrowRight" | "Home" | "End" if field => {
+                self.acted(true);
                 let shift = key.modifiers.shift;
                 let word = chord || key.modifiers.alt;
                 bind::node::with_dom(runtime.context(), |dom| {
@@ -1485,6 +1192,11 @@ impl Document {
                     }
                 });
             }
+            "z" | "Z" | "y" | "Y" if field && chord && !key.modifiers.alt => {
+                let redo = key.key.eq_ignore_ascii_case("y") || key.modifiers.shift;
+                let did = self.undo_field(runtime, target, redo);
+                self.acted(did);
+            }
             "a" | "A" if field && chord => {
                 bind::node::with_dom(runtime.context(), |dom| {
                     bind::element::ensure_draft(dom, target);
@@ -1492,8 +1204,13 @@ impl Document {
                         draft.select_all();
                     }
                 });
+                self.acted(true);
             }
-            "Tab" => self.tab(runtime, target, key.modifiers.shift),
+            "Tab" => {
+                let before = self.focused();
+                self.tab(runtime, target, key.modifiers.shift);
+                self.acted(self.focused() != before);
+            }
             _ => {}
         }
     }
@@ -1561,7 +1278,7 @@ impl Document {
         };
         let candidates: Vec<NodeId> = candidates
             .into_iter()
-            .filter(|n| bind::events::focusable(context, *n))
+            .filter(|n| bind::node::read_dom(context, |dom| bind::events::is_focusable(dom, *n)))
             .collect();
         if candidates.is_empty() {
             return;
@@ -1609,14 +1326,12 @@ impl Document {
         text: &str,
         input_type: &str,
     ) {
-        let init = [
-            ("data", bind::text(text)),
-            ("inputType", bind::text(input_type)),
-        ];
+        let init = [("data", js_text(text)), ("inputType", js_text(input_type))];
         let allowed = self.fire(runtime, field, "InputEvent", "beforeinput", &init);
         if !allowed {
             return;
         }
+        let before = self.draft_before(field);
         let changed = bind::node::with_dom(runtime.context(), |dom| {
             bind::element::ensure_draft(dom, field);
             let max = dom
@@ -1655,6 +1370,12 @@ impl Document {
             true
         });
         if changed {
+            let kind = if input_type == "insertText" {
+                field_undo::Edit::Typing
+            } else {
+                field_undo::Edit::Other
+            };
+            self.edited(field, before, kind);
             self.fire(runtime, field, "InputEvent", "input", &init);
         }
     }
@@ -1667,12 +1388,13 @@ impl Document {
             (false, true) => "deleteWordForward",
         };
         let init = [
-            ("inputType", bind::text(input_type)),
+            ("inputType", js_text(input_type)),
             ("data", JsValue::null()),
         ];
         if !self.fire(runtime, field, "InputEvent", "beforeinput", &init) {
             return;
         }
+        let before = self.draft_before(field);
         let changed = bind::node::with_dom(runtime.context(), |dom| {
             bind::element::ensure_draft(dom, field);
             let Some(draft) = dom.get_mut(field).and_then(|n| n.draft.as_mut()) else {
@@ -1685,6 +1407,13 @@ impl Document {
             }
         });
         if changed {
+            // Backspace and Delete join each other; a word deletion is a step of its own.
+            let kind = if word {
+                field_undo::Edit::Other
+            } else {
+                field_undo::Edit::Delete
+            };
+            self.edited(field, before, kind);
             self.fire(runtime, field, "InputEvent", "input", &init);
         }
     }
@@ -1709,6 +1438,8 @@ impl Document {
         let target = self.key_target();
         if self.is_text_field(target) {
             self.insert_into(runtime, target, text, "insertText");
+        } else if let Some(host) = self.editable_host(target) {
+            self.insert_into_host(runtime, host, text);
         }
         runtime.run_microtasks();
     }
@@ -1737,7 +1468,7 @@ impl Document {
                 node,
                 "InputEvent",
                 "input",
-                &[("inputType", bind::text("insertText"))],
+                &[("inputType", js_text("insertText"))],
             );
         }
         runtime.run_microtasks();
@@ -1765,6 +1496,32 @@ impl Document {
     pub fn choose(&self, runtime: &mut verve::Runtime, select: NodeId, value: &str) {
         let changed = bind::node::with_dom(runtime.context(), |dom| dom.set_value(select, value));
         if changed {
+            self.fire(runtime, select, "Event", "input", &[]);
+            self.fire(runtime, select, "Event", "change", &[]);
+        }
+        runtime.run_microtasks();
+    }
+
+    /// One of a `<select>`'s listed options chosen, by its index among the ones the list shows
+    /// (hidden options are not counted): `input` and `change`. An option that cannot be chosen,
+    /// or one that is already the chosen, is ignored.
+    pub fn choose_option(&self, runtime: &mut verve::Runtime, select: NodeId, index: usize) {
+        let changed = bind::node::with_dom(runtime.context(), |dom| {
+            let option = *dom.listed_options(select).get(index)?;
+            let select_off = dom
+                .get(select)
+                .is_some_and(|n| n.attr("disabled").is_some());
+            if select_off
+                || dom.option_disabled(option)
+                || dom.selected_option(select) == Some(option)
+            {
+                return None;
+            }
+            let at = dom.options(select).iter().position(|o| *o == option)?;
+            dom.select_index(select, Some(at));
+            Some(())
+        });
+        if changed.is_some() {
             self.fire(runtime, select, "Event", "input", &[]);
             self.fire(runtime, select, "Event", "change", &[]);
         }
@@ -1848,11 +1605,9 @@ pub mod host {
         methods: &[Method],
         accessors: &[Accessor],
     ) -> JsResult<()> {
-        let prototype = crate::state::shared(context)
-            .borrow()
-            .class(class)
+        let prototype = crate::state::class_of(context, class)
             .map(|(_, p)| p)
-            .ok_or_else(|| crate::bind::type_error(format!("verve-dom has no class {class}")))?;
+            .ok_or_else(|| verve::native::type_error(format!("verve-dom has no class {class}")))?;
         crate::bind::extend_prototype(context, &prototype, methods, accessors)
     }
 

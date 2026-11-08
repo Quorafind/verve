@@ -1,0 +1,55 @@
+{
+  "electron": "39.8.10",
+  "events": [
+    "app will-finish-launching",
+    "app ready",
+    "contents 1 did-start-loading",
+    "contents 1 dom-ready",
+    "contents 1 did-finish-load",
+    "contents 1 did-stop-loading",
+    "app before-quit",
+    "window 1 close",
+    "window 1 closed",
+    "app will-quit",
+    "process exit"
+  ],
+  "console": [
+    {
+      "from": "renderer",
+      "text": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged."
+    },
+    {
+      "from": "renderer",
+      "text": "renderer: hello-from-main {\"n\":1}"
+    },
+    {
+      "from": "main",
+      "text": "main: ping 1 2"
+    },
+    {
+      "from": "renderer",
+      "text": "renderer: pong 3"
+    },
+    {
+      "from": "renderer",
+      "text": "renderer: add 42"
+    },
+    {
+      "from": "main",
+      "text": "Error occurred in handler for 'fail': Error: boom"
+    },
+    {
+      "from": "renderer",
+      "text": "renderer: fail Error invoking remote method 'fail': Error: boom"
+    },
+    {
+      "from": "main",
+      "text": "main: sync 21"
+    },
+    {
+      "from": "renderer",
+      "text": "renderer: sync 42"
+    }
+  ],
+  "exitCode": 0
+}

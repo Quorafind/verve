@@ -34,7 +34,7 @@
 //! **Not supported**: a proxy reached over TLS (`https://`) and SOCKS (`socks5://`). A request
 //! that would go through one fails with `ERR_PROXY_INVALID_CONFIG` rather than going direct.
 
-use boa_engine::{Context, JsData, JsObject, JsResult, JsValue};
+use boa_engine::{Context, JsData, JsObject, JsResult, JsValue, js_string};
 use boa_gc::{Finalize, Trace};
 use std::net::IpAddr;
 use std::rc::Rc;
@@ -127,6 +127,38 @@ pub(crate) fn via_of(options: &JsValue, cx: &mut Context) -> JsResult<Option<Via
     Ok(value
         .as_object()
         .and_then(|o| o.downcast_ref::<ViaData>().map(|d| d.via.clone())))
+}
+
+/// The route the request's options chose themselves, if they did: `Some(None)` is a direct
+/// connection, whatever the agent's configuration says.
+pub(crate) fn chosen(options: &JsValue, cx: &mut Context) -> JsResult<Option<Option<Via>>> {
+    if let Some(via) = via_of(options, cx)? {
+        return Ok(Some(Some(via)));
+    }
+    Ok(get(options, "__verveDirect", cx)?
+        .to_boolean()
+        .then_some(None))
+}
+
+/// Sends a request through the `http:` proxy `(host, port)`, whatever the agent's configuration says.
+pub(crate) fn via(
+    options: &JsObject,
+    (host, port): (String, u16),
+    tunnel: bool,
+    cx: &mut Context,
+) -> JsResult<()> {
+    let proxy = Proxy {
+        host,
+        port,
+        authorization: None,
+    };
+    let route = via_object(Via { proxy, tunnel });
+    crate::native::hidden(options, js_string!("__verveVia"), route, cx)
+}
+
+/// Sends a request straight to its server, whatever the agent's configuration says.
+pub(crate) fn direct(options: &JsObject, cx: &mut Context) -> JsResult<()> {
+    crate::native::hidden(options, js_string!("__verveDirect"), true, cx)
 }
 
 /// An agent's own proxy configuration, from its `proxyEnv`.

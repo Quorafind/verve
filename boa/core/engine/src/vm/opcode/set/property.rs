@@ -3,13 +3,114 @@ use crate::JsValue;
 use crate::value::JsVariant;
 use crate::vm::opcode::{IndexOperand, RegisterOperand, nullish_base_error};
 use crate::{
-    Context, JsNativeError, JsResult,
-    builtins::function::set_function_name,
+    Context, JsNativeError, JsObject, JsResult,
+    builtins::{
+        function::set_function_name, typed_array::object::typed_array_element_set_shortcut,
+    },
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::{PropertyDescriptor, PropertyKey},
-    vm::opcode::Operation,
+    vm::{
+        inline_cache::{AddCache, has_ordinary_property_methods},
+        opcode::Operation,
+    },
 };
 use boa_macros::js_str;
+
+/// Sets `key` on `object` when no part of `[[Set]]` can be observed.
+///
+/// `OrdinarySet` on a receiver without an own property walks the prototype chain, where a setter or
+/// a non-writable data property makes the assignment fail; anything exotic can also intercept it.
+/// The answer is therefore only known up front when the object is ordinary and extensible, every
+/// prototype is ordinary and lacks the key, and the receiver is the object itself. That is exactly
+/// when `CreateDataProperty` inserts the value with the default attributes, so the walk is replaced
+/// by one insert. The insert is remembered in `adds`, so that the next time the site finds the
+/// same shape and prototypes it can skip the lookups.
+fn set_new_own_property(
+    object: &JsObject,
+    key: &PropertyKey,
+    value: JsValue,
+    adds: &AddCache,
+) -> bool {
+    if !has_ordinary_property_methods(object.vtable()) {
+        return false;
+    }
+    {
+        let borrowed = object.borrow();
+        if !borrowed.extensible || borrowed.properties().get(key).is_some() {
+            return false;
+        }
+    }
+
+    let mut current = object.prototype();
+    while let Some(prototype) = current {
+        if !has_ordinary_property_methods(prototype.vtable()) {
+            return false;
+        }
+        let borrowed = prototype.borrow();
+        if borrowed.properties().get(key).is_some() {
+            return false;
+        }
+        current = borrowed.shape().prototype();
+    }
+
+    let from = object.borrow().shape().clone();
+    object.borrow_mut().properties.insert(
+        key,
+        PropertyDescriptor::builder()
+            .value(value)
+            .writable(true)
+            .enumerable(true)
+            .configurable(true)
+            .build(),
+    );
+    adds.record(&from, key, object);
+    true
+}
+
+/// Sets through the inline cache if it has a valid entry for the object, returning whether it did.
+///
+/// Only a setter in the prototype and an own data property are cached: a data property in the
+/// prototype is never cacheable (the write creates an own property), so such an entry would be
+/// a bug, and is treated as a miss.
+fn cached_set(
+    index: IndexOperand,
+    object: &JsObject,
+    receiver: &JsValue,
+    value: &JsValue,
+    context: &mut Context,
+) -> JsResult<bool> {
+    let ic = &context.vm.frame().code_block().ic[usize::from(index)];
+    let object_borrowed = object.borrow();
+    let Some((slot, setter)) = ic.get(object_borrowed.shape(), object_borrowed.properties(), true)
+    else {
+        return Ok(false);
+    };
+
+    if slot.attributes.is_accessor_descriptor() {
+        // No setter function is for `[[Set]]` to decide: it fails, and a strict function throws.
+        let Some(setter) = setter.as_object().filter(|_| slot.attributes.has_set()) else {
+            return Ok(false);
+        };
+        drop(object_borrowed);
+        setter.call(receiver, std::slice::from_ref(value), context)?;
+        return Ok(true);
+    }
+
+    if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+        return Ok(false);
+    }
+    drop(object_borrowed);
+    let mut object_borrowed = object.borrow_mut();
+    let Some(stored) = object_borrowed
+        .properties_mut()
+        .storage
+        .get_mut(slot.index as usize)
+    else {
+        return Ok(false);
+    };
+    *stored = value.clone();
+    Ok(true)
+}
 
 fn set_by_name(
     value: RegisterOperand,
@@ -28,45 +129,24 @@ fn set_by_name(
     }
     let object = value_object.to_object(context)?;
 
-    let ic = &context.vm.frame().code_block().ic[usize::from(index)];
-
-    let object_borrowed = object.borrow();
-    if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
-        let slot_index = slot.index as usize;
-
-        if slot.attributes.is_accessor_descriptor() {
-            let result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                let prototype = shape.prototype().expect("prototype should have value");
-                let prototype = prototype.borrow();
-
-                prototype.properties().storage[slot_index + 1].clone()
-            } else {
-                object_borrowed.properties().storage[slot_index + 1].clone()
-            };
-
-            drop(object_borrowed);
-            if slot.attributes.has_set() && result.is_object() {
-                result.as_object().expect("should contain getter").call(
-                    receiver,
-                    std::slice::from_ref(&value),
-                    context,
-                )?;
-            }
-        } else if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let prototype = shape.prototype().expect("prototype should have value");
-            let mut prototype = prototype.borrow_mut();
-
-            prototype.properties_mut().storage[slot_index] = value.clone();
-        } else {
-            drop(object_borrowed);
-            let mut object_borrowed = object.borrow_mut();
-            object_borrowed.properties_mut().storage[slot_index] = value.clone();
-        }
+    if cached_set(index, &object, receiver, &value, context)? {
         return Ok(());
     }
-    drop(object_borrowed);
 
+    let ic = &context.vm.frame().code_block().ic[usize::from(index)];
+
+    // `[[Set]]` inserts on the receiver, so the shortcuts only apply when the receiver is the
+    // object being written through.
+    let is_receiver = receiver
+        .as_object()
+        .is_some_and(|receiver| JsObject::equals(&object, &receiver));
+    if is_receiver && ic.adds.add(&object, &value) {
+        return Ok(());
+    }
     let name: PropertyKey = ic.name.clone().into();
+    if is_receiver && set_new_own_property(&object, &name, value.clone(), &ic.adds) {
+        return Ok(());
+    }
 
     let context = &mut InternalMethodPropertyContext::new(context);
     let succeeded = object.__set__(name.clone(), value.clone(), receiver.clone(), context)?;
@@ -176,23 +256,37 @@ impl SetPropertyByValue {
 
         let key = key.to_property_key(context)?;
 
-        // Fast Path:
+        // Fast Path: both shortcuts store on `object`, which is where `[[Set]]` stores only when
+        // the receiver is that object; `super[key] = value` has the prototype as `object`.
         'fast_path: {
-            if object.is_array()
-                && let PropertyKey::Index(index) = &key
+            if let PropertyKey::Index(index) = &key
+                && receiver
+                    .as_object()
+                    .is_some_and(|receiver| JsObject::equals(&object, &receiver))
             {
-                let mut object_borrowed = object.borrow_mut();
+                if object.is_array() {
+                    let mut object_borrowed = object.borrow_mut();
 
-                // Cannot modify if not extensible.
-                if !object_borrowed.extensible {
-                    break 'fast_path;
+                    // Cannot modify if not extensible.
+                    if !object_borrowed.extensible {
+                        break 'fast_path;
+                    }
+
+                    if object_borrowed
+                        .properties_mut()
+                        .set_dense_property(index.get(), &value)
+                    {
+                        return Ok(());
+                    }
                 }
 
-                if object_borrowed
-                    .properties_mut()
-                    .set_dense_property(index.get(), &value)
+                // The typed array shortcut also refuses a conversion that could run user code.
+                if let Some(result) =
+                    typed_array_element_set_shortcut(&object, index.get(), &value, context)
                 {
-                    return Ok(());
+                    #[cfg(feature = "jit")]
+                    context.vm.frame().code_block.jit.note_typed_element();
+                    return result;
                 }
             }
         }

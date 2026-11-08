@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use url::Url;
 
 pub(crate) use crate::package_json::{Json as Value, Object};
+use crate::vfs::View;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -16,6 +17,8 @@ pub(crate) enum Mode {
 pub(crate) struct ResolveError {
     pub code: &'static str,
     pub message: String,
+    /// The file the realm may not read, when `code` is `ERR_ACCESS_DENIED`.
+    pub resource: Option<PathBuf>,
 }
 
 pub(crate) type Result<T> = std::result::Result<T, ResolveError>;
@@ -24,6 +27,19 @@ fn error(code: &'static str, message: impl Into<String>) -> ResolveError {
     ResolveError {
         code,
         message: message.into(),
+        resource: None,
+    }
+}
+
+/// Resolution reached `path`, which exists, and the realm may not read it: Node's refusal, not
+/// a module that is missing.
+fn refused(path: &Path) -> ResolveError {
+    ResolveError {
+        resource: Some(path.to_path_buf()),
+        ..error(
+            "ERR_ACCESS_DENIED",
+            "Access to this API has been restricted",
+        )
     }
 }
 
@@ -52,12 +68,12 @@ pub(crate) fn file_path(url: &Url) -> Result<PathBuf> {
     })
 }
 
-pub(crate) fn manifest(dir: &Path) -> Result<Option<Value>> {
+pub(crate) fn manifest(view: &View, dir: &Path) -> Result<Option<Value>> {
     let path = dir.join("package.json");
     if !crate::permission::resolution_may_read(&path) {
         return Ok(None);
     }
-    match std::fs::read_to_string(&path) {
+    match crate::fs::sys::read_to_string(view, &path) {
         Ok(text) => serde_json::from_str(&text).map(Some).map_err(|err| {
             error(
                 "ERR_INVALID_PACKAGE_CONFIG",
@@ -72,13 +88,27 @@ pub(crate) fn manifest(dir: &Path) -> Result<Option<Value>> {
     }
 }
 
-pub(crate) fn scope(path: &Path) -> Result<Option<(PathBuf, Value)>> {
+/// Refuses a `package.json` of the package at `root`, a folder that exists, that the realm may not
+/// read. Unlike [`manifest`], which skips one, the package is there and its entry points are in
+/// that file, so a lookup that went on would report it missing. A folder that does not exist is
+/// not asked about: Node's `--permission` also refuses those for `require`, but `verve run` is
+/// confined by default, and a missing optional dependency must stay `MODULE_NOT_FOUND` there.
+fn ensure_package_readable(root: &Path) -> Result<()> {
+    let path = root.join("package.json");
+    if crate::permission::resolution_may_read(&path) {
+        Ok(())
+    } else {
+        Err(refused(&path))
+    }
+}
+
+pub(crate) fn scope(view: &View, path: &Path) -> Result<Option<(PathBuf, Value)>> {
     let mut dir = path.parent();
     while let Some(at) = dir {
         if at.file_name().is_some_and(|s| s == "node_modules") {
             break;
         }
-        if let Some(json) = manifest(at)? {
+        if let Some(json) = manifest(view, at)? {
             return Ok(Some((at.to_path_buf(), json)));
         }
         dir = at.parent();
@@ -86,24 +116,46 @@ pub(crate) fn scope(path: &Path) -> Result<Option<(PathBuf, Value)>> {
     Ok(None)
 }
 
-/// ESM_RESOLVE, also used by CJS for package exports, imports and self references.
-pub(crate) fn resolve(
-    specifier: &str,
-    parent: &Url,
+/// What every step of a resolution carries: the filesystem to ask, the mode, the conditions the
+/// package maps are read under, and how deep in a mapping this step is.
+struct Rules<'a> {
+    view: &'a View,
     mode: Mode,
-    conditions: &[String],
-) -> Result<Url> {
-    resolve_inner(specifier, parent, mode, conditions, 0)
+    conditions: &'a [String],
+    depth: usize,
 }
 
-fn resolve_inner(
+impl Rules<'_> {
+    /// The same rules one mapping deeper: `imports` may point at `imports`.
+    fn deeper(&self) -> Self {
+        Self {
+            view: self.view,
+            mode: self.mode,
+            conditions: self.conditions,
+            depth: self.depth + 1,
+        }
+    }
+}
+
+/// ESM_RESOLVE, also used by CJS for package exports, imports and self references.
+pub(crate) fn resolve(
+    view: &View,
     specifier: &str,
     parent: &Url,
     mode: Mode,
     conditions: &[String],
-    depth: usize,
 ) -> Result<Url> {
-    if depth > 64 {
+    let rules = Rules {
+        view,
+        mode,
+        conditions,
+        depth: 0,
+    };
+    resolve_inner(&rules, specifier, parent)
+}
+
+fn resolve_inner(rules: &Rules<'_>, specifier: &str, parent: &Url) -> Result<Url> {
+    if rules.depth > 64 {
         return Err(error(
             "ERR_INVALID_PACKAGE_TARGET",
             "Package imports mapping is recursive",
@@ -139,9 +191,9 @@ fn resolve_inner(
             ));
         }
         let path = file_path(parent)?;
-        if let Some((root, json)) = scope(&path)?
+        if let Some((root, json)) = scope(rules.view, &path)?
             && let Some(map) = json.get("imports").and_then(Value::as_object)
-            && let Some(target) = map_match(map, specifier, &root, true, mode, conditions, depth)?
+            && let Some(target) = map_match(rules, map, specifier, &root, true)?
         {
             return Ok(target);
         }
@@ -157,29 +209,30 @@ fn resolve_inner(
             format!("Cannot resolve '{specifier}' from {parent}"),
         )
     })?;
-    if let Some((root, json)) = scope(&path)?
+    if let Some((root, json)) = scope(rules.view, &path)?
         && json.get("name").and_then(Value::as_str) == Some(name)
         && let Some(exports) = json.get("exports").filter(|v| !v.is_null())
     {
-        return exports_resolve(&root, exports, &subpath, mode, conditions, depth);
+        return exports_resolve(rules, &root, exports, &subpath);
     }
     let mut at = path.parent();
     while let Some(dir) = at {
         if dir.file_name().is_none_or(|s| s != "node_modules") {
             let root = dir.join("node_modules").join(name);
-            if root.is_dir() {
-                let json = manifest(&root)?;
+            if crate::fs::sys::is_dir(rules.view, &root) {
+                ensure_package_readable(&root)?;
+                let json = manifest(rules.view, &root)?;
                 if let Some(exports) = json
                     .as_ref()
                     .and_then(|j| j.get("exports"))
                     .filter(|v| !v.is_null())
                 {
-                    return exports_resolve(&root, exports, &subpath, mode, conditions, depth);
+                    return exports_resolve(rules, &root, exports, &subpath);
                 }
                 if subpath != "." {
                     let candidate = root.join(&subpath[2..]);
-                    if mode == Mode::Require
-                        && let Some(file) = legacy_main(&candidate)
+                    if rules.mode == Mode::Require
+                        && let Some(file) = legacy_main(rules.view, &candidate)
                     {
                         return file_url(&file);
                     }
@@ -191,11 +244,11 @@ fn resolve_inner(
                     .and_then(Value::as_str);
                 if let Some(main) = main {
                     let candidate = root.join(main);
-                    if let Some(file) = legacy_main(&candidate) {
+                    if let Some(file) = legacy_main(rules.view, &candidate) {
                         return file_url(&file);
                     }
                 }
-                if let Some(file) = legacy_main(&root.join("index")) {
+                if let Some(file) = legacy_main(rules.view, &root.join("index")) {
                     return file_url(&file);
                 }
                 return Err(error(
@@ -243,33 +296,27 @@ fn package_name(specifier: &str) -> Result<(&str, String)> {
     ))
 }
 
-fn legacy_main(path: &Path) -> Option<PathBuf> {
-    if path.is_file() {
+fn legacy_main(view: &View, path: &Path) -> Option<PathBuf> {
+    let is_file = |path: &Path| crate::fs::sys::is_file(view, path);
+    if is_file(path) {
         return Some(path.into());
     }
     for ext in ["js", "json", "node"] {
         let candidate = PathBuf::from(format!("{}.{ext}", path.display()));
-        if candidate.is_file() {
+        if is_file(&candidate) {
             return Some(candidate);
         }
     }
     for name in ["index.js", "index.json", "index.node"] {
         let candidate = path.join(name);
-        if candidate.is_file() {
+        if is_file(&candidate) {
             return Some(candidate);
         }
     }
     None
 }
 
-fn exports_resolve(
-    root: &Path,
-    exports: &Value,
-    subpath: &str,
-    mode: Mode,
-    conditions: &[String],
-    depth: usize,
-) -> Result<Url> {
+fn exports_resolve(rules: &Rules<'_>, root: &Path, exports: &Value, subpath: &str) -> Result<Url> {
     let target = if let Some(map) = exports.as_object() {
         let dots = map.keys().filter(|k| k.starts_with('.')).count();
         if dots != 0 && dots != map.len() {
@@ -279,14 +326,14 @@ fn exports_resolve(
             ));
         }
         if dots != 0 {
-            map_match(map, subpath, root, false, mode, conditions, depth)?
+            map_match(rules, map, subpath, root, false)?
         } else if subpath == "." {
-            package_target(exports, root, None, false, mode, conditions, depth)?.url()
+            package_target(rules, exports, root, None, false)?.url()
         } else {
             None
         }
     } else if subpath == "." {
-        package_target(exports, root, None, false, mode, conditions, depth)?.url()
+        package_target(rules, exports, root, None, false)?.url()
     } else {
         None
     };
@@ -302,17 +349,14 @@ fn exports_resolve(
 }
 
 fn map_match(
+    rules: &Rules<'_>,
     map: &Object,
     name: &str,
     root: &Path,
     imports: bool,
-    mode: Mode,
-    conditions: &[String],
-    depth: usize,
 ) -> Result<Option<Url>> {
     if let Some(value) = map.get(name).filter(|_| !name.contains('*')) {
-        return package_target(value, root, None, imports, mode, conditions, depth)
-            .map(Target::url);
+        return package_target(rules, value, root, None, imports).map(Target::url);
     }
     let mut matches: Vec<_> = map
         .iter()
@@ -335,14 +379,13 @@ fn map_match(
         .collect();
     matches.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
     if let Some((_, _, matched, value)) = matches.first() {
-        return package_target(value, root, Some(matched), imports, mode, conditions, depth)
-            .map(Target::url);
+        return package_target(rules, value, root, Some(matched), imports).map(Target::url);
     }
     Ok(None)
 }
 
 fn invalid_segments(path: &str) -> bool {
-    let decoded = percent_decode(path)
+    let decoded = decode_url_escapes(path)
         .unwrap_or_else(|_| path.into())
         .replace('\\', "/");
     decoded
@@ -366,13 +409,11 @@ impl Target {
 }
 
 fn package_target(
+    rules: &Rules<'_>,
     target: &Value,
     root: &Path,
     matched: Option<&str>,
     imports: bool,
-    mode: Mode,
-    conditions: &[String],
-    depth: usize,
 ) -> Result<Target> {
     match target {
         Value::Null => Ok(Target::Blocked),
@@ -385,8 +426,7 @@ fn package_target(
                     && Url::parse(target).is_err()
                 {
                     let base = file_url(&root.join("package.json"))?;
-                    return resolve_inner(&replacement, &base, mode, conditions, depth + 1)
-                        .map(Target::Url);
+                    return resolve_inner(&rules.deeper(), &replacement, &base).map(Target::Url);
                 }
                 return Err(error(
                     "ERR_INVALID_PACKAGE_TARGET",
@@ -407,7 +447,7 @@ fn package_target(
         Value::Array(targets) => {
             let mut last = None;
             for item in targets {
-                match package_target(item, root, matched, imports, mode, conditions, depth) {
+                match package_target(rules, item, root, matched, imports) {
                     Ok(Target::Url(url)) => return Ok(Target::Url(url)),
                     Ok(Target::Blocked) => last = None,
                     Ok(Target::Unmatched) => {}
@@ -436,15 +476,15 @@ fn package_target(
                     || condition == "node"
                     || condition == "node-addons"
                     || condition
-                        == if mode == Mode::Import {
+                        == if rules.mode == Mode::Import {
                             "import"
                         } else {
                             "require"
                         }
                     || condition == "module-sync"
-                    || conditions.contains(condition)
+                    || rules.conditions.iter().any(|name| name == condition)
                 {
-                    match package_target(target, root, matched, imports, mode, conditions, depth)? {
+                    match package_target(rules, target, root, matched, imports)? {
                         Target::Unmatched => {}
                         other => return Ok(other),
                     }
@@ -459,49 +499,34 @@ fn package_target(
     }
 }
 
-pub(crate) fn finalize(mut url: Url) -> Result<Url> {
+pub(crate) fn finalize(view: &View, mut url: Url) -> Result<Url> {
     if url.scheme() != "file" {
         return Ok(url);
     }
     let path = file_path(&url)?;
-    if path.is_dir() {
+    if crate::fs::sys::is_dir(view, &path) {
         return Err(error(
             "ERR_UNSUPPORTED_DIR_IMPORT",
             format!("Directory import '{}' is not supported", path.display()),
         ));
     }
-    if !path.is_file() {
+    if !crate::fs::sys::is_file(view, &path) {
         return Err(error(
             "ERR_MODULE_NOT_FOUND",
             format!("Cannot find module '{}'", path.display()),
         ));
     }
-    if let Ok(real) = std::fs::canonicalize(&path) {
+    if let Ok(real) = crate::fs::sys::realpath(view, &path) {
         let canonical = file_url(&real)?;
         url.set_path(canonical.path());
     }
     Ok(url)
 }
 
-pub(crate) fn percent_decode(text: &str) -> Result<String> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at] == b'%' {
-            if at + 2 >= bytes.len() {
-                return Err(error("ERR_INVALID_URL", "Incomplete percent escape"));
-            }
-            let hex = std::str::from_utf8(&bytes[at + 1..at + 3]).unwrap_or("");
-            out.push(
-                u8::from_str_radix(hex, 16)
-                    .map_err(|_| error("ERR_INVALID_URL", "Invalid percent escape"))?,
-            );
-            at += 3;
-        } else {
-            out.push(bytes[at]);
-            at += 1;
-        }
-    }
-    String::from_utf8(out).map_err(|_| error("ERR_INVALID_URL", "URL is not UTF-8"))
+/// `text` with its `%XX` escapes undone, as UTF-8; an escape or text that is not one is the
+/// resolution's `ERR_INVALID_URL`.
+pub(crate) fn decode_url_escapes(text: &str) -> Result<String> {
+    let bytes = crate::encoding::percent_decode_strict(text)
+        .map_err(|message| error("ERR_INVALID_URL", message))?;
+    String::from_utf8(bytes).map_err(|_| error("ERR_INVALID_URL", "URL is not UTF-8"))
 }

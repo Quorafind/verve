@@ -20,7 +20,9 @@ use boa_engine::{
 };
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 
-use crate::native::{arg, closure, function, get, hidden, js_text, object, text_of, type_error};
+use crate::native::{
+    arg, arg_text, closure, function, get, hidden, js_text, object, text_of, type_error,
+};
 
 /// What a codec does: which format, and which way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,7 +76,9 @@ pub(crate) struct Options {
     /// Deflate's level, 0 to 9, or -1 for the default (6).
     pub level: i32,
     /// Brotli's quality (0 to 11) and window (10 to 24).
+    #[cfg(feature = "brotli")]
     pub quality: u32,
+    #[cfg(feature = "brotli")]
     pub window: u32,
     /// How much a synchronous call may answer before it is an error; `usize::MAX` for no limit.
     pub max_output: usize,
@@ -84,7 +88,9 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             level: -1,
+            #[cfg(feature = "brotli")]
             quality: 11,
+            #[cfg(feature = "brotli")]
             window: 22,
             max_output: usize::MAX,
         }
@@ -417,8 +423,21 @@ fn inflate_message(error: &flate2::DecompressError) -> String {
 pub(crate) enum Codec {
     Deflate(Deflater),
     Inflate(Inflater),
+    #[cfg(feature = "brotli")]
     BrotliCompress(Option<Box<brotli::CompressorWriter<Vec<u8>>>>),
     BrotliDecompress(Option<Box<brotli::DecompressorWriter<Vec<u8>>>>),
+    /// `brotliCompress` without the `brotli` feature: every use says it is not supported.
+    #[cfg(not(feature = "brotli"))]
+    Unsupported,
+}
+
+#[cfg(not(feature = "brotli"))]
+fn unsupported() -> ZlibError {
+    ZlibError {
+        message: "zlib.brotliCompress is not supported by Verve".to_owned(),
+        code: "ERR_NOT_SUPPORTED",
+        errno: -1,
+    }
 }
 
 fn brotli_failed() -> ZlibError {
@@ -439,12 +458,19 @@ impl Codec {
                 Codec::Inflate(Inflater::new(kind))
             }
             Kind::BrotliCompress => {
-                Codec::BrotliCompress(Some(Box::new(brotli::CompressorWriter::new(
-                    Vec::new(),
-                    16 * 1024,
-                    options.quality.min(11),
-                    options.window.clamp(10, 24),
-                ))))
+                #[cfg(feature = "brotli")]
+                {
+                    Codec::BrotliCompress(Some(Box::new(brotli::CompressorWriter::new(
+                        Vec::new(),
+                        16 * 1024,
+                        options.quality.min(11),
+                        options.window.clamp(10, 24),
+                    ))))
+                }
+                #[cfg(not(feature = "brotli"))]
+                {
+                    Codec::Unsupported
+                }
             }
             Kind::BrotliDecompress => Codec::BrotliDecompress(Some(Box::new(
                 brotli::DecompressorWriter::new(Vec::new(), 16 * 1024),
@@ -457,6 +483,7 @@ impl Codec {
         match self {
             Codec::Deflate(deflater) => deflater.run(data, FlushCompress::None),
             Codec::Inflate(inflater) => inflater.push(data),
+            #[cfg(feature = "brotli")]
             Codec::BrotliCompress(writer) => {
                 let writer = writer
                     .as_mut()
@@ -473,6 +500,8 @@ impl Codec {
                 writer.write_all(data).map_err(|_| brotli_failed())?;
                 Ok(std::mem::take(writer.get_mut()))
             }
+            #[cfg(not(feature = "brotli"))]
+            Codec::Unsupported => Err(unsupported()),
         }
     }
 
@@ -481,6 +510,7 @@ impl Codec {
         match self {
             Codec::Deflate(deflater) => deflater.run(&[], FlushCompress::Sync),
             Codec::Inflate(inflater) => inflater.push(&[]),
+            #[cfg(feature = "brotli")]
             Codec::BrotliCompress(writer) => {
                 let writer = writer
                     .as_mut()
@@ -496,6 +526,8 @@ impl Codec {
                     .ok_or_else(|| ZlibError::data("write after end"))?;
                 Ok(std::mem::take(writer.get_mut()))
             }
+            #[cfg(not(feature = "brotli"))]
+            Codec::Unsupported => Err(unsupported()),
         }
     }
 
@@ -505,6 +537,7 @@ impl Codec {
         match self {
             Codec::Deflate(deflater) => deflater.finish(),
             Codec::Inflate(inflater) => inflater.finish(),
+            #[cfg(feature = "brotli")]
             Codec::BrotliCompress(writer) => {
                 Ok(writer.take().map(|w| w.into_inner()).unwrap_or_default())
             }
@@ -515,6 +548,8 @@ impl Codec {
                 writer.close().map_err(|_| ZlibError::truncated())?;
                 Ok(std::mem::take(writer.get_mut()))
             }
+            #[cfg(not(feature = "brotli"))]
+            Codec::Unsupported => Err(unsupported()),
         }
     }
 }
@@ -556,7 +591,9 @@ pub(crate) fn options_of(value: &JsValue, context: &mut Context) -> JsResult<Opt
         }
         options.level = level as i32;
     }
+    #[cfg(feature = "brotli")]
     let params = get(value, "params", context)?;
+    #[cfg(feature = "brotli")]
     if params.is_object() {
         let quality = get(&params, "1", context)?;
         if !quality.is_undefined() {
@@ -1090,14 +1127,19 @@ mod tests {
         let text: Vec<u8> = (0..20_000)
             .map(|i| b"the quick brown fox "[i % 20])
             .collect();
-        for (pack, unpack) in [
+        let formats = vec![
             (Kind::Gzip, Kind::Gunzip),
             (Kind::Deflate, Kind::Inflate),
             (Kind::DeflateRaw, Kind::InflateRaw),
             (Kind::Gzip, Kind::Unzip),
             (Kind::Deflate, Kind::Unzip),
-            (Kind::BrotliCompress, Kind::BrotliDecompress),
-        ] {
+        ];
+        #[cfg(feature = "brotli")]
+        let formats = formats
+            .into_iter()
+            .chain([(Kind::BrotliCompress, Kind::BrotliDecompress)])
+            .collect::<Vec<_>>();
+        for (pack, unpack) in formats {
             let packed = all(pack, &text).unwrap();
             assert!(packed.len() < text.len() / 10, "{pack:?} compresses");
             let mut codec = Codec::new(unpack, Options::default());
@@ -1232,7 +1274,7 @@ fn construct_web_codec(
                 "Class constructor {name} cannot be invoked without 'new'"
             ))
         })?;
-    let format = text_of(&arg(args, 0), context)?;
+    let format = arg_text(args, 0, context)?;
     let kind = Kind::for_format(&format, compress).ok_or_else(|| {
         type_error(format!(
             "Failed to construct '{name}': Unsupported compression format: '{format}'"

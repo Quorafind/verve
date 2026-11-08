@@ -45,6 +45,11 @@ use crate::{
     },
 };
 
+mod arith;
+mod calls;
+mod stack;
+mod typed;
+
 use super::{
     JitCode, JitOptions,
     helpers::{self, HelperFn, SiteHelperFn},
@@ -52,8 +57,10 @@ use super::{
     memory::{ExecutableCode, LiveCode},
     runtime::{
         EXIT, FRAME_OFFSET, INTERRUPT_OFFSET, LOOP_COUNT_OFFSET, LOOP_LIMIT_OFFSET, REGS_OFFSET,
-        STEPS, jit_lookup, jit_store,
+        STEPS, StepFn, jit_lookup, jit_return, jit_store,
     },
+    stack_layout::{StackLayout, stack_layout},
+    typed_elements::TypedLayout,
 };
 
 /// The tag bits of NaN-boxed values (`value/inner/nan_boxed.rs`); checked against values made
@@ -141,6 +148,9 @@ impl From<&str> for CompileError {
 
 #[cfg(test)]
 thread_local! {
+    /// How many element accesses were compiled with the inline typed-array path on this thread.
+    pub(super) static TYPED_PATHS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
     /// Tests make the code generator panic, as a Cranelift bug would.
     pub(super) static PANIC_IN_CODEGEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -165,10 +175,11 @@ pub(super) fn compile(
             .as_ref()
             .map_err(|reason| CompileError::Unavailable(reason.clone()))?;
         #[cfg(test)]
-        if PANIC_IN_CODEGEN.with(std::cell::Cell::get) {
-            panic!("code generator panic (test)");
-        }
-        let (function, sites) = translate(code_block, &block_pcs, isa);
+        assert!(
+            !PANIC_IN_CODEGEN.with(std::cell::Cell::get),
+            "code generator panic (test)"
+        );
+        let (function, sites) = translate(code_block, options, &block_pcs, isa);
         let mut context = ClifContext::for_function(function);
         let compiled = context
             .compile(&**isa, &mut ControlPlane::default())
@@ -232,6 +243,7 @@ fn kind(instruction: &Instruction) -> Kind {
         | Instruction::Sub { .. }
         | Instruction::Mul { .. }
         | Instruction::Mod { .. }
+        | Instruction::Div { .. }
         | Instruction::BitAnd { .. }
         | Instruction::BitOr { .. }
         | Instruction::BitXor { .. }
@@ -260,7 +272,11 @@ fn kind(instruction: &Instruction) -> Kind {
         | Instruction::GetLengthProperty { .. }
         | Instruction::SetPropertyByName { .. }
         | Instruction::GetPropertyByValue { .. }
-        | Instruction::SetPropertyByValue { .. } => Kind::Inline,
+        | Instruction::SetPropertyByValue { .. }
+        | Instruction::IteratorNext
+        | Instruction::IteratorDone { .. }
+        | Instruction::IteratorValue { .. }
+        | Instruction::IteratorEntry { .. } => Kind::Inline,
         Instruction::Jump { address } => Kind::Jump(address.as_u32()),
         Instruction::JumpIfTrue { address, .. }
         | Instruction::JumpIfFalse { address, .. }
@@ -305,7 +321,12 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
         | Instruction::PopIntoRegister { dst }
         | Instruction::GetArgument { dst, .. }
         | Instruction::GetName { dst, .. }
-        | Instruction::GetNameGlobal { dst, .. } => vec![dst.into()],
+        | Instruction::GetNameGlobal { dst, .. }
+        | Instruction::IteratorDone { dst }
+        | Instruction::IteratorValue { dst } => vec![dst.into()],
+        Instruction::IteratorEntry { key, value, fast } => {
+            vec![key.into(), value.into(), fast.into()]
+        }
         Instruction::PushFromRegister { src } | Instruction::SetAccumulator { src } => {
             vec![src.into()]
         }
@@ -325,6 +346,7 @@ fn inline_registers(instruction: &Instruction) -> Vec<u32> {
         | Instruction::Sub { dst, lhs, rhs }
         | Instruction::Mul { dst, lhs, rhs }
         | Instruction::Mod { dst, lhs, rhs }
+        | Instruction::Div { dst, lhs, rhs }
         | Instruction::BitAnd { dst, lhs, rhs }
         | Instruction::BitOr { dst, lhs, rhs }
         | Instruction::BitXor { dst, lhs, rhs }
@@ -530,6 +552,10 @@ struct Translator<'a> {
     b: FunctionBuilder<'a>,
     /// The code block's bytecode.
     bytes: &'a [u8],
+    /// The code block, for what the interpreter saw.
+    code_block: &'a CodeBlock,
+    /// Whether every element access gets the typed-array path.
+    typed_everywhere: bool,
     state: Value,
     regs: Variable,
     blocks: BTreeMap<u32, Block>,
@@ -541,6 +567,10 @@ struct Translator<'a> {
     site_helper_sig: SigRef,
     /// Where objects keep their shape and properties, if it checked out on this thread.
     layout: Option<ObjectLayout>,
+    /// Where the VM stack's fields are, if it checked out on this thread.
+    stack_layout: Option<StackLayout>,
+    /// The code block's register count, below which a pop would take a register.
+    register_count: u32,
     /// The caches of the property accesses compiled inline; the code keeps them.
     #[allow(
         clippy::vec_box,
@@ -559,6 +589,7 @@ struct Translator<'a> {
 )]
 fn translate(
     code_block: &CodeBlock,
+    options: &JitOptions,
     block_pcs: &[u32],
     isa: &OwnedTargetIsa,
 ) -> (Function, Vec<Box<SiteCache>>) {
@@ -613,6 +644,8 @@ fn translate(
     let mut t = Translator {
         b,
         bytes: &code_block.bytecode.bytes,
+        code_block,
+        typed_everywhere: options.typed_elements_everywhere,
         state,
         regs,
         blocks,
@@ -623,6 +656,8 @@ fn translate(
         helper_sig,
         site_helper_sig,
         layout: object_layout(),
+        stack_layout: stack_layout(),
+        register_count: code_block.register_count,
         sites: Vec::new(),
         lookup_sig,
         slow: Vec::new(),
@@ -662,8 +697,9 @@ fn translate(
             pc = next;
             continue;
         }
-        // Pushes in a row (a call's `this`, function and arguments) are one helper call.
-        if let Instruction::PushFromRegister { src } = instruction {
+        // Pushes in a row (a call's `this`, function and arguments) are one helper call, unless
+        // they are done inline.
+        if let (&Instruction::PushFromRegister { src }, None) = (&instruction, t.stack_layout) {
             let mut sources = vec![u32::from(src)];
             let mut end = next;
             while sources.len() < 3 && end < len && !t.blocks.contains_key(&(end as u32)) {
@@ -808,9 +844,13 @@ impl Translator<'_> {
     /// Runs the instruction at `pc` with [`jit_step`], then goes on where it says: to one of
     /// `expected` (the next instruction first), or through `dispatch`.
     fn step(&mut self, pc: u32, expected: &[u32]) {
-        let pc_value = self.b.ins().iconst(I32, i64::from(pc));
         let opcode = Opcode::decode(self.bytes[pc as usize]);
-        let step = STEPS[opcode as usize];
+        self.step_with(STEPS[opcode as usize], pc, expected);
+    }
+
+    /// As [`Self::step`], with `step` in place of the helper for the instruction's opcode.
+    pub(super) fn step_with(&mut self, step: StepFn, pc: u32, expected: &[u32]) {
+        let pc_value = self.b.ins().iconst(I32, i64::from(pc));
         let next = self.call(self.step_sig, step as *const () as i64, &[pc_value]);
         let regs = self
             .b
@@ -1083,8 +1123,16 @@ impl Translator<'_> {
                 self.b.switch_to_block(done);
             }
             Instruction::PushFromRegister { src } => {
-                let operands = [src.into(), helpers::NO_REGISTER, helpers::NO_REGISTER];
-                self.fast(helpers::jit_push, operands, Fast::MovesStack, pc, next);
+                if let Some(layout) = self.stack_layout {
+                    self.push_inline(layout, src.into(), pc, next);
+                } else {
+                    let operands = [src.into(), helpers::NO_REGISTER, helpers::NO_REGISTER];
+                    self.fast(helpers::jit_push, operands, Fast::MovesStack, pc, next);
+                }
+            }
+            Instruction::PopIntoRegister { dst } if self.stack_layout.is_some() => {
+                let layout = self.stack_layout.expect("checked by the guard");
+                self.pop_inline(layout, dst.into(), pc, next);
             }
             Instruction::PopIntoRegister { dst } => {
                 self.fast(
@@ -1099,9 +1147,34 @@ impl Translator<'_> {
                 let f = helpers::jit_set_accumulator;
                 self.fast(f, [src.into(), 0, 0], Fast::Always, pc, next);
             }
+            Instruction::GetArgument { index, dst } if self.stack_layout.is_some() => {
+                let layout = self.stack_layout.expect("checked by the guard");
+                self.argument_inline(layout, [index.into(), dst.into()], pc, next);
+            }
             Instruction::GetArgument { index, dst } => {
                 let f = helpers::jit_get_argument;
                 self.fast(f, [index.into(), dst.into(), 0], Fast::Always, pc, next);
+            }
+            Instruction::IteratorNext => {
+                self.fast(helpers::jit_iterator_next, [0; 3], Fast::MaySlow, pc, next);
+            }
+            Instruction::IteratorDone { dst } => {
+                let f = helpers::jit_iterator_done;
+                self.fast(f, [dst.into(), 0, 0], Fast::MaySlow, pc, next);
+            }
+            Instruction::IteratorValue { dst } => {
+                let f = helpers::jit_iterator_value;
+                self.fast(f, [dst.into(), 0, 0], Fast::MaySlow, pc, next);
+            }
+            Instruction::IteratorEntry { key, value, fast } => {
+                let operands = [key.into(), value.into(), fast.into()];
+                self.fast(
+                    helpers::jit_iterator_entry,
+                    operands,
+                    Fast::MaySlow,
+                    pc,
+                    next,
+                );
             }
             Instruction::GetName { dst, binding_index } => {
                 let operands = [dst.into(), binding_index.into(), 0];
@@ -1120,6 +1193,10 @@ impl Translator<'_> {
                     pc,
                     next,
                 );
+            }
+            Instruction::CheckReturn if self.stack_layout.is_some() => {
+                let layout = self.stack_layout.expect("checked by the guard");
+                self.check_return_inline(layout, pc, next);
             }
             Instruction::CheckReturn => {
                 self.fast(helpers::jit_check_return, [0; 3], Fast::MaySlow, pc, next);
@@ -1154,9 +1231,17 @@ impl Translator<'_> {
                 self.get_element([dst.into(), key.into(), object.into()], pc, next);
             }
             Instruction::SetPropertyByValue {
-                value, key, object, ..
-            } => {
+                value,
+                key,
+                receiver,
+                object,
+            } if u32::from(receiver) == u32::from(object) => {
                 self.set_element([value.into(), key.into(), object.into()], pc, next);
+            }
+            // A receiver that is not the object (`super[key] = value`) is the interpreter's.
+            Instruction::SetPropertyByValue { .. } => {
+                self.step(pc, &[next]);
+                return true;
             }
             Instruction::Add { dst, lhs, rhs } => {
                 self.arithmetic(Arith::Add, dst.into(), lhs.into(), rhs.into(), pc, next);
@@ -1169,6 +1254,9 @@ impl Translator<'_> {
             }
             Instruction::Mod { dst, lhs, rhs } => {
                 self.remainder(dst.into(), lhs.into(), rhs.into(), pc, next);
+            }
+            Instruction::Div { dst, lhs, rhs } => {
+                self.divide(dst.into(), lhs.into(), rhs.into(), pc, next);
             }
             Instruction::BitAnd { dst, lhs, rhs } => {
                 self.bitwise(Bitwise::And, dst.into(), lhs.into(), rhs.into(), pc, next);
@@ -1331,6 +1419,14 @@ impl Translator<'_> {
             }
             Instruction::IncrementLoopIteration => {
                 self.loop_iteration(pc, next);
+                return true;
+            }
+            Instruction::Call { argument_count } => {
+                self.call_direct(pc, next, argument_count.into());
+                return true;
+            }
+            Instruction::Return => {
+                self.step_with(jit_return, pc, &[]);
                 return true;
             }
             _ => {
@@ -1538,8 +1634,10 @@ impl Translator<'_> {
         self.b.switch_to_block(done);
     }
 
-    /// `GetLengthProperty`: of an array, read inline; anything else through the helper.
+    /// `GetLengthProperty`: of an array, read inline; anything else through the helper, which
+    /// fills the site for a typed array.
     fn get_length(&mut self, [dst, object, ic]: [u32; 3], pc: u32, next: u32) {
+        let site = self.new_site();
         let done = self.b.create_block();
         let miss = self.b.create_block();
         self.b.set_cold_block(miss);
@@ -1574,15 +1672,14 @@ impl Translator<'_> {
             self.b.ins().jump(miss, &[]);
         }
         self.b.switch_to_block(miss);
-        let operands =
-            [dst, object, ic].map(|operand| self.b.ins().iconst(I32, i64::from(operand)));
-        let status = self.call(
-            self.helper_sig,
-            helpers::jit_get_length as *const () as i64,
-            &operands,
+        self.site_helper(
+            helpers::jit_get_length,
+            [dst, object, ic],
+            site,
+            pc,
+            next,
+            done,
         );
-        let slow = self.slow_block(pc, &[next]);
-        self.b.ins().brif(status, slow, &[], done, &[]);
         self.b.switch_to_block(done);
     }
 
@@ -1622,14 +1719,17 @@ impl Translator<'_> {
     }
 
     /// The address of the array that register `object` holds, and the index register `key`
-    /// holds, when the key is a non-negative `int32`; `miss` otherwise. Leaves the builder in a
-    /// new block.
+    /// holds, when the key is a non-negative `int32`; `miss` otherwise. An object that is not an
+    /// array goes to `not_array` (with the address and the index as `i64`s), or to `miss` if
+    /// there is none. Leaves the builder
+    /// in a new block.
     fn array_and_index(
         &mut self,
         layout: ObjectLayout,
         object: u32,
         key: u32,
         miss: Block,
+        not_array: Option<Block>,
     ) -> (Value, Value) {
         let key = self.load(key);
         let is_int = self.is_int(key);
@@ -1647,10 +1747,40 @@ impl Translator<'_> {
             std::ptr::from_ref(&crate::builtins::array::ARRAY_EXOTIC_INTERNAL_METHODS) as i64;
         let is_array = self.b.ins().icmp_imm_s(IntCC::Equal, vtable, array_vtable);
         let array = self.b.create_block();
-        self.b.ins().brif(is_array, array, &[], miss, &[]);
-        self.b.switch_to_block(array);
         let index = self.b.ins().uextend(I64, index);
+        match not_array {
+            Some(not_array) => {
+                let other = [address, index].map(BlockArg::Value);
+                self.b.ins().brif(is_array, array, &[], not_array, &other);
+            }
+            None => {
+                self.b.ins().brif(is_array, array, &[], miss, &[]);
+            }
+        }
+        self.b.switch_to_block(array);
         (address, index)
+    }
+
+    /// The layout of typed arrays when the element accesses of this function are to be compiled
+    /// with the inline typed-array path: the interpreter has met a typed array in it (or the
+    /// options ask for it everywhere). Other functions leave a typed array to the helper, and
+    /// compile no more than the array path.
+    fn typed_path(&self, layout: ObjectLayout) -> Option<TypedLayout> {
+        let typed = layout.typed?;
+        if !(self.typed_everywhere || self.code_block.jit.saw_typed_element()) {
+            return None;
+        }
+        #[cfg(test)]
+        TYPED_PATHS.with(|count| count.set(count.get() + 1));
+        Some(typed)
+    }
+
+    /// A new block that takes an object's address and an index, both `i64`s.
+    fn address_and_index_block(&mut self) -> Block {
+        let block = self.b.create_block();
+        self.b.append_block_param(block, I64);
+        self.b.append_block_param(block, I64);
+        block
     }
 
     /// The tag of an array's elements, and the address of element `index` of a dense kind
@@ -1696,7 +1826,9 @@ impl Translator<'_> {
         let miss = self.b.create_block();
         self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
-            let (address, index) = self.array_and_index(layout, object, key, miss);
+            let typed = self.typed_path(layout);
+            let not_array = typed.map(|_| self.address_and_index_block());
+            let (address, index) = self.array_and_index(layout, object, key, miss, not_array);
             let flag = self.load_at(I64, address, layout.flag);
             let writing = self.b.ins().icmp_imm_s(IntCC::Equal, flag, -1);
             let readable = self.b.create_block();
@@ -1746,6 +1878,13 @@ impl Translator<'_> {
             let result = self.b.block_params(store)[0];
             self.store(dst, result);
             self.b.ins().jump(done, &[]);
+            if let (Some(typed), Some(not_array)) = (typed, not_array) {
+                self.b.switch_to_block(not_array);
+                let [address, index] = self.b.block_params(not_array)[..] else {
+                    unreachable!("an address and an index");
+                };
+                self.typed_read(layout, typed, [address, index], miss, store);
+            }
         } else {
             self.b.ins().jump(miss, &[]);
         }
@@ -1772,7 +1911,9 @@ impl Translator<'_> {
         self.b.set_cold_block(miss);
         if let Some(layout) = self.layout {
             let new = self.load(value);
-            let (address, index) = self.array_and_index(layout, object, key, miss);
+            let typed = self.typed_path(layout);
+            let not_array = typed.map(|_| self.address_and_index_block());
+            let (address, index) = self.array_and_index(layout, object, key, miss, not_array);
             // Not borrowed at all, as `borrow_mut` requires, and extensible.
             let flag = self.load_at(I64, address, layout.flag);
             let unused = self.b.create_block();
@@ -1824,6 +1965,13 @@ impl Translator<'_> {
             self.b.switch_to_block(values);
             self.replace_value(element, new, miss);
             self.b.ins().jump(done, &[]);
+            if let (Some(typed), Some(not_array)) = (typed, not_array) {
+                self.b.switch_to_block(not_array);
+                let [address, index] = self.b.block_params(not_array)[..] else {
+                    unreachable!("an address and an index");
+                };
+                self.typed_write(layout, typed, [address, index], new, miss, done);
+            }
         } else {
             self.b.ins().jump(miss, &[]);
         }

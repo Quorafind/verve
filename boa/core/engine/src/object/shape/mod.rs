@@ -14,7 +14,7 @@ use std::fmt::Debug;
 
 use boa_gc::{Finalize, Trace};
 
-use crate::property::PropertyKey;
+use crate::{JsObject, property::PropertyKey};
 
 use self::{
     shared_shape::{TransitionKey, WeakSharedShape},
@@ -187,6 +187,15 @@ impl Shape {
         }
     }
 
+    /// The prototype of a shared shape, without cloning it (`None` for a unique shape, whose
+    /// prototype can be changed in place and has to be read through its cell).
+    pub(crate) fn shared_prototype(&self) -> Option<&JsObject> {
+        match &self.inner {
+            Inner::Shared(shape) => shape.prototype_ref(),
+            Inner::Unique(_) => None,
+        }
+    }
+
     /// Get the [`JsPrototype`] of the [`Shape`].
     #[must_use]
     pub fn prototype(&self) -> JsPrototype {
@@ -202,6 +211,18 @@ impl Shape {
         match &self.inner {
             Inner::Shared(shape) => shape.lookup(key),
             Inner::Unique(shape) => shape.lookup(key),
+        }
+    }
+
+    /// The number of properties of a unique shape, which gains properties in place and keeps its
+    /// identity; zero for a shared shape, which never changes. Two unique shapes that are the same
+    /// shape and have the same count have the same table: losing a property, or changing the
+    /// kind or attributes of one, makes a new shape.
+    #[inline]
+    pub(crate) fn unique_property_count(&self) -> u32 {
+        match &self.inner {
+            Inner::Shared(_) => 0,
+            Inner::Unique(shape) => shape.property_count(),
         }
     }
 
@@ -260,7 +281,6 @@ impl WeakShape {
     }
 
     /// Whether this is a weak reference to `shape`, which is alive; changes no reference count.
-    #[cfg(feature = "jit")]
     #[inline]
     #[must_use]
     pub(crate) fn points_to(&self, shape: &Shape) -> bool {

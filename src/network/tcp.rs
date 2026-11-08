@@ -643,6 +643,7 @@ pub(crate) fn deliver(id: Id, target: &JsObject, event: Event, cx: &mut Context)
             }
         }
         Event::Timeout => emit(&this, "timeout", &[], cx)?,
+        Event::Exited(..) => {}
         Event::Datagram(..)
         | Event::DatagramSent(..)
         | Event::DatagramConnected(..)

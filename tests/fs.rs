@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+mod common;
+
 use verve::Runtime;
 
 fn folder(test: &str) -> PathBuf {
@@ -19,21 +21,7 @@ fn run_in(rt: &mut Runtime, dir: &Path, body: &str) -> Vec<String> {
         .load_module(&dir.join("main.js"), body)
         .unwrap_or_else(|e| panic!("{e}"));
     rt.run_microtasks();
-    let json = rt.eval("JSON.stringify").unwrap();
-    let text = rt
-        .call(&json, &boa_engine::JsValue::undefined(), &[exports])
-        .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
-    parsed["result"]
-        .as_array()
-        .unwrap_or_else(|| panic!("no result in {parsed}"))
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| v.to_string())
-        })
-        .collect()
+    common::result_of(rt, exports)
 }
 
 #[test]

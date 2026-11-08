@@ -1,0 +1,6 @@
+// Chromium lines "[<pid>:<time>:INFO:CONSOLE:<line>] ..." that reached stderr for the 10 console calls of
+// console/observe/page.html, by the value of ELECTRON_ENABLE_LOGGING (Electron 39.8.10, Windows; --user-data-dir in a scratch folder):
+ELECTRON_ENABLE_LOGGING=1      10
+ELECTRON_ENABLE_LOGGING=0      10
+ELECTRON_ENABLE_LOGGING=false  10
+ELECTRON_ENABLE_LOGGING=       0   (an empty variable is the same as none on Windows)

@@ -1,14 +1,13 @@
 //! Native ECMAScript modules: URL identities, Node packages and synthetic CJS/builtin bridges.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::ready;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Module, Source,
-    js_string,
+    Context, JsError, JsObject, JsResult, JsString, JsValue, Module, js_string,
     module::{ModuleLoader, ModuleRequest, Referrer, SyntheticModuleInitializer},
     object::builtins::{JsFunction, JsPromise},
     property::PropertyKey,
@@ -17,9 +16,11 @@ use boa_engine::{
 use url::Url;
 
 use crate::esm_resolve::{self as resolve, Mode};
-use crate::native::{arg, closure, js_text, text_of};
+use crate::fs::sys;
+use crate::native::{arg_text, closure, js_text};
+use crate::vfs::View;
 
-fn coded_error(context: &mut Context, message: &str, code: &str) -> JsError {
+fn module_error(context: &mut Context, message: &str, code: &str) -> JsError {
     if matches!(
         code,
         "ERR_INVALID_MODULE_SPECIFIER"
@@ -31,14 +32,52 @@ fn coded_error(context: &mut Context, message: &str, code: &str) -> JsError {
             | "ERR_IMPORT_ATTRIBUTE_UNSUPPORTED"
             | "ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE"
     ) {
-        let error = JsNativeError::typ()
-            .with_message(message.to_owned())
-            .into_opaque(context);
-        let _ = error.set(js_string!("code"), JsString::from(code), false, context);
-        JsError::from_opaque(error.into())
+        crate::events::coded_type_error(context, message, code)
     } else {
         crate::native::coded_error(context, message, code)
     }
+}
+
+/// The `TypeError` a browser throws for a module it cannot find, with Node's code on it.
+fn coded_type_error(context: &mut Context, message: &str) -> JsError {
+    crate::events::coded_type_error(context, message, "ERR_MODULE_NOT_FOUND")
+}
+
+/// The property that marks the error of a module that could not be parsed: the fetch of a
+/// module graph failed, where an error thrown by a module that ran did not.
+const UNPARSED: &str = "verve:unparsed";
+
+/// Whether `error` says a module could not be parsed (and so never ran).
+pub fn is_parse_failure(error: &JsError, context: &mut Context) -> bool {
+    let Ok(value) = error.clone().into_opaque(context) else {
+        return false;
+    };
+    value.as_object().is_some_and(|object| {
+        object
+            .has_own_property(JsString::from(UNPARSED), context)
+            .unwrap_or(false)
+    })
+}
+
+/// A parse error, marked as one.
+fn unparsed(error: JsError, context: &mut Context) -> JsError {
+    let Ok(value) = error.clone().into_opaque(context) else {
+        return error;
+    };
+    if let Some(object) = value.as_object() {
+        // The error is as it was but for a property nobody lists; if it cannot be set the
+        // error is thrown unmarked, and reads as one the module threw.
+        let _ = crate::native::hidden(&object, JsString::from(UNPARSED), true, context);
+    }
+    JsError::from_opaque(value)
+}
+
+/// What the web's rules make of an import under a host's address.
+enum Web {
+    /// The address to load.
+    Url(Url),
+    /// The specifier, left for the runtime's own resolution.
+    Left(String),
 }
 
 #[derive(Default)]
@@ -56,15 +95,172 @@ pub(crate) struct Loader {
     /// engine asks once while `import()` runs and again to load, and a referrer must get the same
     /// module for the same specifier every time, whatever a hook would answer now.
     hooked: RefCell<HashMap<(String, String), Url>>,
+    /// The wrapper a format decision parsed for a CommonJS module no extension or package named,
+    /// by the module's path and the digest of the source it was parsed from: the load that
+    /// follows runs it from here, so the source is parsed and compiled once rather than once to
+    /// decide and once to run. The digest is there because that load may not come — a module
+    /// graph that fails to link leaves the wrapper behind — and a file written since must not
+    /// run from it.
+    cjs_wrappers: RefCell<HashMap<PathBuf, (u64, Script)>>,
+    /// Where the host's own addresses (`app://`, `https://`) get their source, when it set one.
+    source_hook: RefCell<Option<crate::ModuleSource>>,
+    /// The page's import map, when it set one.
+    import_map: RefCell<Option<Rc<crate::ImportMap>>>,
+    /// Whether every `import` resolves the web's way, whoever asks (a page without Node).
+    web_only: Cell<bool>,
+    /// Whether every `file:` module is refused, whoever imports it (a page that is not a local
+    /// one). Off by default.
+    local_refused: Cell<bool>,
 }
 
-fn resolve_error(context: &mut Context, error: resolve::ResolveError) -> JsError {
-    coded_error(context, &error.message, error.code)
+/// A resolution failure as the error Node throws: `ERR_ACCESS_DENIED` names the file refused.
+pub(crate) fn resolve_error(context: &mut Context, error: resolve::ResolveError) -> JsError {
+    match error.resource {
+        Some(path) => crate::permission::denied(context, "FileSystemRead", &path.to_string_lossy()),
+        None => module_error(context, &error.message, error.code),
+    }
+}
+
+/// A digest of `source`, to tell a wrapper kept for one text from another: it decides nothing
+/// about trust, and the cache's own key is what authenticates an entry. A byte order mark is
+/// left out, as the wrapper leaves it out: the load that asks for the wrapper passes the text
+/// with it already stripped.
+fn source_digest(source: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source
+        .strip_prefix('\u{feff}')
+        .unwrap_or(source)
+        .hash(&mut hasher);
+    hasher.finish()
 }
 
 impl Loader {
     pub(crate) fn is_requiring(&self) -> bool {
         !self.requiring.borrow().is_empty()
+    }
+
+    /// Keeps the wrapper parsed for the file at `path`, whose source is `source`, for the load
+    /// that follows the format decision: the same decision, asked again.
+    pub(crate) fn stash_cjs_wrapper(&self, path: &Path, source: &str, script: Script) {
+        self.cjs_wrappers
+            .borrow_mut()
+            .insert(crate::modules::clean(path), (source_digest(source), script));
+    }
+
+    /// The wrapper kept for `path`, when it was parsed from `source`: a file written since the
+    /// decision is parsed again rather than run from the code the decision made.
+    pub(crate) fn take_cjs_wrapper(&self, path: &Path, source: &str) -> Option<Script> {
+        let (digest, script) = self
+            .cjs_wrappers
+            .borrow_mut()
+            .remove(&crate::modules::clean(path))?;
+        (digest == source_digest(source)).then_some(script)
+    }
+
+    pub(crate) fn set_source_hook(&self, hook: Option<crate::ModuleSource>) {
+        *self.source_hook.borrow_mut() = hook;
+    }
+
+    pub(crate) fn set_web_only(&self, on: bool) {
+        self.web_only.set(on);
+    }
+
+    pub(crate) fn refuse_local(&self, refuse: bool) {
+        self.local_refused.set(refuse);
+    }
+
+    pub(crate) fn set_import_map(&self, map: Option<crate::ImportMap>) {
+        *self.import_map.borrow_mut() = map.map(Rc::new);
+    }
+
+    /// Whether `url` is one of the host's: none of the runtime's own kinds, and a hook is set.
+    fn is_hosted(&self, url: &Url) -> bool {
+        self.source_hook.borrow().is_some()
+            && url.scheme().len() > 1
+            && !matches!(url.scheme(), "file" | "data" | "blob" | "node")
+    }
+
+    /// The import map's say on `specifier`, then the web's rules for the host's addresses.
+    /// Answers the address when the host's hook has its source, and otherwise the specifier
+    /// the map left for the runtime's own resolution.
+    fn web_resolve(
+        &self,
+        specifier: &str,
+        parent: Option<&Path>,
+        context: &mut Context,
+    ) -> JsResult<Web> {
+        let map = self.import_map.borrow().clone();
+        let hooked = self.source_hook.borrow().clone();
+        let web = self.web_only.get();
+        let refused = self.local_refused.get();
+        if map.is_none() && hooked.is_none() && !web && !refused {
+            return Ok(Web::Left(specifier.to_owned()));
+        }
+        let referrer = self.parent(parent, context)?;
+        let mut specifier = specifier.to_owned();
+        if let Some(map) = map {
+            match map.resolve(&specifier, &referrer) {
+                Ok(Some(url)) => specifier = url.to_string(),
+                Ok(None) => {}
+                Err(message) => {
+                    return Err(module_error(context, &message, "ERR_MODULE_NOT_FOUND"));
+                }
+            }
+        }
+        // An address the specifier is (a path against the importer, or a whole one), if it is.
+        let found = crate::url_like(&specifier, &referrer);
+        // A page that is not a local one may not read a local file, whoever imports it:
+        // Electron's default rule, Chromium's error and all.
+        if let Some(url) = found
+            .as_ref()
+            .filter(|url| url.scheme() == "file" && refused)
+        {
+            return Err(coded_type_error(
+                context,
+                &format!("Failed to fetch dynamically imported module: {url}"),
+            ));
+        }
+        let target = found.clone().filter(|url| self.is_hosted(url));
+        if web && target.is_none() {
+            return self.web_target(&specifier, found, context);
+        }
+        match (target, hooked) {
+            (Some(url), Some(hook)) if hook(&url).is_some() => Ok(Web::Url(url)),
+            (Some(url), _) => Err(module_error(
+                context,
+                &format!("Cannot find module '{url}'"),
+                "ERR_MODULE_NOT_FOUND",
+            )),
+            // A bare name under a host's address has no Node to find it.
+            (None, _) if found.is_none() && self.is_hosted(&referrer) => Err(module_error(
+                context,
+                &format!("Failed to resolve module specifier '{specifier}'"),
+                "ERR_MODULE_NOT_FOUND",
+            )),
+            _ => Ok(Web::Left(specifier)),
+        }
+    }
+
+    /// What a page's `specifier` is when Node is not in the page: an address (`found`) the
+    /// runtime reads itself, or an error with the browser's words.
+    fn web_target(
+        &self,
+        specifier: &str,
+        found: Option<Url>,
+        context: &mut Context,
+    ) -> JsResult<Web> {
+        match found {
+            Some(url) if matches!(url.scheme(), "file" | "data" | "blob") => Ok(Web::Url(url)),
+            Some(_) => Err(coded_type_error(
+                context,
+                &format!("Failed to fetch dynamically imported module: {specifier}"),
+            )),
+            None => Err(coded_type_error(
+                context,
+                &format!("Failed to resolve module specifier '{specifier}'"),
+            )),
+        }
     }
 
     pub(crate) fn conditions(&self, conditions: Vec<String>) {
@@ -82,7 +278,8 @@ impl Loader {
         if let Some(parent) = parent {
             let text = parent.to_string_lossy();
             if let Ok(url) = Url::parse(&text)
-                && matches!(url.scheme(), "file" | "data" | "blob" | "node")
+                && (matches!(url.scheme(), "file" | "data" | "blob" | "node")
+                    || self.is_hosted(&url))
             {
                 return Ok(url);
             }
@@ -119,12 +316,24 @@ impl Loader {
         check_file: bool,
         context: &mut Context,
     ) -> JsResult<Url> {
+        let mapped;
+        let specifier = if mode == Mode::Import {
+            match self.web_resolve(specifier, parent, context)? {
+                Web::Url(url) => return Ok(url),
+                Web::Left(left) => {
+                    mapped = left;
+                    mapped.as_str()
+                }
+            }
+        } else {
+            specifier
+        };
         if (!specifier.ends_with('/') || mode == Mode::Require)
             && crate::modules::is_builtin(context, specifier)
         {
             let bare = crate::modules::bare_name(specifier);
             return Url::parse(&format!("node:{bare}")).map_err(|_| {
-                coded_error(
+                module_error(
                     context,
                     "Invalid builtin module name",
                     "ERR_INVALID_MODULE_SPECIFIER",
@@ -134,7 +343,8 @@ impl Loader {
         let parent = self.parent(parent, context)?;
         let result = {
             let _resolving = crate::permission::Resolving::enter(context);
-            resolve::resolve(specifier, &parent, mode, &self.conditions.borrow())
+            let view = View::of(context);
+            resolve::resolve(&view, specifier, &parent, mode, &self.conditions.borrow())
         };
         let url = result.map_err(|e| resolve_error(context, e))?;
         match url.scheme() {
@@ -143,14 +353,14 @@ impl Loader {
                 if !url.path().ends_with('/') && crate::modules::is_builtin(context, url.as_str()) {
                     return Ok(url);
                 }
-                return Err(coded_error(
+                return Err(module_error(
                     context,
                     &format!("No such built-in module: {url}"),
                     "ERR_UNKNOWN_BUILTIN_MODULE",
                 ));
             }
             _ => {
-                return Err(coded_error(
+                return Err(module_error(
                     context,
                     &format!(
                         "Only file:, data:, blob: and node: module URLs are supported. Received {url}"
@@ -160,7 +370,7 @@ impl Loader {
             }
         }
         if check_file {
-            resolve::finalize(url).map_err(|e| resolve_error(context, e))
+            resolve::finalize(&View::of(context), url).map_err(|e| resolve_error(context, e))
         } else {
             if url.scheme() == "file" {
                 resolve::file_path(&url).map_err(|e| resolve_error(context, e))?;
@@ -187,7 +397,7 @@ impl Loader {
                 .get(url.as_str())
                 .cloned();
             let Some(bytes) = bytes else {
-                return Err(coded_error(
+                return Err(module_error(
                     context,
                     &format!("Cannot find module '{url}'"),
                     "ERR_MODULE_NOT_FOUND",
@@ -245,14 +455,17 @@ impl Loader {
     ) -> JsResult<Url> {
         let text = filename.to_string_lossy();
         let url = match Url::parse(&text) {
-            Ok(url) if matches!(url.scheme(), "file" | "data" | "blob") => url,
+            Ok(url) if matches!(url.scheme(), "file" | "data" | "blob") || self.is_hosted(&url) => {
+                url
+            }
             _ => resolve::file_url(&absolute(filename, context))
                 .map_err(|e| resolve_error(context, e))?,
         };
+        let view = View::of(context);
         let url = if url.scheme() == "file"
-            && resolve::file_path(&url).is_ok_and(|path| path.is_file())
+            && resolve::file_path(&url).is_ok_and(|path| sys::is_file(&view, &path))
         {
-            resolve::finalize(url).map_err(|e| resolve_error(context, e))?
+            resolve::finalize(&view, url).map_err(|e| resolve_error(context, e))?
         } else {
             url
         };
@@ -274,15 +487,15 @@ impl Loader {
                     .and_then(|ext| ext.to_str())
                     .is_some_and(|ext| !matches!(ext, "js" | "mjs" | "cjs" | "json"))
                 {
-                    return Err(coded_error(
+                    return Err(module_error(
                         context,
                         &format!("Unknown file extension for {}", path.display()),
                         "ERR_UNKNOWN_FILE_EXTENSION",
                     ));
                 }
                 crate::permission::read(context, &path)?;
-                let text = std::fs::read_to_string(&path).map_err(|e| {
-                    coded_error(
+                let text = sys::read_to_string(&View::of(context), &path).map_err(|e| {
+                    module_error(
                         context,
                         &format!("{}: {e}", path.display()),
                         "ERR_MODULE_NOT_FOUND",
@@ -305,14 +518,14 @@ impl Loader {
                             .cloned()
                     });
                 let bytes = bytes.ok_or_else(|| {
-                    coded_error(
+                    module_error(
                         context,
                         &format!("Cannot find module '{url}'"),
                         "ERR_MODULE_NOT_FOUND",
                     )
                 })?;
                 let text = String::from_utf8(bytes).map_err(|_| {
-                    coded_error(
+                    module_error(
                         context,
                         "Module source is not UTF-8",
                         "ERR_INVALID_MODULE_SPECIFIER",
@@ -320,11 +533,17 @@ impl Loader {
                 })?;
                 Ok((text, false))
             }
-            _ => Err(coded_error(
-                context,
-                "Unsupported ESM URL",
-                "ERR_UNSUPPORTED_ESM_URL_SCHEME",
-            )),
+            _ => {
+                let hook = self.source_hook.borrow().clone();
+                match hook.and_then(|hook| hook(url)) {
+                    Some(text) => Ok((text.to_string(), false)),
+                    None => Err(module_error(
+                        context,
+                        "Unsupported ESM URL",
+                        "ERR_UNSUPPORTED_ESM_URL_SCHEME",
+                    )),
+                }
+            }
         }
     }
 
@@ -395,10 +614,15 @@ impl Loader {
             }
             "module" => {
                 let path = PathBuf::from(url.as_str());
-                crate::code_cache::module(source.trim_start_matches('\u{feff}'), &path, context)?
+                crate::code_cache_load::module(
+                    source.trim_start_matches('\u{feff}'),
+                    &path,
+                    context,
+                )
+                .map_err(|error| unparsed(error, context))?
             }
             format => {
-                return Err(coded_error(
+                return Err(module_error(
                     context,
                     &format!("Unknown module format: {format} for URL {url}"),
                     "ERR_UNKNOWN_MODULE_FORMAT",
@@ -431,14 +655,19 @@ impl Loader {
             Some(format) => format,
             None if json => "json".to_owned(),
             None if url.scheme() == "file"
-                && !self.sources.borrow().contains_key(url.as_str())
-                && !is_esm(
-                    &resolve::file_path(url).map_err(|e| resolve_error(context, e))?,
-                    &source,
-                    context,
-                )? =>
+                && !self.web_only.get()
+                && !self.sources.borrow().contains_key(url.as_str()) =>
             {
-                "commonjs".to_owned()
+                let path = resolve::file_path(url).map_err(|e| resolve_error(context, e))?;
+                match crate::modules::format(&path, &source, context)? {
+                    crate::modules::Format::Module => "module".to_owned(),
+                    crate::modules::Format::CommonJs(script) => {
+                        if let Some(script) = script {
+                            self.stash_cjs_wrapper(&path, &source, script);
+                        }
+                        "commonjs".to_owned()
+                    }
+                }
             }
             None => "module".to_owned(),
         };
@@ -451,14 +680,14 @@ impl Loader {
     /// A builtin as a module: its exports, live, under their own names.
     fn builtin_module(&self, url: &Url, context: &mut Context) -> JsResult<Module> {
         if url.scheme() != "node" {
-            return Err(coded_error(
+            return Err(module_error(
                 context,
                 &format!("No such built-in module: {url}"),
                 "ERR_UNKNOWN_BUILTIN_MODULE",
             ));
         }
         let exports = crate::modules::builtin(context, url.as_str())?.ok_or_else(|| {
-            coded_error(
+            module_error(
                 context,
                 "Unknown builtin module",
                 "ERR_UNKNOWN_BUILTIN_MODULE",
@@ -509,11 +738,11 @@ impl Loader {
         let url = if self.sources.borrow().contains_key(url.as_str()) {
             url
         } else {
-            resolve::finalize(url).map_err(|e| resolve_error(context, e))?
+            resolve::finalize(&View::of(context), url).map_err(|e| resolve_error(context, e))?
         };
         let key = url.to_string();
         if !self.requiring.borrow_mut().insert(key.clone()) {
-            return Err(coded_error(
+            return Err(module_error(
                 context,
                 "Cannot require() an ES module in a cycle",
                 "ERR_REQUIRE_CYCLE_MODULE",
@@ -524,11 +753,11 @@ impl Loader {
             module.load_link_evaluate_sync(context).map_err(|error| {
                 let message = error.to_string();
                 if message.contains("top-level await") {
-                    coded_error(context, "require() cannot be used on an ESM graph with top-level await. Use import() instead.", "ERR_REQUIRE_ASYNC_MODULE")
+                    module_error(context, "require() cannot be used on an ESM graph with top-level await. Use import() instead.", "ERR_REQUIRE_ASYNC_MODULE")
                 } else if message.contains("already evaluating") {
-                    coded_error(context, "Cannot require() an ES module in a cycle", "ERR_REQUIRE_CYCLE_MODULE")
+                    module_error(context, "Cannot require() an ES module in a cycle", "ERR_REQUIRE_CYCLE_MODULE")
                 } else if message.contains("did not complete synchronously") {
-                    coded_error(context, "The ESM graph did not load synchronously", "ERR_REQUIRE_ASYNC_MODULE")
+                    module_error(context, "The ESM graph did not load synchronously", "ERR_REQUIRE_ASYNC_MODULE")
                 } else { error }
             })?;
             let namespace = module.namespace(context);
@@ -584,7 +813,8 @@ impl Loader {
             .filter(|u| matches!(u.scheme(), "file" | "data" | "blob" | "node"))
             .or_else(|| resolve::file_url(&absolute(filename, context)).ok());
         if let Some(url) = url {
-            let canonical = resolve::finalize(url.clone()).unwrap_or(url.clone());
+            let canonical =
+                resolve::finalize(&View::of(context), url.clone()).unwrap_or(url.clone());
             for key in [url.as_str(), canonical.as_str()] {
                 self.modules.borrow_mut().remove(key);
                 self.sources.borrow_mut().remove(key);
@@ -646,7 +876,7 @@ impl ModuleLoader for Loader {
             "resolve",
             1,
             |_, args, parent: &JsString, context| {
-                let name = text_of(&arg(args, 0), context)?;
+                let name = arg_text(args, 0, context)?;
                 let loader = crate::shared(context).esm.clone();
                 let url = loader.resolve(
                     &name,
@@ -673,13 +903,16 @@ pub(crate) fn absolute(path: &Path, context: &Context) -> PathBuf {
     }
 }
 
-pub(crate) fn is_esm(path: &Path, source: &str, context: &mut Context) -> JsResult<bool> {
+/// Whether `path` names the format of what it holds — an ES module, or a CommonJS one — by its
+/// extension or by the `type` of the package it is in; `None` when neither says, so the source
+/// itself decides (see [`crate::modules::format`]).
+pub(crate) fn named_format(path: &Path, context: &mut Context) -> JsResult<Option<bool>> {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("mjs") => return Ok(true),
-        Some("cjs" | "json" | "node") => return Ok(false),
+        Some("mjs") => return Ok(Some(true)),
+        Some("cjs" | "json" | "node") => return Ok(Some(false)),
         Some("js") | None => {}
         _ => {
-            return Err(coded_error(
+            return Err(module_error(
                 context,
                 &format!("Unknown file extension for {}", path.display()),
                 "ERR_UNKNOWN_FILE_EXTENSION",
@@ -688,27 +921,16 @@ pub(crate) fn is_esm(path: &Path, source: &str, context: &mut Context) -> JsResu
     }
     let scope = {
         let _resolving = crate::permission::Resolving::enter(context);
-        resolve::scope(path)
+        resolve::scope(&View::of(context), path)
     };
-    if let Some((_, json)) = scope.map_err(|e| resolve_error(context, e))? {
-        match json.get("type").and_then(resolve::Value::as_str) {
-            Some("module") => return Ok(true),
-            Some("commonjs") => return Ok(false),
-            _ => {}
-        }
-    }
-    let source = source.trim_start_matches('\u{feff}');
-    let source = if source.starts_with("#!") {
-        source.find('\n').map_or("", |n| &source[n..])
-    } else {
-        source
+    let Some((_, json)) = scope.map_err(|e| resolve_error(context, e))? else {
+        return Ok(None);
     };
-    // Parsing the real CJS wrapper also detects lexical redeclarations of its parameters.
-    let wrapper = format!("(function(exports,require,module,__filename,__dirname){{{source}\n}})");
-    if Script::parse(Source::from_bytes(&wrapper), None, context).is_ok() {
-        return Ok(false);
-    }
-    Ok(Module::parse(Source::from_bytes(source), None, context).is_ok())
+    Ok(match json.get("type").and_then(resolve::Value::as_str) {
+        Some("module") => Some(true),
+        Some("commonjs") => Some(false),
+        _ => None,
+    })
 }
 
 fn attributes(request: Option<&ModuleRequest>, json: bool, context: &mut Context) -> JsResult<()> {
@@ -716,7 +938,7 @@ fn attributes(request: Option<&ModuleRequest>, json: bool, context: &mut Context
     if let Some(request) = request {
         for attr in request.attributes() {
             if attr.key() != &js_string!("type") {
-                return Err(coded_error(
+                return Err(module_error(
                     context,
                     &format!(
                         "Import attribute '{}' is not supported",
@@ -730,17 +952,17 @@ fn attributes(request: Option<&ModuleRequest>, json: bool, context: &mut Context
     }
     match (json, kind.as_deref()) {
         (true, Some("json")) | (false, None) => Ok(()),
-        (true, None) => Err(coded_error(
+        (true, None) => Err(module_error(
             context,
             "JSON modules require an import attribute of type json",
             "ERR_IMPORT_ATTRIBUTE_MISSING",
         )),
-        (false, Some("json")) => Err(coded_error(
+        (false, Some("json")) => Err(module_error(
             context,
             "Module is not of type json",
             "ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE",
         )),
-        (_, Some(_)) => Err(coded_error(
+        (_, Some(_)) => Err(module_error(
             context,
             "Unsupported import attribute type",
             "ERR_IMPORT_ATTRIBUTE_UNSUPPORTED",
@@ -756,11 +978,11 @@ fn synthetic(url: &Url, mut names: Vec<JsString>, builtin: bool, context: &mut C
             let url = url.to_std_string_escaped();
             let exports = if *builtin {
                 crate::modules::builtin(context, &url)?.ok_or_else(|| {
-                    coded_error(context, "Unknown builtin", "ERR_UNKNOWN_BUILTIN_MODULE")
+                    module_error(context, "Unknown builtin", "ERR_UNKNOWN_BUILTIN_MODULE")
                 })?
             } else {
                 let url = Url::parse(&url)
-                    .map_err(|_| coded_error(context, "Invalid module URL", "ERR_INVALID_URL"))?;
+                    .map_err(|_| module_error(context, "Invalid module URL", "ERR_INVALID_URL"))?;
                 let path = resolve::file_path(&url).map_err(|e| resolve_error(context, e))?;
                 crate::modules::import_cjs(context, &path)?
             };
@@ -808,7 +1030,7 @@ fn cjs_names(
                 && let Ok(path) = resolve::file_path(&url)
                 && !seen.contains(&path)
                 && crate::permission::read(context, &path).is_ok()
-                && let Ok(source) = std::fs::read_to_string(&path)
+                && let Ok(source) = sys::read_to_string(&View::of(context), &path)
             {
                 pending.push((path, source));
             }
@@ -819,8 +1041,11 @@ fn cjs_names(
 }
 
 fn data_source(url: &Url, context: &mut Context) -> JsResult<(String, bool)> {
-    let Some((header, body)) = url.path().split_once(',') else {
-        return Err(coded_error(
+    // The format is read from the type before the body is decoded, the query is dropped and a
+    // stray `%` is an error. Node 22 reads the body as fetch does instead: the query kept, a
+    // stray `%` kept, and bad base64 an ERR_INVALID_URL that comes before the format's error.
+    let Some((header, _)) = url.path().split_once(',') else {
+        return Err(module_error(
             context,
             "Malformed data URL",
             "ERR_INVALID_URL",
@@ -829,45 +1054,22 @@ fn data_source(url: &Url, context: &mut Context) -> JsResult<(String, bool)> {
     let mime = header.split(';').next().unwrap_or("").to_ascii_lowercase();
     let json = mime == "application/json";
     if !json && !matches!(mime.as_str(), "text/javascript" | "application/javascript") {
-        return Err(coded_error(
+        return Err(module_error(
             context,
             &format!("Unknown module format: {mime}"),
             "ERR_UNKNOWN_MODULE_FORMAT",
         ));
     }
-    let decoded = resolve::percent_decode(body).map_err(|e| resolve_error(context, e))?;
-    let source = if header.split(';').any(|s| s.eq_ignore_ascii_case("base64")) {
-        let bytes = decode_base64(&decoded)
-            .ok_or_else(|| coded_error(context, "Invalid base64 data URL", "ERR_INVALID_URL"))?;
-        String::from_utf8(bytes)
-            .map_err(|_| coded_error(context, "Module source is not UTF-8", "ERR_INVALID_URL"))?
-    } else {
-        decoded
-    };
-    Ok((source, json))
-}
-
-fn decode_base64(text: &str) -> Option<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut bits = 0u32;
-    let mut count = 0u32;
-    for byte in text.bytes().filter(|b| !b.is_ascii_whitespace()) {
-        let digit = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' => break,
-            _ => return None,
+    let mut data = url.clone();
+    data.set_query(None);
+    let (_, bytes) = crate::encoding::data_url_strict(&data).map_err(|message| {
+        let message = match message.as_str() {
+            "invalid base64 in data: URL" => "Invalid base64 data URL",
+            other => other,
         };
-        bits = (bits << 6) | u32::from(digit);
-        count += 6;
-        if count >= 8 {
-            count -= 8;
-            output.push((bits >> count) as u8);
-            bits &= (1 << count) - 1;
-        }
-    }
-    Some(output)
+        module_error(context, message, "ERR_INVALID_URL")
+    })?;
+    let source = String::from_utf8(bytes)
+        .map_err(|_| module_error(context, "Module source is not UTF-8", "ERR_INVALID_URL"))?;
+    Ok((source, json))
 }

@@ -152,3 +152,119 @@ fn a_worker_is_heard_from_its_script_alone() {
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
     js(&mut rt, "worker.terminate(); brokenWorker.terminate()");
 }
+
+/// A message posted and at once waited on is waited for, whether the worker answers it straight
+/// away or arms a timer to answer later: no moment of the worker's picking it up and answering
+/// it looks like nothing being worked on.
+#[test]
+fn a_page_waiting_at_once_hears_the_answer() {
+    for reply in [
+        "postMessage(e.data + 1)",
+        "setTimeout(() => postMessage(e.data + 1), 30)",
+    ] {
+        let mut rt = Runtime::new();
+        js(
+            &mut rt,
+            &format!(
+                r#"
+                globalThis.heard = [];
+                const url = URL.createObjectURL(new Blob(['self.onmessage = (e) => {{ {reply} }}']));
+                globalThis.worker = new Worker(url);
+                worker.onmessage = (e) => heard.push(e.data);
+            "#
+            ),
+        );
+        // The worker's script is waited out first, then a message posted and waited on at once.
+        rt.wait_for_workers(std::time::Duration::from_secs(5));
+        js(&mut rt, "worker.postMessage(1)");
+        assert!(
+            rt.wait_for_workers(std::time::Duration::from_secs(5)),
+            "no answer from {reply}"
+        );
+        rt.run_workers();
+        assert_eq!(js(&mut rt, "heard.join()"), "2", "{reply}");
+        js(&mut rt, "worker.terminate()");
+    }
+}
+
+/// A worker that posts what cannot be cloned says so on the page's console in Node's words, not
+/// as an object.
+#[test]
+fn a_worker_that_posts_what_cannot_be_cloned_says_why() {
+    let mut rt = Runtime::new();
+    js(
+        &mut rt,
+        r#"
+        const code = `postMessage(() => 1);`;
+        const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+        globalThis.worker = new Worker(url);
+        'started'
+    "#,
+    );
+    let mut said = String::new();
+    for _ in 0..50 {
+        rt.wait_for_workers(std::time::Duration::from_millis(100));
+        rt.run_workers();
+        said = rt
+            .take_console()
+            .into_iter()
+            .map(|l| l.text)
+            .find(|l| l.starts_with("[worker] "))
+            .unwrap_or_default();
+        if !said.is_empty() {
+            break;
+        }
+    }
+    assert!(said.contains("DataCloneError"), "{said}");
+    assert!(said.contains("() => 1 could not be cloned."), "{said}");
+    assert!(!said.contains("Failed to execute"), "{said}");
+}
+
+#[test]
+fn only_a_blob_file_or_data_address_is_a_script() {
+    let mut rt = Runtime::new();
+    for address in ["https://h/a,b.js", "a:"] {
+        let outcome = js(
+            &mut rt,
+            &format!("try {{ new Worker('{address}'); 'made' }} catch (e) {{ e.message }}"),
+        );
+        assert!(
+            outcome.contains("is not a script here"),
+            "{address}: {outcome}"
+        );
+    }
+}
+
+#[test]
+fn a_data_address_is_read_as_a_browser_reads_it() {
+    // `;BASE64` in any case and a fragment make a worker; so do a byte that is not UTF-8 and a
+    // `%` that starts no escape, which fetch's data: URL processor keeps as they are. Each script
+    // says it ran by posting to its page.
+    for (address, said) in [
+        (
+            "data:text/javascript;BASE64,cG9zdE1lc3NhZ2UoJ2Zyb20gYmFzZTY0Jyk=#fragment",
+            "from base64",
+        ),
+        (
+            "data:text/javascript,postMessage('from text')//%FF%zz",
+            "from text",
+        ),
+    ] {
+        let mut rt = Runtime::new();
+        js(
+            &mut rt,
+            &format!(
+                "globalThis.heard = []; globalThis.worker = new Worker(`{address}`); \
+                 worker.onmessage = (e) => heard.push(e.data); 'made'"
+            ),
+        );
+        for _ in 0..50 {
+            rt.wait_for_workers(std::time::Duration::from_millis(100));
+            rt.run_workers();
+            if js(&mut rt, "heard.length") != "0" {
+                break;
+            }
+        }
+        assert_eq!(js(&mut rt, "heard[0]"), said, "{address}");
+    }
+}

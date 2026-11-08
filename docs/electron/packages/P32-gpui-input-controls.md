@@ -1,0 +1,465 @@
+# P32 输入桥接与表单控件
+
+**依赖**：P30（P31 用于文本字段测量）  **规模**：M  **修改**：`crates/verve-gpui/src/input.rs`（新）、`keymap.rs`（新）、`controls.rs`（新）、`ime.rs`（新）、`dom_element.rs`；`crates/verve-layout/src/controls.rs`（新）；`crates/verve-electron/src/renderer_guest.rs`（输入分发、`RendererView.cursor/ime_rect`）
+
+## 目标
+
+1. 把 GPUI 窗口里发生的鼠标、键盘、滚轮、输入法、文件拖入，翻译成 P02 的 `ToRendererInput`，渲染器再交给 verve-dom
+   的输入方法（`pointer_move/pointer_down_on/pointer_up_on/wheel/key_down/key_up/insert_text/edit_field`），事件顺序与 Chromium 一致。
+2. 指针样式（CSS `cursor`）、焦点环（`:focus-visible`）。
+3. 原生表单控件的外观：`<input>`（text/password/search/email/url/tel/number/range/checkbox/radio/color/date/time/file）、
+   `<textarea>`、`<select>`（含下拉弹层）、`<button>`、`<progress>`、`<meter>`，以及文本字段里的光标、选区和输入法预编辑。
+
+## 背景（先读）
+
+- verve-dom：`Pointer { x, y, button, count, modifiers }`、`Modifiers`、`Key { key, code, modifiers, repeat }`、`Key::char/named`、
+  `Document::{pointer_move, pointer_leave, hover, pointer_down_on, pointer_up_on, press, wheel, key_down, key_up, type_text,
+  insert_text, edit_field, draft, commit_field, choose, focus, focused, hover_sensitive, listens}`、`Draft`（`field.rs`：text、caret、anchor、marked）。
+- 参考（只读）：su-editor `view.rs` 的 `pointer_of`（GPUI 按钮 → DOM 按钮号）和对 `<input>`/toggle/`<select>`/slider 的专门绘制；
+  `live.rs` 的"输入框先在窗口本地显示、等宿主跟上"（乐观更新）—— 本包同样需要，见"延迟"一节。
+- GPUI：`interactive.rs`（`MouseDownEvent { button, position, modifiers, click_count }`、`MouseUpEvent`、
+  `MouseMoveEvent { pressed_button }`、`MouseExitEvent`、`ScrollWheelEvent { delta: ScrollDelta::Pixels|Lines, touch_phase }`、
+  `KeyDownEvent { keystroke, is_held }`、`KeyUpEvent`、`ModifiersChangedEvent`、`FileDropEvent`、`MouseButton::{Left,Right,Middle,Navigate}`）；
+  `platform/keystroke.rs`（`Keystroke { modifiers, key, key_char }`、`Modifiers { control, alt, shift, platform, function }`）；
+  `input.rs`（`EntityInputHandler`：`text_for_range`、`selected_text_range`、`marked_text_range`、`unmark_text`、
+  `replace_text_in_range`、`replace_and_mark_text_in_range`、`bounds_for_range`、`character_index_for_point`；`ElementInputHandler`）；
+  `window.rs` 的 `handle_input`、`set_cursor_style`、`insert_hitbox`、`invalidate_character_coordinates`；`CursorStyle` 枚举。
+
+## 接口契约
+
+### 坐标
+
+GPUI 事件的 `position` 是窗口逻辑像素（已除以 scale factor），等于 CSS 像素 × 缩放系数（`webContents.setZoomFactor`，
+P13）。换算：`css = position / zoom`。无边框窗口里内容区原点就是窗口原点；有系统标题栏时 GPUI 给的已是内容区坐标。
+
+### 鼠标
+
+| GPUI | DOM |
+|---|---|
+| `MouseButton::Left/Middle/Right` | `button` 0/1/2 |
+| `MouseButton::Navigate(Back/Forward)` | 3/4（同时由 P13 发 `app-command` 的 `browser-backward/forward`） |
+| `click_count` | `Pointer.count`（`detail`、`dblclick`） |
+| `Modifiers { control, alt, shift, platform }` | `ctrlKey, altKey, shiftKey, metaKey`（Windows 的 Win 键 = meta） |
+| `MouseMoveEvent` | `PointerKind::Move`，带 `pressed_button` 时 `buttons` 位掩码 |
+| `MouseExitEvent` | `pointer_leave` |
+
+命中：Shell 用当前显示列表的 `Hitbox` 项（P30）找到目标节点，放进 `ToRendererInput::Pointer.target`，渲染器调用
+`pointer_down_on(target)` 等 `_on` 方法；目标为 `None`（命中过期）时渲染器用 `LayoutEngine::hit_test` 自己算。
+按下后到松开之前**捕获指针**（目标不变，`setPointerCapture` 也走这里）。
+`pointer-events: none` 的节点不产生 `Hitbox`。
+
+### 滚轮
+
+`ScrollDelta::Pixels(p)` → `deltaMode = 0`，`deltaX/Y = -p.x / -p.y`（GPUI 与 DOM 方向相反，实现时用真实 Electron 校对符号）；
+`ScrollDelta::Lines(l)` → 按 Chromium 乘 40px 转成像素（`deltaMode` 仍为 0，与 Chromium 一致）。`shift` + 竖直滚轮 → 横向。
+滚动本身的处理见 P30"滚动"一节：滚轮的目标是命中元素向上最近的、能往该方向滚的 `Scroller`，滚不动再链到外层。命中与光标用 `DisplayList::resolved_hitboxes`/`hit_test`，不要自己推帧的栈。`ctrl` + 滚轮 → 发给主进程做缩放（P13 的 `zoom-changed`），不滚动。
+
+### 键盘
+
+`Keystroke.key` 是 GPUI 的逻辑键名（小写，如 `"enter"`、`"backspace"`、`"left"`、`"f5"`、`"a"`），`key_char` 是产生的字符。
+映射表 `keymap.rs`：
+
+| GPUI `key` | DOM `key` | DOM `code`（US 布局推断） |
+|---|---|---|
+| `enter`/`tab`/`backspace`/`delete`/`escape`/`space` | `Enter`/`Tab`/`Backspace`/`Delete`/`Escape`/`" "` | `Enter`/`Tab`/`Backspace`/`Delete`/`Escape`/`Space` |
+| `left`/`right`/`up`/`down` | `ArrowLeft`… | `ArrowLeft`… |
+| `home`/`end`/`pageup`/`pagedown`/`insert` | `Home`/`End`/`PageUp`/`PageDown`/`Insert` | 同名 |
+| `f1`…`f24` | `F1`… | `F1`… |
+| 单个字符 | `key_char`（考虑 shift 后的字符） | `KeyA`…`KeyZ`、`Digit0`…`Digit9`、`Minus`、`Equal`、`BracketLeft`… |
+| 修饰键（`ModifiersChangedEvent` 推断按下/抬起） | `Control`/`Shift`/`Alt`/`Meta` | `ControlLeft`/`ShiftLeft`/`AltLeft`/`MetaLeft` |
+
+GPUI 不提供物理扫描码：`code` 只能按 US 布局从 `key` 推断（非 US 布局下与 Chromium 不同，记录为已知偏差）。
+若需要精确 `code`，在 fork `Quorafind/zed-c` 给 `Keystroke` 加 `scan_code: Option<u32>`（可选，后续）。
+`is_held` → `repeat: true`。
+**顺序**：`keydown` →（未被阻止且产生字符、且没有输入法在组字）字符走 `insert_text` 路径的 `keypress/beforeinput/input` → `keyup`。
+GPUI 的动作/快捷键系统不要拦截按键：DomElement 不注册 action，所有键交给页面；只有 P15 注册的菜单加速键和
+`globalShortcut` 由系统层处理；菜单加速键在页面之后动，只在页面没处理这个 key down 时（见“第一阶段契约变更”的“菜单加速键的顺序”，Electron 39.8.10 观察）。
+
+### 输入法（IME）与文本输入
+
+- DomElement 在有可编辑焦点（`<input>`/`<textarea>`/`contenteditable`，由显示列表 `Control` 项或快照的 `focused` 得知）时，
+  在 `paint` 中调用 `window.handle_input(focus_handle, ElementInputHandler::new(bounds, entity), cx)`；实现
+  `EntityInputHandler` 的实体是 `ImeBridge`（`ime.rs`），它不持有文字真相，只做转发：
+  - `replace_and_mark_text_in_range` → `ToRendererInput::Composition(Update { text, selected_range })`（P24 定义 `CompositionEvent`，
+    v1 至少：`Start`、`Update{text}`、`End{committed}`）；
+  - `replace_text_in_range` → `ToRendererInput::Text(text)`（提交）或 `Composition(End)`；
+  - `unmark_text` → `Composition(End{committed: current})`；
+  - `text_for_range`/`selected_text_range`/`marked_text_range` → 读最近一次快照里焦点字段的 `Draft`（UTF-8 ↔ UTF-16 换算）；
+  - `bounds_for_range` → 返回 `RendererView.ime_rect`（候选框跟随光标）；`character_index_for_point` → 用 P31 的文本命中。
+- 焦点字段的光标位置变化时调用 `window.invalidate_character_coordinates()`。
+- `<input>` 内的组字效果（下划线）由本包画；`contenteditable` 的组字由 P24 负责 DOM 侧，绘制仍由本包按 `marked` 范围画下划线。
+
+### 延迟（乐观回显）
+
+键入到屏幕的延迟必须低于一帧。渲染器在另一线程，正常情况下一次 `Key` → 渲染器处理 → 发布新快照 < 1 ms，无需特别处理。
+但渲染器忙（长任务）时：Shell 在本地对焦点字段的 `Draft` 副本应用同样的编辑并立即重画，直到渲染器的快照的
+`applied`（P02 `RendererView.applied`）追上该输入的序号，再丢弃本地副本（su-editor `live.rs` 同款）。页面 `keydown`
+里 `preventDefault` 的情况会在追上后被纠正，可接受。
+
+### 指针样式
+
+`Hitbox.cursor` → GPUI `CursorStyle`：`default/auto`→`Arrow`、`pointer`→`PointingHand`、`text`→`IBeam`、`crosshair`→`Crosshair`、
+`grab`→`OpenHand`、`grabbing`→`ClosedHand`、`ew-resize`→`ResizeLeftRight`、`ns-resize`→`ResizeUpDown`、`col-resize`→`ResizeColumn`、
+`row-resize`→`ResizeRow`、`nwse-resize`→`ResizeUpLeftDownRight`、`nesw-resize`→`ResizeUpRightDownLeft`、`not-allowed/no-drop`→`OperationNotAllowed`、
+`alias`→`DragLink`、`copy`→`DragCopy`、`context-menu`→`ContextualMenu`、`vertical-text`→`IBeamCursorForVerticalLayout`；
+GPUI 的 `CursorStyle` 没有"隐藏"，`cursor: none` 暂按 `Arrow`（记录；需要时在 fork 加 `Hidden`）；`url(...)` 自定义光标不支持。
+在 `prepaint` 里对每个 hitbox 调 `window.set_cursor_style(style, &hitbox)`。
+
+### 第一阶段契约变更（输入桥；数值取自 Electron 39.8.10 的实测）
+
+下面几条改动或补充上文，以这里为准。实测在隐藏窗口、临时 profile 下用 `webContents.sendInputEvent` 注入，不碰桌面。
+
+- **事件字段**：`pointer*` 事件的 `detail` 恒为 0；`mousedown`/`mouseup`/`click`/`auxclick` 的 `detail` 是点击数（1、2、3；`dblclick` 是 2）；
+  `mousemove`/`mouseover`/`mouseout`/`wheel`/`contextmenu` 的 `detail` 为 0（p32-review 的 `mouse` 探针）。`pointermove`/`pointerover`/`pointerout` 的 `button` 是 -1，鼠标事件是 0。
+  按下时 `buttons` 是位掩码（左 1、右 2、中 4、后退 8、前进 16），抬起后为 0；移动时带着仍按住的按键。
+  右键抬起的顺序是 `pointerup, mouseup, auxclick, contextmenu`；中键是 `pointerup, mouseup, auxclick`。
+  第一次进入元素：`pointerover, mouseover, pointermove, mousemove`；换元素时先 `pointerout, pointerover, mouseout, mouseover`。
+- **不做隐式指针捕获**：Chromium 的鼠标事件没有隐式捕获，`mouseup` 落在抬起时指针下的元素，`click` 落在按下与抬起共同的祖先上
+  （verve-dom 的 `release` 已是这样）。所以 Shell 不固定目标：每个 `Pointer` 都带着它此刻命中的节点。GPUI/系统层的捕获
+  （按住时指针移出窗口仍收到事件，Windows 的 `SetCapture`）照旧。`setPointerCapture` 是页面里的事，不经过 Shell。
+- **`verve_dom::Pointer` 追加 `buttons: u16`**（按住的键的位掩码；`Default` 为 0）。移动事件用它填 `buttons`。
+- **滚轮**：页面看到的 `deltaY` 是注入值的相反数（注入 `deltaY: 120` 向上滚，页面得到 `deltaY: -120`、`wheelDelta: 120`），
+  `deltaMode` 恒为 0，所以 `ScrollDelta::Pixels(p)` → `deltaX = -p.x`、`deltaY = -p.y`，`Lines` 按 `LINE`（Windows 100/3、macOS 40）换成像素。
+  Shift+竖直滚轮：页面收到的仍是 `deltaY`，`shiftKey: true`，默认动作是横向滚动；GPUI 在 Windows 上已把它换成 `x`，Shell 换回 `dy` 再发。
+  Ctrl+滚轮（竖直）：页面先收到 `wheel`（`ctrlKey: true`，可取消），没被阻止才发 `zoom-changed`（Ctrl+横向滚轮不发）（页面 `deltaY < 0` 即向上滚为 `'in'`，否则 `'out'`），
+  不滚动，也不改变缩放系数；要不要缩放是应用自己的事。注入的一次滚轮事件让 `zoom-changed` 触发了两次，Verve 每个滚轮事件只发一次。
+  物理滚轮每一格滚多少无法用注入测得，仍按 P30 的 `LINE`。
+- **消息**：Shell → 主进程新增 `FromShell::Page { contents, event: PageEvent }`，`PageEvent` 追加 `CursorChanged(String)`、
+  `UpdateTargetUrl(String)`、`ZoomChanged { zoom_in: bool }`；它们变成 `webContents` 的 `cursor-changed`、`update-target-url`、`zoom-changed`
+  （参数都是 `(event, 值)`）。`zoom-changed` 由渲染器在 `wheel` 没被阻止时经 `FromRenderer::Lifecycle` 发出，另两个由 Shell 命中后发。
+  `RendererView.cursor` 不再使用：光标由 Shell 从 `Hitbox.cursor` 取得，渲染器并不知道指针在哪里。另追加：`PointerKind::Leave`（指针离开窗口）、
+  `FromRenderer::KeyUnhandled(Key)`（页面没处理的 key down，见“按键”），`FromShell::Page` 追加在枚举末尾。
+- **光标名**（`cursor-changed` 的 `type`）：`auto`/`default` → `pointer`（箭头叫 `pointer`）；`pointer` → `hand`；`text`、`crosshair`、`grab`、`grabbing`、
+  `ew-resize`、`ns-resize`、`col-resize`、`row-resize`、`nwse-resize`、`nesw-resize`、`e-resize`、`n-resize`、`not-allowed`、`alias`、`copy`、`context-menu`、
+  `vertical-text`、`none`、`move`、`wait`、`progress`、`help`、`zoom-in`、`zoom-out`、`cell` 同名；`no-drop` → `nodrop`；`all-scroll` → `move`。
+  只在名字变化时发。`update-target-url`：指针进入 `a[href]` 时是解析后的地址，离开时是空串。
+- **按键**：`before-input-event` 先于页面的 `keydown`，`keyUp` 也发；`key`/`code` 见 `keymap.rs` 的表（测得：`Enter/Enter`、`Tab/Tab`、`" "/Space`、
+  `ArrowLeft/ArrowLeft`、`F1…F24`、`1/Digit1`、`=/Equal`、`-/Minus`、`,/Comma`、`./Period`、`//Slash`、`;/Semicolon`、`[/BracketLeft`、`]/BracketRight`、
+  `\\/Backslash`、`` ` ``/`Backquote`、`'/Quote`；`shift+a` 是 `A/KeyA`，`shift+1` 是 `!/Digit1`；单独的修饰键是 `Control/ControlLeft`、`Shift/ShiftLeft`、`Alt/AltLeft`、`Meta/MetaLeft`）。
+  可打印键之后依次是 `keypress, beforeinput, textInput, input`；`ctrl+a` 没有 `keypress`。
+- **Windows 上的字符只来一次**：GPUI 在 Windows 上先给 `KeyDown`，随后 `WM_CHAR` 又经输入处理器的 `replace_text_in_range(None, 字符)` 送来同一个字符。  Shell 把可打印键作为 `Key` 发给页面（verve-dom 在 `keydown` 之后自己输入字符），并把这个字符记进一个队列（只有文字来了才取走，key up 不清；  GPUI 在忙时会先处理后面的按键再处理已投递的 `WM_CHAR`，所以不能只记一个），输入处理器收到队列里的字符就丢掉；焦点字段变了就清空队列。  输入法提交的文字不是刚发出的按键字符，照常作为 `Composition(Commit)`/`Text` 发。
+- **Shift 取自窗口**：GPUI 在 Windows 上把 `shift+1` 变成键 `!` 时会从 `Keystroke.modifiers` 里去掉 shift，所以 `Key.modifiers` 取自窗口当前按住的修饰键。
+- **死键**：死键（`prefer_character_input` 且没有 Ctrl/Alt/Meta）发 `key: "Dead"`、不记入队列；组合出的字母（`é`）作为下一个键到达并由页面输入，AltGr 的字符只经文本到达。
+- **菜单加速键的顺序（改了 P15 的约定，见 P15 的备注）**：页面先听到键；页面没处理这个 key down（没取消，且默认动作只是输入字符或什么也没做）才查菜单并点击。  观察（Electron 39.8.10，可见的屏幕外窗口，总控的 `probe-keys` 探针）：Ctrl+O/F6 页面先收到 keydown、keyup，随后菜单项被点击；页面取消 keydown 则不点击；  `before-input-event` 取消 keyDown 则页面没有 keydown 也没有 keyup，不点击，也没有 keyUp 的 `before-input-event`；除此之外什么也不吞。  没处理（点击）：空 input 里的 Ctrl+Z、普通 input 里的 Ctrl+B、body 上的 Ctrl+Left 和 Backspace、input 里的普通字母加速键（字符照样输入）；  处理了（不点击）：Ctrl+A、输入过后的 Ctrl+Z、input 里的 Ctrl+Left 和 Backspace。路径：键 → `before-input-event`（有监听时）→ 页面 → `FromRenderer::KeyUnhandled` → 主进程查菜单（`input_events::key_unhandled`）。macOS 没观察，规则相同。
+- **`:focus-visible`**（实测，p32-review 的 `focus`、`focus2` 探针）：点击按钮不匹配，点击文本框匹配；Tab 到的元素匹配；脚本 `focus()` 在最近一次是键盘操作后匹配，  在点了空白处之后匹配，在鼠标点了按钮之后聚焦文本框匹配、聚焦按钮不匹配；点击已有可见焦点环的按钮不改变环；从鼠标聚焦的按钮出发，Shift 单独、Shift+A、F5、Escape、  普通字母之后环出现，Control 单独、Alt 单独、Ctrl+A、Alt+A、Meta+A、Ctrl+Shift+A 之后不出现。右键/中键按下也移动焦点。verve-dom 记 `Dom.focus_visible` 与（crate 内部的）`LastInput`。
+- **缩放**：Shell 里还没有页面缩放（`setZoomFactor` 只记在主进程），坐标按系数 1 换算；接入时在 `input::local` 里除以系数。
+
+### 表单控件
+
+控件在 `verve-layout` 里是原子盒，固有尺寸按 Chromium 默认（`input` 文本 ≈ 153×21 CSS px 含边框、checkbox 13×13、
+`select` 高 19 …，以真实 Electron 量出来为准写成常量表）。显示列表出 `PaintItem::Control { node, bounds, kind }`：
+
+```rust
+pub enum ControlKind {
+    TextField { draft: Draft, placeholder: Option<String>, password: bool, multiline: bool, scroll: [f32; 2], focused: bool },
+    Checkbox { checked: bool, indeterminate: bool }, Radio { checked: bool },
+    Button { label_inline: bool /* 内容由普通行内排版画 */ },
+    Select { label: String, open: bool }, Range { min: f64, max: f64, value: f64 },
+    Progress { value: Option<f64> /* None = 不确定 */ }, Meter { value: f64, low: f64, high: f64, optimum: f64 },
+    Color { value: [u8; 3] }, Date { text: String }, File { label: String },
+}
+```
+
+- 页面写了 `appearance: none` 或给控件设置了背景/边框时，按普通盒子画（P30），只保留文字、光标、选区（文本字段仍出 `TextField`；只有勾、三角、滑块等不画）。
+- 外观：v1 用一套与 Windows 11 Chromium 默认相近的平面风格（不追求平台原生），配色随 `color-scheme` 和 `accent-color`（`color-scheme` 还没有支持，见阶段 2 的 「状态」；控件不跟系统暗色，这是 Electron 39.8.10 观察到的）。
+- 文本字段：文字按 P31 规则单行/多行排版，光标闪烁（530 ms，窗口不活动时停止），选区用固定的高亮色（`::selection` 还没有支持），水平/垂直滚动保持光标可见，
+  `password` 显示 `•`。
+- `<select>` 下拉：Shell 用 GPUI `deferred(...).with_priority(..)` 在窗口内画弹层（选项列表来自快照），选择后发
+  `ToRendererInput` 的新变体 `Choose { select: NodeId, index: usize }`（**追加到 P02 契约**；`index` 是选项在 `SelectOption` 里的序号，不是值）→ `Document::choose_option`。
+  超出窗口时 v1 夹在窗口内（不开新系统窗口）。
+- `type=date/time/color/file`：点击时分别交给 P14 的系统对话框（`file` 用打开对话框；`color`/`date` v1 用窗口内简单弹层）。
+- `range`：拖动滑块直接 `edit_field` 写 `value` 并发 `input`，松开发 `change`。
+- 焦点环：`:focus-visible` 匹配（键盘导航后）时画 2px `outline`（颜色 `accent-color` 或系统强调色），由 P22 的 UA 样式表给出，本包只保证 Tab 导航能触发 `:focus-visible`。
+
+### 第二阶段契约变更（控件；数值取自 Electron 39.8.10 的实测）
+
+下面几条改动上文“表单控件”一节的 `ControlKind`，以这里为准。
+
+- **`PaintItem::Control { node, bounds, kind }`**（`display_list.rs` 里已有这个变体和空的 `ControlKind`，这里给它变体）。
+  与任务书的草案相比有三处改动，理由相同：文字已经由 P31 排好了，壳不该再排一次。
+  1. **文字字段的文字不在 `ControlKind` 里**。`<input>`/`<textarea>` 的内容（密码框是 `•`，空时是 placeholder，`<select>` 是选中项的标签）由
+     verve-layout 当作盒子里的生成文字排版（`Plan::Generated`），出普通的 `PaintItem::Glyphs`；`Control` 只带它旁边的东西。所以没有 `draft`、`placeholder`、`label`。
+  2. **几何由布局给出**：`TextField { caret, marked, .. }` 的矩形在**字段文字所在的框架里**（盒子自己的裁剪和滚动之内，不是窗口坐标；光标是零宽矩形），
+     壳只管画和闪烁，不需要字体。选区不在 `TextField` 里：布局把它当作和页面选区同色的 `Box`，画在字段文字之下（`Painter::selection`），没有焦点的字段不画选区。
+     候选框位置用 `caret`（`RendererView.ime_rect` 取 `DisplayList::caret_of`，经滚动帧换算）。有选区时不给光标。
+  3. **`Select` 带选项**，因为弹层在壳里画：`options: Arc<[SelectOption]>`；弹层是否展开是壳的本地状态，不在显示列表里。
+  ```rust
+  pub enum ControlKind {
+      TextField { caret: Option<Rect>, marked: Vec<Rect>, multiline: bool, focused: bool },
+      Checkbox { checked: bool, indeterminate: bool }, Radio { checked: bool },
+      Select { options: Arc<[SelectOption]>, multiple: bool },
+      Range { min: f64, max: f64, value: f64 },
+      Progress { value: Option<f64> }, Meter { value: f64, min: f64, max: f64, low: f64, high: f64, optimum: f64 },
+      Color { value: Rgba }, Date { kind: DateKind }, File { multiple: bool },
+  }
+  pub struct SelectOption { pub value: String, pub label: String, pub selected: bool, pub disabled: bool, pub group: Option<String> }
+  ```
+  `SelectOption` 不含 `hidden` 的选项；`<optgroup disabled>` 里的选项算 `disabled`。`PaintItem::Control` 另带 `look: ControlLook { accent, color, disabled }`（`accent-color`、文字色、是否禁用；矩形都在盒子的框架里）。
+  `<button>` 和 `<input type=button|submit|reset>` 不是 `Control`：它们是带 UA 边框和背景的普通盒子，内容是普通行内文字（`value` 当作生成文字）。
+  `disabled`、`:hover`、`:active` 由壳按 `Hitbox` 和 `Control` 的节点画；`disabled` 在 `look` 里，不进 `ControlKind`（壳画勾、滑块时要降低对比；文字和边框的颜色取自 UA 样式表的 `:disabled`）。
+  `appearance: none` 的控件只出普通的 `Box` 和 `Glyphs`，不出勾、三角、滑块的 `Control`；**文本字段照样出 `TextField`**，所以文字、光标、组字下划线和选区都在。
+- **固有尺寸**（隐藏窗口，`getBoundingClientRect`，DPR 1 和 1.25；探针 `SCRATCH\p32b\size`）：border-box 尺寸，默认字体。DPR 1.25 只改变文字相关的尺寸（Chromium 按物理像素取整字体度量），
+  表中不随 DPR 变的用常量，文字相关的用公式：
+
+  | 控件 | 宽 × 高 | 备注 |
+  |---|---|---|
+  | 文本类 `<input>`（text/password/email/url/tel/number，search 是 border-box） | `size × 7 + 29 + 8` × 21 | 13.3333px Arial，padding 1/2，边框 2 inset；`size` 默认 20，所以 177 × 21 |
+  | `<textarea>` | `round(cols × "0" 的宽) + 15 + 6` × `rows × 行高 + 6` | 13.3333px monospace，边框 1，padding 2，默认 20 × 2；en-US 下 168 × 36（Consolas，"0" 宽 7.33）；15 是滚动条宽 |
+  | checkbox / radio | 13 × 13 | 外边距 3px 3px 3px 4px / 5px |
+  | range | 129 × 16 | 外边距 2px |
+  | color | 50 × 27 | 边框 1，padding 1/2 |
+  | date / time / datetime-local | en-US：116.33 × 21.33 / 98 × 24 / 188.33 × 21.33（13.3333px）；date 在 20px 下是 167 × 29 | monospace 的字段，内容宽随字号变：按两个实测点拟合成 `15 + 7.6·字号`（date）等，**不是固定像素** |
+  | file | 253 × 21（13.3333px），379 × 29（20px） | 按钮加 “No file chosen”，同样按字号拟合 `1 + 18.9·字号` |
+  | button / submit | 文字宽 + 12 + 4 × 文字高 + 2 + 4 | padding 1/6，边框 2 outset；空按钮 16 × 6 |
+  | `<select>` | `ceil(最宽选项文字) + 20 + 边框` × 19 | 边框 1 solid，border-box（观察：48、204；20px 下 60 × 26）；`<optgroup>` 里的选项缩进 4 个空格宽 |
+  | `<select multiple>`/`size=n` | `最宽选项文字 + 19 + 边框`（不取整）× `n × (行高 + 2) + 2` | `size` 默认 4（55.83 × 70；20px 下 73.25 × 102） |
+  | progress / meter | `10em × 1em` / `5em × 1em`（16px 字体下 160 × 16 / 80 × 16；13.3333px 下 133.33 × 13.33 / 66.66 × 13.33） | |
+
+  `font: 13.3333px Arial`（`textarea` 为 monospace）、上面的 padding 和边框进 UA 样式表，作者的 CSS 照常覆盖。
+- **`ToRendererInput::Choose { select: NodeId, index: usize }`**，追加在枚举末尾（P02 汇总表那一行早已写了它，这次才有变体）。渲染器收到后调
+  `Document::choose_option`（`index` 按 `SelectOption` 的顺序、不含隐藏选项；选项禁用、序号越界或本来就是选中的则什么都不发，否则 `input` + `change`）；节点已不在文档里则丢掉。
+- **乐观回显**：Shell 给每个发往渲染器的输入记下 `Isolate::send` 返回的任务号（`Hub::input` 改为返回它）。焦点字段的编辑键、文字和组字会在 Shell
+  的本地副本 `Echo { node, text, caret, anchor, marked, from }` 上同样应用，`from` 是最后一个未被看到的输入号；每个快照到达时：`RendererView.applied >= from`
+  则丢掉副本，用快照里的字段；否则重画时把副本叠在快照上（只改这个字段的文字和光标矩形，用 `Draft` 的编辑方法），并且仍在忙。
+  不追的情况：焦点变了、页面取消了 `keydown`（在追上后被纠正，可接受）、`maxlength`/`input` 事件改写值（追上后被纠正）、密码框以外的组字：
+  忙的时候组字只更新 `Echo.marked`，提交时把文字写进副本；渲染器追上后以快照为准。一次只回显一个字段；不回显的键（方向键以外的导航键、`Tab`）立刻丢掉副本以免失真。
+- **文件拖入**：GPUI 的 `FileDropEvent::Entered { position, paths }` → `DragInput::Enter { data: ExternalDrag { files: paths, .. }, pointer }`；`Pending { position }`
+  → `DragInput::Over`；`Submit { position }` → `DragInput::Drop`；`Exited` → `DragInput::Leave`。`pointer` 的 `x,y` 经与指针相同的 `input::local`
+  换算，不带按键；目标节点由渲染器命中。`RendererView.drop_effect` 决定壳显示的拖放光标。`File` 对象的路径由 P24 的 `ExternalDrag` 给出。
+
+### 文件拖入
+
+`FileDropEvent::{Entered, Pending, Submit, Exited}` → `dragenter/dragover/drop/dragleave`（P24 负责 `DataTransfer` 内容，本包负责事件来源和坐标）。
+`File` 对象的路径通过 `webUtils.getPathForFile`（P21）取得。
+
+## 步骤
+
+1. `keymap.rs` + 单测（表格每一行）。
+2. `input.rs`：GPUI 事件 → `ToRendererInput`；指针捕获；Shell 侧命中。渲染器侧分发到 verve-dom。
+3. 指针样式与 `RendererView.cursor`。
+4. `ImeBridge`（`EntityInputHandler`）与 `ime_rect`；中文微软拼音、日文 IME 手测。
+5. `verve-layout` 的控件固有尺寸与 `ControlKind` 生成；`controls.rs` 绘制。
+6. `<select>` 弹层、`range` 拖动、`file` 对话框接 P14。
+7. 乐观回显。
+
+## 验收
+
+- `cargo test -p verve-gpui --test keymap`。
+- `cargo test -p verve-electron --test input`（无头，直接注入 `ToRendererInput`）：点击按钮 → `pointerdown, mousedown, pointerup, mouseup, click` 顺序；
+  双击 → `dblclick` 且 `detail===2`；`shift+a` 在 input 里得到 `A` 且 `keydown.key==='A'`、`code==='KeyA'`；组字 `Start/Update('ni')/End('你')`
+  后 input 值为 `你` 且触发 `compositionstart/compositionupdate/compositionend` 和一次 `input`（`isComposing` 正确）；`<select>` 选择触发 `input`+`change`。
+- 夹具 `tests/electron/apps/forms/`：每种控件一个；手动验收清单（截图附 PR）：微软拼音输入"加载"无残留拼音、候选框位于光标下、
+  Tab 在控件间移动并出现焦点环、checkbox 点击切换、range 拖动。
+- 渲染器里跑一个 300 ms 的忙循环期间连续键入，屏幕即时回显，忙完后值一致。
+
+## 不做
+
+触摸与手写笔事件（`touch*`、`pressure`）、`<input type=week/month>`、平台原生外观控件、`::-webkit-*` 控件伪元素样式、
+系统级下拉弹窗（新窗口）、自定义 `url()` 光标、`inputmode`/虚拟键盘、`showPicker()` 之外的日期选择细节。
+
+## 状态
+
+### 阶段 1：输入桥（已完成；控件、`<select>`、`range`、文件拖入、乐观回显属阶段 2，未开始）
+
+**做了什么**
+
+- `keymap.rs`（`verve_gpui::keymap`，公开）：GPUI 的 `Keystroke`/`Modifiers` → `verve_dom::Key`/`Modifiers`，修饰键的按下/抬起由前后两次状态推出
+  （`ModifiersChangedEvent`）。表里的每一行都有测试（`cargo test -p verve-gpui --test keymap`），数值取自 Electron 39.8.10 的实测。
+- `input.rs`：GPUI 的按下/抬起/移动/离开/滚轮/按键 → `ToRendererInput`。目标节点由 Shell 在 `Plan.hitboxes`（`resolved_hitboxes` 的结果）里找，
+  `click_count` → `Pointer.count`，按住的键 → `Pointer.buttons`，Navigate 键 → 3/4。映射是不需要窗口的纯函数，单测直接构造 GPUI 的事件结构。
+  `KeyRoute` 是按键的路径：页面有 `before-input-event` 监听时先发 `FromShell::KeyForContents`，否则直接交给页面；菜单加速键不在这里查——页面先听到键，
+  页面没处理的 key down 由渲染器报 `FromRenderer::KeyUnhandled`，主进程查菜单并点击（顺序与理由见上“菜单加速键的顺序”，P15 的备注已改）。
+- `wheel.rs`：页面看到的 `deltaX/deltaY` 是内容移动量的相反数；Shift+滚轮在 Windows 上被 GPUI 换成了横向，Shell 换回 `deltaY` 并让渲染器横向滚动；
+  Ctrl+滚轮不滚动、不预测，渲染器在页面没阻止 `wheel` 时发 `zoom-changed`（`in`/`out`）。
+- 光标：`cursor.rs` 把 `Hitbox.cursor` 变成 GPUI 的 `CursorStyle`（在 `paint` 里 `set_cursor_style`，这点沿用 P30），`auto` 在 Shell 里解析
+  （链接 → 手，文本框/可编辑区 → I-beam，按快照缓存）。`cursor-changed`（Electron 的名字：箭头叫 `pointer`、手叫 `hand`、`no-drop` 叫 `nodrop`）和
+  `update-target-url`（链接地址按页面的 base 解析，离开时为空串）由 Shell 在指针移动时发，只在变化时发；经新的 `FromShell::Page`。
+- 输入法：`ime.rs` 的 `ImeBridge` 是 `EntityInputHandler`，只转发：`replace_and_mark_text_in_range` → `Composition(Update)`，
+  组字中的 `replace_text_in_range` → `Composition(Commit)`，否则 → `Text`，清空 → `Cancel`；`text_for_range`/`selected_text_range`/`marked_text_range` 读最近一份快照里
+  焦点字段的 `Draft`（UTF-8 ↔ UTF-16 用 `Draft` 自带的换算）；`bounds_for_range` 用 `ime_rect`；`ime_rect` 或焦点字段变了就 `invalidate_character_coordinates`。
+  只有焦点在可输入的元素上时 `paint` 才登记输入处理器（`handle_input`）。
+- 焦点：窗口焦点 → `ToRendererInput::Focus`（原来就有，渲染器现在交给 `Document::set_window_focus`）；`DomView` 持有 GPUI 的 `FocusHandle`，
+  窗口打开时聚焦它，点击页面时重新聚焦；Tab/Shift+Tab 由 verve-dom 移动焦点；`:focus-visible` 有了焦点来源（verve-dom 的 `LastInput`）。
+- 让位于 P43 的拾取：拾取层存在时（`DomState.picking`）桥不转发指针和滚轮。
+- verve-dom：`Pointer.buttons`；`pointer*` 事件和 `contextmenu` 的 `detail` 为 0（测得），右键抬起先 `auxclick` 再 `contextmenu`（测得）；
+  Navigate 键只发 `auxclick`。
+- 验收：`cargo test -p verve-electron --test input`（无头）：点击顺序、`dblclick` 的 `detail === 2`、其余键的 `auxclick`/`contextmenu`、
+  `shift+a` → `A`/`KeyA`、组字提交、Tab 与 `:focus-visible`、窗口焦点、Shift/Ctrl+滚轮、`cursor-changed`/`update-target-url`。
+
+**没做 / 只做了一部分**
+
+- **`wheel` 在 window/document/html/body 上默认被动**（Chromium 如此）：内核的 `addEventListener` 只认显式的 `passive`，没有按目标给默认值，
+  所以这些节点上的 `wheel` 监听器 `preventDefault()` 仍能阻止滚动。需要内核知道事件目标是不是 window/document/html/body，没在本阶段做。
+- **Navigate 键的 `app-command`**（`browser-backward/forward`）：P13 没有这个事件的来源，只发了按钮 3/4 给页面。
+- **`character_index_for_point` 返回 `None`**：点到文本位置要问渲染器（`Document::text_position_at`），而平台是同步问的。
+  后果：重新转换/触摸屏上的某些输入法定位不准，微软拼音的普通输入不受影响。
+- **组字下划线**：`<input>` 内预编辑文字的下划线（`Draft` 的 `marked` 范围）要由文本字段的绘制来画，属阶段 2 的 `controls.rs`，现在预编辑文字显示了但没有下划线。
+- **文本上的 I-beam**：`auto` 光标只在链接和文本框上解析，普通文字上仍是箭头。
+- **`cursor: none`** 按箭头显示（GPUI 没有隐藏光标），自定义 `url(...)` 光标不支持；`cursor-changed` 不带图片参数。
+- **页面缩放**：Shell 里还没有缩放，坐标系数恒为 1；`setZoomFactor` 接入后要在 `input::local` 里除以它（没有 `DomState.zoom` 字段）。
+- **`code` 按 US 布局推断**；Windows 的 AltGr（Ctrl+Alt）的字符只经文本到达页面（`keydown` 的 `key` 是 GPUI 给的字符）；死键发 `Dead`，其 key up 的 `key` 是重音字符本身（GPUI 的 key up 不带 `prefer_character_input`）。
+- `before-input-event` 的 `isComposing` 恒为 `false`（原有）。
+- 已知的 Chromium 差异：`setPointerCapture` 的实测在隐藏窗口里卡死了探针（没有结论），所以页面级指针捕获没有做进桥；只做了系统层的鼠标捕获（GPUI 已有）。
+- macOS/Linux 没有实测：`WM_CHAR` 去重（`Input.typed`）是按 Windows 的行为写的，其他平台的文字到达路径若不同，要看 `replace_text_in_range` 是否重复输入。
+
+**第二轮（复查与总控的修改）**
+
+- 改了：Shift 取自窗口（GPUI 在 Windows 上会从 `Keystroke` 里清掉 shift）；`WM_CHAR` 去重改成队列；死键发 `Dead`；悬停和滚轮用 Shell 命中的节点（`pointer_move_on`、`wheel_on`）；
+  焦点环规则按观察重写（修饰键、点空白处、右/中键聚焦）；`Document` 的指针/键盘新代码放进 `person.rs`（`lib.rs` 从 1634 行降到约 1523 行），`detail`/`button` 按事件类别给，边界事件顺序同 Chromium，Alt+字母不再输入；
+  菜单加速键改为页面先听到键、没处理才点击（`KeyUnhandled`，P15 文档同步），三份吞键规则合成主进程里的一份，`Control::menu_item_for_key` 删除；`before-input-event` 取消的 key down 不再有 key up；
+  `FromShell::Page` 移到枚举末尾；Ctrl+横向滚轮不发 `zoom-changed`；候选框（单行输入框）放在输入框下边缘；`ImeBridge` 的组字状态记最后一次更新的文字，焦点字段变了就作废；
+  光标的“文本框”判断与 Chromium 一致（只读和未知 `type` 也是 I-beam），链接的 `href` 查找不再解析地址，指针留在同一节点上时不再重算；Shift→`deltaY` 的换算只在 Windows 的行滚动上做；
+  `sendInputEvent` 的 `leftButtonDown` 等修饰键填进 `buttons`；测试：组字序列、被取消的 Tab、`contextmenu` 的字段、菜单键的五个测试。
+- **没改（留到阶段 2 或以后）**：
+  - 拆分 `55ef5e820`：要重写历史，由总控处理。
+  - `url` 依赖换成 verve-dom 的辅助函数：不省体积，没做。
+  - 候选框跟着插入符水平移动、`<textarea>` 的候选框位置：要渲染器量出插入符的矩形（`caret_rect_of` 现在返回整个框），超过本轮范围。
+  - `replace_text_in_range` 的范围参数（macOS 长按重音）：macOS 没验证。
+  - 滚轮在 Shell 里命中两次（`input::hit` 与 `DisplayList::wheel`）：每次滚轮一次，不是每次移动。
+  - `auto_cursors` 仍在每个快照版本清空（现在每个节点的开销是一次 `href` 属性查找）。
+  - Ctrl+滚轮按整格累计才缩放（Chromium 从源码看是这样，没有观察到）：精确触摸板会连发。
+  - 把 `Page.window` 之类死字段、`RendererView.cursor` 字段本身删掉：字段保留（避免动 P24 也在改的 `RendererView`），文档里标为不再使用。
+  - GPUI `test-support`：阶段 2。
+
+**第三轮（与 P24 阶段 2 合并）**
+
+- 壳给了目标的指针路径也走 P24 的钩子：`pointer_move_on` 先问 `drag_moved`（拖动中只有拖动听到移动），移动后调 `drag_may_start`（鼠标选区与拖动起点）；`wheel_on`、`pointer_down_on`/`pointer_up_on` 本来就经过 `press_down`/`release`。
+- `Document::person(Act)` 是人的输入的唯一入口：给瞬时激活（`activate`，P24）并记录 `LastInput`（焦点环，P32）；两者是不同的状态（输入方式与限时的许可），过滤规则也不同（单独的修饰键不算键盘使用，但算一次按下）。`press_down`、`release`、`key_down` 开头各调一次。
+- `key_down_unhandled` 现在看默认动作实际做了什么（`Document::acted`）：复制/剪切真的复制了东西、粘贴、真的撤销了什么（没有可撤销的 Ctrl+Z 仍是菜单的）、可编辑区里的编辑键；Escape 取消拖动时 `key_down` 返回 `false`，算已处理。文本框里的方向键、删除、Enter、Tab 仍按静态规则。
+- `pointer_init(pointer, buttons)` 只用于鼠标类事件（`detail` 是点击数）；P24 的拖动事件改用 `person::fields`：`dragstart` 是 `detail` 0、`buttons` 1，`drag`/`dragenter`/`dragover`/`drop`/`dragend` 是 `detail` 0、`buttons` 0（第二次复查的 `drag` 探针，`Input.setInterceptDrags`；CDP 的拖动带不了按键，所以真实的系统拖动的 `buttons` 没有定论）。
+- `lib.rs` 1571 行（上限 1661）。
+
+**第四轮（第二次复查）**
+
+- 改了：
+  - 输入法：焦点移走时 verve-dom 先结束进行中的组字（`compositionend`，文字保留，在 `blur` 之前，无 `input`，`imeblur` 探针）；GPUI 桥丢掉组字状态，并在下一帧不登记输入处理器，让 GPUI 在系统一侧结束组字；密码框关闭输入法。
+  - 死键 + 空格得到一个重音（`{key:"space", key_char:"´"}`），死键 + 不能组合的字母时按键是那个字母、两个字符走文本；`WM_CHAR` 去重队列不再在焦点变化时清空（在途的 `WM_CHAR` 还会来）。
+  - 拖动与选区用壳给的目标（`drag_moved`/`drag_released` 带目标；`begin_selecting` 的“有位置”改成参数）；第二次按下（双击）不再武装拖动；`drag`/`dragenter`/`dragover`/`drop`/`dragend` 的 `buttons` 为 0。
+  - `-webkit-app-region: drag` 区域内页面收不到按下和抬起，移动变成一次 `Leave`（依据 Electron 无边框窗口文档和 GPUI 的源码，不是观察）。
+  - “已处理”只来自按键的默认动作里真的跑了的命令（`keys3` 探针）：`default_acts` 删掉；表在 `tests/input.rs`（`which_keydowns_are_handled_is_frozen_from_electron_39_8_10`）；输入法接走的键算已处理；没有页面时的 key down 报为没处理，窗口的加速键仍可用（`Hub::input`，来自 Electron 的源码，隐藏窗口观察不到）。
+  - contenteditable 里 Alt+字母不再输入；过期的壳目标（节点已被移出文档）改用页面自己的命中；held 加速键的测试数点击次数（每次重复一次）。
+- **字段没有撤销历史**（`<input>` 里输入后 Ctrl+Z 没有东西可撤销，所以点击菜单项）；真 Electron 里输入后的 Ctrl+Z 会撤销（`type-x-then-ctrl-z-in-input`）。contenteditable 的这个情形已有测试。
+- 历史备注：文档提交 `d8ca485fc`（折叠后在合并提交之下）还改了 `msg/input.rs` 里 `RendererView.cursor` 的注释；接受，不为它重做合并。
+- 没做：
+  - `<textarea>` 的插入符大小的候选框矩形（要 P31 的 `Draft` 排版量字符位置，超过约 80 行）；
+  - 三份“能输入文字”的判断合并；
+  - 滚轮后补一次合成的移动（`:hover` 在鼠标动之前滞后）；
+  - `a_wheel_the_page_prevents…` 测试加强（还要等一段时间才能断言没有 `zoom-changed`）；
+  - `contents_page.rs` 里关于 `sendInputEvent` 越过 `before-input-event` 的注释（P13 的，39.8.10 其实会发）；
+  - `replace_text_in_range` 的范围参数。
+
+**给 GPUI 测试平台的发现**：GPUI 的 `test-support` 特性有 `TestAppContext`/`VisualTestContext`（`simulate_event`、`simulate_keystrokes`、`simulate_input`、
+`simulate_mouse_down` 等），在内存里驱动窗口，不碰桌面。把 `DomView` 放进测试窗口、注入 `MouseDownEvent` 和输入法调用，就能自动测 `ImeBridge` 和
+`KeyRoute`（现在这两个只能靠手测）。代价：给 `verve-gpui` 的 dev-dependencies 加 `gpui` 的 `test-support`（拉进 `collections`/`http_client` 的测试支持，编译时间变长），
+再写一个小的测试夹具；估计 200 行以内。没有加。
+
+**测试命令**（我只跑了 `cargo check`）
+
+    cargo test -p verve-dom --test input
+    cargo test -p verve-gpui --test keymap
+    cargo test -p verve-gpui --lib --features jit
+    cargo test -p verve-electron --test input
+    cargo test -p verve-electron --test headless --test web_contents --test menu
+
+**手测清单**（在真窗口里，需要一个人；Windows）
+
+1. 打开有链接和按钮的页面：点链接，页面导航；点按钮，`click` 触发；双击一个带 `dblclick` 监听的元素，监听里 `detail === 2`。
+2. 在 `<input>` 里输入英文、大写（Shift+a）、数字、标点；退格、Delete、方向键、Home/End 工作；输入的每个字符只出现一次。
+3. Tab / Shift+Tab 在按钮、输入框、链接间移动，焦点环出现（键盘导航后）；用鼠标点按钮不出现焦点环，点输入框出现。
+4. 滚轮滚动页面和内层可滚动区域；Shift+滚轮横向滚动；Ctrl+滚轮不滚动（应用监听 `webContents.on('zoom-changed')` 时能收到）。
+5. 光标：悬停链接是手，悬停输入框是 I-beam，`cursor: crosshair`/`not-allowed`/`col-resize` 的元素上形状对应；`webContents.on('cursor-changed')` 收到 `hand`/`text`/`pointer`；
+   悬停链接时 `update-target-url` 收到地址，移开收到空串。
+6. 菜单加速键：设了 `Ctrl+O` 之类加速键的菜单，在页面里按下，页面先收到 `keydown`/`keyup`，菜单项随后触发；页面在 `keydown` 里 `preventDefault()` 则菜单项不触发；在输入框里按 `Ctrl+A` 是全选、不触发菜单项，`Ctrl+B`（没有页面用途）触发。给 `webContents` 加 `before-input-event` 监听后，监听先收到键，`preventDefault()` 后页面和菜单都收不到（keyup 也不再到监听器和页面）。
+7. 微软拼音：在 `<input>` 里输入“jiazai”，选“加载”：输入框里没有残留拼音、预编辑文字带下划线（下划线绘制属阶段 2）、候选框在输入框的下边缘（不是输入框的一半高度处；还不跟着插入符水平移动）；
+   提交后只有一次 `input`，`compositionstart/update/end` 各自出现。Esc 取消组字后输入框是空的。
+7a. 死键布局（美式国际、德语、法语等，Windows 设置里加一个）：输入 `´` 再输入 `e`，输入框里只有 `é`（不是 `´é`）；输入 `´` 再输入 `x`，得到 `´x`；`keydown` 的 `key` 先是 `Dead` 再是 `é`。
+7b. Shift+数字和标点（`!`、`:`、`+`）：页面 `keydown` 的 `shiftKey` 为 `true`；Ctrl+Shift+`=` 触发带 `CommandOrControl+Plus` 加速键的菜单项。
+7c. 在输入框里很快地连敲一串字符（或让页面忙一会儿时敲）：每个字符只出现一次。
+7d. 微软拼音输入“jia”后不选词，直接用鼠标点另一个输入框、按钮或空白处：已输入的拼音留在原来的框里、不再变化，之后键盘照常（Tab、空格、字母都有效）。7e. “´”再按空格：得到一个“´”（不是“ ´”）；“´”再按“x”：得到“´x”。7f. 候选框：`<textarea>` 里它在文本框左侧的垂直中间，空的 contenteditable 行里在整个编辑区的位置（不在插入符处，已知）。7g. 密码框里微软拼音不弹候选框（输入法被关掉）。10. 无边框窗口（`-webkit-app-region: drag` 的标题栏）：拖动窗口，松开后在文字上移动鼠标，什么也不会被选中；标题栏上的 `no-drag` 按钮仍可点击。
+8. 窗口失焦再回来：`document.hasFocus()` 先假后真，`window` 的 `blur`/`focus` 事件各一次。
+9. 打开检查器的元素拾取：拾取期间页面收不到鼠标事件，退出后恢复。
+
+### 阶段 2：控件、字段里的撤销、候选框（做了一半；第二部分接着做）
+
+**做了什么**
+
+- **契约**（见上“第二阶段契约变更”）：`ControlKind`/`SelectOption`/`DateKind`/`ControlLook`、`ToRendererInput::Choose`、回显与文件拖入的映射。
+  与草案不同处：文字不进 `ControlKind`（布局把字段的值当盒子里的生成文字排版），几何由布局给出；`PaintItem::Control` 另带 `look: ControlLook { accent, color, disabled }`
+  （契约文字里写的是“`disabled` 不进 `ControlKind`”，实现把它放进 `look`，因为壳画勾、滑块时要降低对比）。
+- **尺寸**：Electron 39.8.10 的实测在 `SCRATCH\p32b\size-1.json`/`size-1.25.json`（探针 `p32b\size`），边距、边框、字体进 `USER_AGENT_SHEET`，尺寸（复选框、range、date 等也是）随字体和属性变的在 `verve-layout/src/controls.rs`
+  （`size`、`cols`、`rows`、`<select>` 最宽的选项）。文字字段的字符宽 7px、加 29px、行高 15px 都是 13.3333px Arial 下的测得值，按字号等比。
+  DPR 1.25 下文字相关的尺寸会差一点（Chromium 对物理像素取整），没有复现。
+- **绘制**：`verve-gpui/src/controls.rs` 把 `Control` 降为 `Fill`/`Border`/新的 `Shape::Caret`，窗口和软件绘制器（`screenshot.rs`）用同一份：勾、箭头、滑块、进度条、仪表（颜色按 HTML 标准）、
+  色块、选区（固定的高亮色，和页面选区同值；`::selection` 没有支持）、组字下划线（1px，字段文字色，`<input>` 和 `<textarea>` 都有）、光标（530 ms 闪烁，移动后先常亮；失焦时布局不给光标，所以停止）。
+- **候选框**：`RendererView.ime_rect` 现在是焦点字段的光标矩形（`DisplayList::caret_of`，经滚动帧换算），`bounds_for_range` 把候选窗放在光标正下方
+  （单行输入框和 `<textarea>` 一样，水平跟着光标）。
+- **字段撤销**：`field_undo.rs`：每个字段一份历史（上限 1000），连续输入合成一步（在上一个字符停下的地方继续打），删除和选区替换单独成步；Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y，
+  发 `beforeinput`/`input`（`historyUndo`/`historyRedo`）；有可撤销的才算“已处理”（没有则仍交给菜单，与 `keys2` 的观察一致）。
+- **`Choose`**：带选项的序号（两个选项可以同值）；渲染器收到后调 `Document::choose_option`（`input` 然后 `change`；禁用的、已选中的什么都不发）。
+- 测试：`cargo test -p verve-electron --test forms`（复选框点击、`<select>` 选择、字段撤销、`forms` 夹具的几何）；`field_undo`、`controls`（两处）的单测。
+- 夹具 `tests/electron/apps/forms/`：`expected-geometry.json` 和 `expected-chromium.png` 取自 Electron 39.8.10（隐藏窗口，临时 profile，480×270，DPR 1）。几何逐项比较：
+  比较见第二轮：随文字变的控件和孪生 `<span>` 比差值，其余精确到 0.02px，y 用每行的零尺寸标记量。
+
+**没做（留给第二部分）**
+
+- 步骤 4 的交互：`<select>` 弹层（`deferred`，方向键/Enter/Esc，夹在窗口内；`Choose` 的发送端）、`range` 拖动、`type=file` 经 P14 的打开对话框（`VERVE_NO_SYSTEM_DIALOGS` 下的答复）、
+  `color`/`date` 的窗口内弹层。复选框/单选框在 verve-dom 里已经会切换（测试覆盖）。
+- 步骤 5 的 `character_index_for_point`（仍是 `None`）；
+- 步骤 6 文件拖入（GPUI `FileDropEvent` → `DragInput`；映射已写进契约）；
+- 步骤 7 乐观回显（`Isolate::send` 的任务号要从 `Hub::input` 返回，壳里的 `Echo`；契约已写）；
+- 步骤 8：文字上的 I-beam（先观察 Chromium）、三份“能输入文字”判断合并、GPUI `test-support` 测试文件；
+- 步骤 9 的像素比较（夹具和 `expected-chromium.png` 在，比较没写）；
+- 文字字段的横向/纵向滚动（光标出界时不会滚进来：`<input>` 是 `overflow:hidden`，长文字的光标矩形在盒外）；
+- `type=file` 的内部文字（“Choose File / No file chosen”）和日历图标：布局没有为它们生成文字（`date` 显示 `mm/dd/yyyy` 或值）；
+- `<select multiple>`/`size>1` 的列表框不画选项（只画一个空盒子）；`<button>`/`submit` 用 UA 的 `2px outset` 边框，不是 Chromium 的圆角平面外观；
+- “作者给了背景或边框就按普通盒子画”：只实现了 `appearance: none`；
+- 组字时的回显；
+- 暗色：`color-scheme` 没有支持。Electron 39.8.10 里没有 `color-scheme` 时控件在暗色系统主题下仍是白底黑字，所以 UA 样式表**没有**暗色规则（第一部分误加了，已删）。
+
+### 阶段 2 第一部分，第二轮修正（审查的 9 条 MUST、集中测试的两项和多数 SHOULD）
+
+**做了**
+
+- **尺寸模型（MUST 3）**：`adjust` 不再把固有尺寸写进 `width`/`height`。在 flex/grid 容器里样式保持 `auto`，固有内容尺寸放在 `BoxProps.intrinsic`，由该盒的 `Ifc::measure`
+  当作内容尺寸给 taffy，所以输入框、textarea、select、按钮（和复选框）又会拉伸，在窄的行里仍保持自己的宽度；在普通流里仍写进样式。有固有尺寸的控件即使没有文字也持有一个 `Ifc`。
+  固定尺寸（复选框 13、range 129×16、color、date/time/file 随字号）从 UA 样式表移到 `adjust`；`select` 的 19px 高、列表行（行高 + 2）、`<textarea>` 的列宽（"0" 的宽）也在这里；`line-height` 进高度（`line-height: 30px` 的输入框 36 高）；`appearance: none` 的复选框是 0 × 0。
+- **光标与选区的框架（MUST 5）**：`TextField` 的 `Control` 项现在从 `inline_content` 里字段自己的裁剪与滚动帧内发出（`Painter::text_field`），所以长值的光标被裁剪，滚动后的 `<textarea>` 里光标和 `ime_rect` 跟着滚动。
+  选区改为布局画的 `Box`（`Painter::selection`，在文字之下），`TextField` 不再带 `selection`；没有焦点的字段不画选区；有选区时不给光标；窗口不活动时不闪烁；下一次翻转安排在 `BLINK − 已过 % BLINK`。
+- **按字节的位置（MUST 6）**：生成文字的 `Stop.byte` 现在是生成串里的字节（原来是 0），`Segment` 的末尾字节也补上了；字段用 `inline/query.rs` 的 `x_at`（现为 `pub(crate)`）找光标、选区和组字的横坐标。
+  密码框把值的第 n 个字符映射到第 3n 个字节（`•` 三字节）。`\n` 之后的光标在下一行（空行，或结尾换行下面的一行）。
+- **基线（MUST 7）**：`BoxProps.baseline`：文本输入、按钮、select、date 取文字基线（即使 `overflow: hidden` 裁剪），空字段取文字放在控件高度正中的基线；复选框、单选框、range 取边框盒的下沿。
+- **`appearance: none`（MUST 8）**：文本字段总是出 `TextField`。契约文字已恢复。
+- **暗色（MUST 4）**：删去 UA 样式表里的暗色块；`color-scheme` 未支持。
+- **UA 样式表**：`line-height`/`font-weight`/`font-style`/`text-transform`/`text-indent`/`word-spacing` 在控件上复位；`input[type=image]` 无 padding 和边框；按钮背景 `#f0f0f0`；禁用的输入框和 textarea 用 Chromium 的颜色。
+- **撤销（MUST 9）**：(a) 脚本改过值之后（字段文字与历史末尾的文字不同）历史作废，之后键入从新值开始；(b) 输入法提交记为一步，第一次提交并入之前的键入，之后每次提交单独一步（"ab"、加、载：Ctrl+Z → "ab加" → ""）。
+  另：连续的退格/Delete 合成一步；字段被释放时历史随 `forget_nodes` 清掉。
+- **第二部分的接口**：`Choose` 带选项序号；`SelectOption` 不含隐藏选项，`<optgroup disabled>` 里的选项禁用；`Document::choose_option`（原来的 `choose` 按值，留给 React 测试）。
+- **夹具（MUST 1、2）**：用 `appendSwitch('lang', 'en-US')` 重录 `expected-geometry.json` 和 PNG（隐藏窗口，Electron 39.8.10）；测试用孪生 `<span>`（按钮、submit、select、列表框、textarea）比较“控件 − 孪生”，其余按字号定的尺寸精确比较（1/64 容差），y 在 2px 内。
+  观察到：submit 57.5 × 21，textarea 168 × 36，date 116.33 × 21.33，time 98 × 24，file 253 × 21（zh-CN 下 submit 是“提交”）。
+- **中心的两项**：选区跨两行的单测改成 `tests/controls.rs` 里的布局测试（第二行 13.33 宽是对的：两个字符，旧期望 7 是错的）；两处 clippy（`is_multiple_of`，`Caret` 分支拆成 `caret`）。
+
+**没做 / 偏差**（原因）
+
+- **文本字段的宽度按字体算**（SHOULD）：仍是 13.3333px Arial 的常量按字号等比。Chromium 的 `20·round(avg) + round(max) − round(avg)` 要字体的平均与最大字符宽，`TextMeasurer` 没有；Arial 16px 的 Verve 值 211 对 203，等宽字体 177 对 163。需要给 `TextMeasurer` 加这两个度量，另做。
+- **文字在高输入框、select、按钮里垂直居中**（SHOULD）：没做（行仍在顶部）。
+- **按钮背景/边框的计算值**：背景改成 `rgb(240,240,240)`，边框颜色仍是 `#767676`（Chromium 的计算值是黑色，但它是主题绘制的；Verve 按 CSS 画边框，黑色的 outset 边框会明显变丑）。color 输入的边框同。
+- **`webContents.undo()`、Undo 菜单角色、`execCommand('undo')` 触及焦点字段**：没做（它们走 `editing.rs` 的 `travel`，只服务 contenteditable）。
+- **撤销历史存差量**（SHOULD）：没做，每步仍是整份 `Draft`（上限 1000）。
+- **与 Chromium 有意的差别**：Chromium 的历史是每个文档一份（在字段 B 或 body 上 Ctrl+Z 会撤销 A 并把焦点移回 A）；这里每个字段一份，Ctrl+Z 只作用于有焦点的字段。
+- **`<fieldset disabled>`、`indeterminate` 的绘制、下划线用 `caret-color`**：没做。`look.color` 仍先取 `caret-color`。
+- **文本字段宽度、监测的 20px 下的 select 高**：select 单行高在 20px 下 Verve 给 27，Chromium 26（行高 + 4 的公式差 1）。
+- **提交的历史**：把 `ControlLook.color` 并入 3010fb3d8 的修正单（fixup）已做，但“把 Choose 和撤销的测试移进各自的提交”没做（它们在 309fddcae 里一并加入）；`forms.rs` 复制自 `input.rs` 的 `Page`/`launch`/`send`/`key`/`eval` 没有移到 `tests/support`。
+
+**第四轮补充**（审查 2 的 MUST A–D 和中心的两项）
+
+- date/time/datetime-local 的尺寸是**内容盒**：边框盒 116.33 × 21.33 减去 padding 1 和边框 4 → 内容 `10 + 7.6·字号` × `2 + 1.15·字号`（time `6.975·字号` × `1.5·字号`，datetime-local `13.75·字号`）。
+- 基线：color 在边框盒下沿上 6px，`<select multiple>`/`size>1` 在最后一行（下沿上 3px），file 取文字基线（`BaselineRule::FromBottom` 和 `Text`）。
+- 光标跨换行：取最后一个在光标之前结束的文字片段，再按其间的 `\n` 个数往下数行（空行、结尾换行下面的一行）。
+- 字段文字取字段自己的字体、颜色、字距、大小写、`line-height`、`white-space`（生成文字只读交给它的样式）；单行字段总是 `pre`，`<textarea>` 的 `normal` 当 `pre-wrap`、`nowrap` 当 `pre`。
+- flex/grid 里的字段 `min-width/min-height: auto` = 固有尺寸，所以窄行里不收缩；`<input>` 的 `overflow` 为 `clip !important`；`<textarea>` 列数取 ceil。
+- 夹具 y 用每行的零尺寸标记（它的上沿是基线）比较控件到标记的距离。
+- 撤销：Ctrl+Backspace 单独成步。**没做**：脚本把值改回同样文字时清空历史（要节点上的值版本号，现在只比文字）；`choose_option` 之外的 `Choose` 路径无变化。
+
+**手测清单（第二部分做完后一起）**：复选框切换；`<select>` 鼠标和键盘；`range` 拖动；Tab 在控件间移动并出现焦点环；文件输入打开系统对话框；
+微软拼音在 `<input>` 和 `<textarea>` 里带下划线、候选框在光标下；字段里 Ctrl+Z；页面忙时输入。
+目前已可手测：光标闪烁、选区、组字下划线与候选框位置、Ctrl+Z/Ctrl+Y、复选框/单选框/滑块/进度条/仪表/色块的外观。

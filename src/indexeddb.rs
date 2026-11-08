@@ -21,10 +21,14 @@ use boa_engine::{
         FunctionObjectBuilder,
         builtins::{JsArray, JsArrayBuffer, JsDate, JsMap, JsSet, JsUint8Array},
     },
-    property::{Attribute, PropertyDescriptor},
+    property::Attribute,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::native::{
+    PlainClass, arg, arg_text, define_global, function, hidden, js_text, list_from, object,
+    plain_class, text_of,
+};
 use crate::shared;
 
 // ─── Keys and values, in Rust ───────────────────────────────────────────────────────────────
@@ -108,40 +112,6 @@ fn dom_exception(context: &mut Context, name: &str, message: &str) -> JsValue {
     error.into()
 }
 
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
-
-fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
-    Ok(value.to_string(context)?.to_std_string_escaped())
-}
-
-fn js_text(text: &str) -> JsValue {
-    JsString::from(text).into()
-}
-
-fn list_of(value: &JsValue, context: &mut Context) -> JsResult<Vec<JsValue>> {
-    let from = context
-        .intrinsics()
-        .constructors()
-        .array()
-        .constructor()
-        .get(js_string!("from"), context)?;
-    let list = crate::call(
-        context,
-        &from,
-        &JsValue::undefined(),
-        std::slice::from_ref(value),
-    )?;
-    let Some(list) = list.as_object() else {
-        return Ok(Vec::new());
-    };
-    let list = JsArray::from_object(list)?;
-    (0..list.length(context)?)
-        .map(|at| list.get(at, context))
-        .collect()
-}
-
 /// A value as a key, or `None` when it is not a valid one.
 fn key_of(value: &JsValue, context: &mut Context) -> JsResult<Option<Key>> {
     if let Some(n) = value.as_number() {
@@ -159,7 +129,7 @@ fn key_of(value: &JsValue, context: &mut Context) -> JsResult<Option<Key>> {
     }
     if object.is_array() {
         let mut keys = Vec::new();
-        for item in list_of(value, context)? {
+        for item in list_from(value, context)? {
             match key_of(&item, context)? {
                 Some(key) => keys.push(key),
                 None => return Ok(None),
@@ -254,8 +224,8 @@ fn store_value(value: &JsValue, context: &mut Context, depth: usize) -> JsResult
     }
     if let Ok(map) = JsMap::from_object(object.clone()) {
         let mut pairs = Vec::new();
-        for pair in list_of(&map.entries(context)?.into(), context)? {
-            let pair = list_of(&pair, context)?;
+        for pair in list_from(&map.entries(context)?.into(), context)? {
+            let pair = list_from(&pair, context)?;
             let k = store_value(
                 pair.first().unwrap_or(&JsValue::undefined()),
                 context,
@@ -272,14 +242,14 @@ fn store_value(value: &JsValue, context: &mut Context, depth: usize) -> JsResult
     }
     if let Ok(set) = JsSet::from_object(object.clone()) {
         let mut items = Vec::new();
-        for item in list_of(&set.values(context)?.into(), context)? {
+        for item in list_from(&set.values(context)?.into(), context)? {
             items.push(store_value(&item, context, depth + 1)?);
         }
         return Ok(Stored::Set(items));
     }
     if object.is_array() {
         let mut items = Vec::new();
-        for item in list_of(value, context)? {
+        for item in list_from(value, context)? {
             items.push(store_value(&item, context, depth + 1)?);
         }
         return Ok(Stored::Array(items));
@@ -297,7 +267,7 @@ fn store_value(value: &JsValue, context: &mut Context, depth: usize) -> JsResult
         std::slice::from_ref(value),
     )?;
     let mut fields = Vec::new();
-    for key in list_of(&keys, context)? {
+    for key in list_from(&keys, context)? {
         let name = text_of(&key, context)?;
         let item = object.get(JsString::from(name.as_str()), context)?;
         fields.push((name, store_value(&item, context, depth + 1)?));
@@ -390,7 +360,7 @@ fn key_path_of(value: &JsValue, context: &mut Context) -> JsResult<Option<KeyPat
     }
     if value.as_object().is_some_and(|o| o.is_array()) {
         let mut paths = Vec::new();
-        for item in list_of(value, context)? {
+        for item in list_from(value, context)? {
             paths.push(text_of(&item, context)?);
         }
         return Ok(Some(KeyPath::Many(paths)));
@@ -860,10 +830,6 @@ fn idb(context: &Context) -> std::rc::Rc<crate::Shared> {
 
 // ─── Events ─────────────────────────────────────────────────────────────────────────────────
 
-fn object(context: &mut Context) -> JsObject {
-    JsObject::with_object_proto(context.intrinsics())
-}
-
 fn with_proto(context: &mut Context, class: &str) -> JsObject {
     let made = object(context);
     if let Ok(class) = context.global_object().get(JsString::from(class), context)
@@ -873,24 +839,6 @@ fn with_proto(context: &mut Context, class: &str) -> JsObject {
         made.set_prototype(prototype.as_object());
     }
     made
-}
-
-fn hidden(
-    target: &JsObject,
-    name: &str,
-    value: impl Into<JsValue>,
-    context: &mut Context,
-) -> JsResult<()> {
-    target.define_property_or_throw(
-        JsString::from(name),
-        PropertyDescriptor::builder()
-            .value(value.into())
-            .writable(true)
-            .enumerable(false)
-            .configurable(true),
-        context,
-    )?;
-    Ok(())
 }
 
 fn hidden_number(target: &JsValue, name: &str, context: &mut Context) -> Option<u32> {
@@ -920,7 +868,7 @@ fn fire(target: &JsObject, kind: &str, extra: &[(&str, JsValue)], context: &mut 
     for (key, value) in extra {
         let _ = event.set(JsString::from(*key), value.clone(), false, context);
     }
-    let _ = hidden(&event, "__prevented", false, context);
+    let _ = hidden(&event, js_string!("__prevented"), false, context);
     let prevent = FunctionObjectBuilder::new(
         context.realm(),
         NativeFunction::from_fn_ptr(|this, _, cx| {
@@ -948,7 +896,7 @@ fn fire(target: &JsObject, kind: &str, extra: &[(&str, JsValue)], context: &mut 
     if let Ok(listeners) = target.get(js_string!("__listeners"), context)
         && let Some(listeners) = listeners.as_object()
         && let Ok(list) = listeners.get(JsString::from(kind), context)
-        && let Ok(list) = list_of(&list, context)
+        && let Ok(list) = list_from(&list, context)
     {
         handlers.extend(list);
     }
@@ -972,7 +920,7 @@ const TARGET_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let Some(target) = this.as_object() else {
             return Ok(JsValue::undefined());
         };
-        let kind = text_of(&arg(args, 0), cx)?;
+        let kind = arg_text(args, 0, cx)?;
         let listener = arg(args, 1);
         if !listener.is_callable() {
             return Ok(JsValue::undefined());
@@ -980,7 +928,7 @@ const TARGET_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let mut table = target.get(js_string!("__listeners"), cx)?;
         if !table.is_object() {
             table = object(cx).into();
-            hidden(&target, "__listeners", table.clone(), cx)?;
+            hidden(&target, js_string!("__listeners"), table.clone(), cx)?;
         }
         let table = table.as_object().expect("an object");
         let mut list = table.get(JsString::from(kind.as_str()), cx)?;
@@ -995,12 +943,12 @@ const TARGET_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let Some(target) = this.as_object() else {
             return Ok(JsValue::undefined());
         };
-        let kind = text_of(&arg(args, 0), cx)?;
+        let kind = arg_text(args, 0, cx)?;
         let listener = arg(args, 1);
         let table = target.get(js_string!("__listeners"), cx)?;
         if let Some(table) = table.as_object() {
             let list = table.get(JsString::from(kind.as_str()), cx)?;
-            let kept: Vec<JsValue> = list_of(&list, cx)?
+            let kept: Vec<JsValue> = list_from(&list, cx)?
                 .into_iter()
                 .filter(|l| *l != listener)
                 .collect();
@@ -1058,10 +1006,10 @@ fn new_request(
     for handler in ["onsuccess", "onerror"] {
         request.set(JsString::from(handler), JsValue::null(), false, context)?;
     }
-    if let Some(id) = tx {
-        if let Some(t) = idb(context).idb.borrow_mut().transactions.get_mut(&id) {
-            t.pending += 1;
-        }
+    if let Some(id) = tx
+        && let Some(t) = idb(context).idb.borrow_mut().transactions.get_mut(&id)
+    {
+        t.pending += 1;
     }
     Ok(request)
 }
@@ -1273,7 +1221,7 @@ fn abort(context: &mut Context, tx: u32) -> JsResult<()> {
 // ─── indexedDB ──────────────────────────────────────────────────────────────────────────────
 
 fn open(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let name = text_of(&arg(args, 0), context)?;
+    let name = arg_text(args, 0, context)?;
     let asked = arg(args, 1);
     let asked = if asked.is_undefined() {
         None
@@ -1370,7 +1318,7 @@ fn open(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValu
 }
 
 fn delete_database(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let name = text_of(&arg(args, 0), context)?;
+    let name = arg_text(args, 0, context)?;
     let request = new_request(context, JsValue::null(), None, "IDBOpenDBRequest")?;
     {
         let state = idb(context);
@@ -1396,7 +1344,7 @@ fn delete_database(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
 fn database_object(context: &mut Context, name: &str) -> JsResult<JsObject> {
     let db = with_proto(context, "IDBDatabase");
     db.set(js_string!("name"), js_text(name), false, context)?;
-    hidden(&db, "__db", js_text(name), context)?;
+    hidden(&db, js_string!("__db"), js_text(name), context)?;
     for handler in ["onversionchange", "onclose", "onerror", "onabort"] {
         db.set(JsString::from(handler), JsValue::null(), false, context)?;
     }
@@ -1409,8 +1357,8 @@ fn string_list(context: &mut Context, names: Vec<String>) -> JsValue {
     let contains = FunctionObjectBuilder::new(
         context.realm(),
         NativeFunction::from_fn_ptr(|this, args, cx| {
-            let wanted = text_of(&arg(args, 0), cx)?;
-            Ok(list_of(this, cx)?
+            let wanted = arg_text(args, 0, cx)?;
+            Ok(list_from(this, cx)?
                 .iter()
                 .any(|v| {
                     v.as_string()
@@ -1424,7 +1372,7 @@ fn string_list(context: &mut Context, names: Vec<String>) -> JsValue {
         context.realm(),
         NativeFunction::from_fn_ptr(|this, args, cx| {
             let at = arg(args, 0).to_number(cx)? as usize;
-            Ok(list_of(this, cx)?
+            Ok(list_from(this, cx)?
                 .get(at)
                 .cloned()
                 .unwrap_or(JsValue::null()))
@@ -1486,7 +1434,7 @@ const DATABASE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
                 "createObjectStore is only allowed in a version change.",
             )
         })?;
-        let store = text_of(&arg(args, 0), cx)?;
+        let store = arg_text(args, 0, cx)?;
         let options = arg(args, 1);
         let (key_path, auto) = match options.as_object() {
             Some(o) => (
@@ -1527,7 +1475,7 @@ const DATABASE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
                 "deleteObjectStore is only allowed in a version change.",
             )
         })?;
-        let store = text_of(&arg(args, 0), cx)?;
+        let store = arg_text(args, 0, cx)?;
         if let Some(db) = idb(cx).idb.borrow_mut().database(&name) {
             db.stores.remove(&store);
         }
@@ -1539,7 +1487,7 @@ const DATABASE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let stores: Vec<String> = if names.is_string() {
             vec![text_of(&names, cx)?]
         } else {
-            list_of(&names, cx)?
+            list_from(&names, cx)?
                 .iter()
                 .map(|n| text_of(n, cx))
                 .collect::<JsResult<_>>()?
@@ -1605,7 +1553,7 @@ fn transaction_object(
     mode: &str,
 ) -> JsResult<JsObject> {
     let tx = with_proto(context, "IDBTransaction");
-    hidden(&tx, "__tx", id, context)?;
+    hidden(&tx, js_string!("__tx"), id, context)?;
     tx.set(js_string!("db"), db.clone(), false, context)?;
     tx.set(js_string!("mode"), js_text(mode), false, context)?;
     tx.set(js_string!("error"), JsValue::null(), false, context)?;
@@ -1644,7 +1592,7 @@ fn tx_info(context: &Context, tx: u32) -> JsResult<(String, Mode, Vec<String>)> 
 const TRANSACTION_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("objectStore", 1, |this, args, cx| {
         let tx = tx_of(this, cx)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let (db, mode, stores) = tx_info(cx, tx)?;
         let known = idb(cx)
             .idb
@@ -1700,8 +1648,8 @@ fn store_object(
             "IDBObjectStore"
         },
     );
-    hidden(&object, "__tx", tx, context)?;
-    hidden(&object, "__store", js_text(store), context)?;
+    hidden(&object, js_string!("__tx"), tx, context)?;
+    hidden(&object, js_string!("__store"), js_text(store), context)?;
     let tx_object = idb(context)
         .idb
         .borrow()
@@ -1721,7 +1669,7 @@ fn store_object(
     };
     match (index, index_info) {
         (Some(name), Some(info)) => {
-            hidden(&object, "__index", js_text(name), context)?;
+            hidden(&object, js_string!("__index"), js_text(name), context)?;
             object.set(js_string!("name"), js_text(name), false, context)?;
             let path = key_path_value(&Some(info.key_path.clone()), context)?;
             object.set(js_string!("keyPath"), path, false, context)?;
@@ -1915,12 +1863,15 @@ fn record(context: &Context, db: &str, store: &str, primary: &Key) -> JsResult<O
     with_store(context, db, store, |s| s.records.get(primary).cloned())
 }
 
+/// How a store or index answers a ranged read (`getAll`, `getAllKeys`, `count`…).
+type Reader = fn(&mut Context, &str, &str, Vec<(Key, Key)>, Option<usize>) -> JsResult<JsValue>;
+
 /// One read: the request answered with what `read` made of the entries in range.
 fn read(
     this: &JsValue,
     args: &[JsValue],
     context: &mut Context,
-    read: fn(&mut Context, &str, &str, Vec<(Key, Key)>, Option<usize>) -> JsResult<JsValue>,
+    read: Reader,
 ) -> JsResult<JsValue> {
     let (tx, db, store, index) = target_of(this, context, false)?;
     let range = range_of(&arg(args, 0), context)?;
@@ -2039,7 +1990,7 @@ const STORE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
                 "createIndex is only allowed in a version change.",
             ));
         }
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let key_path = key_path_of(&arg(args, 1), cx)?
             .ok_or_else(|| data_error("An index needs a key path."))?;
         let options = arg(args, 2);
@@ -2065,13 +2016,13 @@ const STORE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     }),
     ("deleteIndex", 1, |this, args, cx| {
         let (_, db, store, _) = target_of(this, cx, true)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         with_store(cx, &db, &store, |s| s.indexes.remove(&name))?;
         Ok(JsValue::undefined())
     }),
     ("index", 1, |this, args, cx| {
         let (tx, db, store, _) = target_of(this, cx, false)?;
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let known = with_store(cx, &db, &store, |s| s.indexes.contains_key(&name))?;
         if !known {
             return Err(dom_error(
@@ -2120,7 +2071,7 @@ fn open_cursor(
             "IDBCursorWithValue"
         },
     );
-    hidden(&cursor, "__cursor", cursor_id, context)?;
+    hidden(&cursor, js_string!("__cursor"), cursor_id, context)?;
     cursor.set(js_string!("direction"), js_text(&direction), false, context)?;
     cursor.set(js_string!("source"), this.clone(), false, context)?;
     cursor.set(js_string!("request"), request.clone(), false, context)?;
@@ -2340,7 +2291,7 @@ fn make_range(
         }
     }
     let range = with_proto(context, "IDBKeyRange");
-    hidden(&range, "__range", true, context)?;
+    hidden(&range, js_string!("__range"), true, context)?;
     range.set(js_string!("lower"), lower, false, context)?;
     range.set(js_string!("upper"), upper, false, context)?;
     range.set(js_string!("lowerOpen"), lower_open, false, context)?;
@@ -2399,111 +2350,58 @@ const RANGE_METHODS: &[(&str, usize, NativeFunctionPointer)] =
 
 // ─── Installing it ──────────────────────────────────────────────────────────────────────────
 
-fn function(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
-}
-
-fn class(
+/// An `IDB*` interface: a global that cannot be constructed, on `parent`'s prototype.
+fn define_interface(
     context: &mut Context,
     name: &str,
     parent: Option<&JsObject>,
     methods: &[(&str, usize, NativeFunctionPointer)],
     getters: &[(&str, NativeFunctionPointer)],
 ) -> JsResult<JsObject> {
-    let constructor: JsObject = FunctionObjectBuilder::new(
-        context.realm(),
-        NativeFunction::from_fn_ptr(|_, _, _| {
-            Err(JsNativeError::typ()
-                .with_message("Illegal constructor")
-                .into())
-        }),
-    )
-    .name(JsString::from(name))
-    .constructor(true)
-    .build()
-    .into();
-    let prototype = object(context);
-    if let Some(parent) = parent {
-        prototype.set_prototype(Some(parent.clone()));
-    }
-    for (method, length, f) in methods {
-        let f = function(context, method, *length, *f);
-        prototype.define_property_or_throw(
-            JsString::from(*method),
-            PropertyDescriptor::builder()
-                .value(f)
-                .writable(true)
-                .enumerable(false)
-                .configurable(true),
-            context,
-        )?;
-    }
-    for (getter, f) in getters {
-        let f = function(context, &format!("get {getter}"), 0, *f);
-        prototype.define_property_or_throw(
-            JsString::from(*getter),
-            PropertyDescriptor::builder()
-                .get(f)
-                .enumerable(true)
-                .configurable(true),
-            context,
-        )?;
-    }
-    constructor.define_property_or_throw(
-        js_string!("prototype"),
-        PropertyDescriptor::builder()
-            .value(prototype.clone())
-            .writable(false)
-            .enumerable(false)
-            .configurable(false),
+    let (class, prototype) = plain_class(
         context,
+        PlainClass {
+            name,
+            construct: crate::native::illegal_constructor,
+            length: 0,
+            parent: parent.cloned(),
+            methods,
+            getters,
+        },
     )?;
-    context.register_global_property(
-        JsString::from(name),
-        constructor.clone(),
-        Attribute::WRITABLE | Attribute::CONFIGURABLE,
-    )?;
+    define_global(context, name, class)?;
     Ok(prototype)
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let target = class(context, "IDBEventTarget", None, TARGET_METHODS, &[])?;
-    let request = class(context, "IDBRequest", Some(&target), &[], &[])?;
-    class(context, "IDBOpenDBRequest", Some(&request), &[], &[])?;
-    class(
+    let target = define_interface(context, "IDBEventTarget", None, TARGET_METHODS, &[])?;
+    let request = define_interface(context, "IDBRequest", Some(&target), &[], &[])?;
+    define_interface(context, "IDBOpenDBRequest", Some(&request), &[], &[])?;
+    define_interface(
         context,
         "IDBDatabase",
         Some(&target),
         DATABASE_METHODS,
         DATABASE_GETTERS,
     )?;
-    class(
+    define_interface(
         context,
         "IDBTransaction",
         Some(&target),
         TRANSACTION_METHODS,
         TRANSACTION_GETTERS,
     )?;
-    let store = class(
+    let store = define_interface(
         context,
         "IDBObjectStore",
         None,
         STORE_METHODS,
         STORE_GETTERS,
     )?;
-    class(context, "IDBIndex", Some(&store), &[], &[])?;
-    let cursor = class(context, "IDBCursor", None, CURSOR_METHODS, &[])?;
-    class(context, "IDBCursorWithValue", Some(&cursor), &[], &[])?;
-    class(context, "IDBKeyRange", None, RANGE_METHODS, &[])?;
+    define_interface(context, "IDBIndex", Some(&store), &[], &[])?;
+    let cursor = define_interface(context, "IDBCursor", None, CURSOR_METHODS, &[])?;
+    define_interface(context, "IDBCursorWithValue", Some(&cursor), &[], &[])?;
+    define_interface(context, "IDBKeyRange", None, RANGE_METHODS, &[])?;
     let range_class = context
         .global_object()
         .get(js_string!("IDBKeyRange"), context)?;

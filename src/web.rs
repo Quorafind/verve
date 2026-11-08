@@ -2,63 +2,33 @@
 //! `structuredClone`, `performance`, `Blob` and `File`.
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
-    js_string,
+    Context, JsError, JsObject, JsResult, JsString, JsValue, js_string,
     native_function::NativeFunctionPointer,
-    object::{
-        FunctionObjectBuilder,
-        builtins::{
-            JsArray, JsArrayBuffer, JsDate, JsMap, JsPromise, JsRegExp, JsSet, JsUint8Array,
-        },
+    object::builtins::{
+        JsArray, JsArrayBuffer, JsDate, JsMap, JsPromise, JsRegExp, JsSet, JsUint8Array,
     },
     property::{Attribute, PropertyDescriptor},
 };
 
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
+use crate::native::{
+    PlainClass, arg, arg_text, define_global, function, js_text, object, plain_class, text_of,
+    type_error,
+};
 
-fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
-    Ok(value.to_string(context)?.to_std_string_escaped())
-}
-
-fn js_text(text: &str) -> JsValue {
-    JsString::from(text).into()
-}
-
-fn type_error(message: impl Into<String>) -> JsError {
-    JsNativeError::typ().with_message(message.into()).into()
-}
-
-fn object(context: &mut Context) -> JsObject {
-    JsObject::with_object_proto(context.intrinsics())
-}
-
-fn function(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
-}
-
-fn constructor(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .constructor(true)
-        .build()
-        .into()
+/// A class of this module: no getters, a constructor of no parameters.
+fn class_spec<'a>(
+    name: &'a str,
+    construct: NativeFunctionPointer,
+    methods: &'a [(&'a str, usize, NativeFunctionPointer)],
+) -> PlainClass<'a> {
+    PlainClass {
+        name,
+        construct,
+        length: 0,
+        parent: None,
+        methods,
+        getters: &[],
+    }
 }
 
 /// The object `new` makes for a native constructor: `this` is the constructor `new` was
@@ -70,65 +40,6 @@ fn made_by(this: &JsValue, context: &mut Context) -> JsResult<JsObject> {
         made.set_prototype(prototype.as_object());
     }
     Ok(made)
-}
-
-/// A class: its constructor, its prototype with `methods` and `getters`, as a global.
-fn class(
-    context: &mut Context,
-    name: &str,
-    construct: NativeFunctionPointer,
-    methods: &[(&str, usize, NativeFunctionPointer)],
-    getters: &[(&str, NativeFunctionPointer)],
-) -> JsResult<(JsObject, JsObject)> {
-    let class = constructor(context, name, 0, construct);
-    let prototype = object(context);
-    for (method, length, f) in methods {
-        let method_fn = function(context, method, *length, *f);
-        prototype.define_property_or_throw(
-            JsString::from(*method),
-            PropertyDescriptor::builder()
-                .value(method_fn)
-                .writable(true)
-                .enumerable(false)
-                .configurable(true),
-            context,
-        )?;
-    }
-    for (getter, f) in getters {
-        let get = function(context, &format!("get {getter}"), 0, *f);
-        prototype.define_property_or_throw(
-            JsString::from(*getter),
-            PropertyDescriptor::builder()
-                .get(get)
-                .enumerable(true)
-                .configurable(true),
-            context,
-        )?;
-    }
-    prototype.define_property_or_throw(
-        js_string!("constructor"),
-        PropertyDescriptor::builder()
-            .value(class.clone())
-            .writable(true)
-            .enumerable(false)
-            .configurable(true),
-        context,
-    )?;
-    class.define_property_or_throw(
-        js_string!("prototype"),
-        PropertyDescriptor::builder()
-            .value(prototype.clone())
-            .writable(false)
-            .enumerable(false)
-            .configurable(false),
-        context,
-    )?;
-    context.register_global_property(
-        JsString::from(name),
-        class.clone(),
-        Attribute::WRITABLE | Attribute::CONFIGURABLE,
-    )?;
-    Ok((class, prototype))
 }
 
 // ─── structuredClone ────────────────────────────────────────────────────────────────────────
@@ -179,7 +90,7 @@ pub(crate) fn structured_clone(
     Ok(copy)
 }
 
-fn clone_error_at(context: &mut Context, message: &str) -> JsError {
+pub(crate) fn clone_error_at(context: &mut Context, message: &str) -> JsError {
     crate::dom_events::dom_exception_error(
         context,
         &format!("Failed to execute 'structuredClone' on 'Window': {message}"),
@@ -188,12 +99,31 @@ fn clone_error_at(context: &mut Context, message: &str) -> JsError {
 }
 
 /// What could not be cloned, as the error names it: `function f() {} could not be cloned.`
-fn clone_error(context: &mut Context, value: &JsValue) -> JsError {
-    let mut shown = crate::print(value);
+pub(crate) fn clone_error(context: &mut Context, value: &JsValue) -> JsError {
+    let text = clone_text(context, value);
+    clone_error_at(context, &text)
+}
+
+/// What is said of `value` when it cannot be cloned: `() => 1 could not be cloned.`, as Node
+/// words it (the text of a function, `#<Promise>` for an object).
+pub(crate) fn clone_text(context: &mut Context, value: &JsValue) -> String {
+    let mut shown = match value.as_object() {
+        Some(object) if object.is_callable() => {
+            crate::native::text_of(value, context).unwrap_or_else(|_| crate::print(value))
+        }
+        Some(_) => {
+            let class = crate::native::get(value, "constructor", context)
+                .and_then(|c| crate::native::get(&c, "name", context))
+                .map(|name| crate::print(&name))
+                .unwrap_or_default();
+            format!("#<{}>", if class.is_empty() { "Object" } else { &class })
+        }
+        None => crate::print(value),
+    };
     if shown.chars().count() > 60 {
         shown = shown.chars().take(57).collect::<String>() + "...";
     }
-    clone_error_at(context, &format!("{shown} could not be cloned."))
+    format!("{shown} could not be cloned.")
 }
 
 /// `Object.prototype.toString.call(value)`: `[object Uint8Array]`, `[object Number]`.
@@ -250,7 +180,10 @@ fn clone_value(
     {
         return Ok(copy.clone().into());
     }
-    if source.is_callable() || crate::dom_events::is_platform_object(&source) {
+    if source.is_callable()
+        || crate::clone::refused(&source, context)
+        || crate::dom_events::is_platform_object(&source)
+    {
         return Err(clone_error(context, value));
     }
     if let Ok(date) = JsDate::from_object(source.clone()) {
@@ -272,9 +205,6 @@ fn clone_value(
         let copy = copy.as_object().ok_or_else(|| type_error("not a buffer"))?;
         seen.push((source.clone(), copy.clone()));
         return Ok(copy.into());
-    }
-    if JsPromise::from_object(source.clone()).is_ok() {
-        return Err(clone_error(context, value));
     }
     let exception = source
         .downcast_ref::<crate::dom_events::DomExceptionData>()
@@ -312,15 +242,7 @@ fn clone_value(
         return Ok(copy.into());
     }
     match kind.as_str() {
-        "WeakMap"
-        | "WeakSet"
-        | "WeakRef"
-        | "FinalizationRegistry"
-        | "Generator"
-        | "AsyncGenerator"
-        | "Symbol" => {
-            return Err(clone_error(context, value));
-        }
+        "Symbol" => return Err(clone_error(context, value)),
         // A wrapper: its primitive, wrapped again — if it really is one (a `toStringTag` can
         // claim anything).
         "Boolean" | "Number" | "String" | "BigInt" => {
@@ -490,12 +412,80 @@ fn clone_error_object(
 // ─── Blob and File ──────────────────────────────────────────────────────────────────────────
 
 /// A blob's bytes are kept as a `Uint8Array` in a property of its own.
-pub(crate) fn blob_bytes(blob: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
+pub fn blob_bytes(blob: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
     let data = match blob.as_object() {
         Some(b) => b.get(js_string!("__bytes"), context)?,
         None => JsValue::undefined(),
     };
     Ok(crate::encoding::bytes_of(&data, context)?.unwrap_or_default())
+}
+
+/// Whether `value` is a `Blob` (or a `File`) this runtime made.
+pub fn is_blob(value: &JsValue, context: &mut Context) -> bool {
+    value.as_object().is_some_and(|o| {
+        o.has_own_property(js_string!("__bytes"), context)
+            .unwrap_or(false)
+    })
+}
+
+/// A new `Blob` of `bytes` and MIME type `kind`, as `new Blob([bytes], { type })` makes it.
+pub fn new_blob(bytes: Vec<u8>, kind: &str, context: &mut Context) -> JsResult<JsValue> {
+    let class = crate::native::global(context, "Blob")?;
+    let blob = made_by(&class, context)?;
+    dress_blob(&blob, bytes, kind, context)?;
+    Ok(blob.into())
+}
+
+/// Which file on the host's disk each `File` made by [`file_with_path`] is, kept where script
+/// cannot see it: a weak map that only Rust reads.
+struct FilePaths(boa_engine::object::builtins::JsWeakMap);
+
+/// A new `File` of `bytes` named `name`, of MIME type `kind`, that the host found at `path`
+/// (a file the user picked or dropped). Script cannot read the path; the host asks
+/// [`path_of_file`], which is how Electron's `webUtils.getPathForFile` answers. A `File` the
+/// page makes with `new File()` has no path.
+///
+/// # Errors
+///
+/// The runtime has no `File` class to make one with.
+pub fn file_with_path(
+    context: &mut Context,
+    bytes: Vec<u8>,
+    name: &str,
+    kind: &str,
+    path: &std::path::Path,
+) -> JsResult<JsValue> {
+    let class = crate::native::global(context, "File")?;
+    let file = made_by(&class, context)?;
+    dress_blob(&file, bytes, kind, context)?;
+    file.set(js_string!("name"), js_text(name), false, context)?;
+    let modified = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(web_time::UNIX_EPOCH).ok())
+        .map_or(0., |since| since.as_millis() as f64);
+    file.set(js_string!("lastModified"), modified, false, context)?;
+    let map = match context.get_data::<FilePaths>() {
+        Some(FilePaths(map)) => map.clone(),
+        None => {
+            let map = boa_engine::object::builtins::JsWeakMap::new(context);
+            context.insert_data(FilePaths(map.clone()));
+            map
+        }
+    };
+    let shown = js_text(&path.to_string_lossy());
+    map.set(&file, shown, context)?;
+    Ok(file.into())
+}
+
+/// Where the host found `file`, when it was made by [`file_with_path`] (in any world).
+pub fn path_of_file(file: &JsValue, context: &mut Context) -> Option<std::path::PathBuf> {
+    let object = file.as_object()?;
+    let FilePaths(map) = context.get_data::<FilePaths>()?;
+    let map = map.clone();
+    let path = map.get(&object, context).ok()?;
+    let path = path.as_string()?.to_std_string_escaped();
+    Some(path.into())
 }
 
 fn dress_blob(blob: &JsObject, bytes: Vec<u8>, kind: &str, context: &mut Context) -> JsResult<()> {
@@ -576,7 +566,7 @@ fn construct_file(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     dress_blob(&file, bytes, &kind, context)?;
     file.set(
         js_string!("name"),
-        js_text(&text_of(&arg(args, 1), context)?),
+        js_text(&arg_text(args, 1, context)?),
         false,
         context,
     )?;
@@ -693,8 +683,11 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
     )?;
 
-    let (_, blob_proto) = class(context, "Blob", construct_blob, BLOB_METHODS, &[])?;
-    let (_, file_proto) = class(context, "File", construct_file, &[], &[])?;
+    let (blob, blob_proto) =
+        plain_class(context, class_spec("Blob", construct_blob, BLOB_METHODS))?;
+    define_global(context, "Blob", blob)?;
+    let (file, file_proto) = plain_class(context, class_spec("File", construct_file, &[]))?;
+    define_global(context, "File", file)?;
     file_proto.set_prototype(Some(blob_proto));
     Ok(())
 }

@@ -11,15 +11,19 @@
 //! everything connected lives as long as the page.
 
 use boa_engine::{Context, JsObject, JsResult, JsValue};
+use verve::native::{
+    self, arg, arg_text, get, illegal_constructor, js_text, list_of, text_of, type_error,
+};
 
 use super::{
-    Accessor, ClassSpec, Method, arg, arg_string, array, class, dom_error, illegal_constructor,
-    node_arg, node_id, node_of, opt_string, prototype_of_target, text, type_error,
+    Accessor, Method, WebIdlClass, dom_error, node_arg, node_id, node_of, opt_string,
+    prototype_of_target, webidl_class,
 };
-use crate::dom::{Dom, Namespace, NodeId, NodeKind};
+use crate::dom::{Dom, Namespace, Node, NodeId, NodeKind};
 use crate::state::shared;
 
-/// What distinguishes a node's number among host targets.
+/// What distinguishes a node's number among host targets: bit 40. An animation's is bit 41, in
+/// `bind/animation.rs`.
 const NODE_TAG: u64 = 1 << 40;
 
 /// The host id a node's object carries.
@@ -32,35 +36,91 @@ pub fn node_of_host(id: u64) -> Option<NodeId> {
     (id & NODE_TAG != 0).then_some((id & !NODE_TAG) as NodeId)
 }
 
+/// Runs `f` on the tree and settles what it changed. Only the borrow and `f` are generic: the
+/// settling is [`settle`], one function for the hundreds of callers.
 pub fn with_dom<R>(context: &mut Context, f: impl FnOnce(&mut Dom) -> R) -> R {
-    let state = shared(context);
-    let (result, relink_due, mutated, moved) = {
+    let result = {
+        let state = shared(context);
         let mut state = state.borrow_mut();
-        let result = f(&mut state.dom);
+        f(&mut state.dom)
+    };
+    settle(context);
+    result
+}
+
+/// What a change to the tree sets going: the observers, the layout, the custom elements, the page
+/// loading.
+#[inline(never)]
+fn settle(context: &mut Context) {
+    let state = shared(context);
+    let (relink_due, mutated, reactions, joined) = {
+        let mut state = state.borrow_mut();
         let mutated = state.dom.has_mutations() && !state.mutation_queued;
         let moved = state.dom.take_moved();
-        // Only custom elements hear their subtrees come and go.
-        let moved = if state.custom_nodes.is_empty() {
-            Vec::new()
+        // Only custom elements hear what happens to them.
+        let attrs = state.dom.take_attr_changes();
+        let (joined, written) = if state.load.active {
+            page_changes(&state.dom, &moved, &attrs)
         } else {
-            moved
+            (Vec::new(), Vec::new())
         };
-        (result, state.dom.has_relinked(), mutated, moved)
+        let reactions = (!state.custom.is_empty()).then_some((attrs, moved));
+        (
+            state.dom.has_relinked(),
+            mutated,
+            reactions,
+            (joined, written),
+        )
     };
+    let (joined, written) = joined;
     if let Err(error) = crate::media::sync(context) {
         verve::report(context, &error);
     }
     super::observers::distribute(context);
+    super::range::announce(context);
     if relink_due {
         relink(context);
     }
+    super::slot::slots_changed(context);
+    crate::animation::wake(context);
     if mutated {
         super::observers::queue_delivery(context);
     }
-    if !moved.is_empty() {
-        super::platform::custom_moved(context, moved);
+    if let Some((attrs, moved)) = reactions {
+        super::custom::react(context, attrs, moved);
     }
-    result
+    for (node, name) in written {
+        crate::load::attribute(context, node, &name);
+    }
+    if !joined.is_empty() {
+        crate::load::connected(context, &joined);
+    }
+}
+
+/// What a change made means to the page's loading: the subtrees that joined the document (and a
+/// `<script>` that got a `src` or text meanwhile), and the attributes set.
+fn page_changes(
+    dom: &Dom,
+    moved: &[(NodeId, bool)],
+    attrs: &[crate::dom::AttrChange],
+) -> (Vec<NodeId>, Vec<(NodeId, String)>) {
+    let is_script = |id: NodeId| dom.get(id).and_then(|n| n.tag()) == Some("script");
+    let mut joined: Vec<NodeId> = moved.iter().filter(|(_, c)| *c).map(|(n, _)| *n).collect();
+    // Text put into a script that is in the page is the script's to run.
+    let holders: Vec<NodeId> = joined
+        .iter()
+        .filter_map(|id| dom.parent(*id))
+        .filter(|id| is_script(*id))
+        .collect();
+    joined.extend(holders);
+    joined.extend(
+        attrs
+            .iter()
+            .filter(|a| a.name == "src" && is_script(a.node))
+            .map(|a| a.node),
+    );
+    let written = attrs.iter().map(|a| (a.node, a.name.clone())).collect();
+    (joined, written)
 }
 
 pub fn read_dom<R>(context: &Context, f: impl FnOnce(&Dom) -> R) -> R {
@@ -71,7 +131,23 @@ pub fn read_dom<R>(context: &Context, f: impl FnOnce(&Dom) -> R) -> R {
 
 /// The node's object, if it still has one.
 pub fn existing_wrapper(context: &Context, id: NodeId) -> Option<JsObject> {
-    shared(context).borrow().wrappers.get(&id)?.upgrade()
+    let world = verve::current_world(context);
+    shared(context)
+        .borrow()
+        .wrappers
+        .get(&(world, id))?
+        .upgrade()
+}
+
+/// The node's object in any other world, if one is alive: the one whose listeners the node's
+/// object here shares.
+fn sibling_wrapper(context: &Context, id: NodeId) -> Option<JsObject> {
+    let world = verve::current_world(context);
+    let state = shared(context);
+    let state = state.borrow();
+    (0..state.worlds)
+        .filter(|other| *other != world)
+        .find_map(|other| state.wrappers.get(&(other, id))?.upgrade())
 }
 
 /// The class a node's object is made of.
@@ -114,21 +190,24 @@ pub fn wrap(context: &mut Context, id: NodeId) -> JsValue {
 }
 
 fn make_wrapper(context: &mut Context, id: NodeId) -> Option<JsObject> {
+    let world = verve::current_world(context);
     let prototype = {
         let state = shared(context);
         let state = state.borrow();
-        let is_shadow_root = state.shadow_hosts.contains_key(&id);
-        match class_name(&state.dom, id) {
-            None => return None,
-            Some(_) if is_shadow_root => state.prototype("ShadowRoot"),
-            Some(name) => state.prototype(name),
+        if state.dom.is_shadow_root(id) {
+            state.prototype(world, "ShadowRoot")
+        } else {
+            state.prototype(world, class_name(&state.dom, id)?)
         }
     };
-    let object = verve::dom_events::host_target(prototype, host_id_of(id));
+    let object = match sibling_wrapper(context, id) {
+        Some(sibling) => verve::dom_events::host_target_beside(prototype, host_id_of(id), &sibling),
+        None => verve::dom_events::host_target(prototype, host_id_of(id)),
+    };
     shared(context)
         .borrow_mut()
         .wrappers
-        .insert(id, object.downgrade());
+        .insert((world, id), object.downgrade());
     Some(object)
 }
 
@@ -141,19 +220,14 @@ pub fn wrap_opt(context: &mut Context, id: Option<NodeId>) -> JsValue {
 
 /// The objects of `ids`, as a `NodeList`: an array, with `item`.
 pub fn node_list(ids: Vec<NodeId>, context: &mut Context) -> JsValue {
-    list_of(ids, "NodeList", context)
+    list_object(ids, "NodeList", context)
 }
 
-/// The same as an `HTMLCollection`, with `namedItem`.
-pub fn collection(ids: Vec<NodeId>, context: &mut Context) -> JsValue {
-    list_of(ids, "HTMLCollection", context)
-}
-
-fn list_of(ids: Vec<NodeId>, class: &str, context: &mut Context) -> JsValue {
+fn list_object(ids: Vec<NodeId>, class: &str, context: &mut Context) -> JsValue {
     let values = ids.into_iter().map(|id| wrap(context, id)).collect();
-    let list = array(values, context);
+    let list = native::array(context, values);
     if let Some(object) = list.as_object() {
-        let prototype = shared(context).borrow().prototype(class);
+        let prototype = crate::state::class_prototype(context, class);
         object.set_prototype(Some(prototype));
     }
     list
@@ -161,18 +235,20 @@ fn list_of(ids: Vec<NodeId>, class: &str, context: &mut Context) -> JsValue {
 
 /// Remembers `object` as the node's object, linked to its parent's.
 pub fn adopt(context: &mut Context, id: NodeId, object: &JsObject) {
+    let world = verve::current_world(context);
     shared(context)
         .borrow_mut()
         .wrappers
-        .insert(id, object.downgrade());
+        .insert((world, id), object.downgrade());
     link(context, id, object);
 }
 
 fn link(context: &mut Context, mut id: NodeId, object: &JsObject) {
+    let world = verve::current_world(context);
     let mut object = object.clone();
     loop {
         let Some(parent) = read_dom(context, |dom| dom.parent(id)) else {
-            shared(context).borrow_mut().links.remove(&id);
+            shared(context).borrow_mut().links.remove(&(world, id));
             break;
         };
         let existing = existing_wrapper(context, parent);
@@ -182,7 +258,10 @@ fn link(context: &mut Context, mut id: NodeId, object: &JsObject) {
         };
         verve::dom_events::hold(&object, |held| held.push(parent_object.clone()));
         verve::dom_events::hold(&parent_object, |held| held.push(object.clone()));
-        shared(context).borrow_mut().links.insert(id, parent);
+        shared(context)
+            .borrow_mut()
+            .links
+            .insert((world, id), parent);
         if !fresh {
             break;
         }
@@ -195,6 +274,18 @@ fn link(context: &mut Context, mut id: NodeId, object: &JsObject) {
 /// linked to the new one's.
 pub fn relink(context: &mut Context) {
     let moved = shared(context).borrow_mut().dom.take_relinked();
+    if moved.is_empty() {
+        return;
+    }
+    let worlds = shared(context).borrow().worlds;
+    for world in 0..worlds {
+        verve::in_world(context, world, |cx| relink_world(cx, moved.clone()));
+    }
+}
+
+/// [`relink`] for the objects of the world that is running.
+fn relink_world(context: &mut Context, moved: Vec<NodeId>) {
+    let world = verve::current_world(context);
     let mut seen = std::collections::HashSet::new();
     let mut due = Vec::new();
     let mut removed =
@@ -209,7 +300,7 @@ pub fn relink(context: &mut Context) {
         let (old, new) = {
             let state = shared(context);
             let state = state.borrow();
-            (state.links.get(&id).copied(), state.dom.parent(id))
+            (state.links.get(&(world, id)).copied(), state.dom.parent(id))
         };
         if old == new {
             continue;
@@ -238,7 +329,7 @@ pub fn node_or_text(value: &JsValue, context: &mut Context) -> JsResult<NodeId> 
     if let Some(id) = node_id(value) {
         return Ok(id);
     }
-    let content = super::string(value, context)?;
+    let content = text_of(value, context)?;
     Ok(with_dom(context, |dom| dom.create_text(&content)))
 }
 
@@ -404,7 +495,7 @@ const NODE_ACCESSORS: &[Accessor] = &[
         "nodeName",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 match dom.get(id).map(|n| &n.kind) {
                     Some(NodeKind::Element(_)) => crate::html::qualified_name(dom, id, true),
                     Some(NodeKind::Text(_)) => "#text".into(),
@@ -439,8 +530,9 @@ const NODE_ACCESSORS: &[Accessor] = &[
         "childNodes",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let children = read_dom(cx, |dom| dom.children(id).to_vec());
-            Ok(node_list(children, cx))
+            super::live::same_node_list(this, "childNodes", cx, move |dom| {
+                dom.children(id).to_vec()
+            })
         }),
         None,
     ),
@@ -486,7 +578,7 @@ const NODE_ACCESSORS: &[Accessor] = &[
             let id = node_of(this)?;
             Ok(read_dom(cx, |dom| match dom.get(id).map(|n| &n.kind) {
                 Some(NodeKind::Document | NodeKind::Doctype(_)) => JsValue::null(),
-                _ => text(&dom.text_content(id)),
+                _ => js_text(&dom.text_content(id)),
             }))
         }),
         Some(|this, args, cx| {
@@ -508,7 +600,7 @@ const NODE_ACCESSORS: &[Accessor] = &[
         Some(|this, _, cx| {
             let id = node_of(this)?;
             Ok(read_dom(cx, |dom| match dom.get(id).map(|n| &n.kind) {
-                Some(NodeKind::Text(t) | NodeKind::Comment(t)) => text(t),
+                Some(NodeKind::Text(t) | NodeKind::Comment(t)) => js_text(t),
                 _ => JsValue::null(),
             }))
         }),
@@ -542,13 +634,13 @@ const NODE_ACCESSORS: &[Accessor] = &[
         "isConnected",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(read_dom(cx, |dom| dom.document_of(id).is_some()).into())
+            Ok(read_dom(cx, |dom| dom.is_connected(id)).into())
         }),
         None,
     ),
     (
         "baseURI",
-        Some(|_, _, cx| Ok(text(shared(cx).borrow().url.as_str()))),
+        Some(|_, _, cx| Ok(js_text(shared(cx).borrow().base_url().as_str()))),
         None,
     ),
 ];
@@ -609,7 +701,7 @@ const NODE_METHODS: &[Method] = &[
         let Some(inner) = node_id(&arg(args, 0)) else {
             return Ok(false.into());
         };
-        Ok(read_dom(cx, |dom| dom.contains(outer, inner)).into())
+        Ok(read_dom(cx, |dom| dom.shadow_including_contains(outer, inner)).into())
     }),
     ("hasChildNodes", 0, |this, _, cx| {
         let id = node_of(this)?;
@@ -617,16 +709,14 @@ const NODE_METHODS: &[Method] = &[
     }),
     ("getRootNode", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let composed = super::get(&arg(args, 0), "composed", cx)?.to_boolean();
-        let root = {
-            let state = shared(cx);
-            let state = state.borrow();
-            let mut root = state.dom.root_of(id);
-            while composed && let Some(host) = state.shadow_hosts.get(&root) {
-                root = state.dom.root_of(*host);
+        let composed = get(&arg(args, 0), "composed", cx)?.to_boolean();
+        let root = read_dom(cx, |dom| {
+            if composed {
+                dom.composed_root_of(id)
+            } else {
+                dom.root_of(id)
             }
-            root
-        };
+        });
         Ok(wrap(cx, root))
     }),
     ("cloneNode", 1, |this, args, cx| {
@@ -649,34 +739,10 @@ const NODE_METHODS: &[Method] = &[
         };
         Ok(read_dom(cx, |dom| equal_nodes(dom, a, b)).into())
     }),
-    // Adjacent text nodes joined into one, and empty ones gone.
+    // Adjacent text nodes joined into one, and empty ones gone; boundaries follow the text.
     ("normalize", 0, |this, _, cx| {
         let id = node_of(this)?;
-        with_dom(cx, |dom| {
-            for parent in dom.subtree(id) {
-                let children = dom.children(parent).to_vec();
-                let mut previous: Option<NodeId> = None;
-                for child in children {
-                    let Some(NodeKind::Text(content)) = dom.get(child).map(|n| n.kind.clone())
-                    else {
-                        previous = None;
-                        continue;
-                    };
-                    if content.is_empty() {
-                        dom.detach(child);
-                        continue;
-                    }
-                    match previous {
-                        Some(before) => {
-                            let joined = format!("{}{content}", dom.text_content(before));
-                            dom.set_text(before, &joined);
-                            dom.detach(child);
-                        }
-                        None => previous = Some(child),
-                    }
-                }
-            }
-        });
+        with_dom(cx, |dom| dom.normalize(id));
         Ok(JsValue::undefined())
     }),
     ("lookupNamespaceURI", 1, |this, args, cx| {
@@ -687,7 +753,7 @@ const NODE_METHODS: &[Method] = &[
         }
         Ok(
             read_dom(cx, |dom| dom.get(id).and_then(|n| n.namespace.uri()))
-                .map_or(JsValue::null(), text),
+                .map_or(JsValue::null(), js_text),
         )
     }),
     ("lookupPrefix", 1, |_, _, _| Ok(JsValue::null())),
@@ -813,9 +879,9 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
     }),
     ("getElementsByClassName", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let classes = arg_string(args, 0, cx)?;
+        let classes = arg_text(args, 0, cx)?;
         let wanted: Vec<String> = classes.split_whitespace().map(str::to_owned).collect();
-        let found = read_dom(cx, |dom| {
+        super::live::collection(cx, move |dom| {
             if wanted.is_empty() {
                 return Vec::new();
             }
@@ -826,30 +892,36 @@ pub const PARENT_NODE_METHODS: &[Method] = &[
                         .is_some_and(|n| wanted.iter().all(|c| n.has_class(c)))
                 })
                 .collect()
-        });
-        Ok(collection(found, cx))
+        })
     }),
     ("getElementsByTagName", 1, |this, args, cx| {
         let id = node_of(this)?;
-        let tag = arg_string(args, 0, cx)?.to_ascii_lowercase();
-        let found = read_dom(cx, |dom| {
+        let tag = arg_text(args, 0, cx)?.to_ascii_lowercase();
+        super::live::collection(cx, move |dom| {
             dom.descendants(id)
                 .into_iter()
                 .filter(|n| tag == "*" || dom.get(*n).and_then(|n| n.tag()) == Some(tag.as_str()))
                 .collect()
-        });
-        Ok(collection(found, cx))
+        })
     }),
     ("getElementsByTagNameNS", 2, |this, args, cx| {
         let id = node_of(this)?;
-        let tag = arg_string(args, 1, cx)?.to_ascii_lowercase();
-        let found = read_dom(cx, |dom| {
-            dom.descendants(id)
-                .into_iter()
-                .filter(|n| tag == "*" || dom.get(*n).and_then(|n| n.tag()) == Some(tag.as_str()))
-                .collect()
-        });
-        Ok(collection(found, cx))
+        let namespace = opt_string(args, 0, cx)?;
+        let tag = arg_text(args, 1, cx)?;
+        super::live::collection(cx, move |dom| {
+            let in_namespace = |n: &Node| {
+                namespace.as_deref() == Some("*") || n.namespace.uri() == namespace.as_deref()
+            };
+            // HTML tags are kept lower case; the others as they were written.
+            let named = |n: &Node| {
+                tag == "*"
+                    || n.tag() == Some(tag.as_str())
+                    || (n.namespace == Namespace::Html
+                        && n.tag() == Some(&tag.to_ascii_lowercase()))
+            };
+            let wanted = |id: &NodeId| dom.get(*id).is_some_and(|n| in_namespace(n) && named(n));
+            dom.descendants(id).into_iter().filter(wanted).collect()
+        })
     }),
 ];
 
@@ -858,7 +930,7 @@ pub fn query_selector(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<crate::css::SelectorList> {
-    let selector = arg_string(args, 0, context)?;
+    let selector = arg_text(args, 0, context)?;
     crate::css::SelectorList::parse(&selector).map_err(|error| {
         dom_error(
             context,
@@ -884,8 +956,7 @@ pub const PARENT_NODE_ACCESSORS: &[Accessor] = &[
         "children",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            let children = read_dom(cx, |dom| element_children(dom, id));
-            Ok(collection(children, cx))
+            super::live::same_collection(this, "children", cx, move |dom| element_children(dom, id))
         }),
         None,
     ),
@@ -1012,11 +1083,13 @@ fn span(units: &[u16], offset: f64, count: f64) -> (usize, usize) {
 const CHARACTER_DATA_ACCESSORS: &[Accessor] = &[
     (
         "data",
-        Some(|this, _, cx| Ok(text(&data_of(this, cx)?.1))),
+        Some(|this, _, cx| Ok(js_text(&data_of(this, cx)?.1))),
         Some(|this, args, cx| {
             let id = node_of(this)?;
             let value = opt_string(args, 0, cx)?.unwrap_or_default();
-            with_dom(cx, |dom| dom.set_text(id, &value));
+            // Setting the same data still replaces it, so boundaries in it go to 0.
+            let total = utf16(&data_of(this, cx)?.1).len();
+            with_dom(cx, |dom| dom.replace_data(id, 0, total, &value));
             Ok(JsValue::undefined())
         }),
     ),
@@ -1027,69 +1100,72 @@ const CHARACTER_DATA_ACCESSORS: &[Accessor] = &[
     ),
 ];
 
+/// The `IndexSizeError` of a character offset past the end of the data.
+fn check_offset(cx: &mut Context, units: &[u16], offset: f64) -> JsResult<()> {
+    if offset > units.len() as f64 {
+        return Err(dom_error(cx, "字符偏移超出数据长度", "IndexSizeError"));
+    }
+    Ok(())
+}
+
 const CHARACTER_DATA_METHODS: &[Method] = &[
     ("appendData", 1, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
-        let more = arg_string(args, 0, cx)?;
-        with_dom(cx, |dom| dom.set_text(id, &format!("{data}{more}")));
+        let more = arg_text(args, 0, cx)?;
+        let end = utf16(&data).len();
+        with_dom(cx, |dom| dom.replace_data(id, end, 0, &more));
         Ok(JsValue::undefined())
     }),
     ("insertData", 2, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
-        let offset = arg(args, 0).to_number(cx)?;
-        let more = arg_string(args, 1, cx)?;
+        let offset = f64::from(arg(args, 0).to_u32(cx)?);
+        let more = arg_text(args, 1, cx)?;
         let units = utf16(&data);
+        check_offset(cx, &units, offset)?;
         let (at, _) = span(&units, offset, 0.);
-        let joined = format!(
-            "{}{more}{}",
-            String::from_utf16_lossy(&units[..at]),
-            String::from_utf16_lossy(&units[at..])
-        );
-        with_dom(cx, |dom| dom.set_text(id, &joined));
+        with_dom(cx, |dom| dom.replace_data(id, at, 0, &more));
         Ok(JsValue::undefined())
     }),
     ("deleteData", 2, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
-        let (offset, count) = (arg(args, 0).to_number(cx)?, arg(args, 1).to_number(cx)?);
-        let units = utf16(&data);
-        if offset > units.len() as f64 {
-            return Err(dom_error(cx, "字符偏移超出数据长度", "IndexSizeError"));
-        }
-        let (start, end) = span(&units, offset, count);
-        let kept = format!(
-            "{}{}",
-            String::from_utf16_lossy(&units[..start]),
-            String::from_utf16_lossy(&units[end..])
+        let (offset, count) = (
+            f64::from(arg(args, 0).to_u32(cx)?),
+            f64::from(arg(args, 1).to_u32(cx)?),
         );
-        with_dom(cx, |dom| dom.set_text(id, &kept));
+        let units = utf16(&data);
+        check_offset(cx, &units, offset)?;
+        let (start, end) = span(&units, offset, count);
+        with_dom(cx, |dom| dom.replace_data(id, start, end - start, ""));
         Ok(JsValue::undefined())
     }),
     ("replaceData", 3, |this, args, cx| {
         let (id, data) = data_of(this, cx)?;
-        let (offset, count) = (arg(args, 0).to_number(cx)?, arg(args, 1).to_number(cx)?);
-        let more = arg_string(args, 2, cx)?;
-        let units = utf16(&data);
-        let (start, end) = span(&units, offset, count);
-        let joined = format!(
-            "{}{more}{}",
-            String::from_utf16_lossy(&units[..start]),
-            String::from_utf16_lossy(&units[end..])
+        let (offset, count) = (
+            f64::from(arg(args, 0).to_u32(cx)?),
+            f64::from(arg(args, 1).to_u32(cx)?),
         );
-        with_dom(cx, |dom| dom.set_text(id, &joined));
+        let more = arg_text(args, 2, cx)?;
+        let units = utf16(&data);
+        check_offset(cx, &units, offset)?;
+        let (start, end) = span(&units, offset, count);
+        with_dom(cx, |dom| dom.replace_data(id, start, end - start, &more));
         Ok(JsValue::undefined())
     }),
     ("substringData", 2, |this, args, cx| {
         let (_, data) = data_of(this, cx)?;
-        let (offset, count) = (arg(args, 0).to_number(cx)?, arg(args, 1).to_number(cx)?);
+        let (offset, count) = (
+            f64::from(arg(args, 0).to_u32(cx)?),
+            f64::from(arg(args, 1).to_u32(cx)?),
+        );
         let units = utf16(&data);
         let (start, end) = span(&units, offset, count);
-        Ok(text(&String::from_utf16_lossy(&units[start..end])))
+        Ok(js_text(&String::from_utf16_lossy(&units[start..end])))
     }),
 ];
 
 const TEXT_METHODS: &[Method] = &[("splitText", 1, |this, args, cx| {
     let (id, data) = data_of(this, cx)?;
-    let offset = arg(args, 0).to_number(cx)?;
+    let offset = f64::from(arg(args, 0).to_u32(cx)?);
     let units = utf16(&data);
     if offset as usize > units.len() {
         return Err(dom_error(
@@ -1099,17 +1175,9 @@ const TEXT_METHODS: &[Method] = &[("splitText", 1, |this, args, cx| {
         ));
     }
     let (at, _) = span(&units, offset, 0.);
-    let head = String::from_utf16_lossy(&units[..at]);
-    let tail = String::from_utf16_lossy(&units[at..]);
-    let rest = with_dom(cx, |dom| {
-        dom.set_text(id, &head);
-        let rest = dom.create_text(&tail);
-        if let Some(parent) = dom.parent(id) {
-            let next = dom.sibling(id, 1, false);
-            dom.insert_before(parent, rest, next);
-        }
-        rest
-    });
+    let Some(rest) = with_dom(cx, |dom| dom.split_text(id, at)) else {
+        return Err(type_error("Illegal invocation: not a Text node"));
+    };
     Ok(wrap(cx, rest))
 })];
 
@@ -1118,7 +1186,7 @@ const TEXT_ACCESSORS: &[Accessor] = &[
         "wholeText",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 let mut start = id;
                 while let Some(previous) = dom
                     .sibling(start, -1, false)
@@ -1159,7 +1227,7 @@ const DOCTYPE_ACCESSORS: &[Accessor] = &[
         "name",
         Some(|this, _, cx| {
             let id = node_of(this)?;
-            Ok(text(&read_dom(cx, |dom| {
+            Ok(js_text(&read_dom(cx, |dom| {
                 match dom.get(id).map(|n| &n.kind) {
                     Some(NodeKind::Doctype(name)) => name.clone(),
                     _ => String::new(),
@@ -1168,14 +1236,14 @@ const DOCTYPE_ACCESSORS: &[Accessor] = &[
         }),
         None,
     ),
-    ("publicId", Some(|_, _, _| Ok(text(""))), None),
-    ("systemId", Some(|_, _, _| Ok(text(""))), None),
+    ("publicId", Some(|_, _, _| Ok(js_text(""))), None),
+    ("systemId", Some(|_, _, _| Ok(js_text(""))), None),
 ];
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Node",
             length: 0,
             construct: illegal_constructor,
@@ -1186,7 +1254,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    let (node, node_proto) = shared(context).borrow().class("Node").expect("made");
+    let (node, node_proto) = crate::state::class_of(context, "Node").expect("made");
     for (key, value) in [
         ("ELEMENT_NODE", 1),
         ("ATTRIBUTE_NODE", 2),
@@ -1219,9 +1287,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             )?;
         }
     }
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "CharacterData",
             length: 0,
             construct: illegal_constructor,
@@ -1232,19 +1300,16 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    let (_, character_data) = shared(context)
-        .borrow()
-        .class("CharacterData")
-        .expect("made");
+    let (_, character_data) = crate::state::class_of(context, "CharacterData").expect("made");
     super::extend_prototype(
         context,
         &character_data,
         CHILD_NODE_METHODS,
         CHILD_NODE_ACCESSORS,
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Text",
             length: 1,
             construct: |new_target, args, cx| {
@@ -1258,9 +1323,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "CDATASection",
             length: 0,
             construct: illegal_constructor,
@@ -1271,9 +1336,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "Comment",
             length: 1,
             construct: |new_target, args, cx| {
@@ -1287,9 +1352,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "DocumentFragment",
             length: 0,
             construct: |new_target, _, cx| construct_node(new_target, cx, Dom::create_fragment),
@@ -1300,16 +1365,13 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             global: true,
         },
     )?;
-    let (_, fragment) = shared(context)
-        .borrow()
-        .class("DocumentFragment")
-        .expect("made");
+    let (_, fragment) = crate::state::class_of(context, "DocumentFragment").expect("made");
     super::extend_prototype(
         context,
         &fragment,
         &[("getElementById", 1, |this, args, cx| {
             let root = node_of(this)?;
-            let wanted = arg_string(args, 0, cx)?;
+            let wanted = arg_text(args, 0, cx)?;
             let found = read_dom(cx, |dom| {
                 dom.descendants(root)
                     .into_iter()
@@ -1319,9 +1381,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         })],
         &[],
     )?;
-    class(
+    webidl_class(
         context,
-        ClassSpec {
+        WebIdlClass {
             name: "DocumentType",
             length: 0,
             construct: illegal_constructor,
@@ -1338,9 +1400,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ("NodeList", LIST_METHODS),
         ("HTMLCollection", COLLECTION_METHODS),
     ] {
-        let (_, prototype) = class(
+        let (_, prototype) = webidl_class(
             context,
-            ClassSpec {
+            WebIdlClass {
                 name,
                 length: 0,
                 construct: illegal_constructor,
@@ -1383,17 +1445,8 @@ const COLLECTION_METHODS: &[Method] = &[
         })
     }),
     ("namedItem", 1, |this, args, cx| {
-        let name = arg_string(args, 0, cx)?;
-        for item in super::list(this, cx)? {
-            let Some(id) = node_id(&item) else { continue };
-            let hit = read_dom(cx, |dom| {
-                dom.get_attr(id, "id").as_deref() == Some(name.as_str())
-                    || dom.get_attr(id, "name").as_deref() == Some(name.as_str())
-            });
-            if hit {
-                return Ok(item);
-            }
-        }
-        Ok(JsValue::null())
+        let name = arg_text(args, 0, cx)?;
+        let nodes: Vec<NodeId> = list_of(this, cx)?.iter().filter_map(node_id).collect();
+        Ok(wrap_opt(cx, super::live::named_item(cx, &nodes, &name)))
     }),
 ];

@@ -7,11 +7,14 @@
 use std::cell::RefCell;
 
 use boa_engine::{
-    Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue,
-    NativeFunction, Trace, js_string,
+    Context, Finalize, JsData, JsObject, JsResult, JsString, JsValue, Trace, js_string,
     native_function::NativeFunctionPointer,
-    object::{FunctionObjectBuilder, builtins::JsArray},
-    property::{Attribute, PropertyDescriptor, PropertyKey},
+    object::builtins::JsArray,
+    property::{PropertyDescriptor, PropertyKey},
+};
+
+use crate::native::{
+    PlainClass, arg, arg_text, define_global, function, js_text, plain_class, text_of, type_error,
 };
 
 #[derive(Trace, Finalize, JsData)]
@@ -28,49 +31,6 @@ struct ParamsData {
     pairs: RefCell<Vec<(String, String)>>,
     /// The URL these are the query of, if they are one's.
     owner: boa_gc::GcRefCell<Option<JsObject>>,
-}
-
-fn arg(args: &[JsValue], at: usize) -> JsValue {
-    args.get(at).cloned().unwrap_or_default()
-}
-
-fn text_of(value: &JsValue, context: &mut Context) -> JsResult<String> {
-    Ok(value.to_string(context)?.to_std_string_escaped())
-}
-
-fn type_error(message: impl Into<String>) -> boa_engine::JsError {
-    JsNativeError::typ().with_message(message.into()).into()
-}
-
-fn js_text(text: &str) -> JsValue {
-    JsString::from(text).into()
-}
-
-fn function(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .build()
-        .into()
-}
-
-fn constructor(
-    context: &mut Context,
-    name: &str,
-    length: usize,
-    f: NativeFunctionPointer,
-) -> JsObject {
-    FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(f))
-        .name(JsString::from(name))
-        .length(length)
-        .constructor(true)
-        .build()
-        .into()
 }
 
 /// The prototype `new_target` names, or `fallback`'s.
@@ -110,7 +70,7 @@ fn construct_url(
             "Class constructor URL cannot be invoked without 'new'",
         ));
     }
-    let input = text_of(&arg(args, 0), context)?;
+    let input = arg_text(args, 0, context)?;
     let base = match arg(args, 1) {
         b if b.is_undefined() => None,
         b => Some(text_of(&b, context)?),
@@ -265,7 +225,7 @@ macro_rules! part_accessors {
         &[$(($name,
             (|this, _, _| url_part_get(this, $name)) as NativeFunctionPointer,
             (|this, args, cx| {
-                let value = text_of(&arg(args, 0), cx)?;
+                let value = arg_text(args, 0, cx)?;
                 url_part_set(this, $name, &value)?;
                 Ok(JsValue::undefined())
             }) as NativeFunctionPointer,
@@ -311,7 +271,7 @@ const URL_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 const URL_STATICS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("canParse", 2, |_, args, cx| {
-        let input = text_of(&arg(args, 0), cx)?;
+        let input = arg_text(args, 0, cx)?;
         let base = match arg(args, 1) {
             b if b.is_undefined() => None,
             b => Some(text_of(&b, cx)?),
@@ -339,7 +299,7 @@ const URL_STATICS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(js_text(&url))
     }),
     ("revokeObjectURL", 1, |_, args, cx| {
-        let url = text_of(&arg(args, 0), cx)?;
+        let url = arg_text(args, 0, cx)?;
         crate::shared(cx).blobs.borrow_mut().remove(&url);
         Ok(JsValue::undefined())
     }),
@@ -459,12 +419,12 @@ fn pair_list(context: &mut Context, pairs: Vec<(String, String)>, which: u8) -> 
 
 const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("append", 2, |this, args, cx| {
-        let (name, value) = (text_of(&arg(args, 0), cx)?, text_of(&arg(args, 1), cx)?);
+        let (name, value) = (arg_text(args, 0, cx)?, arg_text(args, 1, cx)?);
         change_pairs(this, |p| p.push((name, value)))?;
         Ok(JsValue::undefined())
     }),
     ("set", 2, |this, args, cx| {
-        let (name, value) = (text_of(&arg(args, 0), cx)?, text_of(&arg(args, 1), cx)?);
+        let (name, value) = (arg_text(args, 0, cx)?, arg_text(args, 1, cx)?);
         change_pairs(this, |p| match p.iter().position(|(k, _)| *k == name) {
             Some(first) => {
                 p[first].1 = value;
@@ -479,7 +439,7 @@ const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(JsValue::undefined())
     }),
     ("delete", 2, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let value = match arg(args, 1) {
             v if v.is_undefined() => None,
             v => Some(text_of(&v, cx)?),
@@ -490,14 +450,14 @@ const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(JsValue::undefined())
     }),
     ("get", 1, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         Ok(read_pairs(this)?
             .into_iter()
             .find(|(k, _)| *k == name)
             .map_or(JsValue::null(), |(_, v)| js_text(&v)))
     }),
     ("getAll", 1, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let values: Vec<JsValue> = read_pairs(this)?
             .into_iter()
             .filter(|(k, _)| *k == name)
@@ -506,7 +466,7 @@ const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(JsArray::from_iter(values, cx).into())
     }),
     ("has", 2, |this, args, cx| {
-        let name = text_of(&arg(args, 0), cx)?;
+        let name = arg_text(args, 0, cx)?;
         let value = match arg(args, 1) {
             v if v.is_undefined() => None,
             v => Some(text_of(&v, cx)?),
@@ -548,56 +508,30 @@ const PARAMS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 // ─── Installing them ────────────────────────────────────────────────────────────────────────
 
-fn define_method(
-    object: &JsObject,
-    name: &str,
-    method: JsObject,
-    context: &mut Context,
-) -> JsResult<()> {
-    object.define_property_or_throw(
-        JsString::from(name),
-        PropertyDescriptor::builder()
-            .value(method)
-            .writable(true)
-            .enumerable(false)
-            .configurable(true),
-        context,
-    )?;
-    Ok(())
-}
-
-fn class(
+/// A global class of one parameter's constructor, with `methods` and no getters yet.
+fn global_class(
     context: &mut Context,
     name: &str,
     construct: NativeFunctionPointer,
     methods: &[(&str, usize, NativeFunctionPointer)],
 ) -> JsResult<(JsObject, JsObject)> {
-    let class = constructor(context, name, 1, construct);
-    let prototype = JsObject::with_object_proto(context.intrinsics());
-    for (method_name, length, f) in methods {
-        let method = function(context, method_name, *length, *f);
-        define_method(&prototype, method_name, method, context)?;
-    }
-    define_method(&prototype, "constructor", class.clone(), context)?;
-    class.define_property_or_throw(
-        js_string!("prototype"),
-        PropertyDescriptor::builder()
-            .value(prototype.clone())
-            .writable(false)
-            .enumerable(false)
-            .configurable(false),
+    let (class, prototype) = plain_class(
         context,
+        PlainClass {
+            name,
+            construct,
+            length: 1,
+            parent: None,
+            methods,
+            getters: &[],
+        },
     )?;
-    context.register_global_property(
-        JsString::from(name),
-        class.clone(),
-        Attribute::WRITABLE | Attribute::CONFIGURABLE,
-    )?;
+    define_global(context, name, class.clone())?;
     Ok((class, prototype))
 }
 
 pub fn install(context: &mut Context) -> JsResult<()> {
-    let (url_class, url_proto) = class(context, "URL", construct_url, URL_METHODS)?;
+    let (url_class, url_proto) = global_class(context, "URL", construct_url, URL_METHODS)?;
     for (name, get, set) in URL_ACCESSORS {
         let getter = function(context, &format!("get {name}"), 0, *get);
         let setter = (!matches!(*name, "origin"))
@@ -624,7 +558,8 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         let method = function(context, name, *length, *f);
         url_class.set(JsString::from(*name), method, false, context)?;
     }
-    let (_, params_proto) = class(context, "URLSearchParams", construct_params, PARAMS_METHODS)?;
+    let (_, params_proto) =
+        global_class(context, "URLSearchParams", construct_params, PARAMS_METHODS)?;
     // `for (const [k, v] of params)`, and `params.size`.
     let entries = params_proto.get(js_string!("entries"), context)?;
     params_proto.define_property_or_throw(

@@ -29,7 +29,7 @@ command line.
 | The arena | `src/dom.rs` | One document per realm, and every node made but not in it, in one arena of generational ids. Attributes, classes, inline style, namespaces, what is typed in a field (its caret and selection, `src/field.rs`), which box is ticked, which option chosen, focus, `:hover` and `:active`. It remembers what changed (for restyling and redrawing), which subtrees joined or left the document, and — while a `MutationObserver` watches — mutation records. Nodes are held by `Arc`, so a copy of the arena is cheap and shares them. |
 | CSS | `src/css.rs` | Selectors level 4 less what needs layout — every combinator, attribute operator, `:not`/`:is`/`:where`/`:has`, `:nth-child(… of S)` and its family, the state pseudo-classes — parsed into a `SyntaxError` when they do not parse. The cascade: origin, importance, specificity and order, the inline style, inheritance, `inherit`/`initial`/`unset`, `var()` with fallbacks, font sizes computed to pixels, shorthands opened up, `@media` evaluated against the viewport and colour scheme, `@supports`/`@layer` applied; a user agent sheet (`display`, the headings, the lists). Kept incrementally: only the subtrees whose nodes changed are styled again, each node's style shared by `Arc` with the last snapshot. |
 | Markup | `src/html.rs` | `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `DOMParser`, `document.write` and `XMLSerializer`: raw text in `<script>`/`<style>`/`<textarea>`, the end tags HTML implies, `<tbody>` round bare rows, a whole document's `<html>`/`<head>`/`<body>`, SVG and MathML as foreign content, character references. |
-| The classes | `src/bind/` | `Node` ← `Element` ← `HTMLElement` and its sixty-odd subclasses, `SVGElement`'s, `Text`, `Comment`, `DocumentFragment`, `Document`, `ShadowRoot`; the fields (`value`, `checked`, selections, `select`'s options, forms and their submission, labels), links' URL parts, tables, templates, dialogs, media; `classList`, `style`, `dataset`, `attributes`; `Range`, `Selection`, `TreeWalker`; the CSSOM (`sheet`, `styleSheets`, `new CSSStyleSheet`, `adoptedStyleSheets`), `getComputedStyle`; `MutationObserver`, `ResizeObserver`, `IntersectionObserver`; `XMLHttpRequest` (on Verve's `fetch`); custom elements; a canvas that measures text and paints nothing; `DOMMatrix`, `DOMRect`, `DataTransfer`. |
+| The classes | `src/bind/` | `Node` ← `Element` ← `HTMLElement` and its sixty-odd subclasses, `SVGElement`'s, `Text`, `Comment`, `DocumentFragment`, `Document`, `ShadowRoot`; the fields (`value`, `checked`, selections, `select`'s options, forms and their submission, labels), links' URL parts, tables, templates, dialogs, media; `classList`, `style`, `dataset`, `attributes`; `Range`, `Selection`, `TreeWalker`; the CSSOM (`sheet`, `styleSheets`, `new CSSStyleSheet`, `adoptedStyleSheets`), `getComputedStyle`; `MutationObserver`, `ResizeObserver`, `IntersectionObserver`; `XMLHttpRequest` (on Verve's `fetch`); custom elements; a canvas 2D that paints on the CPU (tiny-skia) with its own font stack, and the images it draws; `DOMMatrix`, `DOMRect`, `DataTransfer`. |
 | Events | `src/bind/events.rs`, Verve's `dom_events` | A node's object *is* one of Verve's event targets, so `Node` extends the realm's own `EventTarget` and `AbortSignal`, `MessagePort` and the rest keep theirs; Verve's dispatch asks the document what each target is in and captures, targets and bubbles along that path up to the window. `UIEvent`, `MouseEvent`, `PointerEvent`, `KeyboardEvent`, `InputEvent`, `FocusEvent`, `WheelEvent` and the rest derive from Verve's `Event`; every element, the document and the window have the `on…` handler properties. What the document does itself with events: focus moving, a click ticking a box (and untouched again if prevented), radio groups, a label pressing its control, implicit submission, `<summary>` toggling its `<details>`. |
 | The window | `src/bind/window.rs` | The global object made a `Window`: its sizes, `location` and `history` (`pushState`, `hashchange`, `popstate`), `localStorage` (in memory, or on disk through a `StorageBackend`) and `sessionStorage`, `requestAnimationFrame` (on the realm's timers, or the drawer's frames), `requestIdleCallback`, `matchMedia` (whose lists hear `change`), `scrollTo`, `screen`, `visualViewport`, `postMessage`, `navigator.clipboard`. What only the embedder can do — navigate, open a window, write the clipboard, alert — is a `Request`. |
 
@@ -112,7 +112,7 @@ default actions, runs the microtasks the listeners queued, and leaves the docume
 
 ### What only the embedder can do
 
-`Document::take_requests()`: `Navigate`, `Reload`, `Open`, `CopyText`, `Alert`, `Title`,
+`Document::take_requests()`: `Navigate`, `Reload`, `Open`, `WriteClipboard`, `ReadClipboard`, `Alert`, `Title`,
 `Scroll`, `Fullscreen`, `Submit`, `Frame`.
 
 ## Extending the classes
@@ -161,23 +161,38 @@ everything of its app — CodeMirror, Markdown, the vault, views, menus, its gen
 --test dsh --test react_dev -- --ignored` runs those (set `VERVE_DOM_DSH`/`VERVE_DOM_REACT_DEV`
 to keep the installed packages somewhere of your own; about 30 MB for DSH's).
 
+## Loading a page
+
+`Options::loader` gives the realm a `Loader` (what `file:`, an `app://` scheme or the network
+are to it). `Document::navigate_initial(runtime, url)` fetches the page and `load_html` takes
+markup in hand; the embedder then calls `Document::pump_loads(runtime)` on its beat for as long
+as `is_loading()` and reads `take_load_events()` (`Started`, `Committed`, `FirstPaintable`,
+`Title`, `Icons`, `DomContentLoaded`, `Loaded`, `Failed`). The page is read by a
+`html::StreamParser` that stops at each `<script>`; scripts run in HTML's order (classic, `defer`,
+`async`, `type=module` with its graph fetched first and an `importmap`, and those a script
+inserts), a `<link rel=stylesheet>` (and its `@import`s) holds the scripts after it, `<img>` and
+`@font-face` bytes are fetched through the loader, and `readystatechange`, `DOMContentLoaded`,
+`load` and `pageshow` fire in a browser's order. Attributes such as `onload="…"` become handlers.
+`fetch` and `XMLHttpRequest` of an address the loader claims go through it. The order was
+observed in Chromium 142 (Electron 39): `tests/load.rs` and `tests/fixtures/load/`.
+
 ## Not yet
 
 - No layout: where things are is the drawer's to work out and report. Until it does, boxes
   are empty (the viewport for `<html>` and `<body>`).
-- Lists of nodes (`childNodes`, `children`, `getElementsBy…`) are arrays taken when asked, not
-  live; a script that keeps one and changes the tree sees the tree as it was.
-- No composition events (an input method's text arrives committed, through `insert_text`), no
-  typing into `contenteditable` regions, no drag and drop or touch input from the interface.
-- Custom elements: an element of a defined tag made by `createElement` is of its class, and
-  hears `connectedCallback`/`disconnectedCallback`; one the parser makes is not upgraded, and
-  `attributeChangedCallback` is not called.
-- Shadow roots are held and queried, but their styles are not scoped and events are not
-  retargeted across them.
+- No touch input from the interface. Drag images are not drawn (`setDragImage` is recorded), a
+  text selection cannot be dragged, and a drop on a field or an editable region does not insert
+  the dragged text. `execCommand('paste')` does nothing, since the clipboard is the shell's and a
+  paste is handed to [`Document::paste`].
+- Custom elements: no `is="…"` built-ins, no `ElementInternals` beyond an empty object, and the
+  page's own markup is upgraded once parsed, not constructed while it is parsed. A class or
+  style change through `classList` or `style` does not reach `attributeChangedCallback`.
+- A `<template>`'s `content` is a fragment of the same document, not an inert one.
 - CSS: `calc()`, `env()` and other functions stay as written; pseudo-elements (`::before`)
   match nothing, so generated content is not in the snapshot; `@container`, animations and
   transitions are not run (`animate()` answers a finished animation).
-- Nothing loads: `<img>`, `<link rel=stylesheet>`, `<script src>`, `<iframe>` and media fire
-  no `load`; a canvas measures text and paints nothing; no WebGL.
+- Loading is the embedder's: with an `Options::loader` (a `Loader`) the page loads as a tab's
+  does (see "Loading a page" below); without one nothing loads. `<iframe>` and media fire no
+  `load`; a canvas measures text and paints nothing; no WebGL.
 - `document.cookie` lives in memory; `XMLHttpRequest`'s synchronous requests are sent
   asynchronously.

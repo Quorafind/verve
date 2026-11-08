@@ -36,7 +36,7 @@ use std::cmp::{Ordering, min};
 
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
 
-mod array_iterator;
+pub(crate) mod array_iterator;
 use crate::value::JsVariant;
 pub(crate) use array_iterator::ArrayIterator;
 
@@ -898,7 +898,7 @@ impl Array {
     /// `Object.prototype` as its prototype, which has none either and a null prototype. Then
     /// `Set` finds no element on the prototype chain, and defines one at the end. Returns `o`
     /// borrowed, its length and its count of elements.
-    fn plain_dense_array<'a>(
+    pub(crate) fn plain_dense_array<'a>(
         o: &'a JsObject,
         context: &Context,
     ) -> Option<(

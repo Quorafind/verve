@@ -28,7 +28,7 @@ use super::{
     iterable::if_abrupt_close_iterator,
 };
 
-mod map_iterator;
+pub(crate) mod map_iterator;
 pub(crate) use map_iterator::MapIterator;
 
 pub mod ordered_map;
@@ -544,6 +544,8 @@ impl Map {
                 }
 
                 let Some((k, v)) = map.get_index(index) else {
+                    // A tombstone left by a `delete`: step over it.
+                    index += 1;
                     continue;
                 };
 

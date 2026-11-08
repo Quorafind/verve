@@ -12,12 +12,12 @@
 //! each animation frame.
 
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
+use verve::native::{
+    self, arg, function, get, hidden, illegal_constructor, js_text, list_of, text_of, type_error,
+};
 
 use super::node::{node_list, read_dom, wrap, wrap_opt};
-use super::{
-    ClassSpec, Kind, Method, arg, array, class, get, handle_of, instance, list, node_of,
-    plain_object, set, string, text, type_error,
-};
+use super::{Kind, Method, WebIdlClass, handle_instance, handle_of, node_of, set, webidl_class};
 use crate::Rect;
 use crate::dom::{Mutation, NodeId};
 use crate::state::{MutationOptions, ObservedTarget, ObserverRecord, Watch, shared};
@@ -35,7 +35,7 @@ fn construct(
         ));
     }
     let id = shared(context).borrow_mut().id();
-    let object = instance(new_target, Kind::Plain, id, context)?;
+    let object = handle_instance(new_target, Kind::Plain, id, context)?;
     if watch == Watch::Intersection {
         let options = arg(args, 1);
         let root = get(&options, "root", context)?;
@@ -54,7 +54,7 @@ fn construct(
             &object,
             "rootMargin",
             if margin.is_undefined() {
-                text("0px 0px 0px 0px")
+                js_text("0px 0px 0px 0px")
             } else {
                 margin
             },
@@ -62,18 +62,18 @@ fn construct(
         )?;
         let threshold = get(&options, "threshold", context)?;
         let thresholds = if threshold.is_undefined() {
-            array(vec![0.into()], context)
+            native::array(context, vec![0.into()])
         } else if threshold.is_object() {
             threshold
         } else {
-            array(vec![threshold], context)
+            native::array(context, vec![threshold])
         };
         set(&object, "thresholds", thresholds, context)?;
     }
     // Kept on the observer too: the host lets go of an observer watching nothing, and takes it
     // back from here when it watches again.
-    super::hidden(&object, js_string!("__callback"), callback.clone(), context)?;
-    super::hidden(&object, js_string!("__watch"), watch as u32, context)?;
+    hidden(&object, js_string!("__callback"), callback.clone(), context)?;
+    hidden(&object, js_string!("__watch"), watch as u32, context)?;
     Ok(object.into())
 }
 
@@ -101,6 +101,7 @@ fn record_id(this: &JsValue, context: &mut Context) -> JsResult<u32> {
             id,
             watch,
             object: object.downgrade(),
+            world: verve::current_world(context),
             kept: Vec::new(),
             transient: Vec::new(),
             targets: Vec::new(),
@@ -155,9 +156,9 @@ fn mutation_options(options: &JsValue, context: &mut Context) -> JsResult<Mutati
         None
     } else {
         Some(
-            list(&filter, context)?
+            list_of(&filter, context)?
                 .iter()
-                .map(|v| string(v, context))
+                .map(|v| text_of(v, context))
                 .collect::<JsResult<Vec<_>>>()?,
         )
     };
@@ -263,7 +264,7 @@ const OBSERVER_METHODS: &[Method] = &[
         for mutation in records {
             out.push(mutation_record(cx, &mutation)?);
         }
-        Ok(array(out, cx))
+        Ok(native::array(cx, out))
     }),
 ];
 
@@ -272,16 +273,10 @@ const OBSERVER_METHODS: &[Method] = &[
 /// Queues the delivery of the mutations recorded, a microtask from now.
 pub fn queue_delivery(context: &mut Context) {
     shared(context).borrow_mut().mutation_queued = true;
-    let deliver = super::function(context, "deliver", 0, |_, _, cx| {
+    super::queue_microtask(context, "deliver", |_, _, cx| {
         deliver_mutations(cx)?;
         Ok(JsValue::undefined())
     });
-    let queue = context
-        .global_object()
-        .get(js_string!("queueMicrotask"), context);
-    if let Ok(queue) = queue {
-        let _ = verve::call(context, &queue, &JsValue::undefined(), &[deliver.into()]);
-    }
 }
 
 /// Whether `observer` (with `options` on `target`) hears `mutation`.
@@ -404,8 +399,8 @@ pub(crate) fn distribute(context: &mut Context) {
 }
 
 fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsValue> {
-    let record = plain_object(context);
-    let prototype = shared(context).borrow().prototype("MutationRecord");
+    let record = native::object(context);
+    let prototype = crate::state::class_prototype(context, "MutationRecord");
     record.set_prototype(Some(prototype));
     let target = wrap(context, mutation.target());
     set(&record, "target", target, context)?;
@@ -418,7 +413,7 @@ fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsVal
             next,
             ..
         } => {
-            set(&record, "type", text("childList"), context)?;
+            set(&record, "type", js_text("childList"), context)?;
             let added = node_list(added.clone(), context);
             set(&record, "addedNodes", added, context)?;
             let removed = node_list(removed.clone(), context);
@@ -431,21 +426,21 @@ fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsVal
             set(&record, "oldValue", JsValue::null(), context)?;
         }
         Mutation::Attributes { name, old, .. } => {
-            set(&record, "type", text("attributes"), context)?;
+            set(&record, "type", js_text("attributes"), context)?;
             set(&record, "addedNodes", empty.clone(), context)?;
             set(&record, "removedNodes", empty, context)?;
             set(&record, "previousSibling", JsValue::null(), context)?;
             set(&record, "nextSibling", JsValue::null(), context)?;
-            set(&record, "attributeName", text(name), context)?;
+            set(&record, "attributeName", js_text(name), context)?;
             set(
                 &record,
                 "oldValue",
-                old.as_deref().map_or(JsValue::null(), text),
+                old.as_deref().map_or(JsValue::null(), js_text),
                 context,
             )?;
         }
         Mutation::CharacterData { old, .. } => {
-            set(&record, "type", text("characterData"), context)?;
+            set(&record, "type", js_text("characterData"), context)?;
             set(&record, "addedNodes", empty.clone(), context)?;
             set(&record, "removedNodes", empty, context)?;
             set(&record, "previousSibling", JsValue::null(), context)?;
@@ -457,7 +452,7 @@ fn mutation_record(context: &mut Context, mutation: &Mutation) -> JsResult<JsVal
                 if old.is_empty() {
                     JsValue::null()
                 } else {
-                    text(old)
+                    js_text(old)
                 },
                 context,
             )?;
@@ -480,6 +475,15 @@ pub fn deliver_mutations(context: &mut Context) -> JsResult<()> {
         .map(|o| o.id)
         .collect();
     for id in due {
+        let world = with_record(id, context, |o| o.world).unwrap_or(verve::MAIN_WORLD);
+        verve::in_world(context, world, |cx| deliver_mutations_to(id, cx))?;
+    }
+    Ok(())
+}
+
+/// [`deliver_mutations`] to one observer, in the world it belongs to.
+fn deliver_mutations_to(id: u32, context: &mut Context) -> JsResult<()> {
+    {
         let record = with_record(id, context, |o| {
             o.transient.clear();
             o.object.upgrade().map(|object| {
@@ -492,7 +496,7 @@ pub fn deliver_mutations(context: &mut Context) -> JsResult<()> {
         })
         .flatten();
         let Some((observer, mutations, _kept)) = record else {
-            continue;
+            return Ok(());
         };
         let callback = observer.get(js_string!("__callback"), context)?;
         let mut records = Vec::new();
@@ -503,9 +507,9 @@ pub fn deliver_mutations(context: &mut Context) -> JsResult<()> {
             }
         }
         if records.is_empty() {
-            continue;
+            return Ok(());
         }
-        let list = array(records, context);
+        let list = native::array(context, records);
         if let Err(error) = verve::call(
             context,
             &callback,
@@ -525,7 +529,7 @@ fn schedule_layout_delivery(context: &mut Context) {
     if shared(context).borrow().frame_clock != crate::state::FrameClock::Timer {
         return;
     }
-    let deliver = super::function(context, "observe", 0, |_, _, cx| {
+    let deliver = function(context, "observe", 0, |_, _, cx| {
         deliver_layout(cx)?;
         Ok(JsValue::undefined())
     });
@@ -545,7 +549,7 @@ fn rect_object(context: &mut Context, rect: Rect) -> JsResult<JsValue> {
 }
 
 fn size_object(context: &mut Context, width: f32, height: f32) -> JsResult<JsValue> {
-    let size = plain_object(context);
+    let size = native::object(context);
     set(&size, "inlineSize", f64::from(width), context)?;
     set(&size, "blockSize", f64::from(height), context)?;
     Ok(size.into())
@@ -563,18 +567,28 @@ pub fn deliver_layout(context: &mut Context) -> JsResult<bool> {
         .collect();
     let mut told = false;
     for (id, watch) in observers {
+        let world = with_record(id, context, |o| o.world).unwrap_or(verve::MAIN_WORLD);
+        told |= verve::in_world(context, world, |cx| deliver_layout_to(id, watch, cx))?;
+    }
+    Ok(told)
+}
+
+/// [`deliver_layout`] to one observer, in the world it belongs to.
+fn deliver_layout_to(id: u32, watch: Watch, context: &mut Context) -> JsResult<bool> {
+    let mut told = false;
+    {
         let entries = match watch {
             Watch::Resize => resize_entries(context, id)?,
             _ => intersection_entries(context, id)?,
         };
         if entries.is_empty() {
-            continue;
+            return Ok(false);
         }
         let found = with_record(id, context, |o| o.object.upgrade()).flatten();
         if let Some(object) = found {
             let callback = object.get(js_string!("__callback"), context)?;
             told = true;
-            let list = array(entries, context);
+            let list = native::array(context, entries);
             if let Err(error) = verve::call(
                 context,
                 &callback,
@@ -607,8 +621,8 @@ fn resize_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>> {
                 t.last = Some([now.x, now.y, now.width, now.height]);
             }
         });
-        let entry = plain_object(context);
-        let prototype = shared(context).borrow().prototype("ResizeObserverEntry");
+        let entry = native::object(context);
+        let prototype = crate::state::class_prototype(context, "ResizeObserverEntry");
         entry.set_prototype(Some(prototype));
         let target = wrap(context, node);
         set(&entry, "target", target, context)?;
@@ -628,7 +642,7 @@ fn resize_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>> {
             "devicePixelContentBoxSize",
         ] {
             let size = size_object(context, now.width, now.height)?;
-            let sizes = array(vec![size], context);
+            let sizes = native::array(context, vec![size]);
             set(&entry, key, sizes, context)?;
         }
         out.push(entry.into());
@@ -687,10 +701,8 @@ fn intersection_entries(context: &mut Context, id: u32) -> JsResult<Vec<JsValue>
         } else {
             1.
         };
-        let entry = plain_object(context);
-        let prototype = shared(context)
-            .borrow()
-            .prototype("IntersectionObserverEntry");
+        let entry = native::object(context);
+        let prototype = crate::state::class_prototype(context, "IntersectionObserverEntry");
         entry.set_prototype(Some(prototype));
         let target = wrap(context, node);
         set(&entry, "target", target, context)?;
@@ -732,9 +744,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             construct(t, a, c, Watch::Intersection)
         }),
     ] {
-        class(
+        webidl_class(
             context,
-            ClassSpec {
+            WebIdlClass {
                 name,
                 length: 1,
                 construct: construct_fn,
@@ -748,9 +760,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     }
     context.register_global_property(
         js_string!("WebKitMutationObserver"),
-        shared(context)
-            .borrow()
-            .class("MutationObserver")
+        crate::state::class_of(context, "MutationObserver")
             .expect("made")
             .0,
         boa_engine::property::Attribute::WRITABLE | boa_engine::property::Attribute::CONFIGURABLE,
@@ -761,12 +771,12 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         "IntersectionObserverEntry",
         "ResizeObserverSize",
     ] {
-        class(
+        webidl_class(
             context,
-            ClassSpec {
+            WebIdlClass {
                 name,
                 length: 0,
-                construct: super::illegal_constructor,
+                construct: illegal_constructor,
                 parent: None,
                 methods: &[],
                 accessors: &[],

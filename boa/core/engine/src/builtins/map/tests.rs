@@ -1,3 +1,4 @@
+use crate::builtins::map::ordered_map::OrderedMap;
 use crate::{JsNativeErrorKind, JsValue, TestAction, run_test_actions};
 use boa_macros::js_str;
 use indoc::indoc;
@@ -394,5 +395,214 @@ fn get_or_insert_computed_this_is_undefined_and_key_canonicalized() {
         TestAction::assert_eq("v", js_str!("ok")),
         TestAction::assert("m.has(0)"),
         TestAction::assert_eq("m.get(0)", js_str!("ok")),
+    ]);
+}
+
+#[test]
+fn delete_keeps_the_order_of_the_remaining_keys() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::run(indoc! {r#"
+                const map = new Map();
+                for (let i = 0; i < 6; i++) map.set(i, i * 10);
+                map.delete(1);
+                map.delete(4);
+                map.delete(1);
+            "#}),
+        TestAction::assert("arrayEquals(Array.from(map.keys()), [0, 2, 3, 5])"),
+        TestAction::assert("arrayEquals(Array.from(map.values()), [0, 20, 30, 50])"),
+        TestAction::assert_eq("map.size", 4),
+        // A key added after a deletion goes last, as in Node 22.
+        TestAction::assert("map.set(1, 10); arrayEquals(Array.from(map.keys()), [0, 2, 3, 5, 1])"),
+    ]);
+}
+
+#[test]
+fn delete_compacts_once_tombstones_outnumber_the_entries() {
+    let mut map = OrderedMap::new();
+    for i in 0..100 {
+        map.insert(JsValue::new(i), i);
+    }
+    for i in 0..60 {
+        map.remove(&JsValue::new(i));
+    }
+
+    // `full_len` counts the slots of the index map, tombstones included. The 51st deletion left the
+    // tombstones outnumbering the entries that were left, so that one dropped them; the nine after
+    // it left nine tombstones, in 49 slots for the 40 entries that remain.
+    assert_eq!(map.len(), 40);
+    assert_eq!(map.full_len(), 49);
+    assert_eq!(map.get(&JsValue::new(60)), Some(&60));
+}
+
+/// An iterator that runs to its end has to give the lock back: it takes the lock out of itself and
+/// drops it as a plain value, which never calls `Finalize`. While a lock was held, nothing
+/// compacted, so a map that had been through a `for…of` or an `Array.from` grew without bound.
+#[test]
+fn delete_compacts_after_an_iteration_has_run_to_its_end() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+                const map = new Map();
+                for (let i = 0; i < 100; i++) map.set(i, i);
+                const spread = [...map];
+                const from = Array.from(map.entries());
+                for (let i = 0; i < 60; i++) map.delete(i);
+                globalThis.iterated = map;
+            "#}),
+        TestAction::assert_eq("spread.length", 100),
+        TestAction::assert_eq("from.length", 100),
+        TestAction::inspect_context(|context| {
+            let map = context
+                .global_object()
+                .get(js_str!("iterated"), context)
+                .expect("`iterated` is a global")
+                .as_object()
+                .expect("a Map is an object")
+                .clone()
+                .downcast::<OrderedMap<JsValue>>()
+                .expect("the global holds a Map");
+
+            let map = map.borrow();
+            assert_eq!(map.data().len(), 40);
+            assert_eq!(map.data().full_len(), 49);
+        }),
+    ]);
+}
+
+/// A copy of a map is nobody's iteration: it starts unlocked, so it can compact.
+#[test]
+fn a_copy_of_a_locked_map_can_compact() {
+    let mut map = OrderedMap::new();
+    for i in 0..100 {
+        map.insert(JsValue::new(i), i);
+    }
+    map.lock();
+
+    let mut copy = map.clone();
+    for i in 0..60 {
+        copy.remove(&JsValue::new(i));
+    }
+
+    assert_eq!(copy.len(), 40);
+    assert_eq!(copy.full_len(), 49);
+    map.unlock();
+}
+
+#[test]
+fn for_of_delete_and_add_during_iteration() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::run(indoc! {r#"
+                const map = new Map([[1, "a"], [2, "b"], [3, "c"]]);
+                const seen = [];
+                for (const [key] of map) {
+                    seen.push(key);
+                    if (key === 1) {
+                        map.delete(2);
+                        map.set(4, "d");
+                    }
+                }
+            "#}),
+        // Node 22.21.1 prints `[1,3,4] [1,3,4]` for this program.
+        TestAction::assert("arrayEquals(seen, [1, 3, 4])"),
+        TestAction::assert("arrayEquals(Array.from(map.keys()), [1, 3, 4])"),
+    ]);
+}
+
+#[test]
+fn delete_inside_for_each_skips_the_deleted_key() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::run(indoc! {r#"
+                const map = new Map([[1, "a"], [2, "b"], [3, "c"], [4, "d"]]);
+                const seen = [];
+                map.forEach((value, key) => {
+                    seen.push(key);
+                    if (key === 1) map.delete(2);
+                    if (key === 3) map.delete(3);
+                });
+            "#}),
+        TestAction::assert("arrayEquals(seen, [1, 3, 4])"),
+        TestAction::assert("arrayEquals(Array.from(map.keys()), [1, 4])"),
+    ]);
+}
+
+/// `JsMap::for_each_native` — the Rust-side walk behind `TryFromJs` — has to step over a
+/// tombstone left by an ordinary `delete`, as the JS iterators do.
+#[test]
+fn for_each_native_steps_over_a_deleted_entry() {
+    use crate::object::builtins::JsMap;
+
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+                const map = new Map([["a", 1], ["b", 2], ["c", 3]]);
+                map.delete("b");
+                globalThis.converted = map;
+            "#}),
+        TestAction::inspect_context(|context| {
+            let value = context
+                .global_object()
+                .get(js_str!("converted"), context)
+                .expect("`converted` is a global");
+            let js_map = JsMap::from_object(value.as_object().expect("a Map is an object"))
+                .expect("the global holds a Map");
+
+            let mut pairs = Vec::new();
+            js_map
+                .for_each_native(|key, value| {
+                    pairs.push((
+                        key.to_string(context)?.to_std_string_escaped(),
+                        value.to_number(context)?,
+                    ));
+                    Ok(())
+                })
+                .expect("walking the map cannot fail here");
+
+            assert_eq!(pairs, vec![("a".to_string(), 1.0), ("c".to_string(), 3.0)]);
+        }),
+    ]);
+}
+
+#[test]
+fn clear_keeps_a_live_iterator_running() {
+    // `Map.prototype.clear` empties each entry instead of removing it, so an iterator that is
+    // part-way through keeps its position and goes on to see entries added afterwards.
+    run_test_actions([
+        TestAction::run(
+            "const m = new Map([['a', 1], ['b', 2], ['c', 3]]);
+             const seen = [];
+             const it = m.entries();
+             seen.push(it.next().value[0]);
+             m.clear();
+             m.set('z', 9);
+             const afterClear = it.next();
+             seen.push(afterClear.done ? 'done' : afterClear.value[0]);
+             for (const entry of m) seen.push(entry[0]);",
+        ),
+        TestAction::assert("seen.join() === 'a,z,z'"),
+        TestAction::assert_eq("m.size", 1),
+        // A second `clear()` on an already empty map is a no-op.
+        TestAction::run("m.clear();"),
+        TestAction::assert_eq("m.size", 0),
+        // Clearing before the iterator starts still yields only what is inserted afterwards.
+        TestAction::run(
+            "const fresh = new Map([['a', 1]]);
+             const freshIt = fresh.entries();
+             fresh.clear();
+             fresh.set('q', 7);
+             const firstAfter = freshIt.next();",
+        ),
+        TestAction::assert("firstAfter.done === false && firstAfter.value[0] === 'q'"),
+        // A `for…of` that clears the map while walking it terminates.
+        TestAction::run(
+            "const selfClearing = new Map([['a', 1], ['b', 2]]);
+             let rounds = 0;
+             for (const entry of selfClearing) {
+                 rounds++;
+                 selfClearing.clear();
+                 if (rounds > 3) break;
+             }",
+        ),
+        TestAction::assert("rounds <= 3"),
     ]);
 }

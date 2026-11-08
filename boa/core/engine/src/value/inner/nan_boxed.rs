@@ -683,7 +683,6 @@ impl NanBoxedValue {
     }
 
     /// Runs `f` with the object the value holds, if it holds one, without cloning it.
-    #[cfg(feature = "jit")]
     #[inline(always)]
     pub(crate) fn with_object<R>(&self, f: impl FnOnce(&JsObject) -> R) -> Option<R> {
         if self.is_object() {

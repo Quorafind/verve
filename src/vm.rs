@@ -39,8 +39,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use boa_engine::{
-    Context, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Script,
-    Source,
+    Context, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Script, Source,
     context::intrinsics::Intrinsics,
     error::{EngineError, RuntimeLimitError},
     js_string,
@@ -52,9 +51,10 @@ use boa_engine::{
 use boa_gc::{Finalize, GcRefCell, Trace};
 
 use crate::native::{
-    ClassSpec, arg, array, class, closure, coded_error, coded_error_value, exports, get, hidden,
-    invoke, js_text, list_of, object, settled, text_of,
+    ClassSpec, arg, arg_text, array, class, closure, coded_error, coded_error_value, exports, get,
+    hidden, invoke, js_text, list_of, object, settled, text_of,
 };
+use crate::world::in_realm;
 
 // ─── vm ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -79,6 +79,7 @@ pub(crate) fn global_object(intrinsics: &Intrinsics) -> JsObject {
 struct Contextified {
     #[unsafe_ignore_trace]
     strings: bool,
+    #[cfg(feature = "wasm")]
     #[unsafe_ignore_trace]
     wasm: bool,
     /// Set while `compileFunction` compiles in the realm: the ban is on the context's code.
@@ -103,6 +104,7 @@ pub(crate) fn ensure_can_compile_strings(realm: &Realm) -> JsResult<()> {
 }
 
 /// Whether `WebAssembly` may compile in the running realm (`codeGeneration.wasm`).
+#[cfg(feature = "wasm")]
 pub(crate) fn wasm_allowed(context: &Context) -> bool {
     contextified(context.realm(), |c| c.wasm).unwrap_or(true)
 }
@@ -256,18 +258,11 @@ fn require_context(value: &JsValue, context: &mut Context) -> JsResult<Realm> {
     })
 }
 
-/// Runs `f` with `realm` as the running realm.
-fn in_realm<R>(context: &mut Context, realm: &Realm, f: impl FnOnce(&mut Context) -> R) -> R {
-    let outer = context.enter_realm(realm.clone());
-    let out = f(context);
-    context.enter_realm(outer);
-    out
-}
-
 /// A context's options: `codeGeneration` (or `contextCodeGeneration`, for `runInNewContext`)
 /// and `importModuleDynamically`.
 struct ContextOptions {
     strings: bool,
+    #[cfg(feature = "wasm")]
     wasm: bool,
     import: JsValue,
 }
@@ -286,8 +281,10 @@ fn context_options(
     } else {
         JsValue::undefined()
     };
+    let strings = allowed(generation.clone(), "strings", context)?;
     Ok(ContextOptions {
-        strings: allowed(generation.clone(), "strings", context)?,
+        strings,
+        #[cfg(feature = "wasm")]
         wasm: allowed(generation, "wasm", context)?,
         import: if options.is_object() {
             get(options, "importModuleDynamically", context)?
@@ -314,6 +311,7 @@ fn create_context(
     let realm = made?;
     in_realm(context, &realm, |cx| -> JsResult<()> {
         crate::intl::install(cx)?;
+        #[cfg(feature = "wasm")]
         crate::wasm::install(cx)?;
         if let Some(DisabledProto(script)) = cx.get_data::<DisabledProto>().copied() {
             cx.eval(Source::from_bytes(script))?;
@@ -329,6 +327,7 @@ fn create_context(
     )?;
     realm.host_defined_mut().insert(Contextified {
         strings: options.strings,
+        #[cfg(feature = "wasm")]
         wasm: options.wasm,
         compiling: Cell::new(false),
         import: GcRefCell::new(options.import),
@@ -339,11 +338,7 @@ fn create_context(
 }
 
 /// The object `runInNewContext` contextifies: the one given, or a fresh one.
-fn new_context(
-    value: &JsValue,
-    options: &JsValue,
-    context: &mut Context,
-) -> JsResult<Realm> {
+fn new_context(value: &JsValue, options: &JsValue, context: &mut Context) -> JsResult<Realm> {
     let sandbox = match value.as_object() {
         Some(sandbox) => sandbox,
         None if value.is_undefined() => object(context),
@@ -396,7 +391,9 @@ fn timeout_of(options: &JsValue, context: &mut Context) -> JsResult<Option<u64>>
     Ok(Some(ms as u64))
 }
 
-fn interrupted(error: &JsError) -> bool {
+/// Whether `error` is the host's interrupt (`InterruptHandle::interrupt`) coming back: not a
+/// failure of the script, so nothing reports it.
+pub(crate) fn interrupted(error: &JsError) -> bool {
     matches!(
         error.as_engine(),
         Some(EngineError::RuntimeLimit(RuntimeLimitError::Interrupted))
@@ -562,20 +559,20 @@ const SCRIPT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 const VM_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("runInThisContext", 2, |_, args, cx| {
-        let code = text_of(&arg(args, 0), cx)?;
+        let code = arg_text(args, 0, cx)?;
         let filename = filename_of(&arg(args, 1), cx)?;
         let timeout = timeout_of(&arg(args, 1), cx)?;
         run_in_this_context(&code, &filename, timeout, cx)
     }),
     ("runInContext", 3, |_, args, cx| {
-        let code = text_of(&arg(args, 0), cx)?;
+        let code = arg_text(args, 0, cx)?;
         let realm = require_context(&arg(args, 1), cx)?;
         let filename = filename_of(&arg(args, 2), cx)?;
         let timeout = timeout_of(&arg(args, 2), cx)?;
         run_in_realm(&code, &filename, &realm, timeout, cx)
     }),
     ("runInNewContext", 3, |_, args, cx| {
-        let code = text_of(&arg(args, 0), cx)?;
+        let code = arg_text(args, 0, cx)?;
         let realm = new_context(&arg(args, 1), &arg(args, 2), cx)?;
         let filename = filename_of(&arg(args, 2), cx)?;
         let timeout = timeout_of(&arg(args, 2), cx)?;
@@ -601,7 +598,7 @@ const VM_FUNCTIONS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(realm_of(&arg(args, 0), cx)?.is_some().into())
     }),
     ("compileFunction", 3, |_, args, cx| {
-        let code = text_of(&arg(args, 0), cx)?;
+        let code = arg_text(args, 0, cx)?;
         let params = match arg(args, 1) {
             p if p.is_undefined() => Vec::new(),
             p => list_of(&p, cx)?,
@@ -639,7 +636,7 @@ pub(crate) fn vm_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
             name: "Script",
             length: 2,
             init: |this, args, cx| {
-                let code = text_of(&arg(args, 0), cx)?;
+                let code = arg_text(args, 0, cx)?;
                 let options = arg(args, 1);
                 let filename = filename_of(&options, cx)?;
                 check_syntax(&code, &filename, cx)?;

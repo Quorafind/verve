@@ -1,0 +1,13 @@
+loaded opened false focused false devToolsWebContents null
+after openDevTools() returned opened false focused false devToolsWebContents null
+event devtools-focused opened true focused true devToolsWebContents null
+event devtools-opened opened true focused true devToolsWebContents object
+after 3s opened true focused false devToolsWebContents object
+event devtools-closed opened false focused false devToolsWebContents null
+after closeDevTools() returned opened false focused false devToolsWebContents null
+after close + 1s opened false focused false devToolsWebContents null
+after toggleDevTools() returned opened false focused false devToolsWebContents null
+event devtools-opened opened true focused false devToolsWebContents object
+after toggle + 3s opened true focused false devToolsWebContents object
+event devtools-closed opened false focused false devToolsWebContents null
+after second toggle returned opened false focused false devToolsWebContents null

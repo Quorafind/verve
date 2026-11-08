@@ -2,6 +2,8 @@
 //! stays, what erasing cannot express refused with Node's codes, the `transform` mode that
 //! compiles it instead, and a load hook importing TypeScript through it.
 
+#![cfg(feature = "typescript")]
+
 use boa_engine::{JsString, JsValue, builtins::promise::PromiseState};
 use serde_json::{Value, json};
 use verve::Runtime;

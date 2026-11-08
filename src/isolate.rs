@@ -20,7 +20,7 @@
 //! What to run in an isolate is the embedder's: implement [`Guest`] for it.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -124,6 +124,8 @@ struct Shared<G: Guest> {
     applied: AtomicU64,
     start: Instant,
     interrupt: Mutex<Option<InterruptHandle>>,
+    /// Whether the embedder gave the isolate up ([`Isolate::retire`]): nothing more runs in it.
+    retired: AtomicBool,
     wake: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -138,7 +140,7 @@ impl<G: Guest> Shared<G> {
 /// finish: once it has done what it was sent, the guest's [`Guest::shutdown`] runs and the thread
 /// ends.
 pub struct Isolate<G: Guest> {
-    inbox: Sender<(u64, Job<G>)>,
+    inbox: Arc<Sender<(u64, Job<G>)>>,
     shared: Arc<Shared<G>>,
     next: std::cell::Cell<u64>,
 }
@@ -161,6 +163,7 @@ impl<G: Guest> Isolate<G> {
             applied: AtomicU64::new(0),
             start: Instant::now(),
             interrupt: Mutex::new(None),
+            retired: AtomicBool::new(false),
             wake: Box::new(wake),
         });
         let thread_shared = Arc::clone(&shared);
@@ -174,7 +177,7 @@ impl<G: Guest> Isolate<G> {
                 run(make, jobs, &thread_shared, idle)
             })?;
         Ok(Self {
-            inbox,
+            inbox: Arc::new(inbox),
             shared,
             next: std::cell::Cell::new(0),
         })
@@ -187,6 +190,20 @@ impl<G: Guest> Isolate<G> {
         self.next.set(n);
         let _ = self.inbox.send((n, Box::new(job)));
         n
+    }
+
+    /// A function that wakes the isolate's thread, from any thread, so it runs its beat now
+    /// rather than at its next due time: what a guest hands its runtime's `set_waker`, so work
+    /// finished elsewhere (a socket, a worker) is not left waiting for the idle sleep. It holds
+    /// the isolate's inbox weakly, so keeping it does not keep the isolate alive, and it does
+    /// nothing once the [`Isolate`] is dropped.
+    pub fn poker(&self) -> crate::Waker {
+        let inbox = Arc::downgrade(&self.inbox);
+        Arc::new(move || {
+            if let Some(inbox) = inbox.upgrade() {
+                let _ = inbox.send((0, Box::new(|_, _| {})));
+            }
+        })
     }
 
     /// The newest view published since this was last asked.
@@ -237,6 +254,16 @@ impl<G: Guest> Isolate<G> {
             }
             None => false,
         }
+    }
+
+    /// Gives the isolate up: the script it runs is stopped as [`Isolate::interrupt`] does, and
+    /// nothing more runs in it, not a job already sent, not a timer, not a guest that is still
+    /// being made; it says nothing more to the embedder either. Its thread then ends.
+    pub fn retire(&self) {
+        self.shared.retired.store(true, Ordering::SeqCst);
+        self.interrupt();
+        // Wakes the thread, if it is waiting for a job.
+        let _ = self.inbox.send((0, Box::new(|_, _| {})));
     }
 
     /// Waits, up to `timeout`, for job `job` to be done and a view after it to be published,
@@ -302,6 +329,10 @@ fn run<G: Guest>(
         *slot = guest.interrupt_handle();
     }
     shared.busy_since.store(0, Ordering::SeqCst);
+    // Given up while it was being made: the interrupt had no handle to stop it with.
+    if shared.retired.load(Ordering::SeqCst) {
+        return retired(guest);
+    }
     let mut out = Outbox::default();
     // What the guest said while it was being made — a script's first output, before its first
     // timer — reaches the embedder now, not after a beat that may run long.
@@ -311,6 +342,9 @@ fn run<G: Guest>(
     }
     let mut applied = 0;
     loop {
+        if shared.retired.load(Ordering::SeqCst) {
+            break;
+        }
         let wait = guest.next_due().map_or(idle, |due| due.min(idle));
         let first = match jobs.recv_timeout(wait) {
             Ok(job) => Some(job),
@@ -326,10 +360,19 @@ fn run<G: Guest>(
         shared.busy_since.store(shared.now(), Ordering::SeqCst);
         let turn = catch_unwind(AssertUnwindSafe(|| {
             for (n, job) in batch {
+                if shared.retired.load(Ordering::SeqCst) {
+                    return None;
+                }
                 job(&mut guest, &mut out);
                 guest.drain(&mut out);
-                applied = n;
-                shared.applied.store(n, Ordering::SeqCst);
+                // Job 0 is a poke: it ran the beat, and is no job anyone waits for.
+                if n != 0 {
+                    applied = n;
+                    shared.applied.store(n, Ordering::SeqCst);
+                }
+            }
+            if shared.retired.load(Ordering::SeqCst) {
+                return None;
             }
             // What the jobs made happen is told before the beat, which may run long.
             if deliver(shared, &mut out) {
@@ -353,6 +396,9 @@ fn run<G: Guest>(
                 return die(panic_message(&*panic));
             }
         };
+        if shared.retired.load(Ordering::SeqCst) {
+            break;
+        }
         let mut news = false;
         if let Some(view) = view {
             if let Ok(mut slot) = shared.view.lock() {
@@ -370,6 +416,11 @@ fn run<G: Guest>(
             (shared.wake)();
         }
     }
+    retired(guest);
+}
+
+/// The isolate ends: the guest's last words, and nothing after them.
+fn retired<G: Guest>(mut guest: G) {
     if catch_unwind(AssertUnwindSafe(|| guest.shutdown())).is_err() {
         std::mem::forget(guest);
     }

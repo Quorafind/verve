@@ -254,6 +254,76 @@ fn modules_with_direct_eval_and_lazy_functions_round_trip() {
     }
 }
 
+/// A script that declares nothing in the global scope — Node's `CommonJS` wrapper — is written
+/// down and read back; one that declares anything is not.
+#[test]
+fn only_scripts_that_declare_no_global_are_written_down() {
+    use crate::{object::ObjectInitializer, script::Script};
+    let (mut context, _) = context(false);
+    let wrapper = "(function (exports) { exports.answer = 42; })";
+    let script = Script::parse(Source::from_bytes(wrapper), None, &mut context).unwrap();
+    let bytes = script
+        .code_cache(&mut context)
+        .unwrap()
+        .expect("a wrapper can be written down");
+    let answer = |script: &Script, context: &mut Context| {
+        let function = script.evaluate(context).unwrap();
+        let exports = JsValue::from(ObjectInitializer::new(context).build());
+        function
+            .as_callable()
+            .unwrap()
+            .call(
+                &JsValue::undefined(),
+                std::slice::from_ref(&exports),
+                context,
+            )
+            .unwrap();
+        exports
+            .as_object()
+            .unwrap()
+            .get(js_string!("answer"), context)
+            .unwrap()
+            .to_string(context)
+            .unwrap()
+            .to_std_string_escaped()
+    };
+    assert_eq!(answer(&script, &mut context), "42");
+    let read_back = Script::from_code_cache(&bytes, wrapper, None, None, &mut context).unwrap();
+    assert_eq!(answer(&read_back, &mut context), "42");
+
+    for source in [
+        "var declared = 1;",
+        "let declared = 1;",
+        "function declared() {}",
+    ] {
+        let script = Script::parse(Source::from_bytes(source), None, &mut context).unwrap();
+        assert!(
+            script.code_cache(&mut context).unwrap().is_none(),
+            "not written down: {source}"
+        );
+    }
+    // Annex B.3.2.2 makes a global var binding for a block-level function declaration while a
+    // non-strict script compiles, as parsing makes its other global declarations: code read back
+    // makes neither, so such a script is not written down either.
+    #[cfg(feature = "annex-b")]
+    {
+        let source = "{ function declared() {} }";
+        let script = Script::parse(Source::from_bytes(source), None, &mut context).unwrap();
+        assert!(
+            script.code_cache(&mut context).unwrap().is_none(),
+            "not written down: {source}"
+        );
+    }
+    // Strict, and nothing declared in the global scope: what Annex B adds does not apply.
+    let script = Script::parse(
+        Source::from_bytes("'use strict'; { function local() {} }"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    assert!(script.code_cache(&mut context).unwrap().is_some());
+}
+
 #[test]
 fn cached_functions_are_read_back_when_first_called() {
     use crate::{builtins::function::OrdinaryFunction, vm::CodeBlock};

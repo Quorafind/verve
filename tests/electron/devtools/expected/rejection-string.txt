@@ -1,0 +1,4 @@
+stdout: variant string listenerCount at start 1
+stderr: (node:<pid>) UnhandledPromiseRejectionWarning: plain reason
+stderr: (Use `electron --trace-warnings ...` to show where the warning was created)
+stderr: (node:<pid>) UnhandledPromiseRejectionWarning: Unhandled promise rejection. This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). To terminate the node process on unhandled promise rejection, use the CLI flag `--unhandled-rejections=strict` (see https://nodejs.org/api/cli.html#cli_unhandled_rejections_mode). (rejection id: 1)

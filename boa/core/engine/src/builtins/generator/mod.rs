@@ -66,9 +66,10 @@ pub(crate) struct GeneratorContext {
 impl GeneratorContext {
     /// Creates a new `GeneratorContext` from the current `Context` state.
     pub(crate) fn from_current(context: &mut Context, async_generator: Option<JsObject>) -> Self {
+        // The live frame may hold handles lent by its callee, which this split-off stack is
+        // about to take with it: it counts them now (the clone below does as well).
+        context.vm.frame_mut().own_handles();
         let mut frame = context.vm.frame().clone();
-        frame.environments = context.vm.frame().environments.clone();
-        frame.realm = context.realm().clone();
 
         // Split the stack at fp. The split-off portion starts at what was fp,
         // so adjust rp and fp to be relative to the new base.

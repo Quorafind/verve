@@ -33,7 +33,7 @@ use crate::{
     symbol::JsSymbol,
     value::JsValue,
 };
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use rustc_hash::FxHasher;
 
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
@@ -63,20 +63,21 @@ impl GlobalSymbolRegistry {
     }
 
     fn get_or_create_symbol(&self, key: &JsString) -> JsResult<JsSymbol> {
-        let slice = key.iter().collect::<Vec<_>>();
-        if let Some(symbol) = self.keys.get(&slice[..]) {
-            return Ok(symbol.clone());
+        let slice = key.iter().collect::<Vec<_>>().into_boxed_slice();
+        // The entry holds the key's shard while the symbol is made, so threads asking for a key
+        // the registry lacks cannot each make a symbol of their own.
+        match self.keys.entry(slice.clone()) {
+            Entry::Occupied(found) => Ok(found.get().clone()),
+            Entry::Vacant(vacant) => {
+                let symbol = JsSymbol::new(Some(key.clone())).ok_or_else(|| {
+                    JsNativeError::range()
+                        .with_message("reached the maximum number of symbols that can be created")
+                })?;
+                self.symbols.insert(symbol.clone(), slice);
+                vacant.insert(symbol.clone());
+                Ok(symbol)
+            }
         }
-
-        let symbol = JsSymbol::new(Some(key.clone())).ok_or_else(|| {
-            JsNativeError::range()
-                .with_message("reached the maximum number of symbols that can be created")
-        })?;
-        self.keys
-            .insert(slice.clone().into_boxed_slice(), symbol.clone());
-        self.symbols
-            .insert(symbol.clone(), slice.into_boxed_slice());
-        Ok(symbol)
     }
 
     fn get_key(&self, sym: &JsSymbol) -> Option<JsString> {

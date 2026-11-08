@@ -9,34 +9,61 @@
 
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_string};
 use verve::dom_events::FieldDefault as F;
+use verve::native::{self, arg, arg_text, js_text, type_error};
 
 use super::node::{read_dom, with_dom, wrap};
-use super::{Method, arg, node_id, plain_object, text};
-use crate::dom::{NodeId, NodeKind};
+use super::{Method, node_id};
+use crate::dom::{Dom, NodeId, NodeKind};
 use crate::state::shared;
 
 /// The next target on an event's path from `target`: a node's parent, the window from its
-/// document, a shadow root's host.
+/// document, a shadow root's host — for an event that crosses shadow boundaries (`composed`).
 pub fn parent(
     target: &JsValue,
-    _event: &JsObject,
+    event: &JsObject,
     context: &mut Context,
 ) -> JsResult<Option<JsValue>> {
     let Some(id) = node_id(target) else {
         return Ok(None);
     };
+    let composed = verve::dom_events::is_composed(event);
     let next = {
         let state = shared(context);
         let state = state.borrow();
         if id == state.dom.document {
             return Ok(Some(context.global_object().into()));
         }
-        state
-            .dom
-            .parent(id)
-            .or_else(|| state.shadow_hosts.get(&id).copied())
+        // A slotted node is heard by its slot before the host it is drawn in.
+        match state.dom.assigned_slot(id).or_else(|| state.dom.parent(id)) {
+            Some(parent) => Some(parent),
+            None if composed => state.dom.shadow_host(id),
+            None => None,
+        }
     };
     Ok(next.map(|n| wrap(context, n)))
+}
+
+/// What a listener on `node` sees an event's `target` (or `relatedTarget`) as: the host, for
+/// one inside a shadow tree `node` is outside of.
+fn retarget(node: &JsValue, target: &JsValue, context: &mut Context) -> JsValue {
+    let Some(id) = node_id(target) else {
+        return target.clone();
+    };
+    let seen = read_dom(context, |dom| dom.retarget(id, node_id(node)));
+    if seen == id {
+        target.clone()
+    } else {
+        wrap(context, seen)
+    }
+}
+
+/// Whether `composedPath()` called from a listener on `node` lists `item`: not what is inside
+/// a closed shadow tree `node` is outside of.
+fn visible(node: &JsValue, item: &JsValue, context: &mut Context) -> bool {
+    let Some(item) = node_id(item) else {
+        return true;
+    };
+    read_dom(context, |dom| dom.is_visible_from(item, node_id(node)))
 }
 
 const UI: &[(&str, F)] = &[
@@ -210,8 +237,11 @@ const TOUCH: &[(&str, F)] = &[
     ("changedTouches", F::Undefined),
 ];
 
-/// The event classes: name, parent, fields (the parent's included), whether a global.
-const CLASSES: &[(&str, &str, &[(&str, F)])] = &[
+/// An event class: its name, its parent's, and its fields (the parent's included).
+type EventClass = (&'static str, &'static str, &'static [(&'static str, F)]);
+
+/// The event classes.
+const CLASSES: &[EventClass] = &[
     ("UIEvent", "Event", UI),
     ("MouseEvent", "UIEvent", MOUSE),
     ("PointerEvent", "MouseEvent", POINTER),
@@ -261,7 +291,11 @@ const CLASSES: &[(&str, &str, &[(&str, F)])] = &[
         "Event",
         &[("persisted", F::Bool(false))],
     ),
-    ("BeforeUnloadEvent", "Event", &[]),
+    (
+        "BeforeUnloadEvent",
+        "Event",
+        &[("returnValue", F::Text(""))],
+    ),
     (
         "StorageEvent",
         "Event",
@@ -294,7 +328,7 @@ const CLASSES: &[(&str, &str, &[(&str, F)])] = &[
 ];
 
 const MODIFIER_METHODS: &[Method] = &[("getModifierState", 1, |this, args, cx| {
-    let key = super::arg_string(args, 0, cx)?;
+    let key = arg_text(args, 0, cx)?;
     let field = match key.as_str() {
         "Control" => "ctrlKey",
         "Shift" => "shiftKey",
@@ -310,15 +344,18 @@ const MODIFIER_METHODS: &[Method] = &[("getModifierState", 1, |this, args, cx| {
 pub fn install(context: &mut Context) -> JsResult<()> {
     let classes = verve::dom_events::classes(context)?;
     {
+        let world = verve::current_world(context);
         let state = shared(context);
         let mut state = state.borrow_mut();
         state
             .classes
-            .insert("EventTarget", classes.event_target.clone());
-        state.classes.insert("Event", classes.event.clone());
+            .insert((world, "EventTarget"), classes.event_target.clone());
         state
             .classes
-            .insert("CustomEvent", classes.custom_event.clone());
+            .insert((world, "Event"), classes.event.clone());
+        state
+            .classes
+            .insert((world, "CustomEvent"), classes.custom_event.clone());
     }
     // The runtime's own events beside those, for the document to fire too.
     for name in [
@@ -334,15 +371,16 @@ pub fn install(context: &mut Context) -> JsResult<()> {
                 .get(js_string!("prototype"), context)?
                 .as_object();
             if let Some(prototype) = prototype {
+                let world = verve::current_world(context);
                 shared(context)
                     .borrow_mut()
                     .classes
-                    .insert(name, (constructor, prototype));
+                    .insert((world, name), (constructor, prototype));
             }
         }
     }
     for (name, parent, fields) in CLASSES {
-        let parent = shared(context).borrow().class(parent).expect("made first");
+        let parent = crate::state::class_of(context, parent).expect("made first");
         let methods: &[Method] = if fields.iter().any(|(f, _)| *f == "ctrlKey") {
             MODIFIER_METHODS
         } else {
@@ -355,10 +393,11 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             fields,
             methods,
         )?;
+        let world = verve::current_world(context);
         shared(context)
             .borrow_mut()
             .classes
-            .insert(name, made.clone());
+            .insert((world, name), made.clone());
         context.register_global_property(
             JsString::from(*name),
             made.0,
@@ -367,7 +406,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         )?;
     }
     // `event.x` and `event.y` are `clientX` and `clientY`.
-    let mouse = shared(context).borrow().prototype("MouseEvent");
+    let mouse = crate::state::class_prototype(context, "MouseEvent");
     super::extend_prototype(
         context,
         &mouse,
@@ -402,7 +441,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
             ),
         ],
     )?;
-    let keyboard = shared(context).borrow().prototype("KeyboardEvent");
+    let keyboard = crate::state::class_prototype(context, "KeyboardEvent");
     for (key, value) in [
         ("DOM_KEY_LOCATION_STANDARD", 0),
         ("DOM_KEY_LOCATION_LEFT", 1),
@@ -411,7 +450,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     ] {
         keyboard.set(JsString::from(key), value, false, context)?;
     }
-    let ui = shared(context).borrow().prototype("UIEvent");
+    let ui = crate::state::class_prototype(context, "UIEvent");
     super::extend_prototype(
         context,
         &ui,
@@ -423,8 +462,33 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         })],
         &[],
     )?;
-    verve::dom_events::set_event_parent(context, parent);
+    // `returnValue` of a `BeforeUnloadEvent` is a `DOMString` a handler may set: any text but the
+    // empty one keeps the page (`false` is `"false"`), as the idiom in Electron's documentation
+    // has it.
+    let unload = crate::state::class_prototype(context, "BeforeUnloadEvent");
+    super::extend_prototype(
+        context,
+        &unload,
+        &[],
+        &[(
+            "returnValue",
+            Some(|this, _, _| verve::dom_events::field_value(this, "returnValue")),
+            Some(|this, args, cx| {
+                let value = arg(args, 0).to_string(cx)?;
+                verve::dom_events::set_field_value(this, "returnValue", value.into())?;
+                Ok(JsValue::undefined())
+            }),
+        )],
+    )?;
+    install_hooks(context);
     Ok(())
+}
+
+/// Tells a dispatch what a node's parent is and what a shadow tree hides.
+fn install_hooks(context: &mut Context) {
+    verve::dom_events::set_event_parent(context, parent);
+    let scope = verve::dom_events::EventScope { retarget, visible };
+    verve::dom_events::set_event_scope(context, scope);
 }
 
 /// Whether `kind` bubbles and can be cancelled when the host dispatches it.
@@ -434,9 +498,8 @@ fn defaults(kind: &str) -> (bool, bool) {
         | "load" | "unload" | "scroll" | "scrollend" | "resize" | "toggle" | "close" | "play"
         | "pause" | "invalid" => (false, false),
         "input" | "change" | "focusin" | "focusout" | "select" | "selectionchange"
-        | "compositionend" | "pointercancel" | "gotpointercapture" | "lostpointercapture" => {
-            (true, false)
-        }
+        | "compositionend" | "pointercancel" | "gotpointercapture" | "lostpointercapture"
+        | "dragend" | "dragleave" => (true, false),
         _ => (true, true),
     }
 }
@@ -463,11 +526,31 @@ pub fn fire_event(
     init: &[(&str, JsValue)],
     trusted: bool,
 ) -> JsResult<(bool, JsObject)> {
+    fire_with(context, target, class, kind, init, trusted, |_, _| Ok(()))
+}
+
+/// [`fire_event`], with `prepare` given the event before it is dispatched: for what the event
+/// carries that is no field of its class.
+pub fn fire_with(
+    context: &mut Context,
+    target: &JsValue,
+    class: &str,
+    kind: &str,
+    init: &[(&str, JsValue)],
+    trusted: bool,
+    prepare: impl FnOnce(&mut Context, &JsObject) -> JsResult<()>,
+) -> JsResult<(bool, JsObject)> {
     let (bubbles, cancelable) = defaults(kind);
-    let dict = plain_object(context);
+    let dict = native::object(context);
     dict.set(js_string!("bubbles"), bubbles, false, context)?;
     dict.set(js_string!("cancelable"), cancelable, false, context)?;
-    dict.set(js_string!("composed"), true, false, context)?;
+    // What the page itself does (a load, a change) stays where it happened; what a person did
+    // crosses shadow boundaries.
+    let composed = !matches!(
+        kind,
+        "load" | "change" | "scroll" | "scrollend" | "select" | "toggle" | "invalid"
+    );
+    dict.set(js_string!("composed"), composed, false, context)?;
     if class != "Event" && class != "CustomEvent" {
         let view = context.global_object();
         dict.set(js_string!("view"), view, false, context)?;
@@ -475,13 +558,12 @@ pub fn fire_event(
     for (key, value) in init {
         dict.set(JsString::from(*key), value.clone(), false, context)?;
     }
-    let constructor = shared(context)
-        .borrow()
-        .class(class)
+    let constructor = crate::state::class_of(context, class)
         .map(|(c, _)| c)
-        .ok_or_else(|| super::type_error(format!("no event class {class}")))?;
-    let event = constructor.construct(&[text(kind), dict.into()], None, context)?;
+        .ok_or_else(|| type_error(format!("no event class {class}")))?;
+    let event = constructor.construct(&[js_text(kind), dict.into()], None, context)?;
     verve::dom_events::set_trusted(&event.clone().into(), trusted)?;
+    prepare(context, &event)?;
     let global = context.global_object();
     let previous = global.get(js_string!("event"), context)?;
     global.set(js_string!("event"), event.clone(), false, context)?;
@@ -505,32 +587,61 @@ pub fn fire_at(
 
 /// Whether `id` can take the focus: a field, a link, something with a `tabindex`, an editable
 /// region — enabled, and in the document.
-pub fn focusable(context: &Context, id: NodeId) -> bool {
-    read_dom(context, |dom| {
-        let Some(node) = dom.get(id) else {
-            return false;
-        };
-        if !dom.is_connected(id) || !node.is_element() {
-            return false;
+pub fn is_focusable(dom: &Dom, id: NodeId) -> bool {
+    let Some(node) = dom.get(id) else {
+        return false;
+    };
+    if !dom.is_connected(id) || !node.is_element() {
+        return false;
+    }
+    if node.attr("tabindex").is_some() || dom.editing_host(id) == Some(id) {
+        return true;
+    }
+    match node.tag() {
+        Some("input") => {
+            node.attr("type")
+                .is_none_or(|t| !t.eq_ignore_ascii_case("hidden"))
+                && node.attr("disabled").is_none()
         }
-        if node.attr("tabindex").is_some()
-            || node.attr("contenteditable").is_some_and(|v| v != "false")
-        {
-            return true;
-        }
-        match node.tag() {
-            Some("input") => {
-                node.attr("type")
-                    .is_none_or(|t| !t.eq_ignore_ascii_case("hidden"))
-                    && node.attr("disabled").is_none()
-            }
-            Some("select" | "textarea" | "button") => node.attr("disabled").is_none(),
-            Some("a" | "area") => node.attr("href").is_some(),
-            Some("iframe" | "summary") => true,
-            Some("audio" | "video") => node.attr("controls").is_some(),
-            _ => false,
-        }
-    })
+        Some("select" | "textarea" | "button") => node.attr("disabled").is_none(),
+        Some("a" | "area") => node.attr("href").is_some(),
+        Some("iframe" | "summary") => true,
+        Some("audio" | "video") => node.attr("controls").is_some(),
+        _ => false,
+    }
+}
+
+/// Whether focus moving to `id` shows its ring (`:focus-visible`), as Chromium decides it: after
+/// the keyboard, or before any input, always; after the pointer, only for what takes text.
+fn shows_focus_ring(dom: &Dom, id: NodeId) -> bool {
+    match dom.last_input {
+        crate::input::LastInput::Pointer => takes_text(dom, id),
+        crate::input::LastInput::Keyboard | crate::input::LastInput::Nothing => true,
+    }
+}
+
+/// Whether `id` is a field a person types in, or an editing host.
+fn takes_text(dom: &Dom, id: NodeId) -> bool {
+    let tag = dom.get(id).and_then(|node| node.tag());
+    match tag {
+        Some("textarea") => true,
+        Some("input") => matches!(
+            super::element::input_type(dom, id).as_str(),
+            "text"
+                | "search"
+                | "tel"
+                | "url"
+                | "email"
+                | "password"
+                | "number"
+                | "date"
+                | "month"
+                | "week"
+                | "time"
+                | "datetime-local"
+        ),
+        _ => dom.editing_host(id) == Some(id),
+    }
 }
 
 /// Focus moves to `id` (or away, with `None`), with the events that says.
@@ -543,8 +654,12 @@ pub fn set_focus_from(context: &mut Context, id: Option<NodeId>, trusted: bool) 
     if before == id {
         return Ok(());
     }
+    if let Some(before) = before.filter(|b| read_dom(context, |dom| dom.exists(*b))) {
+        crate::ime::end_for_blur(context, before)?;
+    }
     with_dom(context, |dom| {
         dom.focused = id;
+        dom.focus_visible = id.is_some_and(|id| shows_focus_ring(dom, id));
         for node in [before, id].into_iter().flatten() {
             if dom.exists(node) {
                 dom.mark(node);
@@ -781,7 +896,7 @@ pub fn click(
             if let Some(control) =
                 control.filter(|c| !read_dom(context, |dom| dom.contains(*c, id)))
             {
-                if focusable(context, control) {
+                if read_dom(context, |dom| is_focusable(dom, control)) {
                     set_focus_from(context, Some(control), trusted)?;
                 }
                 click(context, control, props, trusted)?;
@@ -811,7 +926,21 @@ pub fn click(
                 .join(&href)
                 .map(|u| u.to_string())
                 .unwrap_or(href);
-            super::window::navigate(context, &resolved, false)?;
+            let target =
+                read_dom(context, |dom| dom.get_attr(activator, "target")).unwrap_or_default();
+            let download = read_dom(context, |dom| dom.get_attr(activator, "download"));
+            if let Some(name) = download {
+                let filename = (!name.is_empty()).then_some(name);
+                let request = crate::Request::Download {
+                    url: resolved,
+                    filename,
+                };
+                shared(context).borrow_mut().requests.push(request);
+            } else if super::window::opens_elsewhere(&target) {
+                super::window::open_window(context, &resolved, &target)?;
+            } else {
+                super::window::navigate(context, &resolved, false)?;
+            }
         }
         _ => {}
     }
@@ -990,10 +1119,10 @@ pub const WINDOW_EVENTS: &[&str] = &[
 /// Puts the handler properties on the element and document prototypes and the window.
 pub fn install_handlers(context: &mut Context) -> JsResult<()> {
     for owner in ["HTMLElement", "SVGElement", "MathMLElement", "Document"] {
-        let prototype = shared(context).borrow().prototype(owner);
+        let prototype = crate::state::class_prototype(context, owner);
         verve::dom_events::handler_accessors(context, &prototype, HANDLER_EVENTS)?;
     }
-    let window = shared(context).borrow().prototype("Window");
+    let window = crate::state::class_prototype(context, "Window");
     verve::dom_events::handler_accessors(context, &window, HANDLER_EVENTS)?;
     verve::dom_events::handler_accessors(context, &window, WINDOW_EVENTS)?;
     let _ = MODIFIERS;

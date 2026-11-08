@@ -74,7 +74,11 @@ fn a_context_has_its_own_globals_and_intrinsics() {
             "true",
             "true",
             "undefined",
-            "functionobjectobjectfunction",
+            if cfg!(feature = "wasm") {
+                "functionobjectobjectfunction"
+            } else {
+                "functionobjectundefinedfunction"
+            },
             "ReferenceError",
         ],
     );
@@ -154,8 +158,17 @@ fn values_cross_with_their_own_realm() {
         try { new vm.Script('(').runInContext(ctx); } catch (e) { log.push(e.name); }
         "#,
         &[
-            "true", "false", "true", "true", "TypeError", "false", "true", "mine", "true",
-            "SyntaxError", "SyntaxError",
+            "true",
+            "false",
+            "true",
+            "true",
+            "TypeError",
+            "false",
+            "true",
+            "mine",
+            "true",
+            "SyntaxError",
+            "SyntaxError",
         ],
     );
 }
@@ -204,6 +217,7 @@ fn code_generation_from_strings_can_be_refused() {
     );
 }
 
+#[cfg(feature = "wasm")]
 #[test]
 fn webassembly_can_be_refused() {
     expect(

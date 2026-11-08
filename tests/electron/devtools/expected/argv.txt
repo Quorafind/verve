@@ -1,0 +1,2 @@
+argv ["--inspect=127.0.0.1:0","--inspect-publish-uid=http","--remote-debugging-port=0","--js-flags=--max-old-space-size=100","--log-level=3","--v=0","--vmodule=x=0","--foo=bar","--inspect-port=0","--enable-logging=stderr","<APP>"]
+stderr: DevTools listening on ws://127.0.0.1:<port>/devtools/browser/<id>

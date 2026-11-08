@@ -58,7 +58,7 @@ fn review_variables_cycles_fallback_and_expansion_limit() {
                 out.push(getComputedStyle(at).color);
                 return out.join('|');
             })()
-        "#), "red|3px|blue|green|purple|orange|purple");
+        "#), "rgb(255, 0, 0)|3px|rgb(0, 0, 255)|rgb(0, 128, 0)|rgb(128, 0, 128)|rgb(255, 165, 0)|rgb(128, 0, 128)");
     });
 }
 
@@ -124,7 +124,7 @@ fn review_stylesheets_and_sibling_indices_remain_fresh() {
                 document.body.innerHTML = '<div id=target></div>';
                 const target = document.getElementById('target');
                 for (let n = 0; n < 20; n++) {
-                    if (getComputedStyle(target).color !== 'red') throw Error('样式缓存');
+                    if (getComputedStyle(target).color !== 'rgb(255, 0, 0)') throw Error('stale style cache');
                 }
                 const last = document.head.lastChild;
                 last.firstChild.data = '#target { color: blue }';
@@ -138,7 +138,7 @@ fn review_stylesheets_and_sibling_indices_remain_fresh() {
             })()
         "#
             ),
-            "blue|red|0|2000"
+            "rgb(0, 0, 255)|rgb(255, 0, 0)|0|2000"
         );
     });
 }
@@ -175,8 +175,11 @@ fn rules_inline_styles_and_inheritance_cascade_into_computed_style() {
         // `var()`, with its fallback, and the shorthands opened up.
         assert_eq!(snapshot.style(main, "color"), Some("rgb(0, 128, 0)"));
         assert_eq!(snapshot.style(main, "padding-top"), Some("6px"));
-        assert_eq!(snapshot.style(main, "padding-left"), Some("calc(2 * 6px)"));
-        assert_eq!(snapshot.style(main, "border-top-color"), Some("blue"));
+        assert_eq!(snapshot.style(main, "padding-left"), Some("12px"));
+        assert_eq!(
+            snapshot.style(main, "border-top-color"),
+            Some("rgb(0, 0, 255)")
+        );
         assert_eq!(snapshot.style(main, "margin-left"), Some("auto"));
         // Inherited down two levels; a property that does not inherit is not.
         assert_eq!(snapshot.style(deep, "color"), Some("rgb(0, 128, 0)"));
@@ -188,8 +191,8 @@ fn rules_inline_styles_and_inheritance_cascade_into_computed_style() {
         assert_eq!(snapshot.style(main, "display"), Some("block"));
         assert_eq!(snapshot.style(deep, "display"), None);
         // The inline style over every rule; an important rule over the inline style.
-        assert_eq!(snapshot.style(inline, "color"), Some("orange"));
-        assert_eq!(snapshot.style(loud, "color"), Some("purple"));
+        assert_eq!(snapshot.style(inline, "color"), Some("rgb(255, 165, 0)"));
+        assert_eq!(snapshot.style(loud, "color"), Some("rgb(128, 0, 128)"));
         // getComputedStyle answers the same, with initial values for what nothing set.
         assert_eq!(
             page.eval("(() => { const s = getComputedStyle(document.getElementById('deep')); return [s.color, s.fontSize, s.display, s.getPropertyValue('--accent'), s.position].join('|') })()"),
@@ -286,5 +289,172 @@ fn a_change_dirties_only_its_partition_and_restyles_only_its_subtree() {
         let changes = page.document.update().changes;
         assert_eq!(changes.partitions, vec![side]);
         assert!(!changes.restyled.contains(&main));
+    });
+}
+
+/// The shape of what Tailwind v4 compiles to: a theme layer of variables, a base reset, and a
+/// layer of utilities — `groups` of each of ten kinds, with `calc()` spacing, `oklch()`
+/// colors, hover variants and a media query — so a page that uses a few of them in its markup
+/// is cascaded against `10 * groups` rules.
+fn tailwind_sheet(groups: usize) -> String {
+    let mut css = String::from(
+        "@layer theme, base, components, utilities;
+         @layer theme { :root { --spacing: 0.25rem; --font-sans: ui-sans-serif, system-ui;
+           --color-brand: oklch(63.7% 0.237 25.331); } }
+         @layer base { *, ::before, ::after { box-sizing: border-box; border: 0 solid }
+           h1, h2, h3 { font-size: inherit; font-weight: inherit } p, h1 { margin: 0 } }
+         @layer utilities {\n",
+    );
+    for i in 0..groups {
+        css.push_str(&format!(
+            ".p-{i} {{ padding: calc(var(--spacing) * {i}) }}
+             .m-{i} {{ margin: calc(var(--spacing) * {i}) }}
+             .w-{i} {{ width: calc(var(--spacing) * {i}) }}
+             .h-{i} {{ height: calc(var(--spacing) * {i}) }}
+             .gap-{i} {{ gap: calc(var(--spacing) * {i}) }}
+             .text-c{i} {{ color: oklch(63.7% 0.237 {}) }}
+             .bg-c{i} {{ background-color: rgb({} 10 20 / 50%) }}
+             .border-c{i} {{ border-color: var(--color-brand) }}
+             .hover\\:bg-c{i}:hover {{ background-color: color-mix(in oklab, var(--color-brand) 50%, transparent) }}
+             @media (min-width: 768px) {{ .md\\:p-{i} {{ padding: calc(var(--spacing) * {i} + 1px) }} }}\n",
+            i % 360,
+            i % 256,
+        ));
+    }
+    css.push('}');
+    css
+}
+
+/// `count` elements in sections, each with seven of the sheet's classes.
+fn tailwind_markup(count: usize, groups: usize) -> String {
+    let class = |n: usize| {
+        let at = |k: usize| (n * 7 + k * 13) % groups;
+        format!(
+            "p-{} m-{} w-{} text-c{} bg-c{} hover:bg-c{} md:p-{}",
+            at(1),
+            at(2),
+            at(3),
+            at(4),
+            at(5),
+            at(6),
+            at(7)
+        )
+    };
+    let mut html = String::new();
+    let mut made = 0;
+    while made < count {
+        html.push_str(&format!("<section class=\"{}\">", class(made)));
+        made += 1;
+        for _ in 0..33 {
+            html.push_str(&format!(
+                "<div class=\"{}\"><span class=\"{}\">t</span></div>",
+                class(made),
+                class(made + 1)
+            ));
+            made += 2;
+        }
+        html.push_str("</section>");
+    }
+    html
+}
+
+#[test]
+#[ignore = "a benchmark: cargo test -p verve-dom --test css -- --ignored --nocapture"]
+fn cascading_five_thousand_nodes_under_a_tailwind_sheet() {
+    use std::time::Instant;
+    use verve_dom::Environment;
+    use verve_dom::css::{Computed, Origin, Sheet, Styler, USER_AGENT_SHEET};
+    on_page(|| {
+        let groups = 400;
+        let mut page = Page::new(Options::default());
+        let markup = serde_json::to_string(&tailwind_markup(5000, groups)).expect("a string");
+        page.eval(&format!("document.body.innerHTML = {markup}"));
+        let css = tailwind_sheet(groups);
+        // What a drawer waits for: the first update of the page, and one after 500 elements
+        // changed class.
+        page.document.set_stylesheet("tailwind", &css);
+        let started = Instant::now();
+        page.document.update();
+        let first = started.elapsed().as_secs_f64() * 1000.;
+        page.eval("document.querySelectorAll('span').forEach((n, i) => { if (i < 500) n.classList.add('p-1'); })");
+        let started = Instant::now();
+        page.document.update();
+        let restyle = started.elapsed().as_secs_f64() * 1000.;
+        eprintln!("update: first {first:.0} ms, 500 elements restyled {restyle:.0} ms");
+        let dom = page.document.dom();
+        let nodes = dom.len();
+        // The best of `runs`, in milliseconds.
+        fn best(runs: usize, mut work: impl FnMut()) -> f64 {
+            (0..runs)
+                .map(|_| {
+                    let start = Instant::now();
+                    work();
+                    start.elapsed().as_secs_f64() * 1000.
+                })
+                .fold(f64::INFINITY, f64::min)
+        }
+        let parse = best(3, || {
+            Sheet::parse(&css);
+        });
+        let user_agent = Sheet::parse(USER_AGENT_SHEET);
+        let author = Sheet::parse(&css);
+        let env = Environment::default();
+        let sheets = [
+            (Origin::UserAgent, &user_agent, dom.document),
+            (Origin::Author, &author, dom.document),
+        ];
+        let index = best(3, || {
+            Styler::new(&sheets, &env);
+        });
+        let styler = Styler::new(&sheets, &env);
+        let cascade = best(5, || {
+            Computed::cascade(&dom, &styler);
+        });
+        eprintln!(
+            "{nodes} nodes, {} rules: parse {parse:.0} ms, index {index:.0} ms, cascade {cascade:.0} ms",
+            author.len()
+        );
+    });
+}
+
+// Observed in Electron 39.8.10 (Chromium 142): a CSS-wide keyword on `background` is the keyword
+// on each longhand, and `background: var()` is read once the variable is.
+#[test]
+fn background_keywords_and_variables_reach_every_longhand() {
+    on_page(|| {
+        let mut page = Page::new(Options::default());
+        assert_eq!(
+            page.eval(
+                r#"
+            (() => {
+                document.head.innerHTML = '<style>'
+                    + '.u{background-image:url(x.png);background-size:10px 5px;background-repeat:no-repeat}'
+                    + '.i{background:initial} .k{background:unset}'
+                    + '.p{background-image:url(y.png);background-size:7px 3px} .c{background:inherit}'
+                    + '.v{--c:red;background:var(--c)}'
+                    + '.w{--bg:url(x.png) no-repeat center / 10px 5px;background:var(--bg)}</style>';
+                document.body.innerHTML = '<div class="u i" id="a"></div><div class="u k" id="k"></div>'
+                    + '<div class="p"><div class="c" id="c"></div></div><div class="v" id="v"></div><div class="w" id="w"></div>';
+                const names = ['background-image', 'background-size', 'background-position',
+                    'background-repeat', 'background-origin', 'background-clip'];
+                const look = (id) => {
+                    const style = getComputedStyle(document.getElementById(id));
+                    return names.map((name) => style.getPropertyValue(name));
+                };
+                const initial = 'none,auto,0% 0%,repeat,padding-box,border-box';
+                const w = look('w');
+                const c = look('c');
+                return [
+                    look('a').join() === initial, look('k').join() === initial,
+                    c[0].includes('y.png') && c[1] === '7px 3px',
+                    look('v').join() === initial,
+                    getComputedStyle(document.getElementById('v')).backgroundColor === 'rgb(255, 0, 0)',
+                    w[0].includes('x.png'), w[1] === '10px 5px', w[3] === 'no-repeat',
+                ].join();
+            })()
+        "#
+            ),
+            "true,true,true,true,true,true,true,true"
+        );
     });
 }

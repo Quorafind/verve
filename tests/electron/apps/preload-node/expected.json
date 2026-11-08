@@ -1,0 +1,27 @@
+{
+  "electron": "39.8.10",
+  "events": [
+    "app will-finish-launching",
+    "app ready",
+    "contents 1 did-start-loading",
+    "app before-quit",
+    "window 1 close",
+    "contents 1 dom-ready",
+    "contents 1 did-finish-load",
+    "contents 1 did-stop-loading",
+    "window 1 closed",
+    "app will-quit",
+    "process exit"
+  ],
+  "console": [
+    {
+      "from": "renderer",
+      "text": "page: preload said b.txt"
+    },
+    {
+      "from": "renderer",
+      "text": "page: eol true node string"
+    }
+  ],
+  "exitCode": 0
+}

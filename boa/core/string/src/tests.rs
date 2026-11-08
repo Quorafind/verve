@@ -4,7 +4,7 @@ use std::hash::{BuildHasher, BuildHasherDefault, Hash};
 
 use crate::{
     CodePoint, CommonJsStringBuilder, JsStr, JsString, JsStringKind, Latin1JsStringBuilder,
-    StaticJsStrings, StaticString, Utf16JsStringBuilder,
+    ROPE_MIN_LEN, StaticJsStrings, StaticString, Utf16JsStringBuilder,
 };
 
 use rustc_hash::FxHasher;
@@ -564,4 +564,573 @@ fn starts_with_and_ends_with_basic() {
     let end_needle = JsStr::latin1("def".as_bytes());
     assert!(!basic.starts_with(end_needle));
     assert!(basic.ends_with(end_needle));
+}
+
+#[test]
+fn index_of_starts_at_from_index() {
+    let haystack = JsString::from("aXbXc");
+    let needle = JsStr::latin1(b"X");
+    assert_eq!(haystack.index_of(needle, 0), Some(1));
+    assert_eq!(haystack.index_of(needle, 2), Some(3));
+    assert_eq!(haystack.index_of(needle, 4), None);
+    assert_eq!(haystack.index_of(needle, 5), None);
+
+    // A needle longer than what is left has no candidate, whatever the index.
+    let longer = JsStr::latin1(b"XbXcX");
+    assert_eq!(haystack.index_of(longer, 0), None);
+    assert_eq!(haystack.index_of(longer, 1), None);
+
+    // An empty needle is found at the index itself, up to the length.
+    let empty = JsStr::latin1(b"");
+    assert_eq!(haystack.index_of(empty, 3), Some(3));
+    assert_eq!(haystack.index_of(empty, 5), Some(5));
+    assert_eq!(haystack.index_of(empty, 6), None);
+}
+
+#[test]
+fn index_of_compares_utf16_and_latin1_by_code_unit() {
+    // `µµµx` fits Latin-1, so both this haystack and its needle are Latin-1.
+    let latin1 = JsString::from("µµµx");
+    let narrow_needle = JsStr::latin1(b"x");
+    assert_eq!(latin1.index_of(narrow_needle, 0), Some(3));
+    assert_eq!(latin1.index_of(narrow_needle, 3), Some(3));
+    assert_eq!(latin1.index_of(narrow_needle, 4), None);
+
+    // A haystack and a needle in different encodings are compared code unit by code unit.
+    let narrow = JsString::from("abc");
+    let wide_needle = JsStr::utf16(&[0x0062, 0x0063]);
+    assert_eq!(narrow.index_of(wide_needle, 0), Some(1));
+    assert_eq!(narrow.index_of(wide_needle, 2), None);
+    let wide = JsString::from("µµµx");
+    assert_eq!(wide.index_of(narrow_needle, 0), Some(3));
+    assert_eq!(wide.index_of(narrow_needle, 4), None);
+
+    // A surrogate pair is two code units in either encoding of the needle.
+    let emoji = JsString::from("😀😀x");
+    let pair = JsStr::utf16(&[0xD83D, 0xDE00]);
+    assert_eq!(emoji.index_of(pair, 0), Some(0));
+    assert_eq!(emoji.index_of(pair, 1), Some(2));
+    assert_eq!(emoji.index_of(JsStr::latin1(b"x"), 0), Some(4));
+}
+
+/// Two strings with the same text are not the same allocation, which is what `ptr_eq` says.
+#[test]
+fn equal_strings_from_different_allocations_are_not_one_string() {
+    let first = JsString::from("µµµx");
+    let second = JsString::from("µµµx");
+
+    assert_eq!(first, second);
+    assert!(!first.ptr_eq(&second));
+    assert!(first.ptr_eq(&first.clone()));
+}
+
+#[test]
+fn ptr_eq_tells_one_allocation_from_an_equal_string() {
+    let x = JsString::from("Hello");
+    let clone = x.clone();
+    let equal = JsString::from("Hello");
+
+    assert!(x.ptr_eq(&clone));
+    assert!(!x.ptr_eq(&equal));
+}
+
+#[test]
+fn concat_with_an_int32() {
+    let text = JsString::from("ab");
+    for n in [0, 7, -1, 12345, i32::MAX, i32::MIN] {
+        assert_eq!(
+            JsString::concat_i32(&text, n),
+            JsString::from(format!("ab{n}"))
+        );
+        assert_eq!(
+            JsString::concat_i32_before(n, &text),
+            JsString::from(format!("{n}ab"))
+        );
+    }
+    let wide = JsString::from(&[0x20ac_u16, 0x61][..]);
+    assert_eq!(
+        JsString::concat_i32(&wide, 42).to_vec(),
+        [0x20ac, 0x61, 0x34, 0x32]
+    );
+    assert_eq!(
+        JsString::concat_i32_before(42, &wide).to_vec(),
+        [0x34, 0x32, 0x20ac, 0x61]
+    );
+    let empty = JsString::default();
+    assert_eq!(JsString::concat_i32(&empty, -5), JsString::from("-5"));
+    // Around the length at which the result is a rope.
+    for len in [
+        ROPE_MIN_LEN - 3,
+        ROPE_MIN_LEN - 2,
+        ROPE_MIN_LEN - 1,
+        ROPE_MIN_LEN,
+    ] {
+        let base = JsString::from("x".repeat(len - 2));
+        let want = format!("{}12", "x".repeat(len - 2));
+        assert_eq!(
+            JsString::concat_i32(&base, 12).to_std_string().unwrap(),
+            want
+        );
+        let want = format!("12{}", "x".repeat(len - 2));
+        assert_eq!(
+            JsString::concat_i32_before(12, &base)
+                .to_std_string()
+                .unwrap(),
+            want
+        );
+    }
+}
+
+mod rope {
+    use crate::vtable::RopeString;
+    use crate::{JsString, JsStringKind, ROPE_MIN_LEN};
+
+    /// Chain depth of the deep tests: a million, or little enough for Miri to finish.
+    const DEEP: usize = if cfg!(miri) { 2_000 } else { 1_000_000 };
+
+    fn latin1(n: usize, c: char) -> JsString {
+        JsString::from(c.to_string().repeat(n))
+    }
+
+    fn utf16(n: usize, unit: u16) -> JsString {
+        JsString::from(vec![unit; n].as_slice())
+    }
+
+    fn data_ptr(s: &JsString) -> *const u8 {
+        match s.variant() {
+            crate::JsStrVariant::Latin1(b) => b.as_ptr(),
+            crate::JsStrVariant::Utf16(u) => u.as_ptr().cast(),
+        }
+    }
+
+    fn is_flat(s: &JsString) -> bool {
+        RopeString::flat_of(s).is_some()
+    }
+
+    #[test]
+    fn node_size() {
+        // Reported in docs/electron/size.md; a bigger node costs every append that much more.
+        assert_eq!(size_of::<RopeString>(), 96);
+    }
+
+    #[test]
+    fn short_results_are_copied() {
+        let s = JsString::concat_lazy(&latin1(10, 'a'), &latin1(10, 'b'));
+        assert_eq!(s.kind(), JsStringKind::Latin1Sequence);
+        let s = JsString::concat_lazy(&latin1(ROPE_MIN_LEN - 2, 'a'), &latin1(1, 'b'));
+        assert_eq!(s.kind(), JsStringKind::Latin1Sequence);
+        let s = JsString::concat_lazy(&latin1(ROPE_MIN_LEN, 'a'), &latin1(1, 'b'));
+        assert_eq!(s.kind(), JsStringKind::Rope);
+    }
+
+    #[test]
+    fn empty_sides_return_the_other() {
+        let a = latin1(300, 'a');
+        let e = JsString::default();
+        assert!(JsString::concat_lazy(&a, &e).ptr_eq(&a));
+        assert!(JsString::concat_lazy(&e, &a).ptr_eq(&a));
+        assert!(JsString::concat_lazy(&e, &e).is_empty());
+    }
+
+    #[test]
+    fn latin1_content_and_width() {
+        let (a, b) = (latin1(200, 'a'), latin1(100, '\u{e9}'));
+        let s = JsString::concat_lazy(&a, &b);
+        assert_eq!(s.len(), 300);
+        assert!(!is_flat(&s));
+        assert!(s.as_str().is_latin1());
+        assert_eq!(
+            s.to_std_string().unwrap(),
+            format!("{}{}", "a".repeat(200), "\u{e9}".repeat(100))
+        );
+        assert!(is_flat(&s));
+    }
+
+    #[test]
+    fn mixed_width_content() {
+        let a = latin1(200, '\u{ff}');
+        let b = utf16(100, 0x20ac);
+        let s = JsString::concat_lazy(&a, &b);
+        assert!(!s.as_str().is_latin1());
+        let t = JsString::concat_lazy(&b, &a);
+        let mut want = vec![0xffu16; 200];
+        want.extend(vec![0x20ac; 100]);
+        assert_eq!(s.to_vec(), want);
+        want.rotate_left(200);
+        assert_eq!(t.to_vec(), want);
+    }
+
+    #[test]
+    fn lone_surrogates_at_the_boundary() {
+        let hi = JsString::from(&[&[0x61u16; 300][..], &[0xD83D]].concat()[..]);
+        let lo = JsString::from(&[0xDE00u16][..]);
+        let s = JsString::concat_lazy(&hi, &lo);
+        // The halves join into a valid pair only once flattened.
+        assert_eq!(s.code_points().count(), 301);
+        assert_eq!(s.code_point_at(300).as_char(), Some('\u{1F600}'));
+    }
+
+    #[test]
+    fn len_does_not_flatten() {
+        let s = JsString::concat_lazy(&latin1(300, 'a'), &latin1(5, 'b'));
+        let t = JsString::concat_lazy(&s, &latin1(5, 'c'));
+        assert_eq!(t.len(), 310);
+        assert!(!t.is_empty());
+        let _clone = t.clone();
+        assert!(!is_flat(&t));
+        assert!(!is_flat(&s));
+    }
+
+    #[test]
+    fn flattens_once() {
+        let s = JsString::concat_lazy(&latin1(300, 'a'), &latin1(5, 'b'));
+        let first = data_ptr(&s);
+        assert!(is_flat(&s));
+        assert_eq!(data_ptr(&s), first);
+        assert_eq!(data_ptr(&s.clone()), first);
+    }
+
+    #[test]
+    fn ptr_eq_and_refcount() {
+        let s = JsString::concat_lazy(&latin1(300, 'a'), &latin1(5, 'b'));
+        assert_eq!(s.refcount(), Some(1));
+        let c = s.clone();
+        assert!(c.ptr_eq(&s));
+        assert_eq!(s.refcount(), Some(2));
+        drop(c);
+        assert_eq!(s.refcount(), Some(1));
+    }
+
+    #[test]
+    fn halves_stay_shared() {
+        let a = latin1(300, 'a');
+        let s = JsString::concat_lazy(&a, &latin1(5, 'b'));
+        assert_eq!(a.refcount(), Some(2));
+        let _ = s.as_str();
+        // Flattening releases the halves.
+        assert_eq!(a.refcount(), Some(1));
+    }
+
+    #[test]
+    fn slice_and_clone_after_flatten() {
+        let s = JsString::concat_lazy(&latin1(300, 'a'), &latin1(300, 'b'));
+        let sub = s.slice(295, 305);
+        assert_eq!(sub.to_std_string().unwrap(), "aaaaabbbbb");
+        assert_eq!(sub.kind(), JsStringKind::Slice);
+        drop(s);
+        assert_eq!(sub.to_std_string().unwrap(), "aaaaabbbbb");
+    }
+
+    #[test]
+    fn rope_of_ropes_and_dag() {
+        let s = JsString::concat_lazy(&latin1(300, 'a'), &latin1(1, 'b'));
+        let t = JsString::concat_lazy(&s, &s);
+        let u = JsString::concat_lazy(&t, &utf16(1, 0x100));
+        assert_eq!(u.len(), 603);
+        let mut want = "a".repeat(300);
+        want.push('b');
+        let mut units: Vec<u16> = want.encode_utf16().collect();
+        units.extend(units.clone());
+        units.push(0x100);
+        assert_eq!(u.to_vec(), units);
+    }
+
+    #[test]
+    fn deep_left_chain() {
+        let mut s = latin1(ROPE_MIN_LEN, 'x');
+        let piece = latin1(1, 'y');
+        for _ in 0..DEEP {
+            s = JsString::concat_lazy(&s, &piece);
+        }
+        assert_eq!(s.len(), ROPE_MIN_LEN + DEEP);
+        let flat = s.as_str();
+        assert_eq!(flat.get(ROPE_MIN_LEN + DEEP - 1), Some(u16::from(b'y')));
+        assert_eq!(flat.get(0), Some(u16::from(b'x')));
+    }
+
+    #[test]
+    fn deep_chains_drop_without_flattening() {
+        let mut left = latin1(ROPE_MIN_LEN, 'x');
+        let mut right = latin1(ROPE_MIN_LEN, 'z');
+        let piece = latin1(1, 'y');
+        for _ in 0..DEEP {
+            left = JsString::concat_lazy(&left, &piece);
+            right = JsString::concat_lazy(&piece, &right);
+        }
+        let both = JsString::concat_lazy(&left, &right);
+        assert_eq!(both.len(), 2 * ROPE_MIN_LEN + 2 * DEEP);
+        drop(both);
+        drop(left);
+        drop(right);
+    }
+
+    #[test]
+    fn deep_right_chain_flattens() {
+        let mut s = latin1(ROPE_MIN_LEN, 'x');
+        let letter = |i: usize| b'a' + u8::try_from(i % 26).unwrap();
+        for i in 0..DEEP {
+            let piece = JsString::from(char::from(letter(i)).to_string());
+            s = JsString::concat_lazy(&piece, &s);
+        }
+        let v = s.to_vec();
+        assert_eq!(v.len(), ROPE_MIN_LEN + DEEP);
+        assert_eq!(v[0], u16::from(letter(DEEP - 1)));
+        assert_eq!(v[DEEP], u16::from(b'x'));
+    }
+
+    /// A rope that has taken two short appends, so that it ends in a shared buffer.
+    fn with_buffer(base: &JsString) -> JsString {
+        let s = JsString::concat_lazy(base, &latin1(1, 'x'));
+        JsString::concat_lazy(&s, &latin1(1, 'y'))
+    }
+
+    fn text(s: &JsString) -> String {
+        s.to_std_string().unwrap()
+    }
+
+    #[test]
+    fn short_appends_share_one_buffer() {
+        let base = latin1(300, 'a');
+        let s = with_buffer(&base);
+        // Appending to a rope that ends in a buffer adds no reference to the buffer's owner other
+        // than the new rope's, and the old rope keeps its length and content.
+        let t = JsString::concat_lazy(&s, &latin1(2, 'z'));
+        assert_eq!((s.len(), t.len()), (302, 304));
+        assert_eq!(base.refcount(), Some(3));
+        assert_eq!(text(&s), format!("{}xy", "a".repeat(300)));
+        assert_eq!(text(&t), format!("{}xyzz", "a".repeat(300)));
+    }
+
+    #[test]
+    fn shared_rope_is_not_modified_by_appends() {
+        let base = latin1(300, 'a');
+        let s = with_buffer(&base);
+        let one = JsString::concat_lazy(&s, &latin1(1, '1'));
+        let two = JsString::concat_lazy(&s, &latin1(1, '2'));
+        let one3 = JsString::concat_lazy(&one, &latin1(1, '3'));
+        let one4 = JsString::concat_lazy(&one, &latin1(1, '4'));
+        let two5 = JsString::concat_lazy(&two, &latin1(1, '5'));
+        let head = "a".repeat(300);
+        // Read in an order other than the order of creation.
+        assert_eq!(text(&two5), format!("{head}xy25"));
+        assert_eq!(text(&one4), format!("{head}xy14"));
+        assert_eq!(text(&s), format!("{head}xy"));
+        assert_eq!(text(&one3), format!("{head}xy13"));
+        assert_eq!(text(&two), format!("{head}xy2"));
+        assert_eq!(text(&one), format!("{head}xy1"));
+    }
+
+    #[test]
+    fn appends_after_a_read_and_across_widths() {
+        let base = latin1(300, 'a');
+        let s = with_buffer(&base);
+        let wide = JsString::concat_lazy(&s, &utf16(1, 0x20ac));
+        let later = JsString::concat_lazy(&wide, &latin1(1, 'q'));
+        assert_eq!(wide.len(), 303);
+        assert_eq!(later.to_vec().last(), Some(&u16::from(b'q')));
+        assert_eq!(wide.to_vec()[302], 0x20ac);
+        // A rope that has been read is flat; the next append starts over from it.
+        assert_eq!(text(&s).len(), 302);
+        let u = JsString::concat_lazy(&s, &latin1(1, 'u'));
+        let v = JsString::concat_lazy(&u, &latin1(1, 'v'));
+        assert_eq!(text(&v), format!("{}xyuv", "a".repeat(300)));
+        // A piece too long for the buffer gets a node of its own and the buffer is left alone.
+        let long = JsString::concat_lazy(&v, &latin1(100, 'l'));
+        assert_eq!(long.len(), 404);
+        assert_eq!(
+            text(&long),
+            format!("{}xyuv{}", "a".repeat(300), "l".repeat(100))
+        );
+        assert_eq!(text(&v), format!("{}xyuv", "a".repeat(300)));
+    }
+
+    /// A CJK unit that varies with `i`.
+    fn wide(i: usize) -> u16 {
+        0x4e00 + u16::try_from(i % 100).unwrap()
+    }
+
+    fn units(s: &JsString) -> Vec<u16> {
+        s.to_vec()
+    }
+
+    fn expected(head: usize, tail: &[u16]) -> Vec<u16> {
+        let mut v = vec![u16::from(b'a'); head];
+        v.extend_from_slice(tail);
+        v
+    }
+
+    /// Appends each of `pieces` in turn.
+    fn append_all(base: &JsString, pieces: &[&[u16]]) -> JsString {
+        let mut s = base.clone();
+        for p in pieces {
+            s = JsString::concat_lazy(&s, &JsString::from(*p));
+        }
+        s
+    }
+
+    #[test]
+    fn wide_appends_share_one_buffer() {
+        let base = latin1(300, 'a');
+        let s = append_all(&base, &[&[0x4e2d], &[0x31], &[0x4e2d, 0x32]]);
+        // A node for the base, one for the rope: the pieces live in a shared buffer.
+        assert_eq!(base.refcount(), Some(2));
+        assert_eq!(s.len(), 304);
+        assert_eq!(units(&s), expected(300, &[0x4e2d, 0x31, 0x4e2d, 0x32]));
+    }
+
+    #[test]
+    fn latin1_buffer_is_widened_mid_buffer() {
+        let base = latin1(300, 'a');
+        let s = append_all(&base, &[&[0x78], &[0x79], &[0x7a]]);
+        let t = JsString::concat_lazy(&s, &utf16(1, 0x20ac));
+        let u = JsString::concat_lazy(&t, &latin1(2, 'q'));
+        // The Latin-1 rope is still a Latin-1 rope that can be appended to and read.
+        let s2 = JsString::concat_lazy(&s, &latin1(1, 'w'));
+        assert_eq!(
+            units(&u),
+            expected(300, &[0x78, 0x79, 0x7a, 0x20ac, 0x71, 0x71])
+        );
+        assert_eq!(units(&t), expected(300, &[0x78, 0x79, 0x7a, 0x20ac]));
+        assert_eq!(units(&s2), expected(300, &[0x78, 0x79, 0x7a, 0x77]));
+        assert_eq!(units(&s), expected(300, &[0x78, 0x79, 0x7a]));
+        assert_eq!(s2.to_std_string().unwrap().len(), 304);
+    }
+
+    #[test]
+    fn surrogate_pair_split_across_appends() {
+        let base = latin1(300, 'a');
+        let s = append_all(&base, &[&[0x61], &[0xd83d], &[0xde00], &[0x62]]);
+        assert_eq!(units(&s), expected(300, &[0x61, 0xd83d, 0xde00, 0x62]));
+        assert_eq!(
+            s.to_std_string().unwrap().chars().nth(301),
+            Some('\u{1f600}')
+        );
+        // The first half alone is a lone surrogate, however it was appended.
+        let lone = append_all(&base, &[&[0x61], &[0xd83d]]);
+        assert_eq!(units(&lone), expected(300, &[0x61, 0xd83d]));
+        assert!(lone.to_std_string().is_err());
+        // The same text built from a wide base and from a flat string is equal.
+        let flat = JsString::from(expected(300, &[0x61, 0xd83d, 0xde00, 0x62]).as_slice());
+        assert_eq!(s, flat);
+        assert_eq!(super::hash_value(&s), super::hash_value(&flat));
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn forks_on_both_sides_of_a_widening() {
+        let base = latin1(300, 'a');
+        let s = append_all(&base, &[&[0x31], &[0x32]]);
+        let s1 = s.clone();
+        let a = JsString::concat_lazy(&s, &latin1(1, 'a'));
+        let b = JsString::concat_lazy(&s1, &utf16(1, 0x4e2d));
+        let c = JsString::concat_lazy(&s1, &utf16(1, 0x20ac));
+        let b2 = JsString::concat_lazy(&b, &latin1(1, 'b'));
+        let b3 = JsString::concat_lazy(&b, &utf16(1, 0x4e2e));
+        let c2 = JsString::concat_lazy(&c, &latin1(1, 'c'));
+        let head = [0x31, 0x32];
+        let with = |t: &[u16]| expected(300, &[&head[..], t].concat());
+        assert_eq!(units(&c2), with(&[0x20ac, 0x63]));
+        assert_eq!(units(&b3), with(&[0x4e2d, 0x4e2e]));
+        assert_eq!(units(&a), with(&[0x61]));
+        assert_eq!(units(&b2), with(&[0x4e2d, 0x62]));
+        assert_eq!(units(&s1), with(&[]));
+        assert_eq!(units(&b), with(&[0x4e2d]));
+        assert_eq!(units(&c), with(&[0x20ac]));
+        // Forks of a wide rope too.
+        let w = append_all(&base, &[&[0x4e2d], &[0x4e2d]]);
+        let x = JsString::concat_lazy(&w, &latin1(1, 'x'));
+        let y = JsString::concat_lazy(&w, &utf16(1, 0x4e2f));
+        assert_eq!(units(&y), expected(300, &[0x4e2d, 0x4e2d, 0x4e2f]));
+        assert_eq!(units(&x), expected(300, &[0x4e2d, 0x4e2d, 0x78]));
+        assert_eq!(units(&w), expected(300, &[0x4e2d, 0x4e2d]));
+    }
+
+    #[test]
+    fn wide_base_and_wide_right_half() {
+        // The left half is wide while the pieces appended are Latin-1.
+        let base = utf16(300, 0x4e2d);
+        let s = append_all(&base, &[&[0x31], &[0x32], &[0x4e2d]]);
+        let mut want = vec![0x4e2d; 300];
+        want.extend([0x31, 0x32, 0x4e2d]);
+        assert_eq!(units(&s), want);
+        // A rope of two long pieces, the second one wide, followed by short appends.
+        let r = JsString::concat_lazy(&latin1(300, 'a'), &utf16(40, 0x4e2d));
+        let r = append_all(&r, &[&[0x31], &[0x32]]);
+        let mut want = vec![0x61; 300];
+        want.extend([0x4e2d; 40]);
+        want.extend([0x31, 0x32]);
+        assert_eq!(units(&r), want);
+    }
+
+    #[test]
+    fn empty_and_long_appends_with_buffers() {
+        let base = latin1(300, 'a');
+        let s = append_all(&base, &[&[0x4e2d], &[0x4e2d]]);
+        let same = JsString::concat_lazy(&s, &JsString::default());
+        assert_eq!(same.len(), s.len());
+        let same = JsString::concat_lazy(&JsString::default(), &s);
+        assert_eq!(same.len(), s.len());
+        // A piece longer than the buffer takes stays a node of its own; the buffer is intact.
+        let long = JsString::concat_lazy(&s, &utf16(100, 0x4e2e));
+        let t = JsString::concat_lazy(&s, &latin1(1, 'z'));
+        let mut want = expected(300, &[0x4e2d, 0x4e2d]);
+        want.extend([0x4e2e; 100]);
+        assert_eq!(units(&long), want);
+        assert_eq!(units(&t), expected(300, &[0x4e2d, 0x4e2d, 0x7a]));
+        // A long Latin-1 tail is not widened, and stays correct.
+        let mut big = latin1(300, 'a');
+        for _ in 0..40 {
+            big = JsString::concat_lazy(&big, &latin1(60, 'b'));
+        }
+        let wide = JsString::concat_lazy(&big, &utf16(1, 0x4e2d));
+        assert_eq!(wide.len(), 300 + 2400 + 1);
+        assert_eq!(wide.to_vec()[2700], 0x4e2d);
+        assert_eq!(big.to_vec().len(), 2700);
+    }
+
+    #[test]
+    fn deep_chains_of_wide_appends_flatten_and_drop() {
+        let mut s = latin1(ROPE_MIN_LEN, 'x');
+        for i in 0..DEEP {
+            s = JsString::concat_lazy(&s, &utf16(1, wide(i)));
+        }
+        assert_eq!(s.len(), ROPE_MIN_LEN + DEEP);
+        let v = s.to_vec();
+        assert_eq!(v[ROPE_MIN_LEN + 5], 0x4e05);
+        assert_eq!(v[ROPE_MIN_LEN + DEEP - 1], wide(DEEP - 1));
+        // Long wide pieces: a chain of nodes, not buffers.
+        let mut s = utf16(ROPE_MIN_LEN, 0x4e2d);
+        let piece = utf16(100, 0x4e2e);
+        for _ in 0..DEEP / 10 {
+            s = JsString::concat_lazy(&s, &piece);
+        }
+        assert_eq!(s.to_vec().len(), ROPE_MIN_LEN + 100 * (DEEP / 10));
+        // Dropped unread.
+        let mut s = latin1(ROPE_MIN_LEN, 'x');
+        for i in 0..DEEP {
+            s = JsString::concat_lazy(&s, &utf16(1, wide(i)));
+        }
+        drop(s);
+    }
+
+    #[test]
+    fn deep_chains_of_long_pieces_still_flatten_and_drop() {
+        let mut s = latin1(ROPE_MIN_LEN, 'x');
+        let piece = latin1(100, 'y');
+        for _ in 0..DEEP / 10 {
+            s = JsString::concat_lazy(&s, &piece);
+        }
+        assert_eq!(s.len(), ROPE_MIN_LEN + 100 * (DEEP / 10));
+        assert_eq!(s.to_vec().len(), s.len());
+    }
+
+    #[test]
+    fn equality_hash_and_order() {
+        let a = latin1(300, 'a');
+        let s = JsString::concat_lazy(&latin1(150, 'a'), &latin1(150, 'a'));
+        assert_eq!(s, a);
+        assert_eq!(super::hash_value(&s), super::hash_value(&a));
+        let t = JsString::concat_lazy(&a, &latin1(1, 'b'));
+        assert!(s < t);
+    }
 }

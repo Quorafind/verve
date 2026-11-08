@@ -515,3 +515,182 @@ fn a_cached_length_set_still_runs_array_set_length() {
         "2:undefined:RangeErrorRangeError:2"
     );
 }
+
+/// Runs `source` and returns its string result.
+fn eval_string(source: &str) -> String {
+    let context = &mut Context::default();
+    context
+        .eval(Source::from_bytes(source))
+        .expect("the script runs")
+        .to_string(context)
+        .expect("a string")
+        .to_std_string_escaped()
+}
+
+#[test]
+fn a_prototype_property_replaced_by_an_accessor_is_not_read_from_the_old_slot() {
+    assert_eq!(
+        eval_string(
+            r#"
+            function A() {} A.prototype.x = 'd';
+            const a = new A(); const f = (o) => o.x;
+            for (let i = 0; i < 10; i++) f(a);
+            delete A.prototype.x;
+            Object.defineProperty(A.prototype, 'x', { get() { return 'g'; }, configurable: true });
+            f(a)
+            "#
+        ),
+        "g"
+    );
+}
+
+#[test]
+fn a_prototype_that_lost_properties_is_not_read_past_its_storage() {
+    assert_eq!(
+        eval_string(
+            r#"
+            function B() {} B.prototype.p = 1; B.prototype.q = 2; B.prototype.x = 'd';
+            const b = new B(); const g = (o) => o.x;
+            for (let i = 0; i < 10; i++) g(b);
+            delete B.prototype.p; delete B.prototype.q; delete B.prototype.x;
+            String(g(b))
+            "#
+        ),
+        "undefined"
+    );
+}
+
+#[test]
+fn a_changed_prototype_replaces_its_cache_entry() -> JsResult<()> {
+    let context = &mut Context::default();
+    context.set_lazy_compile(false);
+    let function = context.eval(Source::from_bytes("(function (o) { return o.x; })"))?;
+    let (function, code) = get_codeblock(&function).unwrap();
+    let prototype = context.eval(Source::from_bytes("globalThis.p = { p: 1, x: 'd' }"))?;
+    let object = context.eval(Source::from_bytes("Object.create(p)"))?;
+    let object = object.as_object().unwrap();
+    let call = |context: &mut Context| {
+        function.call(&JsValue::undefined(), &[object.clone().into()], context)
+    };
+
+    assert_eq!(call(context)?.to_string(context)?, js_string!("d"));
+    assert_eq!(code.ic[0].entries.borrow().len(), 1);
+    assert!(code.ic[0].entries.borrow()[0].prototype_shape.is_some());
+
+    // The prototype changes shape: the entry is dropped on the next access and recorded again,
+    // not added next to the stale one, so the cache never fills up with entries of one receiver.
+    for i in 0..10 {
+        let name = js_string!(format!("k{i}"));
+        let prototype = prototype.as_object().unwrap();
+        prototype.delete_property_or_throw(js_string!("p"), context)?;
+        prototype.set(name, i, true, context)?;
+        assert_eq!(call(context)?.to_string(context)?, js_string!("d"));
+        assert_eq!(code.ic[0].entries.borrow().len(), 1);
+        assert!(!code.ic[0].megamorphic.get());
+        prototype.set(js_string!("p"), 1, true, context)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_prototype_slot_is_not_cached_for_a_unique_receiver() {
+    assert_eq!(
+        eval_string(
+            r#"
+            const p = { x: 'p' }; const a = Object.create(p);
+            for (let i = 0; i < 1100; i++) a['k' + i] = i;
+            const f = (o) => o.x;
+            for (let i = 0; i < 10; i++) f(a);
+            a.x = 'own';
+            f(a)
+            "#
+        ),
+        "own"
+    );
+}
+
+#[test]
+fn an_added_property_is_cached_per_site_and_a_changed_prototype_replaces_the_entry() -> JsResult<()>
+{
+    let context = &mut Context::default();
+    context.set_lazy_compile(false);
+    let function = context.eval(Source::from_bytes("(function (o) { o.x = 1; })"))?;
+    let (function, code) = get_codeblock(&function).unwrap();
+    let prototype = context.eval(Source::from_bytes("globalThis.p = { p: 1 }"))?;
+    let call = |context: &mut Context| -> JsResult<JsValue> {
+        let object = context.eval(Source::from_bytes("Object.create(p)"))?;
+        function.call(
+            &JsValue::undefined(),
+            std::slice::from_ref(&object),
+            context,
+        )?;
+        Ok(object)
+    };
+
+    // The first add is made the slow way and recorded; the second takes the cache.
+    call(context)?;
+    assert_eq!(code.ic[0].adds.len(), 1);
+    let object = call(context)?;
+    assert_eq!(code.ic[0].adds.len(), 1);
+    assert_eq!(
+        object
+            .as_object()
+            .unwrap()
+            .borrow()
+            .properties()
+            .storage
+            .len(),
+        1
+    );
+
+    // The prototype changes shape: the entry is replaced, not added to, and the cache does not
+    // fill up with the entries of one kind of receiver.
+    for i in 0..10 {
+        let prototype = prototype.as_object().unwrap();
+        prototype.set(js_string!(format!("k{i}")), i, true, context)?;
+        call(context)?;
+        call(context)?;
+        assert_eq!(code.ic[0].adds.len(), 1);
+        assert!(!code.ic[0].adds.is_full());
+    }
+    Ok(())
+}
+
+#[test]
+fn an_added_property_is_not_cached_past_a_setter_the_chain_gains() {
+    assert_eq!(
+        eval_string(
+            r#"
+            const log = [];
+            const f = (o) => { o.x = 1; };
+            const proto = { p: 1 };
+            const make = () => Object.create(proto);
+            for (let i = 0; i < 10; i++) f(make());
+            Object.defineProperty(Object.prototype, 'x', { set(v) { log.push(v); }, configurable: true });
+            const o = make(); f(o);
+            const own = Object.keys(o).length;
+            delete Object.prototype.x;
+            const p = make(); f(p);
+            log.length + ':' + own + ':' + Object.keys(p).length
+            "#
+        ),
+        "1:0:1"
+    );
+}
+
+#[test]
+fn a_site_with_many_shapes_stops_recording() -> JsResult<()> {
+    let context = &mut Context::default();
+    context.set_lazy_compile(false);
+    let function = context.eval(Source::from_bytes("(function (o) { o.x = 1; })"))?;
+    let (function, code) = get_codeblock(&function).unwrap();
+    for i in 0..6 {
+        let object = context.eval(Source::from_bytes(&format!(
+            "Object.assign(Object.create(null), {{ k{i}: 0 }})"
+        )))?;
+        function.call(&JsValue::undefined(), &[object], context)?;
+    }
+    assert!(code.ic[0].adds.is_full());
+    assert_eq!(code.ic[0].adds.len(), 0);
+    Ok(())
+}

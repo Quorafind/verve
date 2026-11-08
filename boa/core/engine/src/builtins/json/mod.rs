@@ -13,20 +13,15 @@
 //! [json]: https://www.json.org/json-en.html
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON
 
-use std::{borrow::Cow, iter::once};
-
 use rustc_hash::FxHashSet;
 
-use boa_ast::scope::Scope;
-use boa_gc::{Finalize, Gc, Trace};
-use boa_macros::utf16;
-use itertools::Itertools;
+use boa_gc::{Finalize, Trace};
+use boa_macros::{js_str, utf16};
 
 use crate::JsExpect;
 use crate::{
-    Context, JsArgs, JsBigInt, JsData, JsResult, JsString, JsValue, SpannedSourceText,
+    Context, JsArgs, JsBigInt, JsData, JsResult, JsString, JsValue,
     builtins::BuiltInObject,
-    bytecompiler::ByteCompiler,
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
@@ -36,9 +31,8 @@ use crate::{
     string::{CodePoint, StaticJsStrings},
     symbol::JsSymbol,
     value::IntegerOrInfinity,
-    vm::{CallFrame, CallFrameFlags, source_info::SourcePath},
+    vm::native_stack_position,
 };
-use boa_parser::{Parser, Source};
 
 use super::{BuiltInBuilder, IntrinsicObject};
 
@@ -50,150 +44,14 @@ const fn to_hex_digit(val: u16) -> u16 {
     }
 }
 
+mod parse;
+use parse::JsonNode;
 #[cfg(test)]
 mod tests;
 
 /// Marker struct for the `[[IsRawJSON]]` internal slot.
 #[derive(Debug, Trace, Finalize, JsData)]
 pub(crate) struct RawJson;
-
-/// A tree node representing the structure of parsed JSON, preserving source
-/// text spans for primitive values. Used to provide `context.source` to
-/// the reviver function in `JSON.parse`.
-#[derive(Debug)]
-enum JsonNode {
-    /// A primitive value (string, number, boolean, null) with its original source text.
-    Primitive(String),
-    /// An array of child nodes.
-    Array(Vec<JsonNode>),
-    /// An object with key-value pairs.
-    Object(Vec<(String, JsonNode)>),
-}
-
-/// Visitor that builds a `JsonNode` source tree by walking the parsed AST,
-/// extracting source text from `LinearSpan` information tracked by the parser.
-/// Uses a stack to build the tree bottom-up during depth-first traversal.
-struct JsonSourceVisitor<'a> {
-    source_text: &'a boa_ast::SourceText,
-    interner: &'a boa_interner::Interner,
-    /// Stack used to build the tree bottom-up. Leaf nodes (literals) are pushed
-    /// first, then parent nodes (arrays/objects) pop their children and push themselves.
-    stack: Vec<JsonNode>,
-}
-
-impl<'a> JsonSourceVisitor<'a> {
-    /// Creates a new `JsonSourceVisitor`.
-    fn new(source_text: &'a boa_ast::SourceText, interner: &'a boa_interner::Interner) -> Self {
-        Self {
-            source_text,
-            interner,
-            stack: Vec::new(),
-        }
-    }
-
-    /// Consumes the visitor and returns the final `JsonNode` tree.
-    fn finish(mut self) -> Option<JsonNode> {
-        self.stack.pop()
-    }
-}
-
-impl<'ast> boa_ast::visitor::Visitor<'ast> for JsonSourceVisitor<'_> {
-    type BreakTy = std::convert::Infallible;
-
-    fn visit_literal(
-        &mut self,
-        node: &'ast boa_ast::expression::literal::Literal,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        let span = node.linear_span();
-        let code_points = self.source_text.get_code_points_from_span(span);
-        let text = String::from_utf16_lossy(code_points);
-        self.stack.push(JsonNode::Primitive(text));
-        std::ops::ControlFlow::Continue(())
-    }
-
-    fn visit_array_literal(
-        &mut self,
-        node: &'ast boa_ast::expression::literal::ArrayLiteral,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        let count = node.as_ref().len();
-        let base = self.stack.len();
-
-        // Visit each element, which pushes child nodes onto the stack
-        for elem in node.as_ref() {
-            if let Some(expr) = elem {
-                self.visit_expression(expr)?;
-            } else {
-                // Sparse element (should not happen in JSON)
-                self.stack.push(JsonNode::Primitive("null".to_string()));
-            }
-        }
-
-        // Pop the children that were just pushed and collect into array
-        let children: Vec<JsonNode> = self.stack.drain(base..).collect();
-        debug_assert_eq!(children.len(), count);
-        self.stack.push(JsonNode::Array(children));
-        std::ops::ControlFlow::Continue(())
-    }
-
-    fn visit_object_literal(
-        &mut self,
-        node: &'ast boa_ast::expression::literal::ObjectLiteral,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        use boa_ast::expression::literal::PropertyDefinition;
-
-        let base = self.stack.len();
-        let mut keys: Vec<String> = Vec::new();
-
-        for prop in node.properties() {
-            if let PropertyDefinition::Property(name, value) = prop {
-                let key = if let Some(ident) = name.literal() {
-                    self.interner.resolve_expect(ident.sym()).to_string()
-                } else {
-                    String::new()
-                };
-                keys.push(key);
-                // Visit the value expression, which pushes the child node
-                self.visit_expression(value)?;
-            }
-        }
-
-        // Pop the value nodes and zip with keys
-        let values: Vec<JsonNode> = self.stack.drain(base..).collect();
-        debug_assert_eq!(keys.len(), values.len());
-        let entries: Vec<(String, JsonNode)> = keys.into_iter().zip(values).collect();
-        self.stack.push(JsonNode::Object(entries));
-        std::ops::ControlFlow::Continue(())
-    }
-
-    fn visit_unary(
-        &mut self,
-        node: &'ast boa_ast::expression::operator::Unary,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        use boa_ast::expression::operator::unary::UnaryOp;
-        use boa_ast::visitor::VisitWith;
-
-        if node.op() == UnaryOp::Minus
-            && let boa_ast::Expression::Literal(lit) = node.target()
-        {
-            let span = lit.linear_span();
-            let code_points = self.source_text.get_code_points_from_span(span);
-            let num_text = String::from_utf16_lossy(code_points);
-            self.stack.push(JsonNode::Primitive(format!("-{num_text}")));
-            return std::ops::ControlFlow::Continue(());
-        }
-
-        // Default: recurse into children
-        node.visit_with(self)
-    }
-
-    fn visit_parenthesized(
-        &mut self,
-        node: &'ast boa_ast::expression::Parenthesized,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        // Unwrap parentheses and visit inner expression
-        self.visit_expression(node.expression())
-    }
-}
 
 /// JavaScript `JSON` global object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -241,120 +99,30 @@ impl Json {
             .first()
             .cloned()
             .unwrap_or_default()
-            .to_string(context)?
-            .to_std_string()
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
+            .to_string(context)?;
 
         // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
         //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(&json_string) {
-            return Err(JsNativeError::syntax().with_message(e.to_string()).into());
-        }
-
-        // Check if a reviver is provided, to determine if we need source text tracking
-        let has_reviver = args.get_or_undefined(1).is_callable();
-
-        // 3. Let scriptString be the string-concatenation of "(", jsonString, and ");".
-        let script_string = format!("({json_string});");
-
-        // 4-10. Parse and evaluate the script
-        let source = Source::from_bytes(&script_string);
-        let mut parser = Parser::new(source);
-        parser.set_json_parse();
-
-        // Use parse_script_with_source to get SourceText for span-based source extraction
-        let (script, source_text) =
-            parser.parse_script_with_source(&Scope::new_global(), context.interner_mut())?;
-
-        // Build the source tree from the AST if a reviver is present.
-        // This walks the parsed AST and extracts source text from LinearSpan information,
-        // avoiding the need to re-parse the JSON string separately.
-        let source_tree = if has_reviver {
-            let expr = script.statements().statements().first().and_then(|item| {
-                if let boa_ast::StatementListItem::Statement(stmt) = item
-                    && let boa_ast::Statement::Expression(expr) = stmt.as_ref()
-                {
-                    return Some(expr);
-                }
-                None
-            });
-            expr.and_then(|e| {
-                use boa_ast::visitor::Visitor;
-                let mut visitor = JsonSourceVisitor::new(&source_text, context.interner());
-                let _ = visitor.visit_expression(e);
-                visitor.finish()
-            })
-        } else {
-            None
+        // 3-10. Evaluate it to a value. The reader does both at once, from the code units.
+        let Some(reviver) = args.get_or_undefined(1).as_callable() else {
+            return parse::Reader::new(json_string.as_str()).read(context);
         };
 
-        let code_block = {
-            let in_with = context.vm.frame().environments.has_object_environment();
-            let spanned_source_text = SpannedSourceText::new_source_only(
-                crate::spanned_source_text::SourceText::new(source_text),
-            );
-            let mut compiler = ByteCompiler::new(
-                js_string!("<json>"),
-                script.strict(),
-                true,
-                context.realm().scope().clone(),
-                context.realm().scope().clone(),
-                false,
-                false,
-                context.interner_mut(),
-                in_with,
-                spanned_source_text,
-                SourcePath::Json,
-            );
-            compiler.compile_statement_list(script.statements(), true, false);
-            Gc::new(compiler.finish())
-        };
+        // 11. If IsCallable(reviver) is true, then the text every primitive came from is needed
+        // as well, which the reader keeps beside the values it builds.
+        let (unfiltered, source_tree) =
+            parse::Reader::new(json_string.as_str()).read_with_nodes(context)?;
 
-        let realm = context.realm().clone();
+        // a. Let root be ! OrdinaryObjectCreate(%Object.prototype%).
+        let root = JsObject::with_object_proto(context.intrinsics());
 
-        let env_fp = context.vm.frame().environments.len() as u32;
-        context.vm.push_frame_with_stack(
-            CallFrame::new(
-                code_block,
-                None,
-                context.vm.frame().environments.clone(),
-                realm,
-            )
-            .with_env_fp(env_fp)
-            .with_flags(CallFrameFlags::EXIT_EARLY),
-            JsValue::undefined(),
-            JsValue::null(),
-        );
+        // b. Let rootName be the empty String.
+        // c. Perform ! CreateDataPropertyOrThrow(root, rootName, unfiltered).
+        root.create_data_property_or_throw(js_string!(), unfiltered, context)
+            .js_expect("CreateDataPropertyOrThrow should never throw here")?;
 
-        context.realm().resize_global_env();
-        let record = context.run();
-        context.vm.pop_frame();
-
-        let unfiltered = record.consume()?;
-
-        // 11. If IsCallable(reviver) is true, then
-        if let Some(obj) = args.get_or_undefined(1).as_callable() {
-            // a. Let root be ! OrdinaryObjectCreate(%Object.prototype%).
-            let root = JsObject::with_object_proto(context.intrinsics());
-
-            // b. Let rootName be the empty String.
-            // c. Perform ! CreateDataPropertyOrThrow(root, rootName, unfiltered).
-            root.create_data_property_or_throw(js_string!(), unfiltered, context)
-                .js_expect("CreateDataPropertyOrThrow should never throw here")?;
-
-            // d. Return ? InternalizeJSONProperty(root, rootName, reviver).
-            Self::internalize_json_property(
-                &root,
-                js_string!(),
-                &obj,
-                source_tree.as_ref(),
-                context,
-            )
-        } else {
-            // 12. Else,
-            // a. Return unfiltered.
-            Ok(unfiltered)
-        }
+        // d. Return ? InternalizeJSONProperty(root, rootName, reviver).
+        Self::internalize_json_property(&root, js_string!(), &reviver, Some(&source_tree), context)
     }
 
     /// `25.5.1.1 InternalizeJSONProperty ( holder, name, reviver )`
@@ -370,6 +138,19 @@ impl Json {
         source_node: Option<&JsonNode>,
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        // The reader nests as deep as memory allows, and this walk of the result recurses on the
+        // native stack: past what the runtime lets nested runs take, it throws what V8 throws.
+        if context
+            .vm
+            .native_stack_base
+            .saturating_sub(native_stack_position())
+            > context.runtime_limits().native_stack_limit()
+        {
+            return Err(JsNativeError::range()
+                .with_message("Maximum call stack size exceeded")
+                .into());
+        }
+
         // 1. Let val be ? Get(holder, name).
         let val = holder.get(name.clone(), context)?;
 
@@ -429,9 +210,7 @@ impl Json {
                         .as_string()
                         .js_expect("EnumerableOwnPropertyNames only returns strings")?;
 
-                    let p_std = p.to_std_string_escaped();
-                    let child_node =
-                        entries.and_then(|e| e.iter().rfind(|(k, _)| k == &p_std).map(|(_, v)| v));
+                    let child_node = entries.and_then(|e| e.get(&p));
 
                     // 1. Let newElement be ? InternalizeJSONProperty(val, P, reviver).
                     let new_element = Self::internalize_json_property(
@@ -465,41 +244,14 @@ impl Json {
         // Per spec, source is only provided when the value is still the same
         // primitive that was produced by parsing the original JSON text.
         let ctx_obj = JsObject::with_object_proto(context.intrinsics());
-        if let Some(JsonNode::Primitive(source_text)) = source_node {
-            // Check if the current value matches what the source text produces.
-            // If the reviver modified the value, it won't match and we skip source.
-            let value_matches = match source_text.as_str() {
-                "null" => val.is_null(),
-                "true" => val.as_boolean() == Some(true),
-                "false" => val.as_boolean() == Some(false),
-                s if s.starts_with('"') => {
-                    // String: compare parsed string value
-                    if let Some(js_str) = val.as_string() {
-                        serde_json::from_str::<String>(s)
-                            .is_ok_and(|parsed| js_str.to_std_string_escaped() == parsed)
-                    } else {
-                        false
-                    }
-                }
-                s => {
-                    // Number: compare parsed number value
-                    // Exact comparison is intentional: we want to detect if the
-                    // value was replaced by the reviver, not approximate equality.
-                    #[allow(clippy::float_cmp)]
-                    if let Some(n) = val.as_number() {
-                        s.parse::<f64>().is_ok_and(|parsed| n == parsed)
-                    } else {
-                        false
-                    }
-                }
-            };
-            if value_matches {
-                ctx_obj.create_data_property_or_throw(
-                    js_string!("source"),
-                    JsValue::from(js_string!(source_text.as_str())),
-                    context,
-                )?;
-            }
+        if let Some(JsonNode::Primitive { source, value }) = source_node
+            && JsValue::same_value(&val, value)
+        {
+            ctx_obj.create_data_property_or_throw(
+                js_string!("source"),
+                JsValue::from(source.clone()),
+                context,
+            )?;
         }
 
         // 3. Return ? Call(reviver, holder, « name, val, context »).
@@ -951,6 +703,19 @@ impl Json {
         js_string!(&product[..])
     }
 
+    /// The concatenation of `opening`, every piece of `members`, and `closing`, in one
+    /// allocation.
+    ///
+    /// `SerializeJSONObject` and `SerializeJSONArray` collect their members as a list of pieces
+    /// and then ask for one string of them; copying each piece into a `Vec<u16>` first, and that
+    /// `Vec` again into the result, doubled the bytes moved per member.
+    fn concat_members(opening: &JsString, members: &[JsString], closing: &JsString) -> JsString {
+        let mut segments = Vec::with_capacity(members.len() + 2);
+        segments.push(opening.as_str());
+        segments.extend(members.iter().map(JsString::as_str));
+        segments.push(closing.as_str());
+        JsString::concat_array(&segments)
+    }
     /// `25.5.2.4 SerializeJSONObject ( state, value )`
     ///
     /// More information:
@@ -1011,7 +776,21 @@ impl Json {
         };
 
         // 7. Let partial be a new empty List.
-        let mut partial = Vec::with_capacity(k.len());
+        //
+        // A member is kept as its pieces — the quoted key, the colon, the value — instead of
+        // being copied into a `Vec<u16>` first and into the result after that. One allocation at
+        // the end copies each piece once.
+        let separator = if state.gap.is_empty() {
+            js_string!(",")
+        } else {
+            js_string!(js_str!(",\n"), &state.indent)
+        };
+        let colon = if state.gap.is_empty() {
+            js_string!(":")
+        } else {
+            js_string!(": ")
+        };
+        let mut partial: Vec<JsString> = Vec::with_capacity(k.len() * 3);
 
         // 8. For each element P of K, do
         for p in &k {
@@ -1029,22 +808,13 @@ impl Json {
             // b. If strP is not undefined, then
             if let Some(str_p) = str_p {
                 // i. Let member be QuoteJSONString(P).
-                let mut member = Self::quote_json_string(p).iter().collect::<Vec<_>>();
-
-                // ii. Set member to the string-concatenation of member and ":".
-                member.push(':' as u16);
-
-                // iii. If state.[[Gap]] is not the empty String, then
-                if !state.gap.is_empty() {
-                    // 1. Set member to the string-concatenation of member and the code unit 0x0020 (SPACE).
-                    member.push(' ' as u16);
+                // ii–iv. … and ":", the space a gap puts after it, and strP.
+                if !partial.is_empty() {
+                    partial.push(separator.clone());
                 }
-
-                // iv. Set member to the string-concatenation of member and strP.
-                member.extend(str_p.iter());
-
-                // v. Append member to partial.
-                partial.push(member);
+                partial.push(Self::quote_json_string(p));
+                partial.push(colon.clone());
+                partial.push(str_p);
             }
         }
 
@@ -1053,50 +823,17 @@ impl Json {
             // a. Let final be "{}".
             js_string!("{}")
         // 10. Else,
+        } else if state.gap.is_empty() {
+            // a. i–ii. Let final be the string-concatenation of "{", the members separated by
+            // commas, and "}", in one allocation.
+            Self::concat_members(&js_string!("{"), &partial, &js_string!("}"))
         } else {
-            // a. If state.[[Gap]] is the empty String, then
-            if state.gap.is_empty() {
-                // i. Let properties be the String value formed by concatenating all the element Strings of partial
-                //    with each adjacent pair of Strings separated with the code unit 0x002C (COMMA).
-                //    A comma is not inserted either before the first String or after the last String.
-                // ii. Let final be the string-concatenation of "{", properties, and "}".
-                let separator = utf16!(",");
-                let result = once(utf16!("{"))
-                    .chain(Itertools::intersperse(
-                        partial.iter().map(Vec::as_slice),
-                        separator,
-                    ))
-                    .chain(once(utf16!("}")))
-                    .flatten()
-                    .copied()
-                    .collect::<Vec<_>>();
-                js_string!(&result[..])
-            // b. Else,
-            } else {
-                // i. Let separator be the string-concatenation of the code unit 0x002C (COMMA),
-                //    the code unit 0x000A (LINE FEED), and state.[[Indent]].
-                let mut separator = utf16!(",\n").to_vec();
-                separator.extend(state.indent.iter());
-                // ii. Let properties be the String value formed by concatenating all the element Strings of partial
-                //     with each adjacent pair of Strings separated with separator.
-                //     The separator String is not inserted either before the first String or after the last String.
-                // iii. Let final be the string-concatenation of "{", the code
-                //      unit 0x000A (LINE FEED), state.[[Indent]], properties,
-                //      the code unit 0x000A (LINE FEED), stepback, and "}".
-                let indent_vec = state.indent.to_vec();
-                let stepback_vec = stepback.to_vec();
-                let result = [utf16!("{\n"), &indent_vec[..]]
-                    .into_iter()
-                    .chain(Itertools::intersperse(
-                        partial.iter().map(Vec::as_slice),
-                        &separator,
-                    ))
-                    .chain([utf16!("\n"), &stepback_vec[..], utf16!("}")])
-                    .flatten()
-                    .copied()
-                    .collect::<Vec<_>>();
-                js_string!(&result[..])
-            }
+            // b. i. Set separator to the comma, the line feed and state.[[Indent]] (above).
+            // ii–iii. … and final to "{", a line feed, the indent, the members, a line feed,
+            // stepback and "}".
+            let opening = js_string!(js_str!("{\n"), &state.indent);
+            let closing = js_string!(js_str!("\n"), &stepback, js_str!("}"));
+            Self::concat_members(&opening, &partial, &closing)
         };
 
         // 12. Set state.[[Indent]] to stepback.
@@ -1145,7 +882,12 @@ impl Json {
         };
 
         // 5. Let partial be a new empty List.
-        let mut partial = Vec::with_capacity(len as usize);
+        let separator = if state.gap.is_empty() {
+            js_string!(",")
+        } else {
+            js_string!(js_str!(",\n"), &state.indent)
+        };
+        let mut partial: Vec<JsString> = Vec::with_capacity(len as usize * 2);
 
         // 7. Let index be 0.
         let mut index = 0;
@@ -1166,11 +908,17 @@ impl Json {
             // b. If strP is undefined, then
             if let Some(str_p) = str_p {
                 // i. Append strP to partial.
-                partial.push(Cow::Owned(str_p.iter().collect::<_>()));
+                if !partial.is_empty() {
+                    partial.push(separator.clone());
+                }
+                partial.push(str_p);
             // c. Else,
             } else {
                 // i. Append "null" to partial.
-                partial.push(Cow::Borrowed(utf16!("null")));
+                if !partial.is_empty() {
+                    partial.push(separator.clone());
+                }
+                partial.push(js_string!("null"));
             }
 
             // d. Set index to index + 1.
@@ -1182,48 +930,17 @@ impl Json {
             // a. Let final be "[]".
             js_string!("[]")
         // 10. Else,
+        } else if state.gap.is_empty() {
+            // a. i–ii. Let final be the string-concatenation of "[", the elements separated by
+            // commas, and "]", in one allocation.
+            Self::concat_members(&js_string!("["), &partial, &js_string!("]"))
         } else {
-            // a. If state.[[Gap]] is the empty String, then
-            if state.gap.is_empty() {
-                // i. Let properties be the String value formed by concatenating all the element Strings of partial
-                //    with each adjacent pair of Strings separated with the code unit 0x002C (COMMA).
-                //    A comma is not inserted either before the first String or after the last String.
-                // ii. Let final be the string-concatenation of "[", properties, and "]".
-                let separator = utf16!(",");
-                let result = once(utf16!("["))
-                    .chain(Itertools::intersperse(
-                        partial.iter().map(Cow::as_ref),
-                        separator,
-                    ))
-                    .chain(once(utf16!("]")))
-                    .flatten()
-                    .copied()
-                    .collect::<Vec<_>>();
-                js_string!(&result[..])
-            // b. Else,
-            } else {
-                // i. Let separator be the string-concatenation of the code unit 0x002C (COMMA),
-                //    the code unit 0x000A (LINE FEED), and state.[[Indent]].
-                let mut separator = utf16!(",\n").to_vec();
-                separator.extend(state.indent.iter());
-                // ii. Let properties be the String value formed by concatenating all the element Strings of partial
-                //     with each adjacent pair of Strings separated with separator.
-                //     The separator String is not inserted either before the first String or after the last String.
-                // iii. Let final be the string-concatenation of "[", the code unit 0x000A (LINE FEED), state.[[Indent]], properties, the code unit 0x000A (LINE FEED), stepback, and "]".
-                let indent_vec = state.indent.to_vec();
-                let stepback_vec = stepback.to_vec();
-                let result = [utf16!("[\n"), &indent_vec[..]]
-                    .into_iter()
-                    .chain(Itertools::intersperse(
-                        partial.iter().map(Cow::as_ref),
-                        &separator,
-                    ))
-                    .chain([utf16!("\n"), &stepback_vec[..], utf16!("]")])
-                    .flatten()
-                    .copied()
-                    .collect::<Vec<_>>();
-                js_string!(&result[..])
-            }
+            // b. i. Set separator to the comma, the line feed and state.[[Indent]] (above).
+            // ii–iii. … and final to "[", a line feed, the indent, the elements, a line feed,
+            // stepback and "]".
+            let opening = js_string!(js_str!("[\n"), &state.indent);
+            let closing = js_string!(js_str!("\n"), &stepback, js_str!("]"));
+            Self::concat_members(&opening, &partial, &closing)
         };
 
         // 12. Set state.[[Indent]] to stepback.

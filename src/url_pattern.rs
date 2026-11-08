@@ -19,7 +19,7 @@ use boa_engine::{
     native_function::NativeFunctionPointer,
 };
 
-use crate::native::{arg, get, invoke, js_text, object, text_of, type_error};
+use crate::native::{arg, arg_text, get, invoke, js_text, object, text_of, type_error};
 
 /// The parts of a URL, in the order the standard lists them.
 const COMPONENTS: [&str; 8] = [
@@ -469,7 +469,7 @@ fn construct(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     };
     let input = arg(args, 0);
     let (base, options) = if arg(args, 1).is_string() {
-        (Some(text_of(&arg(args, 1), context)?), arg(args, 2))
+        (Some(arg_text(args, 1, context)?), arg(args, 2))
     } else {
         (None, arg(args, 1))
     };

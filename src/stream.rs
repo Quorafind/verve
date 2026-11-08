@@ -17,8 +17,6 @@
 //! `fs.createReadStream` and `fs.createWriteStream` are made here too ([`create_read_stream`],
 //! [`create_write_stream`]), reading and writing the disk a chunk at a time.
 
-use std::path::PathBuf;
-
 use boa_engine::{
     Context, JsError, JsObject, JsResult, JsString, JsSymbol, JsValue, js_string,
     native_function::NativeFunctionPointer,
@@ -27,8 +25,8 @@ use boa_engine::{
 
 use crate::events::{abort_error, coded_type_error};
 use crate::native::{
-    ClassSpec, arg, array, class, closure, coded_error_value, function, get, hidden, invoke,
-    js_text, list_of, object, text_of,
+    ClassSpec, arg, arg_text, array, class, closure, coded_error_value, function, get, hidden,
+    invoke, js_text, list_of, object, text_of,
 };
 
 // ─── Small things ────────────────────────────────────────────────────────────────────────────
@@ -126,7 +124,7 @@ fn is_bytes(value: &JsValue) -> bool {
 }
 
 fn buffer_class(context: &mut Context) -> JsResult<JsValue> {
-    crate::native::global(context, "Buffer")
+    crate::native::buffer_class(context).map(Into::into)
 }
 
 fn is_buffer(value: &JsValue, context: &mut Context) -> JsResult<bool> {
@@ -2370,30 +2368,46 @@ fn write_or_buffer(
             put(state, "allNoop", false, context)?;
         }
     } else {
-        put(state, "writelen", len, context)?;
-        put(state, "writecb", callback, context)?;
-        put(state, "writing", true, context)?;
-        put(state, "sync", true, context)?;
-        let onwrite = sget(state, "onwrite", context)?;
-        invoke(stream, "_write", &[chunk, encoding, onwrite], context)?;
-        put(state, "sync", false, context)?;
+        do_write(
+            stream,
+            state,
+            WriteRequest {
+                writev: false,
+                len,
+                chunk,
+                encoding,
+                callback,
+            },
+            context,
+        )?;
     }
     Ok(ok
         && sget(state, "errored", context)?.is_null_or_undefined()
         && !flag(state, "destroyed", context)?)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn do_write(
-    stream: &JsValue,
-    state: &JsObject,
+/// One write as `_write` is given it: the chunk, how it is counted, and what to call back.
+struct WriteRequest {
     writev: bool,
     len: f64,
     chunk: JsValue,
     encoding: JsValue,
     callback: JsValue,
+}
+
+fn do_write(
+    stream: &JsValue,
+    state: &JsObject,
+    request: WriteRequest,
     context: &mut Context,
 ) -> JsResult<()> {
+    let WriteRequest {
+        writev,
+        len,
+        chunk,
+        encoding,
+        callback,
+    } = request;
     put(state, "writelen", len, context)?;
     put(state, "writecb", callback, context)?;
     put(state, "writing", true, context)?;
@@ -2652,11 +2666,13 @@ fn clear_buffer(stream: &JsValue, state: &JsObject, context: &mut Context) -> Js
         do_write(
             stream,
             state,
-            true,
-            length,
-            list,
-            js_text(""),
-            all.into(),
+            WriteRequest {
+                writev: true,
+                len: length,
+                chunk: list,
+                encoding: js_text(""),
+                callback: all.into(),
+            },
             context,
         )?;
     } else {
@@ -2669,7 +2685,16 @@ fn clear_buffer(stream: &JsValue, state: &JsObject, context: &mut Context) -> Js
             let callback = get(&entry, "callback", context)?;
             let len = chunk_length(&chunk, object_mode, context)?;
             do_write(
-                stream, state, false, len, chunk, encoding, callback, context,
+                stream,
+                state,
+                WriteRequest {
+                    writev: false,
+                    len,
+                    chunk,
+                    encoding,
+                    callback,
+                },
+                context,
             )?;
             if at >= entries.len() || flag(state, "writing", context)? {
                 break;
@@ -3019,7 +3044,7 @@ const WRITABLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("cork", 0, cork),
     ("uncork", 0, uncork),
     ("setDefaultEncoding", 1, |this, args, cx| {
-        let encoding = text_of(&arg(args, 0), cx)?.to_ascii_lowercase();
+        let encoding = arg_text(args, 0, cx)?.to_ascii_lowercase();
         if crate::string_decoder::normalize_encoding(&encoding).is_none() && encoding != "buffer" {
             return Err(coded_type_error(
                 cx,
@@ -4484,302 +4509,9 @@ pub(crate) fn legacy_module(context: &mut Context, name: &str) -> JsResult<JsVal
     Ok(module_class(context, class)?.into())
 }
 
-// ─── fs.createReadStream, fs.createWriteStream ───────────────────────────────────────────────
+mod file;
 
-fn fs_path(value: &JsValue, context: &mut Context) -> JsResult<String> {
-    if let Some(bytes) = crate::encoding::bytes_of(value, context)? {
-        return Ok(String::from_utf8_lossy(&bytes).into_owned());
-    }
-    let text = match value.as_object() {
-        // A `URL`.
-        Some(url) if url.has_property(js_string!("href"), context)? => {
-            text_of(&url.get(js_string!("href"), context)?, context)?
-        }
-        _ => text_of(value, context)?,
-    };
-    Ok(match text.strip_prefix("file://") {
-        Some(rest) if rest.get(2..3) == Some(":") && rest.starts_with('/') => rest[1..].to_owned(),
-        Some(rest) => rest.to_owned(),
-        None => text,
-    })
-}
-
-fn fs_error(context: &mut Context, error: &std::io::Error, path: &str, call: &str) -> JsValue {
-    let code = match error.kind() {
-        std::io::ErrorKind::NotFound => "ENOENT",
-        std::io::ErrorKind::PermissionDenied => "EACCES",
-        std::io::ErrorKind::AlreadyExists => "EEXIST",
-        std::io::ErrorKind::IsADirectory => "EISDIR",
-        _ => "EIO",
-    };
-    let value = error_value(context, &format!("{code}: {error}, {call} '{path}'"), code);
-    if let Some(object) = value.as_object() {
-        let _ = object.set(js_string!("path"), js_text(path), false, context);
-        let _ = object.set(js_string!("syscall"), js_text(call), false, context);
-    }
-    value
-}
-
-/// The options of `createReadStream`/`createWriteStream`: an object, or an encoding's name.
-fn fs_options(value: &JsValue, context: &mut Context) -> JsResult<JsObject> {
-    if let Some(options) = value.as_object().filter(|_| !value.is_string()) {
-        let copy = object(context);
-        for key in options.own_property_keys(context)? {
-            let item = options.get(key.clone(), context)?;
-            copy.set(key, item, false, context)?;
-        }
-        return Ok(copy);
-    }
-    let options = object(context);
-    if value.is_string() {
-        put(&options, "encoding", value.clone(), context)?;
-    }
-    Ok(options)
-}
-
-/// `fs.createReadStream(path, { start, end, highWaterMark, encoding })`: a `Readable` reading
-/// the file a chunk (64 KiB unless asked otherwise) at a time, from `start` to `end`
-/// inclusive. Says `open` and `ready` a tick after it is made; a file that cannot be opened
-/// destroys it with the error.
-pub(crate) fn create_read_stream(context: &mut Context, args: &[JsValue]) -> JsResult<JsValue> {
-    let path = fs_path(&arg(args, 0), context)?;
-    let options = fs_options(&arg(args, 1), context)?;
-    if sget(&options, "highWaterMark", context)?.is_undefined() {
-        put(&options, "highWaterMark", 65536, context)?;
-    }
-    let start = sget(&options, "start", context)?;
-    let start = if start.is_undefined() {
-        0.
-    } else {
-        start.to_number(context)?
-    };
-    let end = sget(&options, "end", context)?;
-    let end = if end.is_undefined() {
-        f64::INFINITY
-    } else {
-        end.to_number(context)?
-    };
-    let readable = module_class(context, "Readable")?;
-    let stream = readable.construct(&[options.into()], None, context)?;
-    stream.set(js_string!("path"), js_text(&path), false, context)?;
-    stream.set(js_string!("bytesRead"), 0, false, context)?;
-    stream.set(js_string!("pending"), true, false, context)?;
-    stream.set(js_string!("fd"), JsValue::null(), false, context)?;
-    stream.set(js_string!("flags"), js_text("r"), false, context)?;
-    stream.set(js_string!("start"), start, false, context)?;
-    stream.set(js_string!("end"), end, false, context)?;
-    hidden(&stream, js_string!("__position"), start, context)?;
-    let read = function(context, "_read", 1, |this, args, cx| {
-        let path = text_of(&get(this, "path", cx)?, cx)?;
-        let position = get(this, "__position", cx)?.to_number(cx)?;
-        let end = get(this, "end", cx)?.to_number(cx)?;
-        let wanted = arg(args, 0).to_number(cx)?.max(1.);
-        let left = end - position + 1.;
-        if left <= 0. {
-            invoke(this, "push", &[JsValue::null()], cx)?;
-            return Ok(JsValue::undefined());
-        }
-        let size = wanted.min(left).min(16. * 1024. * 1024.) as usize;
-        // `path` is the stream's own property, which code can change between reads.
-        if let Err(error) = crate::permission::read(cx, &path) {
-            let error = error.into_opaque(cx)?;
-            invoke(this, "destroy", &[error], cx)?;
-            return Ok(JsValue::undefined());
-        }
-        let outcome = (|| -> std::io::Result<Vec<u8>> {
-            use std::io::{Read, Seek, SeekFrom};
-            let mut file = std::fs::File::open(&path)?;
-            file.seek(SeekFrom::Start(position as u64))?;
-            let mut bytes = vec![0u8; size];
-            let mut filled = 0;
-            while filled < size {
-                let n = file.read(&mut bytes[filled..])?;
-                if n == 0 {
-                    break;
-                }
-                filled += n;
-            }
-            bytes.truncate(filled);
-            Ok(bytes)
-        })();
-        match outcome {
-            Err(error) => {
-                let error = fs_error(cx, &error, &path, "read");
-                invoke(this, "destroy", &[error], cx)?;
-            }
-            Ok(bytes) if bytes.is_empty() => {
-                invoke(this, "push", &[JsValue::null()], cx)?;
-            }
-            Ok(bytes) => {
-                let count = bytes.len() as f64;
-                if let Some(target) = this.as_object() {
-                    target.set(js_string!("__position"), position + count, false, cx)?;
-                    let read = target.get(js_string!("bytesRead"), cx)?.to_number(cx)?;
-                    target.set(js_string!("bytesRead"), read + count, false, cx)?;
-                }
-                let buffer = crate::encoding::make_buffer(cx, bytes)?;
-                invoke(this, "push", &[buffer], cx)?;
-            }
-        }
-        Ok(JsValue::undefined())
-    });
-    stream.set(js_string!("_read"), read, false, context)?;
-    let close = function(context, "close", 1, |this, args, cx| {
-        let callback = arg(args, 0);
-        if callback.is_callable() {
-            invoke(this, "once", &[js_text("close"), callback], cx)?;
-        }
-        invoke(this, "destroy", &[], cx)
-    });
-    stream.set(js_string!("close"), close, false, context)?;
-    // Opened a tick from now, as Node opens it: `open` with a descriptor, then `ready` — or
-    // the error.
-    next_tick(
-        context,
-        |_, args, cx| {
-            let stream = arg(args, 0);
-            let path = text_of(&get(&stream, "path", cx)?, cx)?;
-            if let Err(error) = crate::permission::read(cx, &path) {
-                let error = error.into_opaque(cx)?;
-                invoke(&stream, "destroy", &[error], cx)?;
-                return Ok(JsValue::undefined());
-            }
-            match std::fs::File::open(PathBuf::from(&path)) {
-                Ok(_) => {
-                    if let Some(target) = stream.as_object() {
-                        target.set(js_string!("pending"), false, false, cx)?;
-                        target.set(js_string!("fd"), 3, false, cx)?;
-                    }
-                    emit(&stream, &[js_text("open"), 3.into()], cx)?;
-                    emit(&stream, &[js_text("ready")], cx)?;
-                }
-                Err(error) => {
-                    let error = fs_error(cx, &error, &path, "open");
-                    invoke(&stream, "destroy", &[error], cx)?;
-                }
-            }
-            Ok(JsValue::undefined())
-        },
-        vec![stream.clone().into()],
-    );
-    Ok(stream.into())
-}
-
-/// `fs.createWriteStream(path, { flags })`: a `Writable` writing each chunk to the file as it
-/// comes — the file made empty first (`'w'`), or added to (`'a'`). Says `open` and `ready` a
-/// tick after it is made, `finish` and `close` when ended.
-pub(crate) fn create_write_stream(context: &mut Context, args: &[JsValue]) -> JsResult<JsValue> {
-    let path = fs_path(&arg(args, 0), context)?;
-    let options = fs_options(&arg(args, 1), context)?;
-    let flags = sget(&options, "flags", context)?;
-    let flags = if flags.is_undefined() {
-        "w".to_owned()
-    } else {
-        text_of(&flags, context)?
-    };
-    let writable = module_class(context, "Writable")?;
-    let encoding = sget(&options, "encoding", context)?;
-    if !encoding.is_undefined() {
-        put(&options, "defaultEncoding", encoding, context)?;
-    }
-    let stream = writable.construct(&[options.into()], None, context)?;
-    stream.set(js_string!("path"), js_text(&path), false, context)?;
-    stream.set(js_string!("bytesWritten"), 0, false, context)?;
-    stream.set(js_string!("pending"), true, false, context)?;
-    stream.set(js_string!("fd"), JsValue::null(), false, context)?;
-    stream.set(js_string!("flags"), js_text(&flags), false, context)?;
-    let allowed = crate::permission::write(context, &path);
-    let opened = if let Err(denied) = allowed {
-        Err(Err(denied))
-    } else if flags.starts_with('a') {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(Ok)
-    } else {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .map_err(Ok)
-    };
-    let failure = match opened {
-        Ok(_) => None,
-        Err(Ok(error)) => Some(fs_error(context, &error, &path, "open")),
-        Err(Err(denied)) => Some(denied.into_opaque(context)?),
-    };
-    let write = function(context, "_write", 3, |this, args, cx| {
-        let path = text_of(&get(this, "path", cx)?, cx)?;
-        let bytes = crate::encoding::bytes_of(&arg(args, 0), cx)?.unwrap_or_default();
-        let callback = arg(args, 2);
-        if let Err(error) = crate::permission::write(cx, &path) {
-            let error = error.into_opaque(cx)?;
-            return crate::call(cx, &callback, &JsValue::undefined(), &[error]);
-        }
-        let outcome = (|| -> std::io::Result<()> {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
-            file.write_all(&bytes)
-        })();
-        match outcome {
-            Ok(()) => {
-                if let Some(target) = this.as_object() {
-                    let written = target.get(js_string!("bytesWritten"), cx)?.to_number(cx)?;
-                    target.set(
-                        js_string!("bytesWritten"),
-                        written + bytes.len() as f64,
-                        false,
-                        cx,
-                    )?;
-                }
-                crate::call(cx, &callback, &JsValue::undefined(), &[])
-            }
-            Err(error) => {
-                let error = fs_error(cx, &error, &path, "write");
-                crate::call(cx, &callback, &JsValue::undefined(), &[error])
-            }
-        }
-    });
-    stream.set(js_string!("_write"), write, false, context)?;
-    let close = function(context, "close", 1, |this, args, cx| {
-        let callback = arg(args, 0);
-        if callback.is_callable() {
-            invoke(this, "once", &[js_text("close"), callback], cx)?;
-        }
-        let ended = match wstate(this, cx)? {
-            Some(w) => flag(&w, "ending", cx)?,
-            None => true,
-        };
-        if ended {
-            invoke(this, "destroy", &[], cx)
-        } else {
-            invoke(this, "end", &[], cx)
-        }
-    });
-    stream.set(js_string!("close"), close.clone(), false, context)?;
-    stream.set(js_string!("destroySoon"), close, false, context)?;
-    next_tick(
-        context,
-        |_, args, cx| {
-            let (stream, failure) = (arg(args, 0), arg(args, 1));
-            if !failure.is_undefined() {
-                invoke(&stream, "destroy", &[failure], cx)?;
-                return Ok(JsValue::undefined());
-            }
-            if let Some(target) = stream.as_object() {
-                target.set(js_string!("pending"), false, false, cx)?;
-                target.set(js_string!("fd"), 3, false, cx)?;
-            }
-            emit(&stream, &[js_text("open"), 3.into()], cx)?;
-            emit(&stream, &[js_text("ready")], cx)?;
-            Ok(JsValue::undefined())
-        },
-        vec![stream.clone().into(), failure.unwrap_or_default()],
-    );
-    Ok(stream.into())
-}
+pub(crate) use file::{create_read_stream, create_write_stream};
 
 #[cfg(test)]
 mod tests {
@@ -4796,12 +4528,21 @@ mod tests {
         std::fs::write(&source, "0123456789".repeat(1000)).unwrap();
         let target = dir.join("target.txt");
         let context = rt.context();
-        let read = crate::native::function(context, "createReadStream", 2, |_, args, cx| {
-            super::create_read_stream(cx, args)
-        });
-        let write = crate::native::function(context, "createWriteStream", 2, |_, args, cx| {
-            super::create_write_stream(cx, args)
-        });
+        let view = crate::vfs::View::disk();
+        let read = crate::native::closure(
+            context,
+            "createReadStream",
+            2,
+            |_, args, view, cx| super::create_read_stream(view, cx, args),
+            view.clone(),
+        );
+        let write = crate::native::closure(
+            context,
+            "createWriteStream",
+            2,
+            |_, args, view, cx| super::create_write_stream(view, cx, args),
+            view,
+        );
         context
             .global_object()
             .set(

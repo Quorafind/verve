@@ -20,13 +20,16 @@
 use std::path::{Path, PathBuf};
 
 use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Source, js_string,
-    object::builtins::JsArray,
+    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Module, Source,
+    js_string, object::builtins::JsArray, script::Script,
 };
 
+use crate::fs::sys;
 use crate::native::{
-    ClassSpec, arg, array, class, closure, function, get, hidden, js_text, object, text_of,
+    ClassSpec, arg, arg_text, array, class, closure, function, get, hidden, js_text, object,
+    text_of,
 };
+use crate::vfs::View;
 
 /// What a name names: a built-in module, or a file.
 enum Resolved {
@@ -35,14 +38,10 @@ enum Resolved {
 }
 
 /// The name Node's built-in module answers to, as `require` was given it: `node:` and a
-/// trailing `/` taken off, and Electron's `original-fs` read as `fs`.
+/// trailing `/` taken off.
 pub(crate) fn bare_name(name: &str) -> &str {
     let bare = name.strip_prefix("node:").unwrap_or(name);
-    let bare = bare.strip_suffix('/').unwrap_or(bare);
-    match bare {
-        "original-fs" => "fs",
-        other => other,
-    }
+    bare.strip_suffix('/').unwrap_or(bare)
 }
 
 /// Whether Node's table answers `name`: every module of it does to its bare name, but those
@@ -56,6 +55,7 @@ pub(crate) fn is_builtin(context: &Context, name: &str) -> bool {
     let bare = bare_name(name);
     let state = crate::shared(context);
     state.builtins.borrow().contains_key(bare)
+        || state.lazy.borrow().contains_key(bare)
         || (node_table_answers(name) && crate::node::MODULES.iter().any(|(n, _)| *n == bare))
         || state
             .families
@@ -64,18 +64,47 @@ pub(crate) fn is_builtin(context: &Context, name: &str) -> bool {
             .any(|(prefix, _)| bare.starts_with(prefix.as_str()))
 }
 
+/// The key `bare` is kept under. `events` is made for each world, its `EventEmitter` among that
+/// world's own built-ins, so that what extends it (a `process`, an `ipcRenderer`) does not reach
+/// the page's `Object.prototype` through it.
+fn per_world(bare: &str, context: &Context) -> String {
+    match crate::current_world(context) {
+        crate::MAIN_WORLD => bare.to_owned(),
+        world if bare == "events" => format!("{bare}:{world}"),
+        _ => bare.to_owned(),
+    }
+}
+
+/// Forgets what was made per world for `world`, which is gone: a world made later with its id must
+/// not find it.
+pub(crate) fn forget_world(context: &Context, world: crate::WorldId) {
+    let key = format!("events:{world}");
+    crate::shared(context).builtins.borrow_mut().remove(&key);
+}
+
 /// The built-in module `name`, made now if it has not been yet; `None` when there is none.
 pub(crate) fn builtin(context: &mut Context, name: &str) -> JsResult<Option<JsValue>> {
     let bare = bare_name(name);
-    if let Some(exports) = crate::shared(context).builtins.borrow().get(bare) {
+    let scoped = per_world(bare, context);
+    if let Some(exports) = crate::shared(context).builtins.borrow().get(&scoped) {
         return Ok(Some(exports.clone()));
+    }
+    // One the host said to make on first use: made now, and kept with the rest.
+    let lazy = crate::shared(context).lazy.borrow().get(bare).copied();
+    if let Some(make) = lazy {
+        let exports = make(context, bare)?;
+        crate::shared(context)
+            .builtins
+            .borrow_mut()
+            .insert(bare.to_owned(), exports.clone());
+        return Ok(Some(exports));
     }
     // One Node has only under `node:` is kept under that name, so that making it does not make
     // a bare `require('sqlite')` find it.
     let key = if crate::node::PREFIX_ONLY.contains(&bare) {
         format!("node:{bare}")
     } else {
-        bare.to_owned()
+        per_world(bare, context)
     };
     if let Some(exports) = crate::shared(context)
         .builtins
@@ -156,33 +185,34 @@ fn path_text(path: &Path) -> JsValue {
 }
 
 /// The file `base` names: itself, with an extension added, or as a folder.
-fn as_file_or_folder(base: &Path) -> Option<PathBuf> {
-    if base.is_file() {
+fn as_file_or_folder(view: &View, base: &Path) -> Option<PathBuf> {
+    if sys::is_file(view, base) {
         return Some(base.to_path_buf());
     }
     for ext in ["js", "json", "cjs"] {
         let path = PathBuf::from(format!("{}.{ext}", base.display()));
-        if path.is_file() {
+        if sys::is_file(view, &path) {
             return Some(path);
         }
     }
-    if base.is_dir() {
+    if sys::is_dir(view, base) {
         let manifest = base.join("package.json");
         if crate::permission::resolution_may_read(&manifest)
-            && let Ok(text) = std::fs::read_to_string(&manifest)
+            && let Ok(text) = sys::read_to_string(view, &manifest)
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
         {
             let main = json.get("main").and_then(|m| m.as_str());
             if let Some(main) = main {
-                let target = base.join(main);
-                if let Some(found) = as_file_or_folder_plain(&target) {
+                // `main` is written as the package's author wrote it: `./main.js`, `lib/x.js`.
+                let target = clean(&base.join(main));
+                if let Some(found) = as_file_or_folder_plain(view, &target) {
                     return Some(found);
                 }
             }
         }
         for index in ["index.js", "index.json", "index.cjs"] {
             let path = base.join(index);
-            if path.is_file() {
+            if sys::is_file(view, &path) {
                 return Some(path);
             }
         }
@@ -192,18 +222,18 @@ fn as_file_or_folder(base: &Path) -> Option<PathBuf> {
 
 /// A `main` named in a `package.json`: the file, with an extension added, or its folder's
 /// `index.js` — but not that folder's own `package.json` again.
-fn as_file_or_folder_plain(base: &Path) -> Option<PathBuf> {
-    if base.is_file() {
+fn as_file_or_folder_plain(view: &View, base: &Path) -> Option<PathBuf> {
+    if sys::is_file(view, base) {
         return Some(base.to_path_buf());
     }
     for ext in ["js", "json", "cjs"] {
         let path = PathBuf::from(format!("{}.{ext}", base.display()));
-        if path.is_file() {
+        if sys::is_file(view, &path) {
             return Some(path);
         }
     }
     let index = base.join("index.js");
-    index.is_file().then_some(index)
+    sys::is_file(view, &index).then_some(index)
 }
 
 fn is_path(name: &str) -> bool {
@@ -224,7 +254,7 @@ fn resolve(context: &mut Context, folder: &Path, name: &str) -> JsResult<Resolve
         return Ok(Resolved::Builtin(name.to_owned()));
     }
     if is_path(name) {
-        return as_file_or_folder(&clean(&folder.join(name)))
+        return as_file_or_folder(&View::of(context), &clean(&folder.join(name)))
             .map(Resolved::File)
             .ok_or_else(|| not_found(context, name));
     }
@@ -258,7 +288,7 @@ fn resolve(context: &mut Context, folder: &Path, name: &str) -> JsResult<Resolve
         return Err(not_found(context, name));
     }
     let path = crate::esm_resolve::file_path(&url)
-        .map_err(|error| crate::native::coded_error(context, &error.message, error.code))?;
+        .map_err(|error| crate::esm::resolve_error(context, error))?;
     Ok(Resolved::File(path))
 }
 
@@ -318,7 +348,8 @@ pub(crate) fn load_file(
         ));
     }
     crate::permission::read(context, path)?;
-    let text = std::fs::read_to_string(path).map_err(|error| {
+    let view = View::of(context);
+    let text = sys::read_to_string(&view, path).map_err(|error| {
         JsNativeError::error().with_message(format!("{}: {error}", path.display()))
     })?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
@@ -346,12 +377,59 @@ pub(crate) fn load_file(
     if matches!(
         path.extension().and_then(|ext| ext.to_str()),
         Some("mjs" | "js") | None
-    ) && crate::esm::is_esm(path, text, context)?
-    {
-        let loader = crate::shared(context).esm.clone();
-        return loader.require(path, context);
+    ) {
+        match format(path, text, context)? {
+            Format::Module => {
+                let loader = crate::shared(context).esm.clone();
+                return loader.require(path, context);
+            }
+            Format::CommonJs(script) => {
+                return run_module_with(context, path, text, parent, script);
+            }
+        }
     }
     run_module(context, path, text, parent)
+}
+
+/// What a file is: a CommonJS module — its wrapper compiled, when the source is what decided
+/// it — or a module.
+pub(crate) enum Format {
+    CommonJs(Option<Script>),
+    Module,
+}
+
+/// What the file at `path`, whose source is `source`, is: the one its extension or its
+/// package's `type` names, or, when neither names one, Node's CommonJS wrapper when the source
+/// parses as one and a module otherwise. That parse is the one the module runs from, so nothing
+/// parses the source twice.
+///
+/// A source that is neither answers CommonJS, as it always has, without its wrapper: refusing it
+/// here would fail the load, and so a whole graph, before the code before it runs. Run as a
+/// CommonJS module, it is parsed again and fails where Node fails it — at the run.
+pub(crate) fn format(path: &Path, source: &str, context: &mut Context) -> JsResult<Format> {
+    let loader = crate::shared(context).esm.clone();
+    if let Some(script) = loader.take_cjs_wrapper(path, source) {
+        return Ok(Format::CommonJs(Some(script)));
+    }
+    match crate::esm::named_format(path, context)? {
+        Some(true) => return Ok(Format::Module),
+        Some(false) => return Ok(Format::CommonJs(None)),
+        None => {}
+    }
+    match crate::code_cache_load::script(&wrapper(source), &source_path_of(&clean(path)), context) {
+        Ok(script) => Ok(Format::CommonJs(Some(script))),
+        Err(_) if Module::parse(Source::from_bytes(source), None, context).is_ok() => {
+            Ok(Format::Module)
+        }
+        Err(_) => Ok(Format::CommonJs(None)),
+    }
+}
+
+/// The path a module's code is compiled against: its URL, as Node names it.
+fn source_path_of(path: &Path) -> PathBuf {
+    crate::esm_resolve::file_url(path)
+        .map(|url| PathBuf::from(url.as_str()))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The CJS side of a synchronous CJS -> ESM -> CJS cycle cannot expose partial exports.
@@ -435,6 +513,17 @@ pub(crate) fn run_module(
     source: &str,
     parent: Option<&JsObject>,
 ) -> JsResult<JsValue> {
+    run_module_with(context, filename, source, parent, None)
+}
+
+/// As [`run_module`], with the module's wrapper compiled already, when the loader has it.
+pub(crate) fn run_module_with(
+    context: &mut Context,
+    filename: &Path,
+    source: &str,
+    parent: Option<&JsObject>,
+    script: Option<Script>,
+) -> JsResult<JsValue> {
     let filename = &clean(filename);
     let key = JsString::from(filename.to_string_lossy().as_ref());
     let cached = cache(context).get(key.clone(), context)?;
@@ -442,21 +531,13 @@ pub(crate) fn run_module(
         return get(&cached, "exports", context);
     }
     let folder = filename.parent().unwrap_or(Path::new("")).to_path_buf();
-    // A `#!` line, which Node reads as a comment.
-    let source = if source.starts_with("#!") {
-        source.find('\n').map_or("", |at| &source[at..])
-    } else {
-        source
+    let wrapper = match script {
+        Some(script) => script.evaluate(context)?,
+        None => {
+            crate::code_cache_load::script(&wrapper(source), &source_path_of(filename), context)?
+                .evaluate(context)?
+        }
     };
-    // Node's own wrapper, word for word, kept on the module's first line so a line number in an
-    // error is the line in the file.
-    let wrapped =
-        format!("(function (exports, require, module, __filename, __dirname) {{ {source}\n}})");
-    let source_path = crate::esm_resolve::file_url(filename)
-        .map(|url| PathBuf::from(url.as_str()))
-        .unwrap_or_else(|_| filename.to_path_buf());
-    let wrapper = context.eval(Source::from_bytes(&wrapped).with_path(&source_path))?;
-
     let module = module_object(context, filename, parent)?;
     let exports = module.get(js_string!("exports"), context)?;
     let require = module.get(js_string!("require"), context)?;
@@ -489,10 +570,8 @@ pub(crate) fn forget(context: &mut Context, filename: &Path) {
         .filter(|url| url.scheme() == "file")
         .and_then(|url| crate::esm_resolve::file_path(&url).ok())
         .unwrap_or_else(|| crate::esm::absolute(filename, context));
-    for path in [Some(path.clone()), std::fs::canonicalize(&path).ok()]
-        .into_iter()
-        .flatten()
-    {
+    let real = sys::realpath(&View::of(context), &path).ok();
+    for path in [Some(path), real].into_iter().flatten() {
         let key = JsString::from(clean(&path).to_string_lossy().as_ref());
         let _ = cache(context).delete_property_or_throw(key, context);
     }
@@ -504,6 +583,19 @@ pub(crate) fn forget(context: &mut Context, filename: &Path) {
 /// need it.
 fn folder_of(captured: &JsValue) -> PathBuf {
     PathBuf::from(crate::print(captured))
+}
+
+/// Node's own module wrapper, word for word, around `source`: the script a CommonJS module is.
+/// Its first line stays the file's, so a line number in an error is the line in the file. A byte
+/// order mark and a `#!` line, which Node reads as nothing, are left out.
+pub(crate) fn wrapper(source: &str) -> String {
+    let source = source.trim_start_matches('\u{feff}');
+    let source = if source.starts_with("#!") {
+        source.find('\n').map_or("", |at| &source[at..])
+    } else {
+        source
+    };
+    format!("(function (exports, require, module, __filename, __dirname) {{ {source}\n}})")
 }
 
 /// A module's own `require`, resolving relative names against `folder`, with `resolve`
@@ -556,7 +648,7 @@ pub(crate) fn require_function(
         "resolve",
         2,
         |_, args, (folder, _): &(JsValue, JsValue), context| {
-            let name = text_of(&arg(args, 0), context)?;
+            let name = arg_text(args, 0, context)?;
             // `{ paths: [...] }`: the folders to resolve from instead of the module's own.
             let mut folders = vec![folder_of(folder)];
             if let Some(paths) = get(&arg(args, 1), "paths", context)?.as_object() {
@@ -582,7 +674,7 @@ pub(crate) fn require_function(
         "paths",
         1,
         |_, args, (folder, _): &(JsValue, JsValue), context| {
-            let name = text_of(&arg(args, 0), context)?;
+            let name = arg_text(args, 0, context)?;
             if is_builtin(context, &name) && !is_path(&name) {
                 return Ok(JsValue::null());
             }
@@ -683,11 +775,11 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
             statics: &[
                 ("createRequire", 1, create_require),
                 ("isBuiltin", 1, |_, args, cx| {
-                    let name = text_of(&arg(args, 0), cx)?;
+                    let name = arg_text(args, 0, cx)?;
                     Ok(is_builtin(cx, &name).into())
                 }),
                 ("_load", 3, |_, args, cx| {
-                    let name = text_of(&arg(args, 0), cx)?;
+                    let name = arg_text(args, 0, cx)?;
                     let parent = arg(args, 1);
                     let folder = match get(&parent, "filename", cx)? {
                         f if f.is_string() => PathBuf::from(crate::print(&f))
@@ -699,7 +791,7 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
                     require(cx, &folder, &name, parent.as_object().as_ref())
                 }),
                 ("_resolveFilename", 2, |_, args, cx| {
-                    let name = text_of(&arg(args, 0), cx)?;
+                    let name = arg_text(args, 0, cx)?;
                     let folder = match get(&arg(args, 1), "filename", cx)? {
                         f if f.is_string() => PathBuf::from(crate::print(&f))
                             .parent()
@@ -713,11 +805,11 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
                     }
                 }),
                 ("_nodeModulePaths", 1, |_, args, cx| {
-                    let folder = PathBuf::from(text_of(&arg(args, 0), cx)?);
+                    let folder = PathBuf::from(arg_text(args, 0, cx)?);
                     Ok(array(cx, lookup_paths(&folder)))
                 }),
                 ("wrap", 1, |_, args, cx| {
-                    let source = text_of(&arg(args, 0), cx)?;
+                    let source = arg_text(args, 0, cx)?;
                     Ok(js_text(&format!(
                         "(function (exports, require, module, __filename, __dirname) {{ {source}\n}});"
                     )))
@@ -733,7 +825,7 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
                 ("enableCompileCache", 0, |_, _, cx| Ok(object(cx).into())),
             ],
             methods: &[("require", 1, |this, args, cx| {
-                let name = text_of(&arg(args, 0), cx)?;
+                let name = arg_text(args, 0, cx)?;
                 let folder = match get(this, "filename", cx)? {
                     f if f.is_string() => PathBuf::from(crate::print(&f))
                         .parent()
@@ -758,7 +850,16 @@ pub(crate) fn module_module(context: &mut Context, _: &str) -> JsResult<JsValue>
     module.set(js_string!("_extensions"), extensions, false, context)?;
     let paths = JsArray::new(context)?;
     module.set(js_string!("globalPaths"), paths, false, context)?;
-    let strip = crate::typescript::function(context)?;
+    #[cfg(feature = "typescript")]
+    let strip = crate::typescript::strip_function(context)?;
+    #[cfg(not(feature = "typescript"))]
+    let strip = crate::native::function(context, "stripTypeScriptTypes", 1, |_, _, cx| {
+        Err(crate::native::coded_error(
+            cx,
+            "module.stripTypeScriptTypes is not supported by Verve",
+            "ERR_NOT_SUPPORTED",
+        ))
+    });
     module.set(js_string!("stripTypeScriptTypes"), strip, false, context)?;
     module.set(js_string!("Module"), module.clone(), false, context)?;
     Ok(module.into())

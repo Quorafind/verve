@@ -1,4 +1,6 @@
-use crate::{JsNativeErrorKind, TestAction, run_test_actions};
+use crate::builtins::set::ordered_set::OrderedSet;
+use crate::{JsNativeErrorKind, JsValue, TestAction, run_test_actions};
+use boa_macros::js_str;
 use indoc::indoc;
 
 #[test]
@@ -493,5 +495,251 @@ fn intersection_other_not_set_like() {
             JsNativeErrorKind::Type,
             "Set-like object must have a callable 'keys' method",
         ),
+    ]);
+}
+
+#[test]
+fn delete_keeps_the_order_of_the_remaining_values() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::run(indoc! {r#"
+                const set = new Set();
+                for (let i = 0; i < 6; i++) set.add(i);
+                set.delete(1);
+                set.delete(4);
+                set.delete(1);
+            "#}),
+        TestAction::assert("arrayEquals(Array.from(set), [0, 2, 3, 5])"),
+        TestAction::assert_eq("set.size", 4),
+        // A value added after a deletion goes last, as in Node 22.
+        TestAction::assert("set.add(1); arrayEquals(Array.from(set), [0, 2, 3, 5, 1])"),
+    ]);
+}
+
+#[test]
+fn delete_compacts_once_tombstones_outnumber_the_values() {
+    let mut set = OrderedSet::new();
+    for i in 0..100 {
+        set.add(JsValue::new(i));
+    }
+    for i in 0..60 {
+        set.delete(&JsValue::new(i));
+    }
+
+    // `full_len` counts the slots of the index set, tombstones included. The 51st deletion left the
+    // tombstones outnumbering the values that were left, so that one dropped them; the nine after
+    // it left nine tombstones, in 49 slots for the 40 values that remain.
+    assert_eq!(set.len(), 40);
+    assert_eq!(set.full_len(), 49);
+    assert!(set.contains(&JsValue::new(60)));
+}
+
+/// An iterator that runs to its end has to give the lock back: it takes the lock out of itself and
+/// drops it as a plain value, which never calls `Finalize`. While a lock was held, nothing
+/// compacted, so a set that had been through a `for…of` or an `Array.from` grew without bound.
+#[test]
+fn delete_compacts_after_an_iteration_has_run_to_its_end() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+                const set = new Set();
+                for (let i = 0; i < 100; i++) set.add(i);
+                const spread = [...set];
+                for (let i = 0; i < 60; i++) set.delete(i);
+                globalThis.iterated = set;
+            "#}),
+        TestAction::assert_eq("spread.length", 100),
+        TestAction::inspect_context(|context| {
+            let set = context
+                .global_object()
+                .get(js_str!("iterated"), context)
+                .expect("`iterated` is a global")
+                .as_object()
+                .expect("a Set is an object")
+                .clone()
+                .downcast::<OrderedSet>()
+                .expect("the global holds a Set");
+
+            let set = set.borrow();
+            assert_eq!(set.data().len(), 40);
+            assert_eq!(set.data().full_len(), 49);
+        }),
+    ]);
+}
+
+/// A copy of a set is nobody's iteration: it starts unlocked, so it can compact. The copies the
+/// set operations take would otherwise be locked for good while `this` is being iterated.
+#[test]
+fn a_copy_of_a_locked_set_can_compact() {
+    let mut set = OrderedSet::new();
+    for i in 0..100 {
+        set.add(JsValue::new(i));
+    }
+    set.lock();
+
+    let mut copy = set.clone();
+    for i in 0..60 {
+        copy.delete(&JsValue::new(i));
+    }
+
+    assert_eq!(copy.len(), 40);
+    assert_eq!(copy.full_len(), 49);
+    set.unlock();
+}
+
+#[test]
+fn for_of_delete_during_iteration() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::run(indoc! {r#"
+                const set = new Set([1, 2, 3, 4, 5]);
+                const seen = [];
+                for (const value of set) {
+                    seen.push(value);
+                    if (value === 2) {
+                        set.delete(3);
+                        set.delete(1);
+                    }
+                }
+            "#}),
+        // Node 22.21.1 prints `[1,2,4,5] [2,4,5]` for this program.
+        TestAction::assert("arrayEquals(seen, [1, 2, 4, 5])"),
+        TestAction::assert("arrayEquals(Array.from(set), [2, 4, 5])"),
+    ]);
+}
+
+/// `JsSet::for_each_native` has to step over a tombstone left by an ordinary `delete`, as the
+/// JS iterators do.
+#[test]
+fn for_each_native_steps_over_a_deleted_value() {
+    use crate::object::builtins::JsSet;
+
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+                const set = new Set([1, 2, 3, 4]);
+                set.delete(2);
+                set.delete(3);
+                globalThis.converted = set;
+            "#}),
+        TestAction::inspect_context(|context| {
+            let value = context
+                .global_object()
+                .get(js_str!("converted"), context)
+                .expect("`converted` is a global");
+            let js_set = JsSet::from_object(value.as_object().expect("a Set is an object"))
+                .expect("the global holds a Set");
+
+            let mut seen = Vec::new();
+            js_set
+                .for_each_native(|value| {
+                    seen.push(value.to_number(context)?);
+                    Ok(())
+                })
+                .expect("walking the set cannot fail here");
+
+            assert_eq!(seen, vec![1.0, 4.0]);
+        }),
+    ]);
+}
+
+/// `Set.prototype.difference` walks a copy of `this` by index, so deleting an entry has to leave
+/// the slots after it where they were. `has` answering `true` for two entries in a row is where an
+/// index that moved would show.
+#[test]
+fn difference_keeps_the_order_when_consecutive_values_are_in_other() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::run(indoc! {r#"
+                const set = new Set([1, 2, 3, 4, 5, 6]);
+                const other = {
+                    size: 6,
+                    has: (value) => value === 2 || value === 3,
+                    keys: () => [2, 3][Symbol.iterator](),
+                };
+                const result = set.difference(other);
+            "#}),
+        // Node 22.21.1 prints `[1,4,5,6]`.
+        TestAction::assert("arrayEquals(Array.from(result), [1, 4, 5, 6])"),
+    ]);
+}
+
+/// The same walk over a set that already has tombstones in it.
+#[test]
+fn difference_keeps_the_order_of_a_set_that_has_tombstones() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::run(indoc! {r#"
+                const set = new Set([1, 2, 3, 4, 5, 6]);
+                set.delete(2);
+                set.delete(3);
+                const other = {
+                    size: 10,
+                    has: (value) => value === 5,
+                    keys: () => [5][Symbol.iterator](),
+                };
+                const result = set.difference(other);
+            "#}),
+        // Node 22.21.1 prints `[1,4,6]`.
+        TestAction::assert("arrayEquals(Array.from(result), [1, 4, 6])"),
+    ]);
+}
+
+/// `isDisjointFrom`, `isSubsetOf` and `intersection` walk `this` by index while calling the other
+/// set's `has`, which a script may make delete enough of `this` to compact it under the walk. The
+/// walk holds the lock, so no entry is skipped.
+#[test]
+fn set_methods_hold_the_lock_while_has_deletes_from_this() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::run(indoc! {r#"
+                const subset = new Set([1, 2, 3, 4, 5, 6]);
+                const subsetVisited = [];
+                const subsetOther = {
+                    size: 6,
+                    has: (value) => {
+                        subsetVisited.push(value);
+                        if (value >= 1 && value <= 4) subset.delete(value);
+                        return value !== 5;
+                    },
+                    keys: () => subset.keys(),
+                };
+                const isSubset = subset.isSubsetOf(subsetOther);
+
+                const disjoint = new Set([1, 2, 3, 4, 5, 6]);
+                const disjointVisited = [];
+                const disjointOther = {
+                    size: 6,
+                    has: (value) => {
+                        disjointVisited.push(value);
+                        if (value >= 1 && value <= 4) disjoint.delete(value);
+                        return value === 1;
+                    },
+                    keys: () => disjoint.keys(),
+                };
+                const isDisjoint = disjoint.isDisjointFrom(disjointOther);
+
+                const common = new Set([1, 2, 3, 4, 5, 6]);
+                const commonVisited = [];
+                const commonOther = {
+                    size: 6,
+                    has: (value) => {
+                        commonVisited.push(value);
+                        if (value >= 1 && value <= 4) common.delete(value);
+                        return value !== 5;
+                    },
+                    keys: () => common.keys(),
+                };
+                const intersection = common.intersection(commonOther);
+            "#}),
+        // Node 22.21.1 prints `false [1,2,3,4,5] [5,6]`, `false [1] [2,3,4,5,6]` and
+        // `[1,2,3,4,6] [1,2,3,4,5,6] [5,6]` for these three programs.
+        TestAction::assert("isSubset === false"),
+        TestAction::assert("arrayEquals(subsetVisited, [1, 2, 3, 4, 5])"),
+        TestAction::assert("arrayEquals(Array.from(subset), [5, 6])"),
+        TestAction::assert("isDisjoint === false"),
+        TestAction::assert("arrayEquals(disjointVisited, [1])"),
+        TestAction::assert("arrayEquals(Array.from(disjoint), [2, 3, 4, 5, 6])"),
+        TestAction::assert("arrayEquals(Array.from(intersection), [1, 2, 3, 4, 6])"),
+        TestAction::assert("arrayEquals(commonVisited, [1, 2, 3, 4, 5, 6])"),
+        TestAction::assert("arrayEquals(Array.from(common), [5, 6])"),
     ]);
 }

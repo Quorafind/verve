@@ -36,6 +36,11 @@ always agree with one another.
   template. Before, the parser stopped at the call and `return super(x).then(f)` was a
   `SyntaxError: expected token ';', got '.'` (Terminal's bundle).
 
+- `boa_engine`, `builtins/symbol`: `Symbol.for` finds or makes its symbol under the registry
+  key's entry, not by a lookup followed by an insert. Two threads asking for a key the registry
+  lacked each made a symbol, the registry kept one, and a realm that had the other never matched
+  `Symbol.for(key)` again (React's `react.element`, so `Minified React error #31`).
+
 - `boa_engine`, `builtins/regexp`: a compiled pattern is kept per thread by its source and flags
   (`COMPILED`, up to 1024 of them), so a regular expression literal evaluated again — once per
   line of a note, in Dataview's parser — no longer compiles its pattern every time.
@@ -191,7 +196,12 @@ always agree with one another.
   `push_frame`/`pop_frame`/`handle_exception_at`/`IncrementLoopIteration` and polled by
   `run_loop`, and `JsValue::raw_bits`/`from_raw_bits` (with `JsValue` and the NaN-boxed inner
   value `repr(transparent)` on 64-bit). `Context::jit_options_mut`, `Context::jit_stats`,
-  `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>`. Design and results: Verve's `docs/jit.md`.
+  `BOA_JIT=0`, `BOA_JIT_THRESHOLD=<n>`. `vm::object_layout_checked()` answers whether property
+  and element accesses compile inline on this thread — the layout they read is checked once per
+  thread against a real object, at that thread's first compile or the first call here, whichever
+  comes first, and the answer is kept — so an embedder can tell a JIT that runs its hot loops as
+  compiled code with only helper property accesses from a fully inline one; without it the check
+  is visible only inside this crate's own tests. Design and results: Verve's `docs/jit.md`.
 
 - `boa_engine`, `object/jsobject.rs`: `JsObject::downgrade` and `WeakJsObject`, a reference to
   an object that does not keep it alive and is read without a call into JavaScript (unlike a
@@ -199,6 +209,567 @@ always agree with one another.
   native thing — `verve-dom`'s one object per DOM node — keeps its objects this way, so a node a
   script let go of is collected and then freed.
 
+- `boa_string`, `str.rs`: `JsStr::index_of` starts at `from_index` instead of skipping that many
+  windows from the front. `Windows` implements `next` only, so `skip(n)` walked n windows one at a
+  time and every search from a position cost O(position) — 40k-part `split` 2,297 ms, 200k parts
+  still running after 120 s. A Latin-1 pair now compares byte slices and a UTF-16 pair `u16`
+  slices, as subslices of the haystack; a needle and a haystack in different encodings still
+  compare code unit by code unit. `split`, `indexOf`, `includes`, `replaceAll` and string-pattern
+  `replace` are linear in the string now.
+
+- `boa_engine`, `builtins/map/ordered_map.rs`, `builtins/set/ordered_set.rs`: `Map.prototype.delete`
+  and `Set.prototype.delete` leave a tombstone instead of calling `shift_remove`, which moved
+  every entry after the deleted one: deleting half the keys of 40k took 878 ms, and 300k did not
+  finish. A tombstone is O(1) and the iterators skip it, so the order they see is unchanged; once
+  the tombstones outnumber the entries that are left and no iterator holds the lock, they are
+  dropped in one O(n) pass, amortized O(1) per deletion. `Set::delete_in_place` leaves the
+  tombstone without compacting, for `Set.prototype.difference`, which walks the set by index as
+  the specification writes it and would otherwise see the entries move underneath it.
+
+  The set operations that walk `this` by index while they call the other set's `has` — the set-like
+  `has` may delete from `this` — hold the same lock, otherwise a compaction in the middle of the
+  walk skipped the value at the next index. `Set.prototype.isDisjointFrom`, `isSubsetOf` and
+  `intersection` take it with `SetLock::new`, as `Set.prototype.forEach` does.
+
+  The lock is what holds compaction back, so an iterator has to give it back. `next` took the lock
+  out of the iterator at the end of its walk and dropped it as a plain value, which never
+  finalizes, so every map or set that had been through a `for…of`, a spread, an `Array.from` or
+  `entries()` stayed locked and never compacted; a pattern like `delete` then `set` with an
+  occasional iteration grew `full_len` without bound. Both iterators now unlock where the walk
+  ends, `Finalize` stays for one abandoned half-way, and a clone starts unlocked — the set
+  operations copy a set that may be being iterated, and the copies carried its lock over.
+
+- `boa_engine`, `builtins/map/mod.rs`, `builtins/set/mod.rs`: `Map::for_each_native` and
+  `Set::for_each_native` — the Rust-side walks behind `JsMap`/`JsSet` and the `TryFromJs`
+  conversions of `HashMap`/`BTreeMap` — step over a tombstone. Before the tombstones above they
+  could not see one after the lock was released, and their index loops did not advance when
+  `get_index` answered `None`, so the first tombstone spun forever. `OrderedSet::is_empty` asks
+  `len()`, as `OrderedMap::is_empty` does, rather than counting tombstones as elements.
+
+- `boa_string`, `lib.rs`: `JsString::ptr_eq` says whether two strings are one allocation rather
+  than merely equal, which the regexp widening below uses: a string's contents never change, so the
+  units derived from one allocation stay right for the next call on it.
+
+- `boa_engine`, `builtins/regexp/mod.rs`: a Latin-1 subject reaches `regress` as its UTF-16 code
+  units, widened once per scan instead of once per match. Widening the whole subject in every
+  `exec` made a global `exec`, `matchAll`, `replace` or `split` quadratic in its length: 8k lines
+  took 724 ms where 2k took 54 ms. The units of one allocation stay right for every later match on
+  it, so `WIDENED` keeps the last subject and its units for the next `exec`, matched by
+  `JsString::ptr_eq`. What a script can observe does not change: `lastIndex` is still read and
+  written once per match, and an overridden `exec` is still called.
+
+  The entry holds the subject — a slice of it pins the whole string it was cut from — and its copy
+  at two bytes a unit, about three times the size of the last subject, so it is released when the
+  scan that needed it ends. `ReleaseWidened` is a guard dropped on every way out of `exec`,
+  `@@search` and `@@split`, `?` errors included, so each of these ends with nothing kept:
+
+  - the failed match that ends a global scan, and the out-of-range `lastIndex` that ends one;
+  - the one match of a search that is neither global nor sticky;
+  - every `@@search` and `@@split`, whose result no next `exec` will want.
+
+  Two cases still keep it until the next Latin-1 `exec`: a `test`, `exec` or `search` on a global
+  or sticky pattern that matched — the scan has not ended, its next step is one `exec` away — and a
+  `matchAll` iterator abandoned half-way, which has no point to release at. A sticky match that
+  fails also keeps it: `@@split` runs the sticky splitter once per position of the subject.
+
+- `boa_engine`, `builtins/regexp/mod.rs`: a match result's `indices` array is built only for a
+  `d`-flagged pattern. `RegExpBuiltinExec` made it unconditionally — the array, its whole-match
+  pair and that pair's own array — and dropped all three unless step 34 read them, so every match
+  of every other pattern paid for a result nobody could observe. `MakeMatchIndicesIndexPairArray`
+  is now step 34's own work (`make_match_indices`), and step 25's "List" stays a list of nothing.
+
+  The result array is also made in one allocation: the whole match at 0 and the captures at
+  `1..n` are a single `Array::create_array_from_list`, where `ArrayCreate` plus one
+  `CreateDataPropertyOrThrow` per element made the same array in `n + 2` steps. Elements still
+  sort before `index`, `input` and `groups` in `Reflect.ownKeys`, and `length` still comes from
+  the number of elements, so what a script observes is unchanged; `groups` and `indices` keep
+  being defined afterwards, in the order steps 32 and 34 name. `groups` is `undefined` when the
+  pattern has no named group, and the `groupNames` object that only `indices` reads is no longer
+  built for a match that has no `indices` — nor is `named_groups` collected into a `Vec` just to
+  ask whether it is empty.
+
+  `tokenize` 200 KB of source with a sticky tokenizer: 262 ms to 190 ms (median, 5 runs, a shared
+  machine). A bare `exec` loop over one 8-code-unit subject, 100k times: 221–228 ms to
+  142–145 ms; the same loop over `/(a)(b)/g`, which has two captures: 257–265 ms to 162–175 ms.
+  A `d`-flagged pattern, which still builds `indices`, reads 229 ms either way — the saving is
+  the array that no longer exists, not the matcher.
+
+- `boa_engine`, `builtins/json/mod.rs`: `JSON.stringify` copies each member once. `SerializeJSONObject`
+  and `SerializeJSONArray` collect their members as a `Vec<u16>` each — every quoted key, colon,
+  separator and serialized value flattened into its own buffer — and then flatten all of them
+  again into the result. A member's bytes therefore moved twice, and the first buffer was
+  reallocated as it grew. `partial` now holds the pieces as `JsString`s and `concat_members`
+  copies them, with the opening and closing text, into one allocation at the end; the separator
+  is made once per container instead of once per member, and a member the serializer skips no
+  longer has a comma reserved for it.
+
+  `stringify` of 70,000 records (7,032,596 code units): 707–746 ms to 408–470 ms, five interleaved
+  runs each, load 22–32%. `JSON.parse` of the same text, which this does not touch, read
+  1865–2033 ms before and 1960–2034 ms after. The suite's `json` test, which parses as well as
+  stringifies, went from 3444–3591 ms to 2849–3019 ms (JIT column, 5 runs, load 21–36%).
+
+- `boa_engine`, `code_cache.rs`, `script.rs`: a classic script can be written down and read back, as
+  a module could already be. `Script::code_cache` compiles the script with every function it
+  declares and answers its bytes; `Script::from_code_cache` reads them into a script that runs as
+  the parsed one, its own code block made now and the rest when their functions are first called.
+  The bytes say which of the two they hold (format 3), so a module's are not read as a script's.
+  A script is written down only if it declares nothing in the global scope: parsing a script is
+  what makes its global declarations, and code read back in another run would have to make them
+  again. A block-level function declaration in a non-strict script makes an unconfigurable global
+  var binding the same way, while the script compiles (Annex B.3.2.2), so such a script is not
+  written down either — `Script::code_cache` answers `None` for it. Node's CommonJS wrapper
+  declares nothing, so a CommonJS module is written down, which is what Verve does with it.
+  Reading checks the same things as for a module (`read_header`, `read_scopes`, `read_codes` are
+  shared), and `BOA_CODE_CACHE_ROUNDTRIP=1` sends scripts parsed from a file through it too: one
+  evaluated from a string, which no cache keeps, is used as parsed — writing it would compile it,
+  and every function it declares, at the parse rather than at the first call.
+
+- `boa_engine`, `builtins/typed_array/object.rs`: `CanonicalNumericIndexString` rejects a key by its
+  first code unit before parsing it. Reading or writing any named property of a typed array —
+  `ta.length`, `ta.byteLength`, `ta.byteOffset`, `ta.buffer`, and every `ta.foo` — reached the
+  integer-indexed exotic `[[Get]]`, which ran the whole conversion for a key that could never be an
+  index: `ToNumber(key)` and then a `JsString::from(n)` allocation to compare back. A key that is
+  not a canonical numeric index string starts with `0`–`9`, `-`, `I` or `N` and with nothing else,
+  so the other keys are refused without parsing or allocating (`may_be_canonical_numeric_index`).
+  The check only widens what is let through to the parser: `-0`, `0`, `-1`, `1.5`, `1e+21`,
+  `Infinity`, `-Infinity` and `NaN` still pass and still resolve exactly as before. Measured on the
+  same round (interpreter, 1M iterations, median of five processes): `ta.length` 386.9 → 201.5 ms,
+  `ta.byteOffset` 374.3 → 212.7 ms, a missing string key 389.5 → 211.6 ms, and the suite's `typed`
+  (six 1M loops reading `f.length` per iteration) 3589.5 → 2350.1 ms.
+
+- `boa_engine`, `vm/opcode/get/property.rs`: `GetLengthProperty` reads a typed array's `length` from
+  its internal slots, the way it already did for arrays and strings. The opcode's array fast path
+  checked `is_array()`, which a typed array is not, so `f.length` fell through to the inline cache,
+  the integer-indexed exotic `[[Get]]`, `CanonicalNumericIndexString`, the prototype walk to
+  `%TypedArray%.prototype`, and an accessor call that itself had to re-validate the receiver. The
+  shortcut is taken only when the read cannot be observed: the receiver is a typed array, it has no
+  own `length`, every prototype between it and `%TypedArray%.prototype` is an ordinary object
+  without `length`, and the accessor that remains has the intrinsic getter (compared as a function
+  pointer, `NativeFunction::as_fn_ptr`, the first use of that new accessor). The getter only reads
+  internal slots, so skipping it is unobservable; a detached buffer and a resized length-tracking
+  view are still computed from the current buffer length, exactly as the getter does. A subclass
+  getter, a shadowing data property on `Uint8Array.prototype`, an own `length`, a rewired prototype
+  and a replaced accessor all fall back to the spec path. Measured on the same round (median of five
+  interleaved processes, load 19–38%): `ta.length` over 1M iterations 178.7 → 73.7 ms compiled
+  (175.3 → 72.0 best) and 238.6 → 102.8 ms in the interpreter (205.5 → 95.0 best); the suite's
+  `typed` 2131.8 → 1391.2 ms compiled, 2907.7 → 1845.1 ms interpreted.
+
+- `boa_engine`, `vm/opcode/{get,set}/property.rs`: reading and writing a typed array element goes
+  to the buffer. `GetPropertyByValue`/`SetPropertyByValue` had a dense-element fast path for arrays
+  only, so `f[i]` built a `PropertyKey`, ran the integer-indexed exotic `[[Get]]`/`[[Set]]` with its
+  `CanonicalNumericIndexString` check, and went through `validate_index` per element. A key that
+  already parsed as an index needs no canonicalisation, and no receiver can observe an
+  integer-indexed read, so the read takes the element straight from the buffer; the write does the
+  same only when the receiver is the array itself (any other receiver, as in `super[0] = v`, gets
+  `OrdinarySet`, which defines on the receiver) and the value is already a `Number`, or a `BigInt` for the BigInt arrays — anything
+  else runs `ToNumber`/`ToBigInt`, which can call a user `valueOf` that detaches the buffer, and the
+  spec converts before it checks, so those keep the spec path (which also throws for a `Number`
+  written into a BigInt array and the other way around). A detached buffer, an out-of-range index, a
+  detached-in-the-middle length-tracking view and a `SharedArrayBuffer` view all keep their existing
+  behaviour: the reads and writes go through the same `BufferRef` slice, so a shared view stays on
+  its atomic path. Measured on the same round (median of five interleaved processes): one element
+  read 1M times 53.7 → 39.8 ms compiled (load 38–48%), 80.5 → 65.6 ms interpreted (load 13–18%);
+  the suite's `typed` 1359.1 → 1060.2 ms compiled, 1559.8 → 1309.5 ms interpreted.
+
+- `boa_engine`, `vm/opcode/define/own_property.rs`: defining a named property of an object literal
+  inserts it directly. `DefineOwnPropertyByName`, which `{ i, s: 'k' + i }` emits once per property,
+  built a four-field descriptor and called `[[DefineOwnProperty]]`, which fetched the current
+  descriptor, asked for extensibility, then inserted. For an ordinary extensible object that lacks
+  the key, `ValidateAndApplyPropertyDescriptor` inserts the descriptor unchanged and returns `true`
+  without running any user code, so the descriptor and the two lookups can be skipped. The shortcut
+  applies only to an ordinary object whose shape lacks the key; an array, an arguments object, a
+  module namespace, a proxy and a typed array have their own `[[DefineOwnProperty]]`, and a
+  non-extensible object or an existing key still needs the full comparison. Measured on the same
+  round (median of five interleaved processes): the suite's `alloc` 295.0 → 278.9 ms compiled and
+  344.5 → 335.0 ms interpreted (load 22–46%); `vdom` 82.2 → 79.6 ms compiled, 97.8 → 88.7 ms
+  interpreted; `oo` does not touch this path, and its spread stayed inside the round's noise.
+
+- `boa_engine`, `vm/opcode/set/property.rs`: assigning a new property inserts it directly.
+  `this.x = x` in a constructor ran the full `OrdinarySet`: `[[GetOwnProperty]]` on the receiver,
+  then a walk up the prototype chain looking for a setter or a non-writable data property, then
+  `CreateDataProperty`. When the object is ordinary and extensible, the key is absent on the whole
+  chain, every prototype is ordinary, and the receiver is the object itself, that walk can only end
+  at `CreateDataProperty` with the default attributes, so the walk is replaced by one insert. A
+  non-writable data property or a setter on the chain still fails or calls, a proxy still
+  intercepts, a non-extensible receiver still fails, and `Reflect.set` with a separate receiver
+  still defines on the receiver. Ordinary objects are recognised by the internal methods the
+  shortcut depends on being the ordinary ones (`std::ptr::fn_addr_eq` on the four method pointers,
+  `[[Set]]` included, since an override of it on the object or a prototype changes the outcome),
+  not on the address of a `const`, which the compiler may materialise twice). Measured on the same
+  round (median of five interleaved processes, load 27–37%): 200,000 constructor calls storing three
+  fields 304.1 → 232.4 ms compiled, 320.0 → 253.6 ms interpreted; storing one field on a fresh
+  object 68.4 → 46.7 ms compiled, 73.7 → 60.3 ms interpreted.
+
+- `boa_engine`, `builtins/{map,set}/ordered_{map,set}.rs`: `clear()` no longer drops the entries out
+  from under a live iterator. Both `Map.prototype.clear` and `Set.prototype.clear` emptied the
+  backing store and freed its capacity, which also reset the length an iterator counts against, so
+  an iterator that was part-way through ended at once instead of going on to the entries added
+  after the call; `new Map([['a',1]])` with an iterator, `clear()`, `set('z',9)` then `next()`
+  reported `done: true` where the specification yields `['z', 9]`. The specification only empties
+  each entry's key and value, so a locked store now keeps its length and replaces every entry with
+  a tombstone; an unlocked one still clears outright, which keeps `clear()` on a map nobody
+  iterates O(1) and frees the capacity as before.
+
+- `boa_engine`, `builtins/typed_array/builtin.rs`: `%TypedArray%.prototype.sort` reads a comparator's
+  result by its sign, and `CompareTypedArrayElements` returned `Greater` for any positive number and
+  `Less` for everything else, `+0` and `-0` included. A comparator that says "equal" therefore said
+  "greater" on every pair, so an equal group came back reversed and a pre-sorted input was reordered:
+  `new Uint8Array([0,1,2,3]).sort(() => 0)` gave `3,2,1,0` where the specification keeps the input,
+  and test262's `builtins/TypedArray/prototype/sort/stability` failed. Both zeroes now mean
+  `Equal`; only a number above or below zero orders the pair. NaN was already `Equal`.
+
+- `boa_engine`, `builtins/array/mod.rs`, `vm/jit/helpers.rs`: `Array::plain_dense_array` is
+  `pub(crate)`, and the JIT's `SetPropertyByValue` helper uses it to append: `a[i] = x` with `i`
+  the count of a plain dense array's elements (and `length` at least that) pushes the element
+  and grows `length` to cover it, as `[[Set]]` and `Array`'s `[[DefineOwnProperty]]` do there.
+  Any other array, index or `length` takes the interpreter's `[[Set]]`.
+
+- `boa_engine`, `vm/jit/compiler/arith.rs` (feature `jit`): `/` is compiled inline as `div_fast`
+  computes it: an exact `int32` quotient is an `int32`, every other quotient of numbers an `f64`.
+  A dividend of `0` takes the interpreter's handler, whose `0 / -5` is `0` where JavaScript's is
+  `-0`.
+
+- `boa_engine`, `builtins/function/mod.rs`, `vm/mod.rs`, `vm/jit/call.rs`: `function_call` is split
+  in two, the checks and the clones of the function's parts, and `enter_ordinary_function`, which
+  pushes the frame and sets `this` and the environments; the interpreter's behaviour is
+  unchanged. `Context::check_runtime_limits` is split into the interrupt check and
+  `runtime_limits_exceeded`, which only reads. Compiled code calls a compiled ordinary function
+  through `enter_ordinary_function` directly (`jit_call`), when no limit is about to be passed and
+  no interrupt is pending; every other callee goes through `jit_step`.
+
+- `boa_engine`, `vm/jit/` (feature `jit`): `PushFromRegister`, `PopIntoRegister`, `GetArgument` and
+  `CheckReturn` are compiled inline, reading and writing the VM stack's `Vec` (pointer, length and
+  capacity found by looking at a real one, as the object layout is) and the frame's `fp`,
+  `argument_count` and `CONSTRUCT` flag; a full stack, a pointer that is not an object and a
+  constructor's frame take the fast helper or the interpreter's handler. `JitState` carries the
+  stack's address. No interpreter code changes.
+
+- `boa_engine`, `vm/jit/helpers.rs` (feature `jit`): the fast helpers of `GetLengthProperty`,
+  `GetPropertyByValue` and `SetPropertyByValue` handle typed arrays by calling the interpreter's
+  own shortcuts (`typed_array_length_guard` with `typed_array_length_read`, `typed_array_element_get_shortcut`,
+  `typed_array_element_set_shortcut`), so the guards live in one place. A store is the
+  helper's only when its receiver is the array itself, which compiled code decides at compile
+  time (the instruction's receiver register is the object's).
+
+- `boa_string`, `vtable/rope.rs`, `lib.rs`: a fifth string kind, `JsStringKind::Rope`, the lazy
+  concatenation of two strings. `JsString::concat_lazy(x, y)` returns the other side for an empty
+  one, copies below `ROPE_MIN_LEN` (256 code units) like `concat`, and otherwise builds a node of
+  88 bytes (`size_of::<RopeString>()`, measured) holding both halves. The content is copied into
+  one buffer by the first `as_str` (iteratively, from the end, with a heap stack, so a chain of
+  any depth is safe), the node then keeps only that flat string and drops the halves; `len`,
+  `clone` and `ptr_eq` never flatten. Dropping a chain is iterative too. Slicing a flattened rope
+  slices its flat string. A flattened rope that is appended to again starts a new chain, so
+  reading before every append is as quadratic as it was.
+
+- `boa_engine`, `value/operations.rs`: `JsValue::add` joins strings with `JsString::concat_lazy`
+  (all three string branches), so `s += x` in a loop builds a rope and is linear. Templates and
+  `concat_array` callers still copy.
+
+- `boa_engine`, `builtins/typed_array/object.rs`, `vm/opcode/get/property.rs`: the typed-array
+  `length` shortcut is two functions, `typed_array_length_guard` (the object's `length` is the
+  intrinsic getter: walks the prototype chain) and `typed_array_length_read` (the length from the
+  internal slots, zero for a detached or out-of-bounds view). `GetLengthProperty` calls them in
+  sequence; the behaviour is the one it had.
+
+- `boa_engine`, `vm/jit/` (feature `jit`): `GetLengthProperty` of a typed array has a site cache
+  (`typed_length.rs`, fields appended to `SiteCache`): the interpreter's guard
+  (`typed_array_length_guard`) is answered by comparing the receiver's shape and each prototype's
+  up to the one with the accessor (three at most), the length of each one's property storage (the
+  builtin prototypes have unique shapes, which grow in place when a property is added), and the
+  accessor's bits against the intrinsic getter's; the read (`typed_array_length_read`) is
+  never cached. Trusted only while the count of collections is the one it was filled at. No
+  interpreter code changes. `docs/jit.md` has the argument.
+
+- `boa_engine`, `bytecompiler/class.rs`, `boa_ast` `scope_analyzer.rs`: a base class constructor gets
+  a function environment only when a function would (a direct `eval`, an escaping `this`, `super`
+  or `new.target` in the body, a captured binding), as `bytecompiler/function.rs` decides for any
+  function; the analyzer no longer forces one for base constructors and an empty default base
+  constructor gets none. A derived constructor keeps it: its `this` binding lives there. The
+  environment is two collected objects and was 188 ns of every `new` of a class.
+
+- `boa_engine`, `builtins/function/mod.rs`, `vm/mod.rs`, `object/shape/`: `function_construct` reads an
+  ordinary function's `prototype` from its shared shape, through a one-entry cache in the `Vm` (the
+  shape, held weakly, and the slot of the data property), instead of the generic `[[Get]]`; a
+  proxy, an accessor, a unique shape or a value that is not an object take the generic path.
+  `points_to` of the weak shapes is no longer behind the `jit` feature.
+
+- `boa_engine`, `vm/jit/mod.rs` (feature `jit`): `prepare` leaves a function that native code calls
+  (a frame with `EXIT_EARLY`, at `pc` 0) interpreted when its bytecode is at most 40 bytes, since
+  entering and leaving compiled code costs more than interpreting a callee that short; a loop in
+  it is still entered by OSR.
+
+- `boa_engine`, `builtins/function/mod.rs`: `enter_ordinary_function` and `function_construct` no
+  longer set the return value again after `push_frame` (which sets it), and the `this` binding
+  status is read from the stack only for a frame that builds a function environment.
+
+- `boa_engine`, `vm/jit/` (feature `jit`), `builtins/typed_array/object.rs`: an element read or write
+  of a typed array by an `int32` index is done in machine code (`typed_elements.rs`, `compiler/typed.rs`)
+  when the view is a fixed-length one of a non-detached `ArrayBuffer` (not a `SharedArrayBuffer`),
+  the kind is one of the eight number kinds (not `BigInt`s, not `Float16`), the view lies within the
+  buffer as it is now and the index within the view; a write also needs a number to store (no
+  `ToNumber`) and, for `Uint8Clamped`, an `int32`. Anything else is the helper, which runs
+  `typed_array_element_get_shortcut` / `typed_array_element_set_shortcut` as before. The offsets of
+  the fields (`TypedArray`, `BufferObject`, `ArrayBuffer`'s bytes) are found and checked against real
+  objects when the object layout is. `TypedArray` gets four `cfg(feature = "jit")` constants, the
+  offsets of its fields; no interpreter code changes. `docs/jit.md` has the argument.
+
 ## Keeping it
 
 Rebase onto the next release tag when Su moves to it, and drop what upstream has fixed.
+
+- `boa_engine`, `builtins/json/mod.rs`, `builtins/json/parse.rs`: `JSON.parse` reads its text once. It
+  used to be validated by `serde_json`, then parsed again as a script by `boa_parser`, compiled to
+  bytecode and run on the VM — three readings of the same bytes, and a `String` copy of them, to
+  build the values the text already spells out. Without a reviver the reader in `parse.rs` now
+  builds them directly from the code units: an object is an `JsObject` with each member created as
+  it is read, an array is one `Array::create_array_from_list`, and a string without an escape is a
+  slice of the text rather than a fresh buffer. Containers are kept on an explicit `Vec`, so a
+  deeply nested text costs heap instead of Rust stack — the script parser gave up at 128 levels,
+  where Node answers as deep as memory allows. A reviver is served by the same reader, which also keeps the text each
+  primitive came from (see the entry on `JSON.parse` with a reviver below).
+
+  Because the reader is now the one validating, its `SyntaxError` messages are V8's, with the
+  position and the line and column V8 names: `Unexpected token '}', "[1,]" is not valid JSON`,
+  `Expected ',' or ']' after array element in JSON at position 4 (line 1 column 5)`,
+  `Unexpected end of JSON input`, and a text that is only `undefined`, `NaN` or `Infinity` is quoted
+  by itself. A whole number that fits an `i32` is an integer value, as a script's number literal
+  is, and `-0` stays a float. Lone surrogates, both escaped and raw, are code units like any other
+  rather than an error — `String::from_utf16` rejected them before.
+
+  `JSON.parse` of 70,000 records (7,032,596 code units): 1536–2034 ms to 453–530 ms, five interleaved
+  runs each, load 19–70%. The suite's `json` test, whose parse phase that is, went from 2926–3519 ms
+  to 1315–1428 ms (JIT column, 5 runs, load 23–41%), which is 8.0× Node rather than 21×.
+
+- `boa_engine`, `vm/opcode/set/property.rs`: `SetPropertyByValue` stored into a dense array whenever the
+  object it was given was one, without asking who the receiver was. `super[k] = v` hands it the home
+  object's prototype as the object and `this` as the receiver, and `OrdinarySet` defines the element on
+  the receiver, so `{ __proto__: [0], m() { super[0] = 5 } }.m()` changed the prototype array and left
+  `this` alone. The dense shortcut now sits behind the same condition the typed array shortcut already
+  had: the receiver is the object itself. `SetPropertyByName` was checked for the same fault and has
+  none (a `super.name = v` that runs repeatedly, so that the inline cache is consulted, still defines
+  on the receiver each time), so it only gained a regression test.
+
+- `boa_engine`, `builtins/json/mod.rs`, `builtins/json/parse.rs`: `JSON.parse` with a reviver builds its
+  values with the same reader as one without. It used to hand the text to the script parser, the
+  bytecode compiler and the VM so as to get the text of each primitive for `context.source`, and that
+  path turned strings into UTF-8, so a lone surrogate (escaped or raw) was a `SyntaxError`
+  (`invalid utf-16: lone surrogate found`) where Node answers the one code unit. The reader now keeps
+  a `JsonNode` tree beside the values when asked: the code units each primitive was read from and the
+  value read, and the members of each container with their keys as `JsString`s (they were lossy
+  `String`s). The reviver gets `source` when the value it is handed is still `SameValue` as the one
+  read, which replaces re-parsing the source text to compare. `JSON.parse` no longer uses the script
+  parser at all; what that parser refuses in a string literal of a script is untouched. The reader
+  nests as deep as memory allows, but the reviver's walk (`InternalizeJSONProperty`) recurses on the
+  native stack, which the script parser's 128-level limit used to guard: past the native stack the
+  runtime allows nested runs (`RuntimeLimits::native_stack_limit`) it throws `RangeError: Maximum
+  call stack size exceeded`, as V8 does, and `JsonNode` is taken apart on the heap when it is dropped
+  rather than by drop glue that would recurse once per level.
+  An object's members are kept in an `FxHashMap` by key (a repeated key keeps the last member, as the
+  object does), so the reviver finds the source of each key in constant time rather than by a search
+  of the members, which made a reviver over n keys cost n² comparisons.
+
+- `boa_engine`, `builtins/iterable`, `array`, `map`, `set`, `string`, `vm/opcode/iteration`: a
+  `GetIterator` whose `next` is the untouched `next` of the running realm's array, map, set or
+  string iterator records which advance function that is, and `IteratorStep` (`for…of`, spread,
+  destructuring, `Array.from`, `new Map(entries)`, and the rest that go through
+  `IteratorRecord::step`) calls it directly and keeps the value, instead of calling `next` and
+  reading `done` and `value` from a result object made only to be read. The object is unobservable
+  there: it is a fresh ordinary object with own data properties. Every read the advance makes of the
+  iterated object (`length` and the elements of an array-like, a proxy's traps, a typed array's
+  buffer) is unchanged, the `next` method is still the one read at `GetIterator`, and a direct
+  `it.next()` still returns a new object. `IteratorNext` and `IteratorValue` step and read the
+  record in place instead of popping it off the frame's stack and pushing it back, and a new record
+  no longer allocates the empty object that stood for "no result yet". What is not kept: a native
+  frame for `next` in the shadow stack while a proxy trap runs inside the step, so an `Error.stack`
+  made there lacks that line; a `next` from another realm is stepped as before.
+  `for (const x of array)` per element, 1M elements, median of 5 processes: 369 to 75 ns
+  interpreted, 352 to 61 compiled; a `Set`: 598 to 47 and 534 to 29; a string: 456 to 100 and 519
+  to 84 (load 25–50%).
+
+- `boa_engine`, `vm/jit`: compiled code runs `IteratorNext`, `IteratorDone` and `IteratorValue` with
+  fast helpers instead of `jit_step`. `IteratorNext` is done by the helper only when stepping
+  cannot run JavaScript or fail: a map, set or string iterator, or an array iterator over a plain
+  array with an integer `length` and a dense element (an iterator whose `next` is the built-in one
+  is the only kind of record that has a stepper); a hole, a proxy, a typed array, a key or entries
+  iterator and every other record take the interpreter's handler. `for (const x of array)` per
+  element, compiled: 61 to 22 ns (1M elements, median of 5 processes, one round at 50–100% load).
+
+- `boa_engine`, `builtins/array/array_iterator.rs`: `%ArrayIteratorPrototype%.next` no longer holds
+  the iterator's borrow while it reads `length` and the element. A Proxy trap or getter that calls
+  `next` on the same iterator, or an array iterator made over an array iterator, panicked with
+  `BorrowError`. The step reads the index, reads `length`, stores `index + 1` and then reads the
+  element, as V8 does; what a re-entrant call stored while `length` was read is overwritten, and a
+  call that exhausted the iterator there does not keep the outer call from stepping.
+
+- `boa_engine`, `builtins/regexp/regexp_string_iterator.rs`: `%RegExpStringIteratorPrototype%.next`
+  no longer holds the iterator's borrow while `exec`, `lastIndex` and the match's `0` run; an
+  `exec` that called `next` on the iterator running it panicked with `BorrowError`.
+
+- `boa_engine`, `builtins/intl/collator/mod.rs`: the function `Intl.Collator.prototype.compare`
+  returns takes the collator's borrow after converting its arguments, not before: a `toString`
+  that read `compare` borrowed the collator mutably under the held shared borrow.
+
+- `boa_string`, `common.rs`, `boa_engine`, `builtins/string/string_iterator.rs`: a string iterator
+  steps without `String.prototype.substring`. `StaticJsStrings::latin1_char` gives the static
+  one-code-unit string of a Latin-1 character (a table of 256, no allocation), and the iterator
+  returns it for any code point of U+0000..U+00FF; every other code point is a slice of the
+  iterated string, as before, but taken directly instead of through the `substring` built-in
+  (which converted its arguments through `ToIntegerOrInfinity` and cloned the string into a value
+  for each step).
+
+- `boa_string`, `lib.rs`, `boa_engine`, `value/operations.rs`: `s + n` and `n + s` with an `int32`
+  `n` skip the generic path. `JsValue::add` used to convert both operands with `ToPrimitive`,
+  build a `JsString` for the number (one allocation) and copy it into the result (a second one,
+  plus a look-up in the static string table). `JsString::concat_i32` and `concat_i32_before` format
+  the digits into a stack buffer and write them straight into the result when it is shorter than
+  `ROPE_MIN_LEN`; longer results build the digits' string and go through `concat_lazy`. The result
+  is the string `ToString(n)` gives, so nothing observable changes. `x = 'ab' + i` per iteration,
+  compiled, median of 5 processes: 117 to 72 ns (load 15-30 %).
+
+- `boa_string`, `vtable/rope.rs`, `lib.rs`: a rope can end in a byte buffer, so a loop of `s += x`
+  with short Latin-1 pieces no longer leaves one 96-byte node (it was 88 before this; the third
+  state needs a tag) and one small string per append until the first read. `concat_lazy` calls
+  `RopeString::append_short` when `y` is at most 64 Latin-1 code units and `x` is an unflattened
+  rope that is all Latin-1: if `x`'s last half is itself short, both are copied into a new `Vec`;
+  if `x` already ends in such a buffer (`RopeState::Appended`, the buffer in an `Rc<RefCell<..>>`),
+  `y` is appended to it in place. The refcount of `x` is no use as a test for "nobody else can see
+  this" (the variable holding it and the operand being added are both references), so a rope
+  appends in place only when its length is the buffer's current end: every rope that shares the
+  buffer reads only the first `len - left.len()` bytes, so appending past them changes none of
+  them (`a = s + 'x'; b = s + 'y'`: `b` finds the buffer already extended past `s` and builds a
+  plain node). Wider pieces, wider `x`, and long pieces take the old node. Nothing is mutated that
+  a rope can see, and there is no new `unsafe`. `s += 'ab' + i`, 320k appends, peak working set
+  (median of 5 processes): 66.5 to 16.3 MB, of which about 16 MB is the process itself; the loop
+  takes the same time or less (load 15-25 %).
+
+- `boa_engine`, `vm/inline_cache`, `vm/opcode/{get,set}`, `vm/jit/helpers.rs`, `object/shape`: the
+  inline cache of a property found on the receiver's prototype records the prototype's shape as
+  well as the receiver's and a hit needs the prototype to still have it. Before, an entry was keyed
+  by the receiver's shape alone, so after `delete proto.x` (or `x` redefined as an accessor, or an
+  earlier property deleted) a hit read the slot out of the changed prototype: the getter function
+  instead of its result, another property's value, or `index out of bounds` past the end of the
+  storage (a panic). An entry whose prototype changed is dropped and recorded again. A slot in a
+  prototype is not recorded for a receiver with a unique shape (a unique shape gains own properties
+  in place, which can shadow the prototype's), and an entry is recorded only if the shape that holds
+  the slot answers the same slot for the name when it is made (a getter can change objects between
+  the lookup and the entry). A cached setter that is not a function (`set: undefined`) is a miss, so
+  a strict write throws as `[[Set]]` does. Cache reads use `get` on the storage: a slot out of
+  range is a miss, never a panic. `UniqueShape::change_attributes_transition` makes a new unique
+  shape for every change, also when the property keeps its kind (it kept the shape, with a
+  `TODO: invalidate the pointer`, so a cached slot kept the old bits: a property made read-only was
+  still written). Compiled code takes the same entries, and
+  reads a prototype's slot only through the helper.
+
+- `boa_engine`, `builtins/regexp/regexp_string_iterator.rs`: `%RegExpStringIteratorPrototype%.next`
+  completes the iterator when `exec`, `ToString(match[0])` or the `lastIndex` read or write throws,
+  as the specification's generator closure does: every later `next` is `{ value: undefined, done: true }`.
+  Node 22 (V8) does not end the iterator there and keeps stepping; the specification is followed.
+
+- `boa_engine`, `object/operations.rs`: `InitializeInstanceElements` no longer holds the class
+  constructor's borrow while it runs the field initializers. An initializer that wrote to the class
+  (`class X { static n = 0; id = ++X.n }`) panicked with `BorrowMutError`, and so did a derived class
+  whose base constructor returns the class itself. The private methods and the fields are copied out
+  first, so the list the instance is built from is the one at the start, as in the spec.
+
+- `boa_engine`, `object/operations.rs`: `OrdinaryHasInstance` of a bound function reads the target
+  and releases the function before it asks the target `@@hasInstance`. A `@@hasInstance` that wrote
+  to the bound function (`bf.x = 1` in `x instanceof bf`) panicked with `BorrowMutError`.
+
+- `boa_engine`, `vm/jit`, `builtins/typed_array/object.rs`, `builtins/array/array_iterator.rs`,
+  `builtins/iterable`: what compiled code reads an object through no longer panics when the object
+  is borrowed. The typed array element and `length` shortcuts, the compiled call's read of the
+  callee, and the quiet iterator steps use `JsObject::try_downcast_ref`/`try_downcast_mut` (new,
+  crate-private) or `try_borrow*` and answer "not here", so the slow path decides. Nothing in the
+  engine core (`vm/`, `object/`, `environments/`) borrows an object across user code any more, so
+  this is a guard, not a fix of a known crash.
+
+- `boa_engine`, `vm/inline_cache/add.rs`, `vm/opcode/set/property.rs`, `vm/jit/helpers.rs`,
+  `object/shape`: an assignment that creates a property (`this.x = v` in a constructor) is
+  remembered per site: the receiver's shape, the shape it had afterwards and the stamps of its
+  prototypes (their shapes, and for a unique shape its number of properties, since a unique shape
+  gains properties in place and keeps its identity). A later assignment that finds the same shape
+  and stamps swaps the shape and pushes the value, skipping the lookups in the object and in each
+  prototype and the transition lookup (`new CX(i)` over `new C0()`: 241 to 68 ns). A hit needs an
+  ordinary, extensible receiver and the same prototype objects with the same tables, so no setter,
+  read-only property or proxy that `[[Set]]` would meet can be skipped; any change gives a miss,
+  and the next slow assignment records the entry again. Four shapes per site, then the site stops
+  recording. Compiled code takes the same entries through `jit_set_property`.
+
+- `boa_engine`, `value/mod.rs`: `ToInt8`, `ToUint8`, `ToInt16` and `ToUint16` take the low bits of
+  `ToInt32` of the number instead of casting to `i64` first, which saturated at 2^63: a float of 2^63
+  or more (`new Int8Array(1)[0] = 3.4e38`, `new Uint16Array(1)[0] = 2 ** 64 + 4096`) gave the wrong
+  element, `-1` or `65535` where the specification and Node give `0` or `4096`.
+
+- `boa_string`, `vtable/rope.rs`: the shared append buffer of a rope (`s += x`) also takes short
+  UTF-16 pieces. A buffer holds Latin-1 bytes while everything in the rope is Latin-1 and UTF-16
+  code units from the first piece that is not (`RopeState::AppendedWide`); a rope that is already
+  not Latin-1 starts one from its short right half. A byte buffer is never rewritten in place,
+  since ropes made earlier still read it as bytes: the first wide append copies the part of it
+  that rope sees (at most 1024 bytes, or the append gets a node of its own) into a new unit buffer,
+  so the earlier ropes keep their content and their own appendable end. The rules of the byte
+  buffer are unchanged: only the rope whose length ends the buffer appends in place, others get a
+  plain node, and flattening and dropping use the heap stack of the existing code. Appending
+  `'中' + i` 320000 times no longer costs a node per step.
+
+- `boa_engine`, `vm/jit`, `vm/opcode/{get,set}/property.rs`: the JIT compiles the inline
+  typed-array element path (about 35 basic blocks for each element access) only into functions in
+  which the interpreter has met a typed array at an element read or write (one flag on the code
+  block's `JitSlot`, set by the two handlers' typed-array shortcuts). Other functions compile the
+  array path alone, as before the typed path existed, and leave a typed array to the helper, which
+  gives the same result; a function that meets its first typed array after it is compiled stays
+  with the helper. `JitOptions::typed_elements_everywhere` (`BOA_JIT_TYPED_ALL=1`) compiles the
+  path into every access; tests use it for the forced-compile mode. 400 functions of 40 element
+  accesses on plain arrays at threshold 0: 19.4 to 13.5 s of CPU, the time before the typed path
+  existed (13.8 s).
+
+- `boa_engine`, `bytecompiler/statement/loop.rs`, `builtins/iterable`, `builtins/map/map_iterator.rs`,
+  `builtins/array/array_iterator.rs`, `vm/opcode`, `vm/jit`: `for (const [k, v] of x)` (also `let`)
+  no longer makes the `[key, value]` array of a `Map` or `Array` entry when destructuring that
+  array cannot be seen. A built-in entry step is now remembered as a key and a value
+  (`IteratorRecord` `LastResult::Entry`); the array is made only when something reads the value
+  (`IteratorValue`, the generic `for…of`, `next` itself). The new `IteratorEntry` instruction (it
+  takes the opcode `Reserved59` had) hands the two halves to a two-name pattern when
+  `%Array.prototype%[@@iterator]` is still `%Array.prototype.values%`, `%ArrayIteratorPrototype%.next`
+  is still the running realm's built-in, and no `return` is found on the chain from
+  `%ArrayIteratorPrototype%` through `%IteratorPrototype%` to `%Object.prototype%` (read afresh at
+  every element, so a rewrite between two elements counts); otherwise it makes the array and the
+  pattern runs the spec's steps. Only `const`/`let` heads qualify: binding a `var` or assigning to
+  a target can run a setter between the two elements. Compiled code takes the same decision in
+  `jit_iterator_entry`, and a value or entry iterator over a dense array no longer declines in
+  `advance_dense`.
+  Compiled `IteratorNext` now steps the record where it sits, as the interpreter's handler does,
+  instead of taking it off the frame's iterator stack and putting it back; a step answers its key
+  and, for an entry, the value in a second slot, so the common one-value step stays one value wide.
+- `boa_engine`, `vm/call_frame`, `builtins/function`, `context`, `vm/jit/call.rs` (P84): the frame of
+  an ordinary function no longer clones the handles it reaches through its callee. Its code
+  block, script or module, realm and environments are `Lent` (a bitwise copy of the function's own, not counted
+  and not dropped) when the function is the value in the frame's function slot: the VM stack
+  keeps it alive, by a counted reference, until the frame is popped, and those four fields of
+  the function are set when it is made, except that a lazy function's compile replaces `code`
+  before the frame exists and `PushPrivateEnvironment` adds the private environment to the
+  `environments` of the class constructor that `GetFunction` has just made (before any script can
+  reach it). The frame copies the environments on its first push or pop (`DerefMut`). A call that comes through another function (a proxy without an
+  `apply`/`construct` trap, which can be revoked while its target runs; a bound function) leaves
+  the forwarder in the slot, and the frame then owns its handles (`callee_parts`). Whatever can
+  outlive the slot makes the handles its own first: cloning a frame counts them,
+  `GeneratorContext::from_current` does it for the live frame before its stack is split off, and
+  `Context::enter_realm` and `swap_realm` replace a lent realm with an owned one. Script, module,
+  `eval` and synthetic-module frames own theirs, as before. `Lent` is `Trace` but takes no part
+  in the root counts when it is lent. `context/mod.rs` is outside the files this package was to
+  change; `enter_realm` and `swap_realm` had to follow the frame's field, and `swap_realm` also
+  returns early when both sides are the same realm (a native function of the running realm), so
+  that call no longer swaps twice. Nothing observable changes.
+- `boa_engine`, `vm/shadow_stack.rs`, `vm/mod.rs` (P84): the shadow stack's entry for a bytecode
+  frame lends the code block's `SourceInfo` (`Lent`) instead of cloning the `Rc` per call; an entry
+  that is kept in a backtrace (`take`, `capture`, `caller_position`) is cloned owned, so what
+  `error.stack` prints is unchanged. `Context::check_runtime_limits` and `runtime_limits_exceeded`
+  are `#[inline]` and the `RangeError` they build is out of line; the limits and the depth at which
+  the error is thrown are the same.
+- `boa_engine`, `vm/jit/call.rs`, `vm/jit/runtime.rs`, `vm/jit/compiler.rs` (P84): a compiled
+  `Call` of a compiled ordinary function runs the callee's code at once, with the code it already
+  found, instead of going through `finish` and `run_callees` and `prepare` again; the checks are
+  the ones `run_callees` makes (nesting cap, native stack share, JIT enabled, no fuzz or trace),
+  and anything else takes the old path. `Return` is compiled as `jit_return`, which pops a frame
+  that does not exit early without the `catch_unwind` and `finish` of `jit_step` (nothing it runs
+  can run JavaScript or panic) and leaves the compiled code; a frame that exits early takes
+  `jit_step`. Exceptions, interrupts, the nesting cap and the fallbacks are unchanged.

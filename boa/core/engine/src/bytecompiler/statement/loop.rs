@@ -1,6 +1,8 @@
 use boa_ast::{
     declaration::Binding,
+    expression::Identifier,
     operations::bound_names,
+    pattern::{ArrayPatternElement, Pattern},
     scope::BindingLocatorError,
     statement::{
         DoWhileLoop, ForInLoop, ForLoop, ForOfLoop, WhileLoop,
@@ -324,6 +326,10 @@ impl ByteCompiler<'_> {
             self.bytecode.emit_iterator_value(reg.variable());
 
             self.push_handler()
+        } else if !for_of_loop.r#await()
+            && let Some(pattern) = entry_pattern(for_of_loop.initializer())
+        {
+            self.compile_entry_binding(pattern)
         } else {
             let value = self.register_allocator.alloc();
             self.bytecode.emit_iterator_value(value.variable());
@@ -418,6 +424,39 @@ impl ByteCompiler<'_> {
         self.iterator_close(for_of_loop.r#await());
     }
 
+    /// Binds the current value of a `for…of` iterator to a `[key, value]` pattern of two plain
+    /// names, taking the two halves of a built-in entry as they are when destructuring the
+    /// entry array would not be observable (`IteratorEntry`) and destructuring the array
+    /// otherwise. Returns the index of the handler that closes the iterator if the binding or
+    /// the body throws.
+    fn compile_entry_binding(&mut self, pattern: &Pattern) -> u32 {
+        let def = BindingOpcode::InitLexical;
+        let key = self.register_allocator.alloc();
+        let value = self.register_allocator.alloc();
+        let fast = self.register_allocator.alloc();
+        self.bytecode
+            .emit_iterator_entry(key.variable(), value.variable(), fast.variable());
+        let handler_index = self.push_handler();
+
+        let names = entry_names(pattern).expect("checked by `entry_pattern`");
+        let (key_ref, value_ref) = (&key, &value);
+        self.if_else(
+            &fast,
+            |compiler| {
+                for (ident, register) in names.into_iter().zip([key_ref, value_ref]) {
+                    let ident = ident.to_js_string(compiler.interner());
+                    compiler.emit_binding(def, ident, register);
+                }
+            },
+            |compiler| compiler.compile_declaration_pattern(pattern, def, key_ref),
+        );
+
+        self.register_allocator.dealloc(fast);
+        self.register_allocator.dealloc(value);
+        self.register_allocator.dealloc(key);
+        handler_index
+    }
+
     pub(crate) fn compile_while_loop(
         &mut self,
         while_loop: &WhileLoop,
@@ -477,5 +516,42 @@ impl ByteCompiler<'_> {
         if let Some(hoisted) = hoisted {
             self.register_allocator.dealloc(hoisted.register);
         }
+    }
+}
+
+/// The pattern of a `for…of` head that is a `[key, value]` pattern of two plain names (no
+/// defaults, holes, rest or nesting) bound by `const` or `let`.
+///
+/// Initializing a lexical binding runs no user code. Binding a `var` or assigning to a target
+/// can (a setter on the global object or in a `with` scope), and code that runs between the two
+/// elements of the pattern could rewrite the array protocol the second element reads, so those
+/// keep the spec path.
+fn entry_pattern(initializer: &IterableLoopInitializer) -> Option<&Pattern> {
+    match initializer {
+        IterableLoopInitializer::Let(Binding::Pattern(pattern))
+        | IterableLoopInitializer::Const(Binding::Pattern(pattern)) => {
+            entry_names(pattern).map(|_| pattern)
+        }
+        _ => None,
+    }
+}
+
+/// The two names of a `[key, value]` pattern of two plain names.
+fn entry_names(pattern: &Pattern) -> Option<[&Identifier; 2]> {
+    let Pattern::Array(pattern) = pattern else {
+        return None;
+    };
+    match pattern.bindings() {
+        [
+            ArrayPatternElement::SingleName {
+                ident: key,
+                default_init: None,
+            },
+            ArrayPatternElement::SingleName {
+                ident: value,
+                default_init: None,
+            },
+        ] => Some([key, value]),
+        _ => None,
     }
 }

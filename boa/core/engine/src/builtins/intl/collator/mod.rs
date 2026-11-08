@@ -34,6 +34,9 @@ use super::{
 };
 
 mod options;
+
+#[cfg(all(test, feature = "intl_bundled"))]
+mod tests;
 pub(crate) use options::*;
 
 #[derive(Debug, Finalize, JsData)]
@@ -360,10 +363,6 @@ impl Collator {
                     |_, args, collator, context| {
                         // 1. Let collator be F.[[Collator]].
                         // 2. Assert: Type(collator) is Object and collator has an [[InitializedCollator]] internal slot.
-                        let collator = collator
-                            .downcast_ref::<Self>()
-                            .js_expect("checked above that the object was a collator object")?;
-
                         // 3. If x is not provided, let x be undefined.
                         // 5. Let X be ? ToString(x).
                         let x = args
@@ -381,6 +380,11 @@ impl Collator {
                             .collect::<Vec<_>>();
 
                         // 7. Return CompareStrings(collator, X, Y).
+                        // NOTE: The collator is borrowed only now, since `ToString` above can run
+                        // user code that reads `compare` and so borrows the collator mutably.
+                        let collator = collator
+                            .downcast_ref::<Self>()
+                            .js_expect("checked above that the object was a collator object")?;
 
                         let result = collator.collator.as_borrowed().compare_utf16(&x, &y) as i32;
 

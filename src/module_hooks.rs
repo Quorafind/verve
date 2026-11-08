@@ -19,7 +19,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use boa_engine::{Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, js_string};
+use boa_engine::{
+    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, js_string,
+};
 use url::Url;
 
 use crate::esm_resolve::Mode;
@@ -72,7 +74,11 @@ fn invalid(context: &mut Context, message: &str, code: &str) -> JsError {
 }
 
 /// A hook function, or none; anything else is refused.
-fn hook_function(options: &JsValue, name: &str, context: &mut Context) -> JsResult<Option<JsObject>> {
+fn hook_function(
+    options: &JsValue,
+    name: &str,
+    context: &mut Context,
+) -> JsResult<Option<JsObject>> {
     let value = get(options, name, context)?;
     if value.is_undefined() {
         return Ok(None);
@@ -89,7 +95,11 @@ fn hook_function(options: &JsValue, name: &str, context: &mut Context) -> JsResu
 
 /// `registerHooks({ resolve, load })`: adds the hooks to the top of the chain, and answers a
 /// handle whose `deregister()` takes them out again.
-pub(crate) fn register_hooks(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn register_hooks(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let options = arg(args, 0);
     if !options.is_object() {
         return Err(invalid(
@@ -103,7 +113,10 @@ pub(crate) fn register_hooks(_: &JsValue, args: &[JsValue], context: &mut Contex
     let registered = chain(context);
     let id = registered.next_id.get();
     registered.next_id.set(id + 1);
-    registered.hooks.borrow_mut().push(Hook { id, resolve, load });
+    registered
+        .hooks
+        .borrow_mut()
+        .push(Hook { id, resolve, load });
     let handle = object(context);
     let deregister = closure(
         context,
@@ -200,7 +213,11 @@ fn run_resolve(
     if level == 0 {
         return own_resolve(&specifier, &hook_context, base, context);
     }
-    let hook = chain(context).hooks.borrow().get(level - 1).and_then(|h| h.resolve.clone());
+    let hook = chain(context)
+        .hooks
+        .borrow()
+        .get(level - 1)
+        .and_then(|h| h.resolve.clone());
     let Some(hook) = hook else {
         return run_resolve(level - 1, specifier, hook_context, base, context);
     };
@@ -210,7 +227,11 @@ fn run_resolve(
         2,
         |_, args, (level, hook_context, base): &(u32, JsValue, ResolveBase), context| {
             let passed = arg(args, 1);
-            let hook_context = if passed.is_object() { passed } else { hook_context.clone() };
+            let hook_context = if passed.is_object() {
+                passed
+            } else {
+                hook_context.clone()
+            };
             run_resolve(*level as usize, arg(args, 0), hook_context, base, context)
         },
         ((level - 1) as u32, hook_context.clone(), base.clone()),
@@ -305,7 +326,10 @@ pub(crate) fn load(url: &Url, context: &mut Context) -> JsResult<Loaded> {
     if !format.is_string() {
         return Err(invalid(
             context,
-            &format!("Unknown module format: {} for URL {url}", crate::print(&format)),
+            &format!(
+                "Unknown module format: {} for URL {url}",
+                crate::print(&format)
+            ),
             "ERR_UNKNOWN_MODULE_FORMAT",
         ));
     }
@@ -324,7 +348,11 @@ fn source_text(source: &JsValue, context: &mut Context) -> JsResult<Option<Strin
     }
     match crate::encoding::bytes_of(source, context)? {
         Some(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| {
-            invalid(context, "Module source is not UTF-8", "ERR_INVALID_RETURN_PROPERTY_VALUE")
+            invalid(
+                context,
+                "Module source is not UTF-8",
+                "ERR_INVALID_RETURN_PROPERTY_VALUE",
+            )
         }),
         None => Err(invalid(
             context,
@@ -344,7 +372,11 @@ fn run_load(
     if level == 0 {
         return own_load(&url, &hook_context, context);
     }
-    let hook = chain(context).hooks.borrow().get(level - 1).and_then(|h| h.load.clone());
+    let hook = chain(context)
+        .hooks
+        .borrow()
+        .get(level - 1)
+        .and_then(|h| h.load.clone());
     let Some(hook) = hook else {
         return run_load(level - 1, url, hook_context, context);
     };
@@ -354,7 +386,11 @@ fn run_load(
         2,
         |_, args, (level, hook_context): &(u32, JsValue), context| {
             let passed = arg(args, 1);
-            let hook_context = if passed.is_object() { passed } else { hook_context.clone() };
+            let hook_context = if passed.is_object() {
+                passed
+            } else {
+                hook_context.clone()
+            };
             run_load(*level as usize, arg(args, 0), hook_context, context)
         },
         ((level - 1) as u32, hook_context.clone()),
@@ -387,7 +423,12 @@ fn own_load(url: &JsValue, hook_context: &JsValue, context: &mut Context) -> JsR
     let loader = crate::shared(context).esm.clone();
     let loaded = loader.own_load(&url, format, context)?;
     let answer = object(context);
-    answer.set(js_string!("format"), js_text(&loaded.format), false, context)?;
+    answer.set(
+        js_string!("format"),
+        js_text(&loaded.format),
+        false,
+        context,
+    )?;
     let source = loaded.source.as_deref().map_or_else(JsValue::null, js_text);
     answer.set(js_string!("source"), source, false, context)?;
     Ok(answer.into())

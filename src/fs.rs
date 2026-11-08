@@ -13,12 +13,9 @@
 //! to the console. `watch` and `watchFile` answer watchers that never fire — nothing here
 //! watches the disk — and close as they should. Paths are strings, `Buffer`s, or `file:` URLs.
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::fs::{File, Metadata, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, js_string,
@@ -27,9 +24,25 @@ use boa_engine::{
 };
 
 use crate::native::{
-    ClassSpec, arg, array, class, closure, coded_error, function, get, hidden, invoke, js_text,
-    methods, object, settled, text_of,
+    arg, array, closure, coded_error, function, get, hidden, invoke, js_text, methods, object,
+    settled, text_of,
 };
+use crate::vfs::View;
+
+mod classes;
+mod fd;
+mod original;
+mod stat;
+pub(crate) mod sys;
+
+pub(crate) use fd::Handle;
+pub(crate) use original::original_module;
+pub(crate) use sys::{Scope, may_write, may_write_all};
+
+use classes::{make_classes, share_classes};
+use fd::{fd_of, with_fd};
+use original::entry;
+use stat::{DIRENT_DIR, dirent, plain, prototype_of, stats_object};
 
 // ─── Errors ─────────────────────────────────────────────────────────────────────────────────
 
@@ -52,6 +65,7 @@ fn description(code: &str) -> &'static str {
         "ENAMETOOLONG" => "name too long",
         "ELOOP" => "too many symbolic links encountered",
         "EMFILE" => "too many open files",
+        "ENOTSUP" => "operation not supported on socket",
         _ => "i/o error",
     }
 }
@@ -95,6 +109,7 @@ fn code_of(error: &std::io::Error) -> &'static str {
         K::InvalidInput | K::InvalidFilename => "EINVAL",
         K::StorageFull => "ENOSPC",
         K::ResourceBusy => "EBUSY",
+        K::Unsupported => "ENOTSUP",
         _ => "EIO",
     }
 }
@@ -114,8 +129,20 @@ fn fs_error(
     if let Some(dest) = dest {
         message.push_str(&format!(" -> '{dest}'"));
     }
+    error_with_message(context, &message, code, syscall, path, dest)
+}
+
+/// An `fs` error with the words the caller says it in: an overlay's own, or Node's.
+fn error_with_message(
+    context: &mut Context,
+    message: &str,
+    code: &str,
+    syscall: &str,
+    path: Option<&str>,
+    dest: Option<&str>,
+) -> JsError {
     let error = JsNativeError::error()
-        .with_message(message)
+        .with_message(message.to_owned())
         .into_opaque(context);
     let _ = error.set(
         js_string!("errno"),
@@ -134,18 +161,21 @@ fn fs_error(
     JsError::from_opaque(error.into())
 }
 
-fn io_error(context: &mut Context, error: std::io::Error, syscall: &str, path: &str) -> JsError {
-    fs_error(context, code_of(&error), syscall, Some(path), None)
-}
-
-fn io_error2(
+/// An `io::Error` as `fs` throws it: what the overlay makes of it when the path is its own,
+/// else Node's words. `dest` is the other end of a two-path call, as `rename` has one.
+fn io_error(
+    view: &View,
     context: &mut Context,
     error: std::io::Error,
     syscall: &str,
     path: &str,
-    dest: &str,
+    dest: Option<&str>,
 ) -> JsError {
-    fs_error(context, code_of(&error), syscall, Some(path), Some(dest))
+    let code = code_of(&error);
+    if let Some(message) = view.error_message(&error, Path::new(path)) {
+        return error_with_message(context, &message, code, syscall, Some(path), dest);
+    }
+    fs_error(context, code, syscall, Some(path), dest)
 }
 
 /// `ERR_FS_EISDIR`: `rm` or `cp` of a folder without `recursive`.
@@ -238,7 +268,7 @@ fn bytes_in(data: &JsValue, encoding: Option<&str>, context: &mut Context) -> Js
     match encoding {
         None | Some("utf8" | "utf-8" | "UTF-8" | "UTF8") => Ok(text.into_bytes()),
         Some(encoding) => {
-            let buffer = crate::native::global(context, "Buffer")?;
+            let buffer = JsValue::from(crate::native::buffer_class(context)?);
             let made = invoke(
                 &buffer,
                 "from",
@@ -250,9 +280,14 @@ fn bytes_in(data: &JsValue, encoding: Option<&str>, context: &mut Context) -> Js
     }
 }
 
+/// One of `fs`'s operations: what it does with the arguments, read and written through the
+/// `View` the export that made it chose — the realm's layers, or the disk alone for
+/// `original-fs`.
+type Operation = fn(&View, &[JsValue], &mut Context) -> JsResult<JsValue>;
+
 /// How a file is opened, from Node's flags: `'r'`, `'w+'`, `'ax'`… or `O_*` bits.
 #[derive(Clone, Copy, Default)]
-struct Flags {
+pub(crate) struct Flags {
     read: bool,
     write: bool,
     append: bool,
@@ -317,12 +352,12 @@ fn flags_of(value: &JsValue, default: &str, context: &mut Context) -> JsResult<F
 }
 
 /// Throws unless the realm may open `path` as `flags` would: to read it, to write it, or both.
-fn opening(context: &mut Context, path: &str, flags: Flags) -> JsResult<()> {
+fn opening(view: &View, context: &mut Context, path: &str, flags: Flags) -> JsResult<()> {
     if flags.read {
         crate::permission::read(context, path)?;
     }
     if flags.write || flags.append || flags.create || flags.truncate {
-        crate::permission::write(context, path)?;
+        may_write(view, context, path, "open", Scope::Path)?;
     }
     Ok(())
 }
@@ -344,353 +379,34 @@ fn open_with(path: &str, flags: Flags) -> std::io::Result<File> {
     options.open(path)
 }
 
-/// A path with Windows' `\\?\` taken off, as `realpath` and `readlink` answer one.
-fn plain(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        return format!(r"\\{rest}");
-    }
-    text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
-}
-
-// ─── File descriptors ───────────────────────────────────────────────────────────────────────
-
-/// A file `openSync` opened, kept until `closeSync`.
-struct OpenFile {
-    file: File,
-    path: String,
-}
-
-/// The realm's open files, by the number `openSync` answered.
-#[derive(Default)]
-struct Descriptors {
-    next: Cell<i32>,
-    open: RefCell<HashMap<i32, OpenFile>>,
-}
-
-fn descriptors(context: &mut Context) -> Rc<Descriptors> {
-    if let Some(table) = context.get_data::<Rc<Descriptors>>() {
-        return table.clone();
-    }
-    let table = Rc::new(Descriptors {
-        next: Cell::new(20),
-        open: RefCell::new(HashMap::new()),
-    });
-    context.insert_data(table.clone());
-    table
-}
-
-fn fd_of(value: &JsValue, context: &mut Context) -> JsResult<i32> {
-    match value.as_number() {
-        Some(n) if n.fract() == 0. && n >= 0. => Ok(n as i32),
-        _ => Err(coded_error(
-            context,
-            &format!(
-                "The \"fd\" argument must be of type number. Received {}",
-                value.type_of()
-            ),
-            "ERR_INVALID_ARG_TYPE",
-        )),
-    }
-}
-
-/// Runs `f` with the open file `fd`, or throws `EBADF`.
-fn with_fd<R>(
-    context: &mut Context,
-    fd: i32,
-    syscall: &str,
-    f: impl FnOnce(&mut OpenFile) -> std::io::Result<R>,
-) -> JsResult<R> {
-    let table = descriptors(context);
-    let mut open = table.open.borrow_mut();
-    let Some(file) = open.get_mut(&fd) else {
-        drop(open);
-        return Err(fs_error(context, "EBADF", syscall, None, None));
-    };
-    let path = file.path.clone();
-    let outcome = f(file);
-    drop(open);
-    outcome.map_err(|e| io_error(context, e, syscall, &path))
-}
-
-/// Writes to the console what is written to descriptor 1 or 2.
-fn console_write(fd: i32, bytes: &[u8], context: &mut Context) {
-    let text = String::from_utf8_lossy(bytes);
-    let text = text.strip_suffix('\n').unwrap_or(&text);
-    let level = if fd == 2 {
-        crate::Level::Error
-    } else {
-        crate::Level::Log
-    };
-    crate::console_line(context, level, text.to_owned());
-}
-
-// ─── Stats and Dirent ───────────────────────────────────────────────────────────────────────
-
-const S_IFMT: u32 = 0o170000;
-const S_IFREG: u32 = 0o100000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFLNK: u32 = 0o120000;
-const S_IFIFO: u32 = 0o010000;
-const S_IFSOCK: u32 = 0o140000;
-const S_IFCHR: u32 = 0o020000;
-const S_IFBLK: u32 = 0o060000;
-
-fn millis(time: std::io::Result<std::time::SystemTime>) -> f64 {
-    time.ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0., |d| d.as_secs_f64() * 1000.)
-}
-
-/// The numbers of a `Stats`, in the order Node's `Stats` constructor takes them.
-struct StatNumbers {
-    dev: f64,
-    mode: f64,
-    nlink: f64,
-    uid: f64,
-    gid: f64,
-    rdev: f64,
-    blksize: f64,
-    ino: f64,
-    size: f64,
-    blocks: f64,
-    atime: f64,
-    mtime: f64,
-    ctime: f64,
-    birthtime: f64,
-}
-
-#[cfg(unix)]
-fn stat_numbers(meta: &Metadata) -> StatNumbers {
-    use std::os::unix::fs::MetadataExt;
-    StatNumbers {
-        dev: meta.dev() as f64,
-        mode: f64::from(meta.mode()),
-        nlink: meta.nlink() as f64,
-        uid: f64::from(meta.uid()),
-        gid: f64::from(meta.gid()),
-        rdev: meta.rdev() as f64,
-        blksize: meta.blksize() as f64,
-        ino: meta.ino() as f64,
-        size: meta.size() as f64,
-        blocks: meta.blocks() as f64,
-        atime: meta.atime() as f64 * 1000. + meta.atime_nsec() as f64 / 1e6,
-        mtime: meta.mtime() as f64 * 1000. + meta.mtime_nsec() as f64 / 1e6,
-        ctime: meta.ctime() as f64 * 1000. + meta.ctime_nsec() as f64 / 1e6,
-        birthtime: millis(meta.created()).max(0.),
-    }
-}
-
-#[cfg(not(unix))]
-fn stat_numbers(meta: &Metadata) -> StatNumbers {
-    // Windows has no mode: Node makes one of the kind and whether the file is read-only.
-    let kind = if meta.is_symlink() {
-        S_IFLNK
-    } else if meta.is_dir() {
-        S_IFDIR
-    } else {
-        S_IFREG
-    };
-    let permissions = if meta.permissions().readonly() {
-        0o444
-    } else {
-        0o666
-    };
-    let size = meta.len() as f64;
-    StatNumbers {
-        dev: 0.,
-        mode: f64::from(kind | permissions),
-        nlink: 1.,
-        uid: 0.,
-        gid: 0.,
-        rdev: 0.,
-        blksize: 4096.,
-        ino: 0.,
-        size,
-        blocks: (size / 4096.).ceil() * 8.,
-        atime: millis(meta.accessed()),
-        mtime: millis(meta.modified()),
-        ctime: millis(meta.modified()),
-        birthtime: millis(meta.created()),
-    }
-}
-
-fn date(ms: f64, context: &mut Context) -> JsResult<JsValue> {
-    let date = JsDate::new(context);
-    date.set_time(ms, context)?;
-    Ok(date.into())
-}
-
-/// Fills a `Stats` with its numbers, and the dates made of them. With `bigint`, the numbers are
-/// `BigInt`s and the times have nanosecond twins (`mtimeNs`), as `{ bigint: true }` asks.
-fn fill_stats(
-    target: &JsObject,
-    n: &StatNumbers,
-    bigint: bool,
-    context: &mut Context,
-) -> JsResult<()> {
-    let number = |value: f64| -> JsValue {
-        if bigint {
-            boa_engine::JsBigInt::new(value.floor() as i64).into()
-        } else {
-            value.into()
-        }
-    };
-    for (key, value) in [
-        ("dev", n.dev),
-        ("mode", n.mode),
-        ("nlink", n.nlink),
-        ("uid", n.uid),
-        ("gid", n.gid),
-        ("rdev", n.rdev),
-        ("blksize", n.blksize),
-        ("ino", n.ino),
-        ("size", n.size),
-        ("blocks", n.blocks),
-        ("atimeMs", n.atime),
-        ("mtimeMs", n.mtime),
-        ("ctimeMs", n.ctime),
-        ("birthtimeMs", n.birthtime),
-    ] {
-        target.set(JsString::from(key), number(value), false, context)?;
-    }
-    if bigint {
-        for (key, value) in [
-            ("atimeNs", n.atime),
-            ("mtimeNs", n.mtime),
-            ("ctimeNs", n.ctime),
-            ("birthtimeNs", n.birthtime),
-        ] {
-            target.set(
-                JsString::from(key),
-                boa_engine::JsBigInt::new((value * 1e6) as i64),
-                false,
-                context,
-            )?;
-        }
-    }
-    for (key, value) in [
-        ("atime", n.atime),
-        ("mtime", n.mtime),
-        ("ctime", n.ctime),
-        ("birthtime", n.birthtime),
-    ] {
-        let date = date(value, context)?;
-        target.set(JsString::from(key), date, false, context)?;
-    }
-    Ok(())
-}
-
-/// A prototype of one of `fs`'s classes: `fs.Stats.prototype`, `fs.Dirent.prototype`.
-fn prototype_of(class_name: &str, context: &mut Context) -> JsResult<JsObject> {
-    let fs = crate::modules::node_module(context, "fs")?;
-    let class = get(&fs, class_name, context)?;
-    get(&class, "prototype", context)?
-        .as_object()
-        .ok_or_else(|| crate::native::type_error(format!("fs.{class_name} is not a class")))
-}
-
-fn stats_object(meta: &Metadata, bigint: bool, context: &mut Context) -> JsResult<JsValue> {
-    let stats = object(context);
-    stats.set_prototype(Some(prototype_of("Stats", context)?));
-    fill_stats(&stats, &stat_numbers(meta), bigint, context)?;
-    Ok(stats.into())
-}
-
-/// `isFile()` and the rest, of a `Stats`: its `mode`'s kind.
-fn mode_is(this: &JsValue, kind: u32, context: &mut Context) -> JsResult<JsValue> {
-    let mode = get(this, "mode", context)?;
-    let mode = if mode.is_bigint() {
-        mode.to_numeric_number(context)?
-    } else {
-        mode.to_number(context)?
-    };
-    Ok(((mode as u32) & S_IFMT == kind).into())
-}
-
-const STATS_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
-    ("isFile", 0, |this, _, cx| mode_is(this, S_IFREG, cx)),
-    ("isDirectory", 0, |this, _, cx| mode_is(this, S_IFDIR, cx)),
-    ("isSymbolicLink", 0, |this, _, cx| {
-        mode_is(this, S_IFLNK, cx)
-    }),
-    ("isFIFO", 0, |this, _, cx| mode_is(this, S_IFIFO, cx)),
-    ("isSocket", 0, |this, _, cx| mode_is(this, S_IFSOCK, cx)),
-    ("isCharacterDevice", 0, |this, _, cx| {
-        mode_is(this, S_IFCHR, cx)
-    }),
-    ("isBlockDevice", 0, |this, _, cx| mode_is(this, S_IFBLK, cx)),
-];
-
-/// A `Dirent`'s kind, as Node numbers them (`UV_DIRENT_*`).
-const DIRENT_FILE: u32 = 1;
-const DIRENT_DIR: u32 = 2;
-const DIRENT_LINK: u32 = 3;
-
-fn dirent_kind(file_type: std::io::Result<std::fs::FileType>) -> u32 {
-    match file_type {
-        Ok(t) if t.is_symlink() => DIRENT_LINK,
-        Ok(t) if t.is_dir() => DIRENT_DIR,
-        Ok(t) if t.is_file() => DIRENT_FILE,
-        _ => 0,
-    }
-}
-
-fn dirent_is(this: &JsValue, kind: u32, context: &mut Context) -> JsResult<JsValue> {
-    let own = get(this, "__kind", context)?.to_number(context)? as u32;
-    Ok((own == kind).into())
-}
-
-const DIRENT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
-    ("isFile", 0, |this, _, cx| dirent_is(this, DIRENT_FILE, cx)),
-    ("isDirectory", 0, |this, _, cx| {
-        dirent_is(this, DIRENT_DIR, cx)
-    }),
-    ("isSymbolicLink", 0, |this, _, cx| {
-        dirent_is(this, DIRENT_LINK, cx)
-    }),
-    ("isFIFO", 0, |this, _, cx| dirent_is(this, 4, cx)),
-    ("isSocket", 0, |this, _, cx| dirent_is(this, 5, cx)),
-    ("isCharacterDevice", 0, |this, _, cx| dirent_is(this, 6, cx)),
-    ("isBlockDevice", 0, |this, _, cx| dirent_is(this, 7, cx)),
-];
-
-fn dirent(name: JsValue, parent: &str, kind: u32, context: &mut Context) -> JsResult<JsValue> {
-    let entry = object(context);
-    entry.set_prototype(Some(prototype_of("Dirent", context)?));
-    entry.set(js_string!("name"), name, false, context)?;
-    entry.set(js_string!("parentPath"), js_text(parent), false, context)?;
-    entry.set(js_string!("path"), js_text(parent), false, context)?;
-    hidden(&entry, js_string!("__kind"), kind, context)?;
-    Ok(entry.into())
-}
-
 // ─── The operations ─────────────────────────────────────────────────────────────────────────
 
-fn read_file(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn read_file(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let target = arg(args, 0);
     let options = arg(args, 1);
     let encoding = encoding_of(&options, context)?;
     let bytes = if target.is_number() {
         let fd = fd_of(&target, context)?;
-        with_fd(context, fd, "read", |open| {
-            let mut bytes = Vec::new();
-            open.file.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })?
+        with_fd(context, fd, "read", |open| open.handle.read_to_end())?
     } else {
         let path = path_of(&target, "path", context)?;
         crate::permission::read(context, &path)?;
-        if Path::new(&path).is_dir() {
+        if sys::is_dir(view, Path::new(&path)) {
             return Err(fs_error(context, "EISDIR", "read", None, None));
         }
-        std::fs::read(&path).map_err(|e| io_error(context, e, "open", &path))?
+        sys::read(view, Path::new(&path))
+            .map_err(|e| io_error(view, context, e, "open", &path, None))?
     };
     bytes_out(bytes, encoding.as_deref(), context)
 }
 
 /// `writeFile` and `appendFile`, to a path or a descriptor.
-fn write_file(args: &[JsValue], context: &mut Context, append: bool) -> JsResult<JsValue> {
+fn write_file(
+    view: &View,
+    args: &[JsValue],
+    context: &mut Context,
+    append: bool,
+) -> JsResult<JsValue> {
     let target = arg(args, 0);
     let options = arg(args, 2);
     let encoding = encoding_of(&options, context)?;
@@ -698,10 +414,12 @@ fn write_file(args: &[JsValue], context: &mut Context, append: bool) -> JsResult
     if target.is_number() {
         let fd = fd_of(&target, context)?;
         if fd == 1 || fd == 2 {
-            console_write(fd, &bytes, context);
+            fd::console_write(fd, &bytes, context);
             return Ok(JsValue::undefined());
         }
-        with_fd(context, fd, "write", |open| open.file.write_all(&bytes))?;
+        with_fd(context, fd, "write", |open| {
+            open.handle.write_at(&bytes, None)
+        })?;
         return Ok(JsValue::undefined());
     }
     let path = path_of(&target, "path", context)?;
@@ -710,13 +428,18 @@ fn write_file(args: &[JsValue], context: &mut Context, append: bool) -> JsResult
         if append { "a" } else { "w" },
         context,
     )?;
-    opening(context, &path, flags)?;
+    opening(view, context, &path, flags)?;
     let outcome = open_with(&path, flags).and_then(|mut file| file.write_all(&bytes));
-    outcome.map_err(|e| io_error(context, e, "open", &path))?;
+    outcome.map_err(|e| io_error(view, context, e, "open", &path, None))?;
     Ok(JsValue::undefined())
 }
 
-fn stat_at(args: &[JsValue], context: &mut Context, follow: bool) -> JsResult<JsValue> {
+fn stat_at(
+    view: &View,
+    args: &[JsValue],
+    context: &mut Context,
+    follow: bool,
+) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     if follow {
         crate::permission::read(context, &path)?;
@@ -724,12 +447,7 @@ fn stat_at(args: &[JsValue], context: &mut Context, follow: bool) -> JsResult<Js
         crate::permission::read_here(context, &path)?;
     }
     let options = arg(args, 1);
-    let meta = if follow {
-        std::fs::metadata(&path)
-    } else {
-        std::fs::symlink_metadata(&path)
-    };
-    match meta {
+    match sys::stat(view, Path::new(&path), follow) {
         Ok(meta) => stats_object(&meta, flag(&options, "bigint", context)?, context),
         Err(e) => {
             // `{ throwIfNoEntry: false }`: a missing file is `undefined`, not an error.
@@ -739,16 +457,18 @@ fn stat_at(args: &[JsValue], context: &mut Context, follow: bool) -> JsResult<Js
                 return Ok(JsValue::undefined());
             }
             Err(io_error(
+                view,
                 context,
                 e,
                 if follow { "stat" } else { "lstat" },
                 &path,
+                None,
             ))
         }
     }
 }
 
-fn read_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn read_dir(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     crate::permission::read(context, &path)?;
     let options = arg(args, 1);
@@ -769,21 +489,13 @@ fn read_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let mut first = true;
     while !queue.is_empty() {
         let (dir, relative) = queue.remove(0);
-        let entries = match std::fs::read_dir(&dir) {
+        let entries = match sys::read_dir(view, &dir) {
             Ok(entries) => entries,
-            Err(e) if first => return Err(io_error(context, e, "scandir", &path)),
+            Err(e) if first => return Err(io_error(view, context, e, "scandir", &path, None)),
             Err(_) => continue,
         };
         first = false;
-        let mut entries: Vec<(String, u32)> = entries
-            .flatten()
-            .map(|e| {
-                (
-                    e.file_name().to_string_lossy().into_owned(),
-                    dirent_kind(e.file_type()),
-                )
-            })
-            .collect();
+        let mut entries: Vec<(String, u32)> = entries;
         entries.sort();
         let parent = if relative.is_empty() {
             path.clone()
@@ -811,12 +523,12 @@ fn read_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     Ok(array(context, out))
 }
 
-fn make_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn make_dir(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
-    crate::permission::write(context, &path)?;
+    may_write(view, context, &path, "mkdir", Scope::Path)?;
     let options = arg(args, 1);
     if !flag(&options, "recursive", context)? {
-        std::fs::create_dir(&path).map_err(|e| io_error(context, e, "mkdir", &path))?;
+        std::fs::create_dir(&path).map_err(|e| io_error(view, context, e, "mkdir", &path, None))?;
         return Ok(JsValue::undefined());
     }
     // Recursively, the answer is the first folder made — none when all were there.
@@ -824,20 +536,20 @@ fn make_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let mut first = None;
     let mut at = Some(absolute.as_path());
     while let Some(dir) = at {
-        if dir.exists() {
+        if sys::exists(view, dir) {
             break;
         }
         first = Some(dir.to_path_buf());
         at = dir.parent();
     }
-    if Path::new(&path).is_file() {
+    if sys::is_file(view, Path::new(&path)) {
         return Err(fs_error(context, "EEXIST", "mkdir", Some(&path), None));
     }
-    std::fs::create_dir_all(&path).map_err(|e| io_error(context, e, "mkdir", &path))?;
+    std::fs::create_dir_all(&path).map_err(|e| io_error(view, context, e, "mkdir", &path, None))?;
     Ok(first.map_or(JsValue::undefined(), |dir| js_text(&dir.to_string_lossy())))
 }
 
-fn make_temp_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn make_temp_dir(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let prefix = path_arg(args, 0, context)?;
     const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     for _ in 0..100 {
@@ -848,11 +560,20 @@ fn make_temp_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
             .map(|b| LETTERS[*b as usize % LETTERS.len()] as char)
             .collect();
         let path = format!("{prefix}{suffix}");
-        crate::permission::write(context, &path)?;
+        may_write(view, context, &path, "mkdtemp", Scope::Path)?;
         match std::fs::create_dir(&path) {
             Ok(()) => return Ok(js_text(&path)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(io_error(context, e, "mkdtemp", &format!("{prefix}XXXXXX"))),
+            Err(e) => {
+                return Err(io_error(
+                    view,
+                    context,
+                    e,
+                    "mkdtemp",
+                    &format!("{prefix}XXXXXX"),
+                    None,
+                ));
+            }
         }
     }
     Err(fs_error(
@@ -864,7 +585,7 @@ fn make_temp_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     ))
 }
 
-fn remove(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn remove(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     crate::permission::write_here(context, &path)?;
     let options = arg(args, 1);
@@ -872,15 +593,14 @@ fn remove(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         flag(&options, "recursive", context)?,
         flag(&options, "force", context)?,
     );
-    if recursive {
-        crate::permission::write_tree(context, &path)?;
-    }
-    let meta = match std::fs::symlink_metadata(&path) {
+    let scope = if recursive { Scope::Tree } else { Scope::Here };
+    may_write(view, context, &path, "rm", scope)?;
+    let meta = match sys::stat(view, Path::new(&path), false) {
         Ok(meta) => meta,
         Err(e) if force && e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(JsValue::undefined());
         }
-        Err(e) => return Err(io_error(context, e, "lstat", &path)),
+        Err(e) => return Err(io_error(view, context, e, "lstat", &path, None)),
     };
     let outcome = if meta.is_dir() {
         if !recursive {
@@ -890,67 +610,73 @@ fn remove(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     } else {
         std::fs::remove_file(&path)
     };
-    outcome.map_err(|e| io_error(context, e, "rm", &path))?;
+    outcome.map_err(|e| io_error(view, context, e, "rm", &path, None))?;
     Ok(JsValue::undefined())
 }
 
-fn remove_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn remove_dir(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
-    crate::permission::write_here(context, &path)?;
-    let outcome = if flag(&arg(args, 1), "recursive", context)? {
-        crate::permission::write_tree(context, &path)?;
+    let recursive = flag(&arg(args, 1), "recursive", context)?;
+    let scope = if recursive { Scope::Tree } else { Scope::Here };
+    may_write(view, context, &path, "rmdir", scope)?;
+    let outcome = if recursive {
         std::fs::remove_dir_all(&path)
     } else {
         std::fs::remove_dir(&path)
     };
-    outcome.map_err(|e| io_error(context, e, "rmdir", &path))?;
+    outcome.map_err(|e| io_error(view, context, e, "rmdir", &path, None))?;
     Ok(JsValue::undefined())
 }
 
-fn copy_tree(from: &Path, to: &Path, force: bool, error_on_exist: bool) -> std::io::Result<()> {
-    let meta = std::fs::metadata(from)?;
+fn copy_tree(
+    view: &View,
+    from: &Path,
+    to: &Path,
+    force: bool,
+    error_on_exist: bool,
+) -> std::io::Result<()> {
+    let meta = sys::stat(view, from, true)?;
     if meta.is_dir() {
         std::fs::create_dir_all(to)?;
-        for entry in std::fs::read_dir(from)? {
-            let entry = entry?;
+        for (name, _) in sys::read_dir_whole(view, from)? {
             copy_tree(
-                &entry.path(),
-                &to.join(entry.file_name()),
+                view,
+                &from.join(&name),
+                &to.join(&name),
                 force,
                 error_on_exist,
             )?;
         }
         return Ok(());
     }
-    if to.exists() && !force {
+    if sys::exists(view, to) && !force {
         if error_on_exist {
             return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
         }
         return Ok(());
     }
-    std::fs::copy(from, to).map(|_| ())
+    sys::copy(view, from, to)
 }
 
 /// Throws unless every file `cp` would read under `from` is readable and every one it would
 /// write under `to` writable: a link inside the tree is followed, so each is checked where it
 /// leads.
-fn copy_allowed(context: &mut Context, from: &Path, to: &Path) -> JsResult<()> {
+fn copy_allowed(context: &mut Context, view: &View, from: &Path, to: &Path) -> JsResult<()> {
     crate::permission::read(context, from)?;
     crate::permission::write(context, to)?;
-    if from.is_dir()
-        && let Ok(entries) = std::fs::read_dir(from)
-    {
-        for entry in entries.flatten() {
-            copy_allowed(context, &entry.path(), &to.join(entry.file_name()))?;
+    if sys::is_dir(view, from) {
+        for (name, _) in sys::read_dir(view, from).unwrap_or_default() {
+            copy_allowed(context, view, &from.join(&name), &to.join(&name))?;
         }
     }
     Ok(())
 }
 
-fn copy(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn copy(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let from = path_arg(args, 0, context)?;
     let to = path_arg(args, 1, context)?;
-    copy_allowed(context, Path::new(&from), Path::new(&to))?;
+    copy_allowed(context, view, Path::new(&from), Path::new(&to))?;
+    may_write(view, context, &to, "cp", Scope::Path)?;
     let options = arg(args, 2);
     let recursive = flag(&options, "recursive", context)?;
     let force = match option(&options, "force", context)? {
@@ -958,24 +684,31 @@ fn copy(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         f => f.to_boolean(),
     };
     let error_on_exist = flag(&options, "errorOnExist", context)?;
-    if Path::new(&from).is_dir() && !recursive {
+    if sys::is_dir(view, Path::new(&from)) && !recursive {
         return Err(is_dir_error(context, "cp", &from));
     }
-    copy_tree(Path::new(&from), Path::new(&to), force, error_on_exist)
-        .map_err(|e| io_error2(context, e, "cp", &from, &to))?;
+    copy_tree(
+        view,
+        Path::new(&from),
+        Path::new(&to),
+        force,
+        error_on_exist,
+    )
+    .map_err(|e| io_error(view, context, e, "cp", &from, Some(&to)))?;
     Ok(JsValue::undefined())
 }
 
-fn access(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn access(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     let mode = arg(args, 1).as_number().unwrap_or(0.) as i64;
     crate::permission::read(context, &path)?;
     if mode & 2 != 0 {
         crate::permission::write(context, &path)?;
     }
-    let meta = std::fs::metadata(&path).map_err(|e| io_error(context, e, "access", &path))?;
-    if mode & 2 != 0 && meta.permissions().readonly() {
-        return Err(fs_error(context, "EACCES", "access", Some(&path), None));
+    let meta = sys::stat(view, Path::new(&path), true)
+        .map_err(|e| io_error(view, context, e, "access", &path, None))?;
+    if let Some(error) = sys::write_refusal(view, &meta, Path::new(&path), mode & 2 != 0) {
+        return Err(io_error(view, context, error, "access", &path, None));
     }
     Ok(JsValue::undefined())
 }
@@ -1029,18 +762,15 @@ fn set_times(
     )
 }
 
-fn utimes(args: &[JsValue], context: &mut Context, follow: bool) -> JsResult<JsValue> {
+fn utimes(view: &View, args: &[JsValue], context: &mut Context, follow: bool) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
-    if follow {
-        crate::permission::write(context, &path)?;
-    } else {
-        crate::permission::write_here(context, &path)?;
-    }
     let accessed = time_of(&arg(args, 1), context)?;
     let modified = time_of(&arg(args, 2), context)?;
+    let scope = if follow { Scope::Path } else { Scope::Here };
+    may_write(view, context, &path, "utime", scope)?;
     open_for_times(&path)
         .and_then(|file| set_times(&file, accessed, modified))
-        .map_err(|e| io_error(context, e, "utime", &path))?;
+        .map_err(|e| io_error(view, context, e, "utime", &path, None))?;
     Ok(JsValue::undefined())
 }
 
@@ -1069,11 +799,11 @@ fn mode_arg(value: &JsValue, context: &mut Context) -> JsResult<u32> {
     Ok(value.to_number(context)? as u32)
 }
 
-fn symlink(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn symlink(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let target = path_arg(args, 0, context)?;
     let path = path_arg(args, 1, context)?;
     // What the link leads to is checked whenever it is followed; making it is a write here.
-    crate::permission::write_here(context, &path)?;
+    may_write(view, context, &path, "symlink", Scope::Here)?;
     let kind = arg(args, 2);
     let kind = if kind.is_string() {
         text_of(&kind, context)?
@@ -1101,24 +831,21 @@ fn symlink(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let _ = kind;
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     };
-    outcome.map_err(|e| io_error2(context, e, "symlink", &target, &path))?;
+    outcome.map_err(|e| io_error(view, context, e, "symlink", &target, Some(&path)))?;
     Ok(JsValue::undefined())
 }
 
-fn open(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn open(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     let flags = flags_of(&arg(args, 1), "r", context)?;
-    opening(context, &path, flags)?;
+    opening(view, context, &path, flags)?;
     #[cfg(windows)]
-    if flags.read && !flags.write && Path::new(&path).is_dir() {
+    if flags.read && !flags.write && sys::is_dir(view, Path::new(&path)) {
         return Err(fs_error(context, "EISDIR", "open", Some(&path), None));
     }
-    let file = open_with(&path, flags).map_err(|e| io_error(context, e, "open", &path))?;
-    let table = descriptors(context);
-    let fd = table.next.get();
-    table.next.set(fd + 1);
-    table.open.borrow_mut().insert(fd, OpenFile { file, path });
-    Ok(fd.into())
+    let handle = sys::open(view, Path::new(&path), flags)
+        .map_err(|e| io_error(view, context, e, "open", &path, None))?;
+    Ok(fd::take(context, handle, path).into())
 }
 
 /// Where in a view of bytes to read into or write from, with Node's defaults and its checks.
@@ -1191,41 +918,6 @@ fn position_of(value: &JsValue, context: &mut Context) -> JsResult<Option<u64>> 
     Ok(if n < 0. { None } else { Some(n as u64) })
 }
 
-/// Reads at `position` (keeping where the file was), or from where it is.
-fn read_at(file: &mut File, into: &mut [u8], position: Option<u64>) -> std::io::Result<usize> {
-    let Some(position) = position else {
-        return read_full(file, into);
-    };
-    let was = file.stream_position()?;
-    file.seek(SeekFrom::Start(position))?;
-    let read = read_full(file, into);
-    file.seek(SeekFrom::Start(was))?;
-    read
-}
-
-fn read_full(file: &mut File, into: &mut [u8]) -> std::io::Result<usize> {
-    let mut total = 0;
-    while total < into.len() {
-        match file.read(&mut into[total..])? {
-            0 => break,
-            n => total += n,
-        }
-    }
-    Ok(total)
-}
-
-fn write_at(file: &mut File, bytes: &[u8], position: Option<u64>) -> std::io::Result<usize> {
-    let Some(position) = position else {
-        file.write_all(bytes)?;
-        return Ok(bytes.len());
-    };
-    let was = file.stream_position()?;
-    file.seek(SeekFrom::Start(position))?;
-    let written = file.write_all(bytes);
-    file.seek(SeekFrom::Start(was))?;
-    written.map(|()| bytes.len())
-}
-
 /// `readSync(fd, buffer, offset, length, position)`, also with an options object in place of
 /// the last three, or of all four. Answers how many bytes were read, and the buffer.
 fn read(args: &[JsValue], context: &mut Context) -> JsResult<(usize, JsValue)> {
@@ -1262,7 +954,7 @@ fn read(args: &[JsValue], context: &mut Context) -> JsResult<(usize, JsValue)> {
     let position = position_of(&position, context)?;
     let mut bytes = vec![0; length];
     let read = with_fd(context, fd, "read", |open| {
-        read_at(&mut open.file, &mut bytes, position)
+        open.handle.read_into(&mut bytes, position)
     })?;
     write_into(&buffer, offset, &bytes[..read], context)?;
     Ok((read, buffer))
@@ -1311,19 +1003,20 @@ fn write(args: &[JsValue], context: &mut Context) -> JsResult<(usize, JsValue)> 
         ));
     };
     if fd == 1 || fd == 2 {
-        console_write(fd, &bytes, context);
+        fd::console_write(fd, &bytes, context);
         return Ok((bytes.len(), data));
     }
     let written = with_fd(context, fd, "write", |open| {
-        write_at(&mut open.file, &bytes, position)
+        open.handle.write_at(&bytes, position)
     })?;
     Ok((written, data))
 }
 
-fn statfs(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn statfs(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     crate::permission::read(context, &path)?;
-    std::fs::metadata(&path).map_err(|e| io_error(context, e, "statfs", &path))?;
+    sys::stat(view, Path::new(&path), true)
+        .map_err(|e| io_error(view, context, e, "statfs", &path, None))?;
     let out = object(context);
     for (key, value) in [
         ("type", 0.),
@@ -1339,37 +1032,162 @@ fn statfs(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     Ok(out.into())
 }
 
+/// `fs.promises.watch(path)`: an async iterator that never yields — nothing here watches the
+/// disk — and ends when it is asked to.
+fn watched_directory(_: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let watched = path_of(&arg(args, 0), "filename", context)?;
+    crate::permission::read(context, &watched)?;
+    let iterator = object(context);
+    methods(
+        context,
+        &iterator,
+        &[
+            ("next", 0, |_, _, cx| {
+                Ok(JsPromise::new_pending(cx).0.into())
+            }),
+            ("return", 0, |_, _, cx| {
+                let done = object(cx);
+                done.set(js_string!("done"), true, false, cx)?;
+                settled(Ok(done.into()), cx)
+            }),
+        ],
+    )?;
+    let symbol = boa_engine::JsSymbol::async_iterator();
+    let itself = function(context, "[Symbol.asyncIterator]", 0, |this, _, _| {
+        Ok(this.clone())
+    });
+    iterator.set(symbol, itself, false, context)?;
+    Ok(iterator.into())
+}
+
+fn unwatch(_: &View, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+/// `fs.existsSync(path)`, and what `fs.exists` answers asynchronously: a path the realm may not
+/// read does not exist, as far as it can tell.
+fn exists_sync(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(exists(view, args, context)?.into())
+}
+
+fn exists(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<bool> {
+    let Ok(path) = path_of(&arg(args, 0), "path", context) else {
+        return Ok(false);
+    };
+    Ok(crate::permission::read(context, &path).is_ok() && sys::exists(view, Path::new(&path)))
+}
+
+fn exists_callback(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let (callback, rest) = callback_of(args, context)?;
+    let found = exists(view, rest, context)?;
+    crate::microtask(context, callback, vec![found.into()]);
+    Ok(JsValue::undefined())
+}
+
+fn read_sync(_: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(read(args, context)?.0.into())
+}
+
+fn read_callback(_: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let (callback, rest) = callback_of(args, context)?;
+    let callback_args = match read(rest, context) {
+        Ok((n, buffer)) => vec![JsValue::null(), n.into(), buffer],
+        Err(e) => vec![e.into_opaque(context)?],
+    };
+    crate::microtask(context, callback, callback_args);
+    Ok(JsValue::undefined())
+}
+
+fn write_sync(_: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(write(args, context)?.0.into())
+}
+
+fn write_callback(_: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let (callback, rest) = callback_of(args, context)?;
+    let callback_args = match write(rest, context) {
+        Ok((n, data)) => vec![JsValue::null(), n.into(), data],
+        Err(e) => vec![e.into_opaque(context)?],
+    };
+    crate::microtask(context, callback, callback_args);
+    Ok(JsValue::undefined())
+}
+
+fn watch(_: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let watched = path_of(&arg(args, 0), "filename", context)?;
+    crate::permission::read(context, &watched)?;
+    let listener = args.iter().skip(1).find(|a| a.is_callable());
+    watcher(context, "FSWatcher", "change", listener)
+}
+
+fn watch_file(_: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let watched = path_of(&arg(args, 0), "filename", context)?;
+    crate::permission::read(context, &watched)?;
+    let listener = args.iter().skip(1).find(|a| a.is_callable());
+    watcher(context, "StatWatcher", "change", listener)
+}
+
 /// The operations, each as `fs` has it synchronously; the callback and promise forms are made
 /// from these. The last field says whether `fs.promises` has it.
-const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
-    ("readFile", 2, |_, args, cx| read_file(args, cx), true),
+const OPERATIONS: &[(&str, usize, Operation, bool)] = &[
+    (
+        "readFile",
+        2,
+        |view, args, cx| read_file(view, args, cx),
+        true,
+    ),
     (
         "writeFile",
         3,
-        |_, args, cx| write_file(args, cx, false),
+        |view, args, cx| write_file(view, args, cx, false),
         true,
     ),
     (
         "appendFile",
         3,
-        |_, args, cx| write_file(args, cx, true),
+        |view, args, cx| write_file(view, args, cx, true),
         true,
     ),
-    ("stat", 2, |_, args, cx| stat_at(args, cx, true), true),
-    ("lstat", 2, |_, args, cx| stat_at(args, cx, false), true),
-    ("statfs", 2, |_, args, cx| statfs(args, cx), true),
-    ("readdir", 2, |_, args, cx| read_dir(args, cx), true),
-    ("mkdir", 2, |_, args, cx| make_dir(args, cx), true),
-    ("mkdtemp", 2, |_, args, cx| make_temp_dir(args, cx), true),
-    ("rm", 2, |_, args, cx| remove(args, cx), true),
-    ("rmdir", 2, |_, args, cx| remove_dir(args, cx), true),
+    (
+        "stat",
+        2,
+        |view, args, cx| stat_at(view, args, cx, true),
+        true,
+    ),
+    (
+        "lstat",
+        2,
+        |view, args, cx| stat_at(view, args, cx, false),
+        true,
+    ),
+    ("statfs", 2, |view, args, cx| statfs(view, args, cx), true),
+    (
+        "readdir",
+        2,
+        |view, args, cx| read_dir(view, args, cx),
+        true,
+    ),
+    ("mkdir", 2, |view, args, cx| make_dir(view, args, cx), true),
+    (
+        "mkdtemp",
+        2,
+        |view, args, cx| make_temp_dir(view, args, cx),
+        true,
+    ),
+    ("rm", 2, |view, args, cx| remove(view, args, cx), true),
+    (
+        "rmdir",
+        2,
+        |view, args, cx| remove_dir(view, args, cx),
+        true,
+    ),
     (
         "unlink",
         1,
-        |_, args, cx| {
+        |view, args, cx| {
             let path = path_arg(args, 0, cx)?;
-            crate::permission::write_here(cx, &path)?;
-            std::fs::remove_file(&path).map_err(|e| io_error(cx, e, "unlink", &path))?;
+            may_write(view, cx, &path, "unlink", Scope::Here)?;
+            std::fs::remove_file(&path)
+                .map_err(|e| io_error(view, cx, e, "unlink", &path, None))?;
             Ok(JsValue::undefined())
         },
         true,
@@ -1377,12 +1195,17 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
     (
         "rename",
         2,
-        |_, args, cx| {
+        |view, args, cx| {
             let from = path_arg(args, 0, cx)?;
             let to = path_arg(args, 1, cx)?;
-            crate::permission::write_tree(cx, &from)?;
-            crate::permission::write_tree(cx, &to)?;
-            std::fs::rename(&from, &to).map_err(|e| io_error2(cx, e, "rename", &from, &to))?;
+            may_write_all(
+                view,
+                cx,
+                &[(&from, Scope::Tree), (&to, Scope::Tree)],
+                "rename",
+            )?;
+            std::fs::rename(&from, &to)
+                .map_err(|e| io_error(view, cx, e, "rename", &from, Some(&to)))?;
             Ok(JsValue::undefined())
         },
         true,
@@ -1390,30 +1213,31 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
     (
         "copyFile",
         3,
-        |_, args, cx| {
+        |view, args, cx| {
             let from = path_arg(args, 0, cx)?;
             let to = path_arg(args, 1, cx)?;
             let mode = arg(args, 2).as_number().unwrap_or(0.) as i64;
             crate::permission::read(cx, &from)?;
-            crate::permission::write(cx, &to)?;
-            if mode & 1 != 0 && Path::new(&to).exists() {
+            may_write(view, cx, &to, "copyfile", Scope::Path)?;
+            if mode & 1 != 0 && sys::exists(view, Path::new(&to)) {
                 return Err(fs_error(cx, "EEXIST", "copyfile", Some(&from), Some(&to)));
             }
-            std::fs::copy(&from, &to).map_err(|e| io_error2(cx, e, "copyfile", &from, &to))?;
+            sys::copy(view, Path::new(&from), Path::new(&to))
+                .map_err(|e| io_error(view, cx, e, "copyfile", &from, Some(&to)))?;
             Ok(JsValue::undefined())
         },
         true,
     ),
-    ("cp", 3, |_, args, cx| copy(args, cx), true),
-    ("access", 2, |_, args, cx| access(args, cx), true),
+    ("cp", 3, |view, args, cx| copy(view, args, cx), true),
+    ("access", 2, |view, args, cx| access(view, args, cx), true),
     (
         "realpath",
         2,
-        |_, args, cx| {
+        |view, args, cx| {
             let path = path_arg(args, 0, cx)?;
             crate::permission::read(cx, &path)?;
-            let real =
-                std::fs::canonicalize(&path).map_err(|e| io_error(cx, e, "realpath", &path))?;
+            let real = sys::realpath(view, Path::new(&path))
+                .map_err(|e| io_error(view, cx, e, "realpath", &path, None))?;
             bytes_or_text(&plain(&real), &arg(args, 1), cx)
         },
         true,
@@ -1421,28 +1245,33 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
     (
         "readlink",
         2,
-        |_, args, cx| {
+        |view, args, cx| {
             let path = path_arg(args, 0, cx)?;
             crate::permission::read_here(cx, &path)?;
-            let target =
-                std::fs::read_link(&path).map_err(|e| io_error(cx, e, "readlink", &path))?;
+            let target = std::fs::read_link(&path)
+                .map_err(|e| io_error(view, cx, e, "readlink", &path, None))?;
             bytes_or_text(&plain(&target), &arg(args, 1), cx)
         },
         true,
     ),
-    ("symlink", 3, |_, args, cx| symlink(args, cx), true),
+    ("symlink", 3, |view, args, cx| symlink(view, args, cx), true),
     (
         "link",
         2,
-        |_, args, cx| {
+        |view, args, cx| {
             let from = path_arg(args, 0, cx)?;
             let to = path_arg(args, 1, cx)?;
             // The new name reaches the same file: whoever may use it must already have been
             // allowed to read and write the file.
             crate::permission::read(cx, &from)?;
-            crate::permission::write(cx, &from)?;
-            crate::permission::write_here(cx, &to)?;
-            std::fs::hard_link(&from, &to).map_err(|e| io_error2(cx, e, "link", &from, &to))?;
+            may_write_all(
+                view,
+                cx,
+                &[(&from, Scope::Path), (&to, Scope::Here)],
+                "link",
+            )?;
+            std::fs::hard_link(&from, &to)
+                .map_err(|e| io_error(view, cx, e, "link", &from, Some(&to)))?;
             Ok(JsValue::undefined())
         },
         true,
@@ -1450,29 +1279,39 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
     (
         "truncate",
         2,
-        |_, args, cx| {
+        |view, args, cx| {
             let path = path_arg(args, 0, cx)?;
             let length = arg(args, 1).as_number().unwrap_or(0.).max(0.) as u64;
-            crate::permission::write(cx, &path)?;
+            may_write(view, cx, &path, "open", Scope::Path)?;
             OpenOptions::new()
                 .write(true)
                 .open(&path)
                 .and_then(|f| f.set_len(length))
-                .map_err(|e| io_error(cx, e, "open", &path))?;
+                .map_err(|e| io_error(view, cx, e, "open", &path, None))?;
             Ok(JsValue::undefined())
         },
         true,
     ),
-    ("utimes", 3, |_, args, cx| utimes(args, cx, true), true),
-    ("lutimes", 3, |_, args, cx| utimes(args, cx, false), true),
+    (
+        "utimes",
+        3,
+        |view, args, cx| utimes(view, args, cx, true),
+        true,
+    ),
+    (
+        "lutimes",
+        3,
+        |view, args, cx| utimes(view, args, cx, false),
+        true,
+    ),
     (
         "chmod",
         2,
-        |_, args, cx| {
+        |view, args, cx| {
             let path = path_arg(args, 0, cx)?;
             let mode = mode_arg(&arg(args, 1), cx)?;
-            crate::permission::write(cx, &path)?;
-            chmod_path(&path, mode).map_err(|e| io_error(cx, e, "chmod", &path))?;
+            may_write(view, cx, &path, "chmod", Scope::Path)?;
+            chmod_path(&path, mode).map_err(|e| io_error(view, cx, e, "chmod", &path, None))?;
             Ok(JsValue::undefined())
         },
         true,
@@ -1481,10 +1320,11 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         "chown",
         3,
         // Ownership is not this runtime's to change: the file must be there, and stays as it is.
-        |_, args, cx| {
+        |view, args, cx| {
             let path = path_arg(args, 0, cx)?;
-            crate::permission::write(cx, &path)?;
-            std::fs::metadata(&path).map_err(|e| io_error(cx, e, "chown", &path))?;
+            may_write(view, cx, &path, "chown", Scope::Path)?;
+            sys::stat(view, Path::new(&path), true)
+                .map_err(|e| io_error(view, cx, e, "chown", &path, None))?;
             Ok(JsValue::undefined())
         },
         true,
@@ -1492,23 +1332,22 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
     (
         "lchown",
         3,
-        |_, args, cx| {
+        |view, args, cx| {
             let path = path_arg(args, 0, cx)?;
-            crate::permission::write_here(cx, &path)?;
-            std::fs::symlink_metadata(&path).map_err(|e| io_error(cx, e, "lchown", &path))?;
+            may_write(view, cx, &path, "lchown", Scope::Here)?;
+            sys::stat(view, Path::new(&path), false)
+                .map_err(|e| io_error(view, cx, e, "lchown", &path, None))?;
             Ok(JsValue::undefined())
         },
         true,
     ),
-    ("open", 3, |_, args, cx| open(args, cx), false),
+    ("open", 3, |view, args, cx| open(view, args, cx), false),
     (
         "close",
         1,
         |_, args, cx| {
             let fd = fd_of(&arg(args, 0), cx)?;
-            if descriptors(cx).open.borrow_mut().remove(&fd).is_none() {
-                return Err(fs_error(cx, "EBADF", "close", None, None));
-            }
+            fd::close(cx, fd)?;
             Ok(JsValue::undefined())
         },
         false,
@@ -1518,7 +1357,7 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         2,
         |_, args, cx| {
             let fd = fd_of(&arg(args, 0), cx)?;
-            let meta = with_fd(cx, fd, "fstat", |open| open.file.metadata())?;
+            let meta = with_fd(cx, fd, "fstat", |open| open.handle.metadata())?;
             stats_object(&meta, flag(&arg(args, 1), "bigint", cx)?, cx)
         },
         false,
@@ -1528,7 +1367,7 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         1,
         |_, args, cx| {
             let fd = fd_of(&arg(args, 0), cx)?;
-            with_fd(cx, fd, "fsync", |open| open.file.sync_all())?;
+            with_fd(cx, fd, "fsync", |open| open.handle.sync())?;
             Ok(JsValue::undefined())
         },
         false,
@@ -1538,7 +1377,7 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         1,
         |_, args, cx| {
             let fd = fd_of(&arg(args, 0), cx)?;
-            with_fd(cx, fd, "fdatasync", |open| open.file.sync_data())?;
+            with_fd(cx, fd, "fdatasync", |open| open.handle.sync_data())?;
             Ok(JsValue::undefined())
         },
         false,
@@ -1549,7 +1388,7 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         |_, args, cx| {
             let fd = fd_of(&arg(args, 0), cx)?;
             let length = arg(args, 1).as_number().unwrap_or(0.).max(0.) as u64;
-            with_fd(cx, fd, "ftruncate", |open| open.file.set_len(length))?;
+            with_fd(cx, fd, "ftruncate", |open| open.handle.set_len(length))?;
             Ok(JsValue::undefined())
         },
         false,
@@ -1561,8 +1400,9 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
             let fd = fd_of(&arg(args, 0), cx)?;
             let accessed = time_of(&arg(args, 1), cx)?;
             let modified = time_of(&arg(args, 2), cx)?;
-            with_fd(cx, fd, "futime", |open| {
-                set_times(&open.file, accessed, modified)
+            with_fd(cx, fd, "futime", |open| match &mut open.handle {
+                Handle::Disk(file) => set_times(file, accessed, modified),
+                Handle::Overlay { .. } => Ok(()),
             })?;
             Ok(JsValue::undefined())
         },
@@ -1571,11 +1411,16 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
     (
         "fchmod",
         2,
-        |_, args, cx| {
+        |view, args, cx| {
             let fd = fd_of(&arg(args, 0), cx)?;
             let mode = mode_arg(&arg(args, 1), cx)?;
-            let path = with_fd(cx, fd, "fchmod", |open| Ok(open.path.clone()))?;
-            chmod_path(&path, mode).map_err(|e| io_error(cx, e, "fchmod", &path))?;
+            let (virtually, path) = with_fd(cx, fd, "fchmod", |open| {
+                Ok((open.handle.is_overlay(), open.path.clone()))
+            })?;
+            if !virtually {
+                chmod_path(&path, mode)
+                    .map_err(|e| io_error(view, cx, e, "fchmod", &path, None))?;
+            }
             Ok(JsValue::undefined())
         },
         false,
@@ -1590,7 +1435,12 @@ const OPERATIONS: &[(&str, usize, NativeFunctionPointer, bool)] = &[
         },
         false,
     ),
-    ("opendir", 2, |_, args, cx| open_dir(args, cx), true),
+    (
+        "opendir",
+        2,
+        |view, args, cx| open_dir(view, args, cx),
+        true,
+    ),
 ];
 
 /// A path answered as text, or as a `Buffer` when `{ encoding: 'buffer' }` asks.
@@ -1604,12 +1454,12 @@ fn bytes_or_text(path: &str, options: &JsValue, context: &mut Context) -> JsResu
 // ─── Dir ────────────────────────────────────────────────────────────────────────────────────
 
 /// `opendirSync(path)`: a `Dir`, its entries read when it is opened and handed out one at a time.
-fn open_dir(args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn open_dir(view: &View, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = path_arg(args, 0, context)?;
     crate::permission::read(context, &path)?;
     let options = object(context);
     options.set(js_string!("withFileTypes"), true, false, context)?;
-    let entries = read_dir(&[js_text(&path), options.into()], context)?;
+    let entries = read_dir(view, &[js_text(&path), options.into()], context)?;
     let dir = object(context);
     dir.set_prototype(Some(prototype_of("Dir", context)?));
     dir.set(js_string!("path"), js_text(&path), false, context)?;
@@ -1628,7 +1478,7 @@ fn dir_next(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
     Ok(entries.get(at).cloned().unwrap_or(JsValue::null()))
 }
 
-const DIR_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
+pub(super) const DIR_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("readSync", 0, |this, _, cx| dir_next(this, cx)),
     ("read", 1, |this, args, cx| {
         let next = dir_next(this, cx);
@@ -1676,13 +1526,13 @@ const DIR_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
 
 // ─── Watchers ───────────────────────────────────────────────────────────────────────────────
 
-fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
+pub(super) fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
     crate::modules::node_module(context, "events")?
         .as_object()
         .ok_or_else(|| crate::native::type_error("EventEmitter is not a class"))
 }
 
-const WATCHER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
+pub(super) const WATCHER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("close", 0, |this, _, cx| {
         let Some(watcher) = this.as_object() else {
             return Ok(JsValue::undefined());
@@ -1751,7 +1601,7 @@ fn handle_op(
     settled(outcome, context)
 }
 
-const FILE_HANDLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
+pub(super) const FILE_HANDLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("read", 4, |this, args, cx| {
         let outcome = (|| {
             let fd = handle_fd(this, cx)?;
@@ -1873,18 +1723,49 @@ fn with_callback(
     Ok(JsValue::undefined())
 }
 
-fn class_on(context: &mut Context, fs: &JsObject, spec: ClassSpec<'_>) -> JsResult<JsObject> {
-    let name = spec.name.to_owned();
-    let (class, prototype) = class(context, spec)?;
-    fs.set(JsString::from(name.as_str()), class, false, context)?;
-    Ok(prototype)
-}
-
-pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
+/// `fs` and `original-fs`, made by one table: the same exports, the second's reading the disk
+/// alone. `fs`'s maker is [`module`], `original-fs`'s is [`original::original_module`].
+pub(crate) fn build(context: &mut Context, original: bool) -> JsResult<JsValue> {
     let fs = object(context);
     let promises = object(context);
+    table_exports(context, original, &fs, &promises)?;
+    other_exports(context, original, &fs, &promises)?;
+    if original {
+        // One set of classes for both modules, so `original.statSync(x) instanceof fs.Stats`.
+        share_classes(context, &fs)?;
+    } else {
+        make_classes(context, &fs)?;
+    }
+    let file_handle = fs.get(js_string!("FileHandle"), context)?;
+    promises.set(js_string!("FileHandle"), file_handle, false, context)?;
+
+    let constants = crate::os::constants_object(context, crate::os::FS_CONSTANTS)?;
+    fs.set(js_string!("constants"), constants.clone(), false, context)?;
+    promises.set(js_string!("constants"), constants, false, context)?;
+    for (name, value) in [("F_OK", 0), ("R_OK", 4), ("W_OK", 2), ("X_OK", 1)] {
+        fs.set(JsString::from(name), value, false, context)?;
+    }
+    fs.set(js_string!("promises"), promises, false, context)?;
+    stream_exports(context, original, &fs)?;
+    Ok(fs.into())
+}
+
+/// Each of [`OPERATIONS`] as `xSync`, `x` with a callback and, where it has one, `promises.x`.
+fn table_exports(
+    context: &mut Context,
+    original: bool,
+    fs: &JsObject,
+    promises: &JsObject,
+) -> JsResult<()> {
     for (name, length, operation, in_promises) in OPERATIONS {
-        let op: JsValue = function(context, &format!("{name}Sync"), *length, *operation).into();
+        let op = entry(
+            context,
+            original,
+            &format!("{name}Sync"),
+            *length,
+            *operation,
+        );
+        let op: JsValue = op.into();
         fs.set(
             JsString::from(format!("{name}Sync")),
             op.clone(),
@@ -1906,70 +1787,35 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
         }
     }
 
-    // What does not fit the pattern: `exists`, `read` and `write`, `open` as a promise.
-    crate::native::exports(
-        context,
-        &fs,
-        &[
-            // A path the realm may not read does not exist, as far as it can tell.
-            ("existsSync", 1, |_, args, cx| {
-                Ok(match path_of(&arg(args, 0), "path", cx) {
-                    Ok(path) => {
-                        crate::permission::read(cx, &path).is_ok() && Path::new(&path).exists()
-                    }
-                    Err(_) => false,
-                }
-                .into())
-            }),
-            ("exists", 2, |_, args, cx| {
-                let (callback, rest) = callback_of(args, cx)?;
-                let exists = match path_of(&arg(rest, 0), "path", cx) {
-                    Ok(path) => {
-                        crate::permission::read(cx, &path).is_ok() && Path::new(&path).exists()
-                    }
-                    Err(_) => false,
-                };
-                crate::microtask(cx, callback, vec![exists.into()]);
-                Ok(JsValue::undefined())
-            }),
-            ("readSync", 5, |_, args, cx| Ok(read(args, cx)?.0.into())),
-            ("read", 6, |_, args, cx| {
-                let (callback, rest) = callback_of(args, cx)?;
-                let callback_args = match read(rest, cx) {
-                    Ok((n, buffer)) => vec![JsValue::null(), n.into(), buffer],
-                    Err(e) => vec![e.into_opaque(cx)?],
-                };
-                crate::microtask(cx, callback, callback_args);
-                Ok(JsValue::undefined())
-            }),
-            ("writeSync", 5, |_, args, cx| Ok(write(args, cx)?.0.into())),
-            ("write", 6, |_, args, cx| {
-                let (callback, rest) = callback_of(args, cx)?;
-                let callback_args = match write(rest, cx) {
-                    Ok((n, data)) => vec![JsValue::null(), n.into(), data],
-                    Err(e) => vec![e.into_opaque(cx)?],
-                };
-                crate::microtask(cx, callback, callback_args);
-                Ok(JsValue::undefined())
-            }),
-            ("watch", 3, |_, args, cx| {
-                let watched = path_of(&arg(args, 0), "filename", cx)?;
-                crate::permission::read(cx, &watched)?;
-                let listener = args.iter().skip(1).find(|a| a.is_callable());
-                watcher(cx, "FSWatcher", "change", listener)
-            }),
-            ("watchFile", 3, |_, args, cx| {
-                let watched = path_of(&arg(args, 0), "filename", cx)?;
-                crate::permission::read(cx, &watched)?;
-                let listener = args.iter().skip(1).find(|a| a.is_callable());
-                watcher(cx, "StatWatcher", "change", listener)
-            }),
-            ("unwatchFile", 2, |_, _, _| Ok(JsValue::undefined())),
-        ],
-    )?;
-    let open_handle = function(context, "open", 3, |_, args, cx| {
+    Ok(())
+}
+
+/// What does not fit the table's pattern.
+fn other_exports(
+    context: &mut Context,
+    original: bool,
+    fs: &JsObject,
+    promises: &JsObject,
+) -> JsResult<()> {
+    // `exists`, `read` and `write`, and `open` as a promise.
+    for (name, length, operation) in [
+        // A path the realm may not read does not exist, as far as it can tell.
+        ("existsSync", 1, exists_sync as Operation),
+        ("exists", 2, exists_callback),
+        ("readSync", 5, read_sync),
+        ("read", 6, read_callback),
+        ("writeSync", 5, write_sync),
+        ("write", 6, write_callback),
+        ("watch", 3, watch),
+        ("watchFile", 3, watch_file),
+        ("unwatchFile", 2, unwatch),
+    ] {
+        let found = entry(context, original, name, length, operation);
+        fs.set(JsString::from(name), found, false, context)?;
+    }
+    let open_handle = entry(context, original, "open", 3, |view, args, cx| {
         let outcome = (|| {
-            let fd = open(args, cx)?;
+            let fd = open(view, args, cx)?;
             let fs = crate::modules::node_module(cx, "fs")?;
             let class = get(&fs, "FileHandle", cx)?;
             let class = class
@@ -1980,179 +1826,42 @@ pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
         settled(outcome, cx)
     });
     promises.set(js_string!("open"), open_handle, false, context)?;
-    let watch = function(context, "watch", 2, |_, args, cx| {
-        let watched = path_of(&arg(args, 0), "filename", cx)?;
-        crate::permission::read(cx, &watched)?;
-        // An async iterator that never yields: nothing here watches the disk.
-        let iterator = object(cx);
-        methods(
-            cx,
-            &iterator,
-            &[
-                ("next", 0, |_, _, cx| {
-                    Ok(JsPromise::new_pending(cx).0.into())
-                }),
-                ("return", 0, |_, _, cx| {
-                    let done = object(cx);
-                    done.set(js_string!("done"), true, false, cx)?;
-                    settled(Ok(done.into()), cx)
-                }),
-            ],
-        )?;
-        let symbol = boa_engine::JsSymbol::async_iterator();
-        let itself = function(cx, "[Symbol.asyncIterator]", 0, |this, _, _| {
-            Ok(this.clone())
-        });
-        iterator.set(symbol, itself, false, cx)?;
-        Ok(iterator.into())
-    });
+    let watch = entry(context, original, "watch", 2, watched_directory);
     promises.set(js_string!("watch"), watch, false, context)?;
 
-    // The classes.
-    class_on(
-        context,
-        &fs,
-        ClassSpec {
-            name: "Stats",
-            length: 14,
-            init: |this, args, cx| {
-                let n = |at: usize, cx: &mut Context| -> JsResult<f64> {
-                    let v = arg(args, at);
-                    Ok(if v.is_undefined() {
-                        0.
-                    } else {
-                        v.to_number(cx)?
-                    })
-                };
-                let numbers = StatNumbers {
-                    dev: n(0, cx)?,
-                    mode: n(1, cx)?,
-                    nlink: n(2, cx)?,
-                    uid: n(3, cx)?,
-                    gid: n(4, cx)?,
-                    rdev: n(5, cx)?,
-                    blksize: n(6, cx)?,
-                    ino: n(7, cx)?,
-                    size: n(8, cx)?,
-                    blocks: n(9, cx)?,
-                    atime: n(10, cx)?,
-                    mtime: n(11, cx)?,
-                    ctime: n(12, cx)?,
-                    birthtime: n(13, cx)?,
-                };
-                fill_stats(this, &numbers, false, cx)
-            },
-            methods: STATS_METHODS,
-            ..ClassSpec::default()
-        },
-    )?;
-    class_on(
-        context,
-        &fs,
-        ClassSpec {
-            name: "Dirent",
-            length: 3,
-            init: |this, args, cx| {
-                this.set(js_string!("name"), arg(args, 0), false, cx)?;
-                let kind = arg(args, 1);
-                hidden(
-                    this,
-                    js_string!("__kind"),
-                    if kind.is_undefined() { 0.into() } else { kind },
-                    cx,
-                )?;
-                this.set(js_string!("parentPath"), arg(args, 2), false, cx)?;
-                this.set(js_string!("path"), arg(args, 2), false, cx)?;
-                Ok(())
-            },
-            methods: DIRENT_METHODS,
-            ..ClassSpec::default()
-        },
-    )?;
-    let dir_prototype = class_on(
-        context,
-        &fs,
-        ClassSpec {
-            name: "Dir",
-            methods: DIR_METHODS,
-            ..ClassSpec::default()
-        },
-    )?;
-    let symbol = boa_engine::JsSymbol::async_iterator();
-    let itself = function(context, "[Symbol.asyncIterator]", 0, |this, _, _| {
-        Ok(this.clone())
-    });
-    dir_prototype.set(symbol, itself, false, context)?;
-    let emitter = emitter_class(context)?;
-    for name in ["FSWatcher", "StatWatcher"] {
-        class_on(
-            context,
-            &fs,
-            ClassSpec {
-                name,
-                parent: Some(&emitter),
-                init: emitter_init,
-                methods: WATCHER_METHODS,
-                ..ClassSpec::default()
-            },
-        )?;
-    }
-    let handle_prototype = class_on(
-        context,
-        &fs,
-        ClassSpec {
-            name: "FileHandle",
-            length: 1,
-            init: |this, args, cx| {
-                emitter_init(this, &[], cx)?;
-                this.set(js_string!("fd"), arg(args, 0), false, cx)
-                    .map(|_| ())
-            },
-            parent: Some(&emitter),
-            methods: FILE_HANDLE_METHODS,
-            ..ClassSpec::default()
-        },
-    )?;
-    let close = handle_prototype.get(js_string!("close"), context)?;
-    // `await using handle = …`: closed when the block ends, where `Symbol.asyncDispose` exists.
-    let symbol_class = context.intrinsics().constructors().symbol().constructor();
-    let async_dispose = symbol_class.get(js_string!("asyncDispose"), context)?;
-    if let Some(symbol) = async_dispose.as_symbol() {
-        hidden(&handle_prototype, symbol, close, context)?;
-    }
-    let file_handle = fs.get(js_string!("FileHandle"), context)?;
-    promises.set(js_string!("FileHandle"), file_handle, false, context)?;
+    Ok(())
+}
 
-    let constants = crate::os::constants_object(context, crate::os::FS_CONSTANTS)?;
-    fs.set(js_string!("constants"), constants.clone(), false, context)?;
-    promises.set(js_string!("constants"), constants, false, context)?;
-    for (name, value) in [("F_OK", 0), ("R_OK", 4), ("W_OK", 2), ("X_OK", 1)] {
-        fs.set(JsString::from(name), value, false, context)?;
+/// The file streams are the `stream` module's `Readable` and `Writable`, made when first used:
+/// requiring `fs` does not make the stream classes.
+fn stream_exports(context: &mut Context, original: bool, fs: &JsObject) -> JsResult<()> {
+    for (name, operation) in [
+        (
+            "createReadStream",
+            (|view, args, cx| crate::stream::create_read_stream(view, cx, args)) as Operation,
+        ),
+        (
+            "createWriteStream",
+            (|view, args, cx| crate::stream::create_write_stream(view, cx, args)) as Operation,
+        ),
+    ] {
+        let found = entry(context, original, name, 2, operation);
+        fs.set(JsString::from(name), found, false, context)?;
     }
-    fs.set(js_string!("promises"), promises, false, context)?;
-    // The file streams are the `stream` module's `Readable` and `Writable`, made when first
-    // used: requiring `fs` does not make the stream classes.
-    crate::native::exports(
-        context,
-        &fs,
-        &[
-            ("createReadStream", 2, |_, args, cx| {
-                crate::stream::create_read_stream(cx, args)
-            }),
-            ("createWriteStream", 2, |_, args, cx| {
-                crate::stream::create_write_stream(cx, args)
-            }),
-        ],
-    )?;
     crate::native::accessors(
         context,
-        &fs,
+        fs,
         &[
             ("ReadStream", |_, _, cx| stream_class(cx, "Readable"), None),
             ("WriteStream", |_, _, cx| stream_class(cx, "Writable"), None),
         ],
     )?;
-    Ok(fs.into())
+    Ok(())
+}
+
+/// `require('fs')`.
+pub(crate) fn module(context: &mut Context, _: &str) -> JsResult<JsValue> {
+    build(context, false)
 }
 
 /// `fs.ReadStream` and `fs.WriteStream`: the `stream` classes the file streams are made of.
@@ -2162,7 +1871,7 @@ fn stream_class(context: &mut Context, name: &str) -> JsResult<JsValue> {
 }
 
 /// The `EventEmitter` part of a watcher or a handle, set up as `EventEmitter.call(this)` would.
-fn emitter_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResult<()> {
+pub(super) fn emitter_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResult<()> {
     let emitter = emitter_class(context)?;
     crate::call(context, &emitter.into(), &this.clone().into(), &[])?;
     Ok(())

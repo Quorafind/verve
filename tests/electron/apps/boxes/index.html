@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Boxes</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #f4f4f4; }
+  div { box-sizing: border-box; }
+  #stage { position: relative; width: 400px; height: 300px; overflow: hidden; }
+  #stage > div { position: absolute; }
+  #plain { left: 10px; top: 10px; width: 80px; height: 60px; background: #e53935; }
+  #bordered { left: 100px; top: 10px; width: 80px; height: 60px; background: #1e88e5; border: 6px solid #0d47a1; }
+  #round { left: 190px; top: 10px; width: 80px; height: 60px; background: #43a047; border-radius: 16px; }
+  #linear { left: 280px; top: 10px; width: 110px; height: 60px; background: linear-gradient(90deg, #ff7043, #ffee58); }
+  #under { left: 10px; top: 80px; width: 100px; height: 60px; background: #5e35b1; }
+  #over { left: 60px; top: 100px; width: 100px; height: 60px; background: #ffb300; opacity: 0.5; }
+  #low { left: 180px; top: 80px; width: 70px; height: 70px; background: #00897b; z-index: 1; }
+  #high { left: 210px; top: 100px; width: 70px; height: 70px; background: #d81b60; z-index: 2; }
+  #behind { left: 195px; top: 90px; width: 40px; height: 90px; background: #3949ab; z-index: 0; }
+  #shadow { left: 300px; top: 90px; width: 70px; height: 50px; background: #fff; box-shadow: 4px 4px 8px rgba(0, 0, 0, 0.5); }
+  #flex { left: 10px; top: 180px; width: 200px; height: 50px; display: flex; gap: 8px; background: #cfd8dc; padding: 5px; }
+  #flex > i { display: block; height: 100%; background: #546e7a; }
+  #flex > i:nth-child(1) { width: 30px; }
+  #flex > i:nth-child(2) { flex: 1; background: #26a69a; }
+  #flex > i:nth-child(3) { width: 50px; align-self: flex-end; height: 50%; }
+  #grid { left: 220px; top: 180px; width: 170px; height: 50px; display: grid; grid-template-columns: 40px 1fr; gap: 4px; background: #cfd8dc; }
+  #grid > i { display: block; background: #8d6e63; }
+  #grid > i:nth-child(2) { background: #ef5350; }
+  #clip { left: 10px; top: 240px; width: 100px; height: 50px; overflow: hidden; background: #eceff1; border: 2px solid #37474f; }
+  #clip > i { display: block; position: absolute; left: 60px; top: -10px; width: 100px; height: 100px; background: #f57c00; }
+  #radial { left: 130px; top: 240px; width: 80px; height: 50px; background: radial-gradient(circle at 50% 50%, #ffffff, #000000); }
+  #pill { left: 230px; top: 240px; width: 160px; height: 50px; background: #6d4c41; border: 4px solid #ffcc80; border-radius: 25px; }
+</style>
+<div id="stage">
+  <div id="plain"></div>
+  <div id="bordered"></div>
+  <div id="round"></div>
+  <div id="linear"></div>
+  <div id="under"></div>
+  <div id="over"></div>
+  <!-- z-index 2, 0, 1: the markup order is not the stacking order -->
+  <div id="high"></div>
+  <div id="behind"></div>
+  <div id="low"></div>
+  <div id="shadow"></div>
+  <div id="flex"><i></i><i></i><i></i></div>
+  <div id="grid"><i></i><i></i></div>
+  <div id="clip"><i></i></div>
+  <div id="radial"></div>
+  <div id="pill"></div>
+</div>

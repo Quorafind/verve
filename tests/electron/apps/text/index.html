@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>text</title>
+<style>
+  html { overflow: hidden; }
+  body { margin: 0; padding: 16px; width: 608px; font: 14px/1.5 'Segoe UI', 'Microsoft YaHei UI', sans-serif; color: #222; }
+  h1 { font: 600 24px/1.25 'Segoe UI', 'Microsoft YaHei UI', sans-serif; margin: 0 0 12px; }
+  h2 { font: 600 18px/1.3 'Segoe UI', 'Microsoft YaHei UI', sans-serif; margin: 16px 0 8px; }
+  p { margin: 0 0 10px; }
+  ul { margin: 0 0 10px; padding-left: 24px; }
+  pre { font: 13px/1.4 Consolas, monospace; background: #f4f4f4; padding: 8px; margin: 0 0 10px; }
+  code { font: 13px Consolas, monospace; background: #eee; padding: 0 3px; border-radius: 3px; }
+  a { color: #06c; }
+  .normal { line-height: normal; }
+  .rtl { direction: rtl; }
+  .just { text-align: justify; }
+</style>
+</head>
+<body>
+<h1 data-m="h1">Inline text in Verve</h1>
+<p data-m="p-short">A short paragraph of plain Latin text that fits on one line.</p>
+<h2 data-m="h2">Wrapping and mixed scripts</h2>
+<p data-m="p-long">The quick brown fox jumps over the lazy dog, and then keeps running through a field of text that is long enough to wrap onto several lines in a column six hundred and eight pixels wide, so that the line breaker has real work to do. A second sentence follows to make the paragraph a little longer still.</p>
+<p data-m="p-mixed">中文和 English 混排：这一段把汉字、Latin letters 和数字 12345 放在一起，检查换行位置、行高以及中英文之间的间距是否和浏览器一致。继续写一些中文，让它至少折成两行，再加一点 English words at the end.</p>
+<p data-m="p-normal" class="normal">A paragraph with line-height normal: Hello 世界, the line is as high as the font says it is.</p>
+<p data-m="p-just" class="just">Justified text spreads the extra space of every line except the last over its spaces, so this paragraph needs to be long enough to have at least three lines and the last one shorter than the rest of them, which is what this sentence is for.</p>
+<h2 data-m="h2-list">A list and some inline boxes</h2>
+<ul>
+  <li data-m="li-1">The first item of the list</li>
+  <li data-m="li-2">The second item has <code data-m="code">inline code</code> and a <a data-m="link" href="https://example.com/">link that is long enough to wrap across the end of the line</a> in it.</li>
+  <li data-m="li-3">第三项是一段中文，长度足够让它在列表项里折行，看看行高是不是一样。</li>
+</ul>
+<pre data-m="pre">function add(a, b) {
+  return a + b;   // a code block
+}</pre>
+<p data-m="p-rtl" class="rtl">هذه فقرة باللغة العربية تُكتب من اليمين إلى اليسار وتمتد على أكثر من سطر واحد حتى نرى كيف يتم كسر الأسطر في كتلة اتجاهها من اليمين إلى اليسار.</p>
+<p data-m="p-sub">Water is H<sub>2</sub>O and E = mc<sup>2</sup>, with <b>bold</b>, <i>italic</i> and <span style="font-size:20px">bigger</span> text in one line.</p>
+<script src="lines.js"></script>
+</body>
+</html>

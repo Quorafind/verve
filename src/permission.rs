@@ -92,6 +92,8 @@ impl Permissions {
         }
     }
 
+    /// Whether a connection to `host` on `port` is permitted: some outbound rule names both,
+    /// or leaves either open.
     pub fn allows_outbound(&self, host: &str, port: u16) -> bool {
         self.outbound.iter().any(|rule| {
             rule.port.is_none_or(|p| p == port)
@@ -102,6 +104,7 @@ impl Permissions {
         })
     }
 
+    /// Whether the realm may listen on `address`, by the listen policy (any, loopback only, none).
     pub fn allows_listen(&self, address: std::net::IpAddr) -> bool {
         self.listen == ListenPermission::Any
             || (self.listen == ListenPermission::Loopback && address.is_loopback())
@@ -400,7 +403,10 @@ thread_local! {
 /// Module resolution reads `package.json` files deep in code that has no realm to ask. While
 /// one of these is held, it asks this one: a `package.json` the realm may not read is not read,
 /// and resolution goes on as though it were not there — the module it leads to is still refused
-/// when it is loaded.
+/// when it is loaded. The one exception is the `package.json` of a package that exists in a
+/// `node_modules` folder a bare specifier looks in: resolution stops with `ERR_ACCESS_DENIED`
+/// rather than report a module that is there as missing. A package that exists nowhere stays
+/// missing, as for `import` in Node.
 pub(crate) struct Resolving;
 
 impl Resolving {
@@ -467,6 +473,9 @@ fn has(args: &[JsValue], context: &mut Context) -> JsResult<bool> {
             Some(path) => grants.may_write(&real(Path::new(&path), true)),
         },
         "worker" => permissions.worker,
+        // The reserved child-process bit: it says whether this realm may start one, once
+        // anything could (P17).
+        "child" => permissions.child_process,
         // Verve's own: the outbound rules, for a `host` or `host:port`.
         "net" => match reference {
             None => permissions

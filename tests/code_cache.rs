@@ -402,6 +402,583 @@ fn an_oversized_pack_is_not_read() {
     assert!(std::fs::metadata(&pack).unwrap().len() < 1 << 20);
 }
 
+/// A fixture with `files` written in it: the CommonJS modules one test loads.
+fn cjs(name: &str, files: &[(&str, &str)]) -> Fixture {
+    let fixture = Fixture::new(name);
+    for (file, text) in files {
+        let path = fixture.root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    fixture
+}
+
+/// Runs the CommonJS module `entry` in a fresh runtime set up by `setup`; answers what it left
+/// in `globalThis.result` and what the cache did.
+fn run_cjs(
+    fixture: &Fixture,
+    entry: &str,
+    setup: impl FnOnce(&mut Runtime),
+) -> (String, Option<CodeCacheStats>) {
+    let mut runtime = Runtime::new();
+    setup(&mut runtime);
+    let path = fixture.root.join(entry);
+    let source = std::fs::read_to_string(&path).unwrap();
+    runtime
+        .load_module(&path, &source)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let result = verve::print(&runtime.eval("globalThis.result").unwrap());
+    let stats = runtime.code_cache_stats();
+    runtime.flush_code_cache();
+    (result, stats)
+}
+
+fn cjs_cached(fixture: &Fixture, entry: &str) -> (String, CodeCacheStats) {
+    let dir = fixture.cache();
+    let (result, stats) = run_cjs(fixture, entry, |runtime| {
+        runtime
+            .set_code_cache_dir_with_secret(&dir, SECRET)
+            .unwrap();
+    });
+    (result, stats.unwrap())
+}
+
+/// Runs the module `entry` as a runtime's own ESM entry, in a fresh runtime set up by `setup`.
+fn run_mjs(
+    fixture: &Fixture,
+    entry: &str,
+    setup: impl FnOnce(&mut Runtime),
+) -> (String, Option<CodeCacheStats>) {
+    let mut runtime = Runtime::new();
+    setup(&mut runtime);
+    let path = fixture.root.join(entry);
+    let source = std::fs::read_to_string(&path).unwrap();
+    let promise = runtime.load_esm(&path, &source).unwrap();
+    for _ in 0..100 {
+        if !matches!(promise.state(), PromiseState::Pending) {
+            break;
+        }
+        runtime.run_microtasks();
+        runtime.run_due();
+    }
+    assert!(
+        matches!(promise.state(), PromiseState::Fulfilled(_)),
+        "{:?} {:?}",
+        promise.state(),
+        runtime.take_console()
+    );
+    let result = verve::print(&runtime.eval("globalThis.result").unwrap());
+    let stats = runtime.code_cache_stats();
+    runtime.flush_code_cache();
+    (result, stats)
+}
+
+fn mjs_cached(fixture: &Fixture, entry: &str) -> (String, CodeCacheStats) {
+    let dir = fixture.cache();
+    let (result, stats) = run_mjs(fixture, entry, |runtime| {
+        runtime
+            .set_code_cache_dir_with_secret(&dir, SECRET)
+            .unwrap();
+    });
+    (result, stats.unwrap())
+}
+
+/// The two modules most of the CommonJS tests here load: one with a class, a generator and a
+/// default parameter, and one that re-exports from the other.
+const CJS_MAIN: &str = r#"
+const { Point, add } = require('./lib.cjs');
+class Local { #x = 1; n() { return this.#x; } }
+function* gen() { yield* [1, 2, 3]; }
+globalThis.result = [
+    [...gen()].join(''), add(40, 2), new Point(3, 4).norm(), new Local().n(),
+    typeof require('module'), add.toString().includes('b = 0'),
+].join(' | ');
+"#;
+
+const CJS_LIB: &str = r#"
+exports.add = (a, b = 0) => a + b;
+exports.Point = class {
+    #x; #y;
+    constructor(x, y) { this.#x = x; this.#y = y; }
+    norm() { return Math.hypot(this.#x, this.#y); }
+};
+"#;
+
+#[test]
+fn commonjs_modules_read_back_run_as_parsed_ones() {
+    let fixture = cjs(
+        "cjs-roundtrip",
+        &[("main.cjs", CJS_MAIN), ("lib.cjs", CJS_LIB)],
+    );
+    let expected = run_cjs(&fixture, "main.cjs", |_| {}).0;
+    assert_eq!(expected, "123 | 42 | 5 | 1 | function | true");
+
+    let (cold, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(cold, expected);
+    assert_eq!(
+        (stats.cjs_hits, stats.cjs_misses, stats.cjs_stored),
+        (0, 2, 2),
+        "{stats:?}"
+    );
+
+    let (warm, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(warm, expected);
+    assert_eq!(
+        (stats.cjs_hits, stats.cjs_misses, stats.cjs_refused),
+        (2, 0, 0),
+        "{stats:?}"
+    );
+
+    // Eager compilation reads back the same entries and runs the same.
+    let dir = fixture.cache();
+    let (eager, stats) = run_cjs(&fixture, "main.cjs", |runtime| {
+        runtime.set_lazy_compile(false);
+        runtime
+            .set_code_cache_dir_with_secret(&dir, SECRET)
+            .unwrap();
+    });
+    assert_eq!(eager, expected);
+    assert_eq!(stats.unwrap().cjs_hits, 2);
+}
+
+#[test]
+fn a_changed_commonjs_source_is_compiled_again() {
+    let fixture = cjs(
+        "cjs-changed",
+        &[("main.cjs", CJS_MAIN), ("lib.cjs", CJS_LIB)],
+    );
+    let (_, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(stats.cjs_stored, 2);
+    std::fs::write(
+        fixture.root.join("lib.cjs"),
+        CJS_LIB.replace("=> a + b;", "=> a + b + 0;"),
+    )
+    .unwrap();
+    let (result, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(result, "123 | 42 | 5 | 1 | function | true");
+    assert_eq!(
+        (stats.cjs_hits, stats.cjs_misses, stats.cjs_stored),
+        (1, 1, 1),
+        "{stats:?}"
+    );
+    // The new entry is read back next time, and the old one is still there for the old source.
+    let (_, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(stats.cjs_hits, 2, "{stats:?}");
+}
+
+#[test]
+fn a_damaged_pack_still_runs_commonjs_from_its_source() {
+    let fixture = cjs(
+        "cjs-damaged",
+        &[("main.cjs", CJS_MAIN), ("lib.cjs", CJS_LIB)],
+    );
+    let expected = run_cjs(&fixture, "main.cjs", |_| {}).0;
+    cjs_cached(&fixture, "main.cjs");
+    let pack = fixture.pack();
+    let good = std::fs::read(&pack).unwrap();
+    for at in [
+        8,
+        40,
+        60,
+        good.len() / 3,
+        good.len() / 2,
+        good.len() - 40,
+        good.len() - 1,
+    ] {
+        let mut damaged = good.clone();
+        damaged[at] ^= 0x5a;
+        std::fs::write(&pack, &damaged).unwrap();
+        let (result, stats) = cjs_cached(&fixture, "main.cjs");
+        assert_eq!(result, expected, "damage at {at}");
+        assert!(stats.cjs_hits < 2, "damage at {at} is noticed: {stats:?}");
+        let (result, stats) = cjs_cached(&fixture, "main.cjs");
+        assert_eq!(result, expected, "damage at {at}");
+        assert_eq!(
+            stats.cjs_hits, 2,
+            "the pack is mended after damage at {at}: {stats:?}"
+        );
+    }
+    // Cut short: refused, and compiled again.
+    for len in [0, 7, 8, 50, good.len() / 2, good.len() - 1] {
+        std::fs::write(&pack, &good[..len]).unwrap();
+        let (result, stats) = cjs_cached(&fixture, "main.cjs");
+        assert_eq!(result, expected, "cut to {len}");
+        assert!(stats.cjs_hits < 2, "{stats:?}");
+    }
+}
+
+/// A wrapper that declares something in the global scope is not cached: parsing a script is
+/// what makes its global declarations, and code read back in another run would have to make
+/// them again. A `});` in the source closes Node's wrapper early, which puts what follows in
+/// the script's own scope.
+#[test]
+fn a_wrapper_that_declares_a_global_is_not_cached() {
+    const LEAK: &str = r#"
+});
+globalThis.leaked = (globalThis.leaked || 0) + 1;
+globalThis.result = 'ran ' + globalThis.leaked;
+var declared = 1;
+(function () {
+"#;
+    let fixture = cjs("cjs-global", &[("leak.cjs", LEAK)]);
+    let (cold, stats) = cjs_cached(&fixture, "leak.cjs");
+    assert_eq!(cold, "ran 1");
+    assert_eq!((stats.cjs_stored, stats.cjs_skipped), (0, 1), "{stats:?}");
+    // Nothing was kept, so the second run compiles it again rather than reading it back.
+    let (warm, stats) = cjs_cached(&fixture, "leak.cjs");
+    assert_eq!(warm, "ran 1");
+    assert_eq!(
+        (stats.cjs_hits, stats.cjs_stored, stats.cjs_skipped),
+        (0, 0, 1),
+        "{stats:?}"
+    );
+}
+
+/// Reading a CommonJS module back changes nothing about what it exports: a cycle still sees
+/// the partial `exports` of the module it came from, and a `module.exports` that is replaced
+/// is what `require` answers.
+#[test]
+fn a_cached_commonjs_module_keeps_its_exports_and_cycles() {
+    let fixture = cjs(
+        "cjs-cycle",
+        &[
+            (
+                "main.cjs",
+                "const a = require('./a.cjs');\nglobalThis.result = [a.seesB, require('./fn.cjs')(2), typeof require('./fn.cjs')].join(' | ');\n",
+            ),
+            (
+                "a.cjs",
+                "exports.early = 1;\nconst b = require('./b.cjs');\nexports.seesB = b.saw;\n",
+            ),
+            ("b.cjs", "exports.saw = require('./a.cjs').early + 1;\n"),
+            (
+                "fn.cjs",
+                "module.exports = function (n) { return n * 21; };\n",
+            ),
+        ],
+    );
+    let expected = run_cjs(&fixture, "main.cjs", |_| {}).0;
+    assert_eq!(expected, "2 | 42 | function");
+    let (cold, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(cold, expected);
+    assert_eq!((stats.cjs_misses, stats.cjs_stored), (4, 4), "{stats:?}");
+    let (warm, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(warm, expected);
+    assert_eq!((stats.cjs_hits, stats.cjs_misses), (4, 0), "{stats:?}");
+}
+
+/// A `.json` module and a native addon are not code the cache keeps: the one is parsed by the
+/// JavaScript parser, the other refused. Neither is counted, and both answer as they do without
+/// a cache.
+#[test]
+fn json_and_native_modules_are_not_cached() {
+    let fixture = cjs(
+        "cjs-json",
+        &[
+            (
+                "main.cjs",
+                "const data = require('./data.json');\n\
+                 let addon = 'none';\n\
+                 try { require('./addon.node'); } catch (e) { addon = e.code; }\n\
+                 globalThis.result = [data.n, addon].join(' | ');\n",
+            ),
+            ("data.json", "{\"n\": 7}\n"),
+            ("addon.node", "\u{7f}ELF not really\n"),
+        ],
+    );
+    let expected = run_cjs(&fixture, "main.cjs", |_| {}).0;
+    assert_eq!(expected, "7 | ERR_DLOPEN_DISABLED");
+    let (cold, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(cold, expected);
+    assert_eq!(
+        (stats.cjs_misses, stats.cjs_stored),
+        (1, 1),
+        "only the module itself is counted: {stats:?}"
+    );
+    let (warm, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(warm, expected);
+    assert_eq!((stats.cjs_hits, stats.cjs_misses), (1, 0), "{stats:?}");
+}
+
+/// A source that is neither a CommonJS wrapper nor a module — nothing names its format — is
+/// refused with the error parsing it as a script gave, with a cache as without one, and nothing
+/// is kept for it.
+#[test]
+fn a_source_that_is_neither_is_refused_as_before() {
+    let fixture = cjs("cjs-broken", &[("broken.js", "const = ;\n")]);
+    let failure = |setup: &dyn Fn(&mut Runtime)| {
+        let mut runtime = Runtime::new();
+        setup(&mut runtime);
+        let path = fixture.root.join("broken.js");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let error = runtime.load_module(&path, &source).unwrap_err();
+        (error.to_string(), runtime.code_cache_stats())
+    };
+    // Without a cache: a run of the whole suite may have one from its environment.
+    let (plain, stats) = failure(&|runtime| runtime.disable_code_cache());
+    assert!(plain.contains("SyntaxError"), "{plain}");
+    assert_eq!(stats, None);
+    let dir = fixture.cache();
+    let (cached, stats) = failure(&|runtime| {
+        runtime
+            .set_code_cache_dir_with_secret(&dir, SECRET)
+            .unwrap();
+    });
+    assert_eq!(cached, plain);
+    let stats = stats.unwrap();
+    assert_eq!((stats.cjs_hits, stats.cjs_stored), (0, 0), "{stats:?}");
+    let (again, stats) = failure(&|runtime| {
+        runtime
+            .set_code_cache_dir_with_secret(&dir, SECRET)
+            .unwrap();
+    });
+    assert_eq!(again, plain);
+    assert_eq!(stats.unwrap().cjs_hits, 0);
+}
+
+/// A `.js` file no extension or package names the format of is required as Node's CommonJS
+/// wrapper, and kept as one: read back, it runs as it did.
+#[test]
+fn an_unnamed_js_file_is_cached_as_commonjs() {
+    let fixture = cjs(
+        "js-cjs",
+        &[
+            (
+                "main.cjs",
+                "const lib = require('./lib.js');\nglobalThis.result = lib.v;\n",
+            ),
+            ("lib.js", "exports.v = 'lib ' + (1 + 1);\n"),
+        ],
+    );
+    let expected = run_cjs(&fixture, "main.cjs", |_| {}).0;
+    assert_eq!(expected, "lib 2");
+    let (cold, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(cold, expected);
+    assert_eq!((stats.cjs_misses, stats.cjs_stored), (2, 2), "{stats:?}");
+    let (warm, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(warm, expected);
+    assert_eq!((stats.cjs_hits, stats.cjs_misses), (2, 0), "{stats:?}");
+}
+
+/// A `.js` file that is a module — required, it falls back to the module loader. Its code is a
+/// module's, not a script's: the CommonJS counts do not move for it, and no script entry is kept.
+#[test]
+fn an_unnamed_js_file_that_is_a_module_falls_back() {
+    let fixture = cjs(
+        "js-esm",
+        &[
+            (
+                "main.cjs",
+                "const mod = require('./mod.js');\nglobalThis.result = mod.v;\n",
+            ),
+            ("mod.js", "export const v = 'esm';\n"),
+        ],
+    );
+    let expected = run_cjs(&fixture, "main.cjs", |_| {}).0;
+    assert_eq!(expected, "esm");
+    let (cold, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(cold, expected);
+    assert_eq!(
+        (
+            stats.cjs_misses,
+            stats.cjs_stored,
+            stats.misses,
+            stats.stored
+        ),
+        (1, 1, 1, 1),
+        "the module is counted as one: {stats:?}"
+    );
+    let (warm, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(warm, expected);
+    assert_eq!(
+        (stats.cjs_hits, stats.cjs_misses, stats.hits),
+        (1, 0, 1),
+        "{stats:?}"
+    );
+}
+
+/// One source text, run as a CommonJS wrapper and as a module: a script's entry and a module's
+/// are told apart, so neither is read as the other.
+#[test]
+fn a_source_run_both_ways_keeps_an_entry_of_each_kind() {
+    const SHARED: &str = "globalThis.shared = 'shared' + 1;\n";
+    let fixture = cjs(
+        "js-both",
+        &[
+            (
+                "use-cjs.cjs",
+                "require('./plain/lib.js');\nglobalThis.result = String(globalThis.shared);\n",
+            ),
+            (
+                "use-esm.mjs",
+                "import './pkg/lib.js';\nglobalThis.result = String(globalThis.shared);\n",
+            ),
+            ("plain/lib.js", SHARED),
+            ("pkg/package.json", "{\"type\": \"module\"}\n"),
+            ("pkg/lib.js", SHARED),
+        ],
+    );
+    assert_eq!(run_cjs(&fixture, "use-cjs.cjs", |_| {}).0, "shared1");
+    assert_eq!(run_cjs(&fixture, "use-esm.mjs", |_| {}).0, "shared1");
+
+    let (cold, stats) = cjs_cached(&fixture, "use-cjs.cjs");
+    assert_eq!(cold, "shared1");
+    assert_eq!(
+        (stats.cjs_misses, stats.cjs_stored, stats.misses),
+        (2, 2, 0),
+        "{stats:?}"
+    );
+    // The module compiles from its own source: the script's entry is not read as one, and does
+    // not count as a hit.
+    let (esm, stats) = cjs_cached(&fixture, "use-esm.mjs");
+    assert_eq!(esm, "shared1");
+    assert_eq!(
+        (stats.misses, stats.stored, stats.cjs_hits),
+        (2, 2, 0),
+        "{stats:?}"
+    );
+    let (esm, stats) = cjs_cached(&fixture, "use-esm.mjs");
+    assert_eq!(esm, "shared1");
+    assert_eq!((stats.hits, stats.cjs_hits), (2, 0), "{stats:?}");
+    let (cjs, stats) = cjs_cached(&fixture, "use-cjs.cjs");
+    assert_eq!(cjs, "shared1");
+    assert_eq!((stats.cjs_hits, stats.hits), (2, 0), "{stats:?}");
+}
+
+/// A byte order mark and a `#!` line are left out of the wrapper, so both are written down and
+/// read back as the same script they run as.
+#[test]
+fn a_byte_order_mark_and_a_hashbang_are_cached() {
+    let fixture = cjs(
+        "js-bom-shebang",
+        &[
+            (
+                "main.cjs",
+                "const a = require('./bom.js');\nconst b = require('./shebang.js');\n\
+                 globalThis.result = [a.v, b.v].join(' | ');\n",
+            ),
+            ("bom.js", "\u{feff}exports.v = 'bom';\n"),
+            (
+                "shebang.js",
+                "#!/usr/bin/env node\nexports.v = 'shebang';\n",
+            ),
+        ],
+    );
+    let expected = run_cjs(&fixture, "main.cjs", |_| {}).0;
+    assert_eq!(expected, "bom | shebang");
+    let (cold, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(cold, expected);
+    assert_eq!((stats.cjs_misses, stats.cjs_stored), (3, 3), "{stats:?}");
+    let (warm, stats) = cjs_cached(&fixture, "main.cjs");
+    assert_eq!(warm, expected);
+    assert_eq!((stats.cjs_hits, stats.cjs_misses), (3, 0), "{stats:?}");
+}
+
+/// An `import` of a `.js` file no extension or package names the format of: the decision parses
+/// its wrapper once, and the CommonJS load that follows runs that parse rather than reading the
+/// entry again or parsing the source again.
+#[test]
+fn an_import_of_an_unnamed_commonjs_file_parses_it_once() {
+    let fixture = cjs(
+        "import-js-cjs",
+        &[
+            (
+                "main.mjs",
+                "import mod from './lib.js';\nglobalThis.result = mod.v;\n",
+            ),
+            ("lib.js", "module.exports = { v: 'lib ' + (1 + 1) };\n"),
+        ],
+    );
+    assert_eq!(run_mjs(&fixture, "main.mjs", |_| {}).0, "lib 2");
+
+    let (cold, stats) = mjs_cached(&fixture, "main.mjs");
+    assert_eq!(cold, "lib 2");
+    assert_eq!(
+        (stats.cjs_misses, stats.cjs_stored, stats.misses),
+        (1, 1, 1),
+        "the wrapper is parsed and compiled once: {stats:?}"
+    );
+
+    let (warm, stats) = mjs_cached(&fixture, "main.mjs");
+    assert_eq!(warm, "lib 2");
+    assert_eq!(
+        (stats.cjs_hits, stats.cjs_misses, stats.hits),
+        (1, 0, 1),
+        "the entry is read once: {stats:?}"
+    );
+}
+
+/// A `.js` entry no package names the format of runs from the wrapper the decision compiled:
+/// the run's entry takes the fast path the imports take, so nothing is parsed as a module.
+#[test]
+fn an_unnamed_js_entry_is_run_from_the_wrapper_it_was_decided_with() {
+    let fixture = cjs(
+        "js-entry",
+        &[
+            (
+                "main.js",
+                "const lib = require('./lib.cjs');\nglobalThis.result = lib.v;\n",
+            ),
+            ("lib.cjs", "exports.v = 'entry ' + (40 + 2);\n"),
+        ],
+    );
+    assert_eq!(run_cjs(&fixture, "main.js", |_| {}).0, "entry 42");
+
+    let (cold, stats) = cjs_cached(&fixture, "main.js");
+    assert_eq!(cold, "entry 42");
+    assert_eq!(
+        (
+            stats.cjs_misses,
+            stats.cjs_stored,
+            stats.misses,
+            stats.stored
+        ),
+        (2, 2, 0, 0),
+        "neither file is parsed as a module: {stats:?}"
+    );
+
+    let (warm, stats) = cjs_cached(&fixture, "main.js");
+    assert_eq!(warm, "entry 42");
+    assert_eq!(
+        (stats.cjs_hits, stats.cjs_misses, stats.misses),
+        (2, 0, 0),
+        "{stats:?}"
+    );
+}
+
+/// One `.js` file, CommonJS for one run and a module for the next: the entry's key holds the
+/// source text, so the code kept for the first is not run as the second.
+#[test]
+fn a_file_that_becomes_a_module_is_not_run_from_its_commonjs_code() {
+    let fixture = cjs(
+        "js-becomes-esm",
+        &[
+            (
+                "main.mjs",
+                "const mod = await import('./lib.js');\nglobalThis.result = mod.default.v;\n",
+            ),
+            ("lib.js", "module.exports = { v: 'commonjs' };\n"),
+        ],
+    );
+    assert_eq!(run_mjs(&fixture, "main.mjs", |_| {}).0, "commonjs");
+    let (cold, stats) = mjs_cached(&fixture, "main.mjs");
+    assert_eq!(cold, "commonjs");
+    assert_eq!((stats.cjs_misses, stats.cjs_stored), (1, 1), "{stats:?}");
+
+    std::fs::write(
+        fixture.root.join("lib.js"),
+        "export default { v: 'module' };\n",
+    )
+    .unwrap();
+    let (changed, stats) = mjs_cached(&fixture, "main.mjs");
+    assert_eq!(changed, "module");
+    assert_eq!(
+        (stats.hits, stats.misses, stats.stored, stats.cjs_hits),
+        (1, 1, 1, 0),
+        "the changed file compiles as a module, and its script entry is not read: {stats:?}"
+    );
+}
+
 #[test]
 fn verve_run_keeps_a_cache_with_the_flag_or_the_variable() {
     let fixture = Fixture::new("cli");
@@ -466,4 +1043,286 @@ fn verve_run_keeps_a_cache_with_the_flag_or_the_variable() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
     assert!(String::from_utf8_lossy(&output.stderr).contains("not used"));
+}
+
+// ─── The default folder, and the mark it leaves ─────────────────────────────────────────────
+
+/// The folder `verve run` keeps its cache in, for a home of a test's own.
+fn code_cache_in(home: &Path) -> PathBuf {
+    let base = if cfg!(windows) {
+        home.join("Verve")
+    } else {
+        home.join("verve")
+    };
+    base.join("code-cache")
+}
+
+/// The user's code cache secret, for a home of a test's own.
+fn secret_in(home: &Path) -> PathBuf {
+    let base = if cfg!(windows) {
+        home.join("Verve")
+    } else {
+        home.join("verve")
+    };
+    base.join("code-cache-secret")
+}
+
+/// The names in `dir`, sorted: nothing at all when it is not there.
+fn names(dir: &Path) -> Vec<String> {
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = listing
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// An entry, and the module it requires: together over the 64 KB that make the default folder
+/// worth a pack (`code_cache_mark::WORTH_CACHING`).
+fn a_big_script(fixture: &Fixture) -> PathBuf {
+    std::fs::write(
+        fixture.root.join("big.cjs"),
+        format!("exports.v = 'big';\n{}", "// padding\n".repeat(7_000)),
+    )
+    .unwrap();
+    let entry = fixture.root.join("entry.cjs");
+    std::fs::write(
+        &entry,
+        "const big = require('./big.cjs'); console.log('v=' + big.v);",
+    )
+    .unwrap();
+    entry
+}
+
+/// `verve run -A <script>`, with the user's own folders inside `home`, and `flag` and `env`
+/// saying what to do about the cache. Answers what it wrote, and insists it wrote nothing to
+/// standard error: a default folder that cannot be used is never a thing to hear about.
+fn run_default(script: &Path, home: &Path, flags: &[&str], env: Option<&str>) -> String {
+    let mut command = Command::new(VERVE);
+    command
+        .env("LOCALAPPDATA", home)
+        .env("XDG_CACHE_HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("HOME", home)
+        .env_remove("VERVE_CODE_CACHE")
+        .arg("run")
+        .arg("-A");
+    for flag in flags {
+        command.arg(flag);
+    }
+    if let Some(dir) = env {
+        command.env("VERVE_CODE_CACHE", dir);
+    }
+    let output = command.arg(script).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "",
+        "the default folder must never write a line"
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// The first run leaves a mark and nothing else — no pack, no secret; the second recognises it,
+/// compiles every function and keeps the pack; and the two switches keep a run from the folder
+/// altogether.
+#[test]
+fn the_default_folder_caches_from_the_second_run_and_the_switches_turn_it_off() {
+    let fixture = Fixture::new("default-dir");
+    let script = a_big_script(&fixture);
+    let home = fixture.root.join("home");
+    let cache = code_cache_in(&home);
+
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    let first = names(&cache);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].ends_with(".seen"), "{first:?}");
+    assert!(
+        !secret_in(&home).exists(),
+        "a first run reads no secret and makes none"
+    );
+
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    let packs: Vec<String> = names(&cache)
+        .into_iter()
+        .filter(|name| name.ends_with(".pack"))
+        .collect();
+    assert_eq!(packs.len(), 1, "{packs:?}");
+    assert!(
+        secret_in(&home).exists(),
+        "the run that keeps a pack signs its entries"
+    );
+
+    // The run after that reads the pack that is there, and keeps it.
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    assert!(cache.join(&packs[0]).exists());
+
+    let cache_before = names(&cache);
+    let home_before = names(&home);
+    assert_eq!(
+        run_default(&script, &home, &["--no-code-cache"], None),
+        "v=big\n"
+    );
+    assert_eq!(
+        names(&cache),
+        cache_before,
+        "--no-code-cache touched the cache"
+    );
+    assert_eq!(
+        names(&home),
+        home_before,
+        "--no-code-cache touched the home"
+    );
+    for off in ["0", "off", "false"] {
+        assert_eq!(run_default(&script, &home, &[], Some(off)), "v=big\n");
+        assert_eq!(
+            names(&cache),
+            cache_before,
+            "VERVE_CODE_CACHE={off} touched the cache"
+        );
+        assert_eq!(
+            names(&home),
+            home_before,
+            "VERVE_CODE_CACHE={off} touched the home"
+        );
+    }
+}
+
+/// A home that cannot hold a cache — here a file where the folder would go — is no reason for a
+/// run to fail, or to say anything.
+#[test]
+fn a_default_folder_that_cannot_be_made_leaves_the_run_silent() {
+    let fixture = Fixture::new("default-unusable");
+    let script = a_big_script(&fixture);
+    let home = fixture.root.join("home");
+    std::fs::write(&home, b"not a folder").unwrap();
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+}
+
+/// This build's pack being there is what makes a run warm, mark or no mark: such a run reads the
+/// pack at startup and leaves no mark at all.
+#[test]
+fn a_pack_that_is_already_there_makes_the_first_run_a_warm_one() {
+    let fixture = Fixture::new("default-warm");
+    let script = a_big_script(&fixture);
+    let home = fixture.root.join("home");
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    let cache = code_cache_in(&home);
+    let pack = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "pack"))
+        .expect("the second run keeps a pack");
+    for entry in std::fs::read_dir(&cache).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|ext| ext == "seen") {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    assert_eq!(run_default(&script, &home, &[], None), "v=big\n");
+    assert!(pack.exists());
+    let seen: Vec<String> = names(&cache)
+        .into_iter()
+        .filter(|name| name.ends_with(".seen"))
+        .collect();
+    assert!(
+        seen.is_empty(),
+        "a warm run compiles nothing, so it leaves no mark: {seen:?}"
+    );
+}
+
+/// Four processes writing one pack at once: the pack stays whole, every tag in it is authentic,
+/// and each process's entry is still there for the next round.
+#[test]
+fn four_processes_writing_one_pack_lose_nothing_that_matters() {
+    let fixture = Fixture::new("concurrent");
+    let dir = fixture.root.join("cache");
+    let home = fixture.root.join("home");
+    let modules: Vec<PathBuf> = (0..4)
+        .map(|n| {
+            let path = fixture.root.join(format!("mod{n}.cjs"));
+            std::fs::write(&path, format!("exports.v = 'm{n}';\n")).unwrap();
+            path
+        })
+        .collect();
+    let ask = |path: &Path| {
+        let name = serde_json::to_string(&path.to_string_lossy().to_string()).unwrap();
+        format!("console.log(require({name}).v)")
+    };
+    let command = |path: &Path| {
+        let mut command = Command::new(VERVE);
+        command
+            .env("LOCALAPPDATA", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env_remove("VERVE_CODE_CACHE")
+            .arg("run")
+            .arg("-A")
+            .arg(format!("--code-cache={}", dir.display()))
+            .arg("-e")
+            .arg(ask(path));
+        command
+    };
+    for round in 0..4 {
+        let children: Vec<_> = modules
+            .iter()
+            .map(|path| {
+                command(path)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for (n, child) in children.into_iter().enumerate() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "round {round} process {n}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                format!("m{n}\n"),
+                "round {round} process {n}"
+            );
+        }
+    }
+    // Every process's entry survived the rounds: each module answers again, and the pack holds
+    // one entry per module, every one of them signed with the user's own secret.
+    for (n, path) in modules.iter().enumerate() {
+        let output = command(path).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("m{n}\n"));
+    }
+    let secret: [u8; 32] = std::fs::read(secret_in(&home))
+        .unwrap()
+        .try_into()
+        .expect("the secret is 32 bytes");
+    let pack = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "pack"))
+        .expect("a pack");
+    let kept = entries(&std::fs::read(&pack).unwrap());
+    assert!(kept.len() >= 4, "one entry per module: {}", kept.len());
+    for (key, code, signed) in &kept {
+        assert_eq!(
+            &tag(&secret, key, code),
+            signed,
+            "an entry is not authentic"
+        );
+    }
 }

@@ -18,7 +18,6 @@
 //! the realm.
 
 use std::collections::VecDeque;
-use std::rc::Rc;
 
 use boa_engine::{
     Context, JsData, JsError, JsObject, JsResult, JsString, JsSymbol, JsValue, NativeFunction,
@@ -31,9 +30,11 @@ use boa_engine::{
     },
     property::PropertyDescriptor,
 };
-use boa_gc::{Finalize, Trace};
+use boa_gc::{Finalize, Gc, Trace};
 
-use crate::native::{arg, array, get, hidden, invoke, js_text, object, text_of, type_error};
+use crate::native::{
+    arg, array, get, hidden, invoke, js_text, object, settled, text_of, type_error,
+};
 
 // ─── Promises from Rust ─────────────────────────────────────────────────────────────────────
 
@@ -53,14 +54,6 @@ pub(crate) fn reject(resolvers: &ResolvingFunctions, reason: JsValue, context: &
     let _ = resolvers
         .reject
         .call(&JsValue::undefined(), &[reason], context);
-}
-
-pub(crate) fn resolved(value: JsValue, context: &mut Context) -> JsResult<JsValue> {
-    Ok(JsPromise::resolve(value, context)?.into())
-}
-
-pub(crate) fn rejected(reason: JsValue, context: &mut Context) -> JsResult<JsValue> {
-    Ok(JsPromise::reject(JsError::from_opaque(reason), context)?.into())
 }
 
 /// An error as the value a promise is rejected with.
@@ -128,13 +121,13 @@ fn promise_call(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     if method.is_undefined() {
-        return resolved(JsValue::undefined(), context);
+        return settled(Ok(JsValue::undefined()), context);
     }
     match crate::call(context, method, target, args) {
-        Ok(value) => resolved(value, context),
+        Ok(value) => settled(Ok(value), context),
         Err(error) => {
             let reason = error_value(error, context);
-            rejected(reason, context)
+            settled(Err(JsError::from_opaque(reason)), context)
         }
     }
 }
@@ -228,6 +221,7 @@ fn view_of_first(view: &JsObject, count: usize, context: &mut Context) -> JsResu
 // ─── The classes, made once ─────────────────────────────────────────────────────────────────
 
 /// Every class of the standard, for the realm: made at the first touch of any of them.
+#[derive(Trace, Finalize)]
 pub(crate) struct Classes {
     pub readable: JsObject,
     readable_proto: JsObject,
@@ -258,12 +252,12 @@ pub(crate) struct Classes {
     text_decoder_proto: JsObject,
 }
 
-pub(crate) fn classes(context: &mut Context) -> JsResult<Rc<Classes>> {
-    if let Some(classes) = context.get_data::<Rc<Classes>>() {
-        return Ok(classes.clone());
+pub(crate) fn classes(context: &mut Context) -> JsResult<Gc<Classes>> {
+    if let Some(classes) = crate::world::realm_data::<Gc<Classes>>(context) {
+        return Ok(classes);
     }
-    let classes = Rc::new(make_classes(context)?);
-    context.insert_data(classes.clone());
+    let classes = Gc::new(make_classes(context)?);
+    crate::world::set_realm_data(context, classes.clone());
     Ok(classes)
 }
 
@@ -278,13 +272,7 @@ pub(crate) fn web_class(
     accessors: &[(&str, NativeFunctionPointer, Option<NativeFunctionPointer>)],
     statics: &[(&str, usize, NativeFunctionPointer)],
 ) -> JsResult<(JsObject, JsObject)> {
-    let constructor: JsObject =
-        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(construct))
-            .name(JsString::from(name))
-            .length(length)
-            .constructor(true)
-            .build()
-            .into();
+    let constructor = crate::native::constructor(context, name, length, construct);
     let prototype = object(context);
     crate::native::methods(context, &prototype, methods)?;
     crate::native::accessors(context, &prototype, accessors)?;
@@ -335,10 +323,6 @@ pub(crate) fn symbol_method(
         context,
     )?;
     Ok(())
-}
-
-fn illegal(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    Err(type_error("Illegal constructor"))
 }
 
 /// The prototype the object a constructor makes is made on: `new.target`'s, which `new` (or a
@@ -418,7 +402,7 @@ fn make_classes(context: &mut Context) -> JsResult<Classes> {
         context,
         "ReadableStreamDefaultController",
         0,
-        illegal,
+        crate::native::illegal_constructor,
         CONTROLLER_METHODS,
         &[("desiredSize", controller_desired_size, None)],
         &[],
@@ -427,7 +411,7 @@ fn make_classes(context: &mut Context) -> JsResult<Classes> {
         context,
         "ReadableByteStreamController",
         0,
-        illegal,
+        crate::native::illegal_constructor,
         CONTROLLER_METHODS,
         &[
             ("desiredSize", controller_desired_size, None),
@@ -493,7 +477,7 @@ fn make_classes(context: &mut Context) -> JsResult<Classes> {
         context,
         "WritableStreamDefaultController",
         0,
-        illegal,
+        crate::native::illegal_constructor,
         &[("error", 1, |this, args, cx| {
             let stream = controlled_writable(this)?;
             if with_writable(&stream, |w| w.phase) == WPhase::Writable {
@@ -548,7 +532,7 @@ fn make_classes(context: &mut Context) -> JsResult<Classes> {
         context,
         "TransformStreamDefaultController",
         0,
-        illegal,
+        crate::native::illegal_constructor,
         TRANSFORM_CONTROLLER_METHODS,
         &[(
             "desiredSize",
@@ -1245,8 +1229,10 @@ pub(crate) fn cancel_stream(
         (r.phase, r.error.clone())
     });
     match phase {
-        Phase::Closed => return resolved(JsValue::undefined(), context),
-        Phase::Errored => return rejected(error, context),
+        Phase::Closed => return settled(Ok(JsValue::undefined()), context),
+        Phase::Errored => {
+            return settled(Err(JsError::from_opaque(error)), context);
+        }
         Phase::Open => {}
     }
     readable_close(context, stream);
@@ -1320,12 +1306,12 @@ const READABLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
             Ok(stream) => stream,
             Err(error) => {
                 let reason = error_value(error, cx);
-                return rejected(reason, cx);
+                return settled(Err(JsError::from_opaque(reason)), cx);
             }
         };
         if is_locked(&stream) {
             let reason = type_error_value("Cannot cancel a locked ReadableStream", cx);
-            return rejected(reason, cx);
+            return settled(Err(JsError::from_opaque(reason)), cx);
         }
         cancel_stream(cx, &stream, arg(args, 0))
     }),
@@ -1345,7 +1331,7 @@ const READABLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(stream) => pipe_to(cx, &stream, &arg(args, 0), &arg(args, 1)),
         Err(error) => {
             let reason = error_value(error, cx);
-            rejected(reason, cx)
+            settled(Err(JsError::from_opaque(reason)), cx)
         }
     }),
     ("pipeThrough", 2, |this, args, cx| {
@@ -1528,7 +1514,7 @@ fn reader_cancel(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
         Some(stream) => cancel_stream(context, &stream, arg(args, 0)),
         None => {
             let reason = type_error_value("This reader has been released", context);
-            rejected(reason, context)
+            settled(Err(JsError::from_opaque(reason)), context)
         }
     }
 }
@@ -1554,7 +1540,7 @@ const BYOB_READER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let view = arg(args, 0);
         if !is_view(&view, cx)? || get(&view, "byteLength", cx)?.to_number(cx)? == 0. {
             let reason = type_error_value("read(view) needs a non-empty ArrayBuffer view", cx);
-            return rejected(reason, cx);
+            return settled(Err(JsError::from_opaque(reason)), cx);
         }
         let view = view.as_object().expect("a view");
         let (promise, resolvers) = pending(cx);
@@ -1618,7 +1604,7 @@ const ITERATOR_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         };
         if done {
             let result = step_result(JsValue::undefined(), true, cx);
-            return resolved(result, cx);
+            return settled(Ok(result), cx);
         }
         let promise = read(cx, &reader)?;
         Ok(when(
@@ -1659,14 +1645,14 @@ const ITERATOR_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         };
         let result = step_result(value, true, cx);
         if done {
-            return resolved(result, cx);
+            return settled(Ok(result), cx);
         }
         let stream = reader
             .downcast_ref::<Reader>()
             .and_then(|r| r.stream.clone());
         let cancelled = match stream {
             Some(stream) if !prevent_cancel => cancel_stream(cx, &stream, arg(args, 0))?,
-            _ => resolved(JsValue::undefined(), cx)?,
+            _ => settled(Ok(JsValue::undefined()), cx)?,
         };
         release_reader(cx, &reader);
         Ok(when(
@@ -1722,7 +1708,7 @@ fn readable_from(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
                 Ok(result) => result,
                 Err(error) => {
                     let reason = error_value(error, cx);
-                    return rejected(reason, cx);
+                    return settled(Err(JsError::from_opaque(reason)), cx);
                 }
             };
             let _ = is_async;
@@ -1764,11 +1750,11 @@ fn readable_from(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
                 Ok(ret) => ret,
                 Err(error) => {
                     let reason = error_value(error, cx);
-                    return rejected(reason, cx);
+                    return settled(Err(JsError::from_opaque(reason)), cx);
                 }
             };
             if ret.is_null_or_undefined() {
-                return resolved(JsValue::undefined(), cx);
+                return settled(Ok(JsValue::undefined()), cx);
             }
             let result = promise_call(iterator, &ret, &[arg(args, 0)], cx)?;
             Ok(when(
@@ -1842,7 +1828,7 @@ pub(crate) fn tee(context: &mut Context, stream: &JsObject) -> JsResult<(JsObjec
         let source = object(context);
         let pull = native(context, "pull", 1, tee.clone(), |_, _, tee, cx| {
             tee_pull(cx, tee)?;
-            resolved(JsValue::undefined(), cx)
+            settled(Ok(JsValue::undefined()), cx)
         });
         let cancel: JsValue = if which == 0 {
             native(context, "cancel", 1, tee.clone(), |_, args, tee, cx| {
@@ -2020,7 +2006,7 @@ fn pipe_to(
 ) -> JsResult<JsValue> {
     let Ok(dest) = writable_of(dest) else {
         let reason = type_error_value("pipeTo: the destination is not a WritableStream", context);
-        return rejected(reason, context);
+        return settled(Err(JsError::from_opaque(reason)), context);
     };
     let flag = |name: &str, cx: &mut Context| -> JsResult<bool> {
         Ok(get(options, name, cx)?.to_boolean())
@@ -2031,11 +2017,11 @@ fn pipe_to(
     let signal = get(options, "signal", context)?;
     if is_locked(source) {
         let reason = type_error_value("pipeTo: the ReadableStream is locked", context);
-        return rejected(reason, context);
+        return settled(Err(JsError::from_opaque(reason)), context);
     }
     if with_writable(&dest, |w| w.writer.is_some()) {
         let reason = type_error_value("pipeTo: the WritableStream is locked", context);
-        return rejected(reason, context);
+        return settled(Err(JsError::from_opaque(reason)), context);
     }
     let reader = acquire_reader(context, source, false)?;
     let writer = acquire_writer(context, &dest)?;
@@ -2296,12 +2282,12 @@ fn pipe_abort(context: &mut Context, pipe: &JsObject) -> JsResult<()> {
     };
     let reason = get(&signal, "reason", context)?;
     let aborted = if prevent_abort || with_writable(&dest, |w| w.phase) != WPhase::Writable {
-        resolved(JsValue::undefined(), context)?
+        settled(Ok(JsValue::undefined()), context)?
     } else {
         writable_abort(context, &dest, reason.clone())?
     };
     let cancelled = if prevent_cancel || with_readable(&source, |r| r.phase) != Phase::Open {
-        resolved(JsValue::undefined(), context)?
+        settled(Ok(JsValue::undefined()), context)?
     } else {
         cancel_stream(context, &source, reason.clone())?
     };
@@ -2929,7 +2915,7 @@ pub(crate) fn writable_abort(
 ) -> JsResult<JsValue> {
     let (phase, controller) = with_writable(stream, |w| (w.phase, w.abort_controller.clone()));
     if matches!(phase, WPhase::Closed | WPhase::Errored) {
-        return resolved(JsValue::undefined(), context);
+        return settled(Ok(JsValue::undefined()), context);
     }
     if controller.is_object() {
         let _ = invoke(&controller, "abort", std::slice::from_ref(&reason), context);
@@ -2938,7 +2924,7 @@ pub(crate) fn writable_abort(
         (w.phase, w.abort.as_ref().map(|a| a.promise.clone()))
     });
     if matches!(phase, WPhase::Closed | WPhase::Errored) {
-        return resolved(JsValue::undefined(), context);
+        return settled(Ok(JsValue::undefined()), context);
     }
     if let Some(existing) = existing {
         return Ok(existing.into());
@@ -2975,7 +2961,7 @@ fn writable_close(context: &mut Context, stream: &JsObject) -> JsResult<JsValue>
     });
     if matches!(phase, WPhase::Closed | WPhase::Errored) || closing {
         let reason = type_error_value("The stream is closed or closing", context);
-        return rejected(reason, context);
+        return settled(Err(JsError::from_opaque(reason)), context);
     }
     let (promise, resolvers) = pending(context);
     with_writable(stream, |w| w.close_resolvers = Some(resolvers));
@@ -3000,7 +2986,7 @@ pub(crate) fn writer_write(
         .and_then(|w| w.stream.clone())
     else {
         let reason = type_error_value("This writer has been released", context);
-        return rejected(reason, context);
+        return settled(Err(JsError::from_opaque(reason)), context);
     };
     let size_fn = with_writable(&stream, |w| w.size.clone());
     let size = if size_fn.is_undefined() {
@@ -3021,21 +3007,23 @@ pub(crate) fn writer_write(
             if with_writable(&stream, |w| w.phase) == WPhase::Writable {
                 start_erroring(context, &stream, reason.clone());
             }
-            return rejected(reason, context);
+            return settled(Err(JsError::from_opaque(reason)), context);
         }
     };
     let (phase, error, closing) = with_writable(&stream, |w| {
         (w.phase, w.error.clone(), w.close_resolvers.is_some())
     });
     match phase {
-        WPhase::Errored | WPhase::Erroring => return rejected(error, context),
+        WPhase::Errored | WPhase::Erroring => {
+            return settled(Err(JsError::from_opaque(error)), context);
+        }
         WPhase::Closed => {
             let reason = type_error_value("The stream is closed", context);
-            return rejected(reason, context);
+            return settled(Err(JsError::from_opaque(reason)), context);
         }
         WPhase::Writable if closing => {
             let reason = type_error_value("The stream is closing", context);
-            return rejected(reason, context);
+            return settled(Err(JsError::from_opaque(reason)), context);
         }
         WPhase::Writable => {}
     }
@@ -3062,7 +3050,7 @@ pub(crate) fn writer_close(context: &mut Context, writer: &JsObject) -> JsResult
         Some(stream) => writable_close(context, &stream),
         None => {
             let reason = type_error_value("This writer has been released", context);
-            rejected(reason, context)
+            settled(Err(JsError::from_opaque(reason)), context)
         }
     }
 }
@@ -3102,14 +3090,14 @@ const WRITER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(writer) => writer_write(cx, &writer, arg(args, 0)),
         Err(error) => {
             let reason = error_value(error, cx);
-            rejected(reason, cx)
+            settled(Err(JsError::from_opaque(reason)), cx)
         }
     }),
     ("close", 0, |this, _, cx| match writer_of(this) {
         Ok(writer) => writer_close(cx, &writer),
         Err(error) => {
             let reason = error_value(error, cx);
-            rejected(reason, cx)
+            settled(Err(JsError::from_opaque(reason)), cx)
         }
     }),
     ("abort", 1, |this, args, cx| {
@@ -3121,7 +3109,7 @@ const WRITER_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
             Some(stream) => writable_abort(cx, &stream, arg(args, 0)),
             None => {
                 let reason = type_error_value("This writer has been released", cx);
-                rejected(reason, cx)
+                settled(Err(JsError::from_opaque(reason)), cx)
             }
         }
     }),
@@ -3137,7 +3125,7 @@ const WRITABLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let stream = writable_of(this)?;
         if with_writable(&stream, |w| w.writer.is_some()) {
             let reason = type_error_value("Cannot abort a locked WritableStream", cx);
-            return rejected(reason, cx);
+            return settled(Err(JsError::from_opaque(reason)), cx);
         }
         writable_abort(cx, &stream, arg(args, 0))
     }),
@@ -3145,7 +3133,7 @@ const WRITABLE_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         let stream = writable_of(this)?;
         if with_writable(&stream, |w| w.writer.is_some()) {
             let reason = type_error_value("Cannot close a locked WritableStream", cx);
-            return rejected(reason, cx);
+            return settled(Err(JsError::from_opaque(reason)), cx);
         }
         writable_close(cx, &stream)
     }),
@@ -3412,10 +3400,10 @@ fn perform_transform(
     let promise = if transform.is_undefined() {
         // No transformer: what is written is what is read.
         match transform_enqueue(context, &controller, chunk) {
-            Ok(()) => resolved(JsValue::undefined(), context)?,
+            Ok(()) => settled(Ok(JsValue::undefined()), context)?,
             Err(error) => {
                 let reason = error_value(error, context);
-                rejected(reason, context)?
+                settled(Err(JsError::from_opaque(reason)), context)?
             }
         }
     } else {

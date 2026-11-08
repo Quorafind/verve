@@ -3,112 +3,11 @@
 //! flags, Node's spellings beside Deno's.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const VERVE: &str = env!("CARGO_BIN_EXE_verve");
+mod common;
 
-/// A folder of the test's own, removed when it is done.
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new(test: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("verve-cli-{}-{test}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // The real path: what the runtime resolves to, so grants and answers compare.
-        Self(std::fs::canonicalize(&dir).map(unverbatim).unwrap_or(dir))
-    }
-
-    fn file(&self, name: &str, text: &str) -> PathBuf {
-        let path = self.0.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&path, text).unwrap();
-        path
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn unverbatim(path: PathBuf) -> PathBuf {
-    match path.to_string_lossy().strip_prefix(r"\\?\") {
-        Some(rest) => PathBuf::from(rest),
-        None => path,
-    }
-}
-
-struct Ran {
-    code: i32,
-    stdout: String,
-    stderr: String,
-    took: Duration,
-}
-
-fn command(args: &[&str], cwd: &Path) -> Command {
-    let mut command = Command::new(VERVE);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command
-}
-
-/// Runs `verve` with `args` in `cwd`, `input` on its standard input (closed after it), and
-/// waits for it — at most 60 seconds, after which it is killed and the test fails.
-fn verve(args: &[&str], cwd: &Path, input: &[u8]) -> Ran {
-    let started = Instant::now();
-    let mut child = command(args, cwd).spawn().unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let input = input.to_vec();
-    let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(&input);
-    });
-    let ran = wait(child, started);
-    let _ = writer.join();
-    ran
-}
-
-fn wait(mut child: Child, started: Instant) -> Ran {
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    let out = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
-        text
-    });
-    let err = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        text
-    });
-    let deadline = started + Duration::from_secs(60);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            panic!("verve did not exit within 60 seconds");
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    let took = started.elapsed();
-    Ran {
-        code: status.code().unwrap_or(-1),
-        stdout: out.join().unwrap(),
-        stderr: err.join().unwrap(),
-        took,
-    }
-}
+use common::{Dir, Ran, VERVE, command, verve, wait};
 
 fn script(dir: &Dir, name: &str, source: &str, flags: &[&str], args: &[&str]) -> Ran {
     let path = dir.file(name, source);
@@ -218,6 +117,13 @@ fn exit_codes_are_nodes() {
     let ran = eval("setTimeout(() => { throw new Error('later') }, 5)", &[]);
     assert_eq!(ran.code, 1);
     assert!(ran.stderr.contains("Error: later"), "{}", ran.stderr);
+    // An error nobody reports is not described: its getters do not run for a line no one reads.
+    let ran = eval(
+        "throw { get message() { console.log('getter ran'); return 'm' } }",
+        &[],
+    );
+    assert_eq!(ran.code, 1);
+    assert!(!ran.stdout.contains("getter ran"), "{}", ran.stdout);
     // ... unless an `uncaughtException` listener hears it.
     let ran = eval(
         "process.on('uncaughtException', (e, origin) => console.log('heard', e.message, origin)); setTimeout(() => { throw new Error('x') }, 1); setTimeout(() => console.log('still running'), 20);",
@@ -674,7 +580,11 @@ fn no_warnings_and_the_flags_with_nothing_to_change() {
         ],
     );
     assert_eq!((accepted.code, accepted.stdout.as_str()), (0, "fine\n"));
-    assert_eq!(eval("0", &["--allow-child-process"]).code, 9);
+    // Programs are a grant of their own, in Node's spelling and Deno's; addons and WASI are not.
+    for flag in ["--allow-child-process", "--allow-run"] {
+        assert_eq!(eval("0", &[flag]).code, 0, "{flag}");
+    }
+    assert_eq!(eval("0", &["--allow-addons"]).code, 9);
 }
 
 #[test]
@@ -694,12 +604,6 @@ fn a_confined_process_is_refused_programs_as_node_refuses_them() {
         "{}",
         confined.stderr
     );
-    // Unconfined, there are still no programs to start: Verve has none.
-    let open = eval(
-        "try { require('child_process').execSync('x'); } catch (e) { console.log(e.code); }",
-        &["-A"],
-    );
-    assert_eq!(open.stdout, "ENOSYS\n", "{}", open.stderr);
 }
 
 #[cfg(windows)]
@@ -718,9 +622,24 @@ fn process_env_finds_a_name_whatever_its_case_on_windows() {
     command.env("https_proxy", "http://127.0.0.1:1");
     let ran = wait(command.spawn().unwrap(), Instant::now());
     assert_eq!(
-        ran.stdout,
-        "http://127.0.0.1:1 http://127.0.0.1:1 true true 1 string\n",
+        ran.stdout, "http://127.0.0.1:1 http://127.0.0.1:1 true true 1 string\n",
         "{}",
         ran.stderr
     );
+}
+
+#[test]
+fn dash_a_and_allow_run_both_let_a_script_start_programs() {
+    let all = eval(
+        "console.log(process.permission.has('child'), require('child_process').execFileSync(process.execPath, ['-p', '6*7']).toString().trim())",
+        &["-A"],
+    );
+    assert_eq!(all.stdout, "true 42\n", "{}", all.stderr);
+    let run = eval(
+        "console.log(process.permission.has('child'))",
+        &["--allow-run"],
+    );
+    assert_eq!(run.stdout, "true\n", "{}", run.stderr);
+    let none = eval("console.log(process.permission.has('child'))", &[]);
+    assert_eq!(none.stdout, "false\n", "{}", none.stderr);
 }

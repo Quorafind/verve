@@ -19,6 +19,23 @@ url = "2.5"
 unicode-segmentation = "1.12"
 # `localStorage`, kept on disk when the embedder says where.
 serde_json = "1"
+# canvas 2D: paths, strokes, gradients, blending — rasterised on the CPU in the renderer
+# thread, so a script's `fillRect` lands in pixels before it returns.
+tiny-skia = { optional = true, version = "0.11", default-features = false, features = ["std", "simd"] }
+# `<img>` and `drawImage` sources: the same decoder GPUI's `img()` uses, so a binary holds
+# one copy of it. Only the formats the snapshot hands to the drawer.
+image = { workspace = true }
+# Canvas text: the system's fonts, their shaping and their outlines — `fillText` and
+# `measureText` are synchronous, and GPUI's text system lives on another thread.
+fontdb = { optional = true, version = "0.23", default-features = false, features = ["std", "fs", "memmap"] }
+rustybuzz = { optional = true, version = "0.20", default-features = false, features = ["std"] }
+skrifa = { optional = true, version = "0.36", default-features = false, features = ["std"] }
+
+[features]
+default = ["canvas"]
+# Canvas 2D: the CPU rasteriser and the font stack. Without it `getContext('2d')` answers
+# `null` and `<img>` still reads its size from the header.
+canvas = ["dep:tiny-skia", "dep:fontdb", "dep:rustybuzz", "dep:skrifa"]
 
 # `verve-dom run`: `verve run`, with a document in the realm.
 [[bin]]

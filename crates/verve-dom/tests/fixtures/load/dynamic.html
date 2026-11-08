@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script>window.__log = [];</script></head><body>
+<script>
+var inline = document.createElement('script');
+inline.textContent = '__log.push("dynamic-inline")';
+__log.push('before');
+document.body.appendChild(inline);
+__log.push('after');
+var missing = document.createElement('script');
+missing.src = 'missing.js';
+missing.onerror = function () { __log.push('error:missing'); };
+document.body.appendChild(missing);
+var a = document.createElement('script'), b = document.createElement('script');
+a.async = false; b.async = false;
+a.src = 'mark.js?n=ordered-a'; b.src = 'mark.js?n=ordered-b';
+b.onload = function () { __log.push('onload-b'); };
+document.body.appendChild(a); document.body.appendChild(b);
+window.addEventListener('load', function () { __log.push('load'); });
+</script>
+</body></html>

@@ -1,0 +1,25 @@
+{
+  "electron": "39.8.10",
+  "events": [
+    "app will-finish-launching",
+    "app ready",
+    "app before-quit",
+    "app will-quit",
+    "process exit"
+  ],
+  "console": [
+    {
+      "from": "main",
+      "text": "appPath ends with asar"
+    },
+    {
+      "from": "main",
+      "text": "text hello from inside the archive"
+    },
+    {
+      "from": "main",
+      "text": "dir [\"hello.txt\"]"
+    }
+  ],
+  "exitCode": 0
+}

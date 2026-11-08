@@ -10,27 +10,37 @@
 //! matching capability it retains the original asynchronous `error`, then `close` (1006),
 //! refusal. The host's `requestUrl` remains independent of these capabilities.
 
-use std::cell::RefCell;
+mod remote;
+
+use std::sync::Arc;
 
 use boa_engine::{
     Context, JsObject, JsResult, JsString, JsValue, js_string,
     native_function::NativeFunctionPointer,
 };
 
+use boa_gc::{Finalize, GcRefCell, Trace};
+
+use crate::clone::Cloned;
 use crate::dom_events::{
     Kind, TargetData, dispatch, dom, dom_exception_error, handler_accessors, new_event,
     new_event_of, set_handler, web_class, with_target,
 };
-use crate::native::{arg, closure, get, hidden, js_text, object, text_of, type_error};
+use crate::native::{arg, arg_text, closure, get, hidden, js_text, object, text_of, type_error};
+
+pub use remote::{PortEnd, PortEvent, remote_port_pair};
 
 /// The classes, and the broadcast channels open in this realm.
+#[derive(Trace, Finalize)]
 pub(crate) struct Messaging {
     pub(crate) message_channel: JsObject,
     pub(crate) message_port: JsObject,
     port_proto: JsObject,
     pub(crate) broadcast_channel: JsObject,
     pub(crate) websocket: JsObject,
-    channels: RefCell<Vec<JsObject>>,
+    channels: GcRefCell<Vec<JsObject>>,
+    /// The ports driven by an end that lives in another isolate; see [`adopt_port`].
+    remotes: GcRefCell<Vec<(JsObject, PortEnd)>>,
 }
 
 pub(crate) fn make_classes(
@@ -43,7 +53,7 @@ pub(crate) fn make_classes(
         context,
         "MessagePort",
         0,
-        |_, _, _| Err(type_error("Illegal constructor")),
+        crate::dom_events::illegal,
         parent,
         PORT_METHODS,
         &[],
@@ -54,7 +64,7 @@ pub(crate) fn make_classes(
         crate::dom_events::handler_of(this, "message")
     });
     let set = crate::native::function(context, "set onmessage", 1, |this, args, cx| {
-        set_handler(this, "message", arg(args, 0))?;
+        set_handler(this, "message", arg(args, 0), cx)?;
         start_port(this, cx)?;
         Ok(JsValue::undefined())
     });
@@ -73,17 +83,6 @@ pub(crate) fn make_classes(
         0,
         |prototype, _, cx| {
             let port_proto = dom(cx)?.messaging.port_proto.clone();
-            let new_port = |proto: &JsObject| {
-                JsObject::from_proto_and_data(
-                    proto.clone(),
-                    TargetData::new(Kind::Port {
-                        other: None,
-                        started: false,
-                        closed: false,
-                        queue: Vec::new(),
-                    }),
-                )
-            };
             let (one, two) = (new_port(&port_proto), new_port(&port_proto));
             entangle(&one, &two)?;
             entangle(&two, &one)?;
@@ -148,11 +147,24 @@ pub(crate) fn make_classes(
         port_proto,
         broadcast_channel,
         websocket,
-        channels: RefCell::new(Vec::new()),
+        channels: GcRefCell::new(Vec::new()),
+        remotes: GcRefCell::new(Vec::new()),
     })
 }
 
 // ─── MessagePort ────────────────────────────────────────────────────────────────────────────
+
+fn new_port(proto: &JsObject) -> JsObject {
+    JsObject::from_proto_and_data(
+        proto.clone(),
+        TargetData::new(Kind::Port {
+            other: None,
+            started: false,
+            closed: false,
+            queue: Vec::new(),
+        }),
+    )
+}
 
 fn entangle(port: &JsObject, with: &JsObject) -> JsResult<()> {
     with_target(&port.clone().into(), |data| {
@@ -179,14 +191,14 @@ fn copy(message: &JsValue, transfer: &JsValue, context: &mut Context) -> JsResul
 }
 
 /// Hears `data` on `port` as a task of its own: dispatched now if the port is started, kept
-/// until it is otherwise.
+/// until it is otherwise. `args` is the message, then the ports that came with it, if any.
 fn deliver(
     _: &JsValue,
     args: &[JsValue],
     port: &JsObject,
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let data = arg(args, 0);
+    let (data, ports) = (arg(args, 0), arg(args, 1));
     let ready = with_target(&port.clone().into(), |target| {
         match &mut *target.kind.borrow_mut() {
             Kind::Port { closed: true, .. } => false,
@@ -195,7 +207,7 @@ fn deliver(
                 queue,
                 ..
             } => {
-                queue.push(data.clone());
+                queue.push((data.clone(), ports.clone()));
                 false
             }
             _ => true,
@@ -203,15 +215,19 @@ fn deliver(
     })?;
     if ready {
         let class = dom(context)?.message_event.clone();
-        let event = new_event_of(context, &class, "message", &[("data", data)])?;
+        let mut fields = vec![("data", data)];
+        if !ports.is_undefined() {
+            fields.push(("ports", ports));
+        }
+        let event = new_event_of(context, &class, "message", &fields)?;
         dispatch(port, &event, context)?;
     }
     Ok(JsValue::undefined())
 }
 
-fn later(context: &mut Context, port: &JsObject, data: JsValue) {
+fn later(context: &mut Context, port: &JsObject, data: JsValue, ports: JsValue) {
     let fire = closure(context, "", 1, deliver, port.clone());
-    crate::set_timeout(context, fire.into(), 0., false, vec![data]);
+    crate::set_timeout(context, fire.into(), 0., false, vec![data, ports]);
 }
 
 fn start_port(this: &JsValue, context: &mut Context) -> JsResult<()> {
@@ -223,8 +239,8 @@ fn start_port(this: &JsValue, context: &mut Context) -> JsResult<()> {
         _ => Vec::new(),
     })?;
     let port = this.as_object().expect("a port");
-    for data in queued {
-        later(context, &port, data);
+    for (data, ports) in queued {
+        later(context, &port, data, ports);
     }
     Ok(())
 }
@@ -232,6 +248,9 @@ fn start_port(this: &JsValue, context: &mut Context) -> JsResult<()> {
 const PORT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
     ("postMessage", 2, |this, args, cx| {
         let transfer = transfer_of(&arg(args, 1), cx)?;
+        if post_remote(this, &arg(args, 0), &transfer, cx)? {
+            return Ok(JsValue::undefined());
+        }
         let data = copy(&arg(args, 0), &transfer, cx)?;
         let other = with_target(this, |data| match &*data.kind.borrow() {
             Kind::Port {
@@ -242,7 +261,7 @@ const PORT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
             _ => None,
         })?;
         if let Some(other) = other {
-            later(cx, &other, data);
+            later(cx, &other, data, JsValue::undefined());
         }
         Ok(JsValue::undefined())
     }),
@@ -250,7 +269,7 @@ const PORT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         start_port(this, cx)?;
         Ok(JsValue::undefined())
     }),
-    ("close", 0, |this, _, _| {
+    ("close", 0, |this, _, cx| {
         let other = with_target(this, |data| match &mut *data.kind.borrow_mut() {
             Kind::Port { other, closed, .. } => {
                 *closed = true;
@@ -258,6 +277,7 @@ const PORT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
             }
             _ => None,
         })?;
+        with_end(this, cx, PortEnd::close);
         if let Some(other) = other {
             with_target(&other.into(), |data| {
                 if let Kind::Port { other, .. } = &mut *data.kind.borrow_mut() {
@@ -268,6 +288,237 @@ const PORT_METHODS: &[(&str, usize, NativeFunctionPointer)] = &[
         Ok(JsValue::undefined())
     }),
 ];
+
+// ─── Ports whose other end is in another isolate ────────────────────────────────────────────
+
+/// A `MessagePort` in this realm driven by `end`: the way a page holds one half of a channel
+/// whose other half is in the main process. What the other end sends is heard on the host's
+/// beat ([`crate::Runtime::run_workers`]), each message as an event of its own with the
+/// microtasks it leaves behind; the realm's waker is what the other end calls when one arrives.
+///
+/// # Errors
+///
+/// The realm's classes could not be made.
+pub fn adopt_port(end: PortEnd, context: &mut Context) -> JsResult<JsValue> {
+    let proto = dom(context)?.messaging.port_proto.clone();
+    let port = new_port(&proto);
+    attach(&port, end, context)?;
+    Ok(port.into())
+}
+
+/// Has `port` driven by the remote `end`.
+fn attach(port: &JsObject, end: PortEnd, context: &mut Context) -> JsResult<()> {
+    let wake = Arc::clone(&crate::shared(context).wake);
+    end.set_waker(Arc::new(move || wake.wake()));
+    let messaging = &dom(context)?.messaging;
+    messaging.remotes.borrow_mut().push((port.clone(), end));
+    Ok(())
+}
+
+/// Runs `use_end` on the remote end driving `port`, if one does.
+fn with_end<T>(
+    port: &JsValue,
+    context: &mut Context,
+    use_end: impl FnOnce(&PortEnd) -> T,
+) -> Option<T> {
+    let object = port.as_object()?;
+    let messaging = &dom(context).ok()?.messaging;
+    let remotes = messaging.remotes.borrow();
+    let (_, end) = remotes
+        .iter()
+        .find(|(driven, _)| JsObject::equals(driven, &object))?;
+    Some(use_end(end))
+}
+
+/// The remote end that drove `port`, if one did, now taken from it.
+fn take_end(port: &JsValue, context: &mut Context) -> Option<PortEnd> {
+    let object = port.as_object()?;
+    let messaging = &dom(context).ok()?.messaging;
+    let mut remotes = messaging.remotes.borrow_mut();
+    let at = remotes
+        .iter()
+        .position(|(driven, _)| JsObject::equals(driven, &object))?;
+    Some(remotes.remove(at).1)
+}
+
+/// Takes the `MessagePort` `port` out of this realm to send it to another isolate, and answers
+/// the end that carries it there; the port is closed from now on, as a transferred one is. A
+/// port driven by a remote end gives that end up. One that is half of a channel in this realm
+/// is cut from it: its partner becomes driven by a new remote pair's other end, and the answer
+/// is this one.
+///
+/// # Errors
+///
+/// `port` is not a `MessagePort`, or was transferred or closed already (`DataCloneError`).
+pub fn release_port(port: &JsValue, context: &mut Context) -> JsResult<PortEnd> {
+    if !port
+        .as_object()
+        .is_some_and(|o| crate::dom_events::is_port(&o))
+    {
+        return Err(type_error("Value is not a MessagePort"));
+    }
+    let open = with_target(port, |data| match &mut *data.kind.borrow_mut() {
+        Kind::Port { closed, other, .. } if !*closed => {
+            *closed = true;
+            Some(other.take())
+        }
+        _ => None,
+    })?;
+    let Some(peer) = open else {
+        return Err(dom_exception_error(
+            context,
+            "A MessagePort in the transfer list has already been transferred or closed.",
+            "DataCloneError",
+        ));
+    };
+    if let Some(held) = take_end(port, context) {
+        return Ok(held);
+    }
+    let (kept, sent) = remote_port_pair();
+    if let Some(peer) = peer {
+        attach(&peer, kept, context)?;
+    }
+    Ok(sent)
+}
+
+/// The first of `items` that cannot be given away with [`release_port`] — not a port, a port that
+/// is closed or already given away, the port `except` is posting on, or one listed twice — and
+/// why. A transfer list is checked whole before any port in it is taken, so one that is refused
+/// leaves every port as it was.
+fn unreleasable(items: &[JsValue], except: Option<&JsValue>) -> Option<(usize, &'static str)> {
+    for (at, item) in items.iter().enumerate() {
+        let Some(port) = item.as_object().filter(crate::dom_events::is_port) else {
+            return Some((at, "does not have a transferable type"));
+        };
+        let open = with_target(item, |data| {
+            matches!(&*data.kind.borrow(), Kind::Port { closed: false, .. })
+        });
+        if !open.unwrap_or(false) {
+            return Some((at, "has already been transferred or closed"));
+        }
+        if except
+            .and_then(JsValue::as_object)
+            .is_some_and(|me| JsObject::equals(&me, &port))
+        {
+            return Some((at, "is the port it is posted on"));
+        }
+        if items[..at]
+            .iter()
+            .filter_map(JsValue::as_object)
+            .any(|earlier| JsObject::equals(&earlier, &port))
+        {
+            return Some((at, "is a duplicate of an earlier port"));
+        }
+    }
+    None
+}
+
+/// Whether every one of `items` can be given away with [`release_port`] together: all ports, open,
+/// and no port twice.
+pub fn can_release(items: &[JsValue]) -> bool {
+    unreleasable(items, None).is_none()
+}
+
+/// `postMessage` on a port driven by a remote end: the message cloned out and sent with the
+/// ports of the transfer list. `false` when the port is not one.
+fn post_remote(
+    this: &JsValue,
+    message: &JsValue,
+    transfer: &JsValue,
+    context: &mut Context,
+) -> JsResult<bool> {
+    if with_end(this, context, |_| ()).is_none() {
+        return Ok(false);
+    }
+    let data = Cloned::from_value(message, context)?;
+    let items = if transfer.is_null_or_undefined() {
+        Vec::new()
+    } else {
+        crate::dom_events::iterate(transfer, context)?
+    };
+    if let Some((at, why)) = unreleasable(&items, Some(this)) {
+        let message = format!("Value at index {at} {why}.");
+        return Err(dom_exception_error(context, &message, "DataCloneError"));
+    }
+    let mut ports = Vec::new();
+    for item in &items {
+        ports.push(release_port(item, context)?);
+    }
+    with_end(this, context, |end| end.send(data, ports));
+    Ok(true)
+}
+
+/// Whether any port of this realm is driven by a remote end.
+pub(crate) fn active(context: &Context) -> bool {
+    crate::world::every_world::<boa_gc::Gc<crate::dom_events::Dom>>(context)
+        .iter()
+        .any(|dom| !dom.messaging.remotes.borrow().is_empty())
+}
+
+/// Hears what the remote ends have sent the ports of this realm. Answers whether any message
+/// came.
+pub(crate) fn poll(context: &mut Context) -> bool {
+    let mut any = false;
+    for world in 0..crate::world::count(context) as crate::WorldId {
+        any |= crate::world::in_world(context, world, poll_world);
+    }
+    any
+}
+
+/// [`poll`] for the ports of the world that is running.
+fn poll_world(context: &mut Context) -> bool {
+    let Some(dom) = crate::world::realm_data::<boa_gc::Gc<crate::dom_events::Dom>>(context) else {
+        return false;
+    };
+    let mut heard = Vec::new();
+    dom.messaging.remotes.borrow_mut().retain(|(port, end)| {
+        while let Some(event) = end.receive() {
+            let closed = matches!(event, PortEvent::Closed);
+            heard.push((port.clone(), event));
+            if closed {
+                return false;
+            }
+        }
+        !end.is_closed()
+    });
+    let any = !heard.is_empty();
+    for (port, event) in heard {
+        match event {
+            PortEvent::Message(data, ends) => hear(&port, &data, ends, context),
+            PortEvent::Closed => close_port(&port),
+        }
+    }
+    any
+}
+
+/// The other end closed: nothing comes through this port again.
+fn close_port(port: &JsObject) {
+    with_target(&port.clone().into(), |data| {
+        if let Kind::Port { closed, .. } = &mut *data.kind.borrow_mut() {
+            *closed = true;
+        }
+    })
+    .expect("a port is an event target");
+}
+
+/// `data` and the ports that came with it, heard on `port`.
+fn hear(port: &JsObject, data: &Cloned, ends: Vec<PortEnd>, context: &mut Context) {
+    let heard = (|| {
+        let data = data.to_value(context)?;
+        let mut ports = Vec::new();
+        for end in ends {
+            ports.push(adopt_port(end, context)?);
+        }
+        let ports = crate::native::array(context, ports);
+        deliver(&JsValue::undefined(), &[data, ports], port, context)
+    })();
+    if let Err(error) = heard {
+        crate::report(context, &error);
+    }
+    // The microtasks the message left, as `Runtime::run_microtasks` runs them: the job executor
+    // reports a job that threw itself, so there is no error left to do anything with.
+    let _ = context.run_jobs();
+}
 
 // ─── BroadcastChannel ───────────────────────────────────────────────────────────────────────
 
@@ -281,7 +532,7 @@ fn make_channel(
             "Failed to construct 'BroadcastChannel': 1 argument required, but only 0 present.",
         ));
     }
-    let name = text_of(&arg(args, 0), context)?;
+    let name = arg_text(args, 0, context)?;
     let channel = JsObject::from_proto_and_data(
         prototype.clone(),
         TargetData::new(Kind::Channel {
@@ -382,7 +633,7 @@ fn make_socket(
             "Failed to construct 'WebSocket': 1 argument required, but only 0 present.",
         ));
     }
-    let given = text_of(&arg(args, 0), context)?;
+    let given = arg_text(args, 0, context)?;
     let mut url = url::Url::parse(&given).map_err(|_| {
         dom_exception_error(
             context,
@@ -590,7 +841,7 @@ const SOCKET_ACCESSORS: &[(&str, NativeFunctionPointer, Option<NativeFunctionPoi
         "binaryType",
         |this, _, _| socket_part(this, |_, _, kind, _| js_text(kind)),
         Some(|this, args, cx| {
-            let kind = text_of(&arg(args, 0), cx)?;
+            let kind = arg_text(args, 0, cx)?;
             if kind == "blob" || kind == "arraybuffer" {
                 socket_part(this, |_, _, own, _| *own = kind)?;
             }

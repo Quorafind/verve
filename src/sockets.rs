@@ -1,6 +1,7 @@
-//! Node's network and process modules. Networking is default-denied and may be granted by
-//! the embedder; the native implementation lives in `network`. Process execution, cluster,
-//! IPC sockets and HTTP/2 remain refused. The refusal paths here retain their original errors.
+//! Node's network modules. Networking is default-denied and may be granted by the embedder;
+//! the native implementation lives in `network`. Cluster, IPC sockets and HTTP/2 remain
+//! refused, and these refusal paths retain their original errors. `child_process` has its own
+//! module, `crate::child_process`.
 
 use boa_engine::{
     Context, JsObject, JsResult, JsString, JsValue, js_string,
@@ -51,18 +52,7 @@ pub(crate) fn denied_dns(
 const NO_NETWORK: &str =
     "Verve does not let plugins open network connections with Node's modules: use requestUrl";
 
-fn emitter_class(context: &mut Context) -> JsResult<JsObject> {
-    crate::modules::node_module(context, "events")?
-        .as_object()
-        .ok_or_else(|| crate::native::type_error("EventEmitter is not a class"))
-}
-
-/// `EventEmitter.call(this)`: an object of one of these classes set up as an emitter.
-fn emitter_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResult<()> {
-    let emitter = emitter_class(context)?;
-    crate::call(context, &emitter.into(), &this.clone().into(), &[])?;
-    Ok(())
-}
+pub(crate) use crate::events::{emitter_class, emitter_init};
 
 /// A microtask from now: `error` to whoever listens for it, then — if `close` says so — a
 /// socket's `close`, with `hadError`.
@@ -73,7 +63,7 @@ fn fail_later(context: &mut Context, target: &JsObject, error: JsValue, close: b
 
 /// [`fail_later`], with what `close` is emitted with given: a child process's is
 /// `(code, signal)`.
-fn fail_later_with(
+pub(crate) fn fail_later_with(
     context: &mut Context,
     target: &JsObject,
     error: JsValue,
@@ -109,22 +99,27 @@ fn fail_later_with(
 }
 
 /// Calls `callback`, if it is one, a microtask from now with `args`.
-fn call_later(context: &mut Context, callback: Option<&JsValue>, args: Vec<JsValue>) {
+pub(crate) fn call_later(context: &mut Context, callback: Option<&JsValue>, args: Vec<JsValue>) {
     if let Some(callback) = callback.filter(|c| c.is_callable()) {
         crate::microtask(context, callback.clone(), args);
     }
 }
 
-fn last_callback(args: &[JsValue]) -> Option<&JsValue> {
+pub(crate) fn last_callback(args: &[JsValue]) -> Option<&JsValue> {
     args.iter().rev().find(|a| a.is_callable())
 }
 
-fn returns_this(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn returns_this(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(this.clone())
 }
 
 /// Makes `name` from the module `module` with `args`: `new net.Socket()`.
-fn make(context: &mut Context, module: &str, name: &str, args: &[JsValue]) -> JsResult<JsObject> {
+pub(crate) fn make(
+    context: &mut Context,
+    module: &str,
+    name: &str,
+    args: &[JsValue],
+) -> JsResult<JsObject> {
     let module = crate::modules::node_module(context, module)?;
     let class = get(&module, name, context)?;
     let class = class
@@ -133,7 +128,7 @@ fn make(context: &mut Context, module: &str, name: &str, args: &[JsValue]) -> Js
     class.construct(args, None, context)
 }
 
-fn define(
+pub(crate) fn define(
     context: &mut Context,
     module: &JsObject,
     name: &str,
@@ -744,7 +739,8 @@ pub(crate) fn dns_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
 pub(crate) fn denied_http(cx: &mut Context) -> JsResult<JsValue> {
     request(&JsValue::undefined(), &[], cx)
 }
-pub(crate) fn status_text(code: u16) -> &'static str {
+/// The reason phrase of an HTTP status, as Node's `http.STATUS_CODES` has it; `unknown` for the rest.
+pub fn status_text(code: u16) -> &'static str {
     STATUS_CODES
         .iter()
         .find(|(c, _)| *c == code)
@@ -1449,150 +1445,4 @@ pub(crate) fn cluster_module(context: &mut Context, _: &str) -> JsResult<JsValue
     )?;
     cluster.set(js_string!("Worker"), worker, false, context)?;
     Ok(cluster.into())
-}
-
-// ─── child_process ──────────────────────────────────────────────────────────────────────────
-
-const NO_PROGRAMS: &str = "child_process is not available in Verve: plugins cannot start programs";
-
-fn spawn_error(context: &mut Context, syscall: &str, file: &JsValue) -> JsValue {
-    let file = if file.is_string() {
-        crate::print(file)
-    } else {
-        String::new()
-    };
-    let error = coded_error_value(
-        context,
-        &format!("{syscall} {file} ENOSYS: {NO_PROGRAMS}"),
-        "ENOSYS",
-    );
-    if let Some(e) = error.as_object() {
-        let _ = e.set(
-            js_string!("syscall"),
-            js_text(format!("{syscall} {file}").trim_end()),
-            false,
-            context,
-        );
-        let _ = e.set(js_string!("path"), js_text(&file), false, context);
-        let _ = e.set(js_string!("errno"), -38, false, context);
-    }
-    error
-}
-
-fn child_init(this: &JsObject, _: &[JsValue], context: &mut Context) -> JsResult<()> {
-    emitter_init(this, &[], context)?;
-    let emitter = emitter_class(context)?;
-    for stream in ["stdin", "stdout", "stderr"] {
-        let made = emitter.construct(&[], None, context)?;
-        exports(
-            context,
-            &made,
-            &[
-                ("setEncoding", 1, returns_this),
-                ("write", 3, |_, _, _| Ok(false.into())),
-                ("end", 3, returns_this),
-                ("pipe", 1, |_, args, _| Ok(arg(args, 0))),
-                ("destroy", 1, returns_this),
-                ("resume", 0, returns_this),
-                ("pause", 0, returns_this),
-            ],
-        )?;
-        this.set(JsString::from(stream), made, false, context)?;
-    }
-    let mut streams = Vec::new();
-    for stream in ["stdin", "stdout", "stderr"] {
-        streams.push(this.get(JsString::from(stream), context)?);
-    }
-    let stdio = array(context, streams);
-    this.set(js_string!("stdio"), stdio, false, context)?;
-    this.set(js_string!("pid"), JsValue::undefined(), false, context)?;
-    this.set(js_string!("exitCode"), JsValue::null(), false, context)?;
-    this.set(js_string!("signalCode"), JsValue::null(), false, context)?;
-    this.set(js_string!("killed"), false, false, context)?;
-    this.set(js_string!("connected"), false, false, context)?;
-    Ok(())
-}
-
-/// `spawn`, `exec`, `execFile`, `fork`: a `ChildProcess` that never started — its callback hears
-/// why, and it emits `error` and `close`.
-fn refused(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    crate::permission::child_process(context)?;
-    let error = spawn_error(context, "spawn", &arg(args, 0));
-    // `exec`'s callback is `(error, stdout, stderr)`.
-    call_later(
-        context,
-        last_callback(args),
-        vec![error.clone(), js_text(""), js_text("")],
-    );
-    let child = make(context, "child_process", "ChildProcess", &[])?;
-    // As a program that could not be found closes: Node's negative errno as the code, no signal.
-    fail_later_with(
-        context,
-        &child,
-        error,
-        Some(vec![JsValue::from(-38), JsValue::null()]),
-    );
-    Ok(child.into())
-}
-
-pub(crate) fn child_process_module(context: &mut Context, _: &str) -> JsResult<JsValue> {
-    let module = object(context);
-    let emitter = emitter_class(context)?;
-    define(
-        context,
-        &module,
-        "ChildProcess",
-        &emitter,
-        child_init,
-        &[
-            ("kill", 1, |_, _, _| Ok(false.into())),
-            ("send", 4, |_, args, cx| {
-                let error = coded_error_value(cx, "Channel closed", "ERR_IPC_CHANNEL_CLOSED");
-                call_later(cx, last_callback(args), vec![error]);
-                Ok(false.into())
-            }),
-            ("disconnect", 0, |_, _, _| Ok(JsValue::undefined())),
-            ("ref", 0, returns_this),
-            ("unref", 0, returns_this),
-        ],
-    )?;
-    for name in ["exec", "execFile", "spawn", "fork"] {
-        let f = function(context, name, 3, refused);
-        module.set(JsString::from(name), f, false, context)?;
-    }
-    exports(
-        context,
-        &module,
-        &[
-            ("execSync", 2, |_, args, cx| {
-                crate::permission::child_process(cx)?;
-                Err(boa_engine::JsError::from_opaque(spawn_error(
-                    cx,
-                    "spawnSync",
-                    &arg(args, 0),
-                )))
-            }),
-            ("execFileSync", 3, |_, args, cx| {
-                crate::permission::child_process(cx)?;
-                Err(boa_engine::JsError::from_opaque(spawn_error(
-                    cx,
-                    "spawnSync",
-                    &arg(args, 0),
-                )))
-            }),
-            ("spawnSync", 3, |_, args, cx| {
-                crate::permission::child_process(cx)?;
-                // As Node answers a program that could not start: no output, no status, the error.
-                let result = object(cx);
-                let error = spawn_error(cx, "spawnSync", &arg(args, 0));
-                for key in ["output", "stdout", "stderr", "status", "signal"] {
-                    result.set(JsString::from(key), JsValue::null(), false, cx)?;
-                }
-                result.set(js_string!("pid"), 0, false, cx)?;
-                result.set(js_string!("error"), error, false, cx)?;
-                Ok(result.into())
-            }),
-        ],
-    )?;
-    Ok(module.into())
 }

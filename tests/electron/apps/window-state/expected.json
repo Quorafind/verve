@@ -1,0 +1,196 @@
+{
+  "electron": "39.8.10",
+  "events": [
+    "app will-finish-launching",
+    "app ready",
+    "contents 1 did-start-loading",
+    "contents 1 dom-ready",
+    "contents 1 did-finish-load",
+    "window 1 show",
+    "contents 1 did-stop-loading",
+    "window 1 ready-to-show",
+    "window 1 hide",
+    "window 1 show",
+    "window 1 close",
+    "window 1 closed",
+    "app window-all-closed",
+    "app before-quit",
+    "app will-quit",
+    "process exit"
+  ],
+  "console": [
+    {
+      "from": "main",
+      "text": "-- show"
+    },
+    {
+      "from": "main",
+      "text": "window move"
+    },
+    {
+      "from": "main",
+      "text": "window show"
+    },
+    {
+      "from": "renderer",
+      "text": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged."
+    },
+    {
+      "from": "main",
+      "text": "window focus"
+    },
+    {
+      "from": "main",
+      "text": "-- hide"
+    },
+    {
+      "from": "main",
+      "text": "window hide"
+    },
+    {
+      "from": "main",
+      "text": "window blur"
+    },
+    {
+      "from": "main",
+      "text": "-- showInactive"
+    },
+    {
+      "from": "main",
+      "text": "window show"
+    },
+    {
+      "from": "main",
+      "text": "-- setBounds"
+    },
+    {
+      "from": "main",
+      "text": "window resize"
+    },
+    {
+      "from": "main",
+      "text": "window move"
+    },
+    {
+      "from": "main",
+      "text": "-- maximize"
+    },
+    {
+      "from": "main",
+      "text": "window resize"
+    },
+    {
+      "from": "main",
+      "text": "window move"
+    },
+    {
+      "from": "main",
+      "text": "window maximize"
+    },
+    {
+      "from": "main",
+      "text": "-- unmaximize"
+    },
+    {
+      "from": "main",
+      "text": "window resize"
+    },
+    {
+      "from": "main",
+      "text": "window unmaximize"
+    },
+    {
+      "from": "main",
+      "text": "-- minimize"
+    },
+    {
+      "from": "main",
+      "text": "window move"
+    },
+    {
+      "from": "main",
+      "text": "window minimize"
+    },
+    {
+      "from": "main",
+      "text": "window blur"
+    },
+    {
+      "from": "main",
+      "text": "-- restore"
+    },
+    {
+      "from": "main",
+      "text": "window restore"
+    },
+    {
+      "from": "main",
+      "text": "window focus"
+    },
+    {
+      "from": "main",
+      "text": "window focus"
+    },
+    {
+      "from": "main",
+      "text": "-- blur"
+    },
+    {
+      "from": "main",
+      "text": "window blur"
+    },
+    {
+      "from": "main",
+      "text": "-- focus"
+    },
+    {
+      "from": "main",
+      "text": "window focus"
+    },
+    {
+      "from": "main",
+      "text": "-- setFullScreen(true)"
+    },
+    {
+      "from": "main",
+      "text": "window enter-full-screen"
+    },
+    {
+      "from": "main",
+      "text": "window resize"
+    },
+    {
+      "from": "main",
+      "text": "window move"
+    },
+    {
+      "from": "main",
+      "text": "-- setFullScreen(false)"
+    },
+    {
+      "from": "main",
+      "text": "window leave-full-screen"
+    },
+    {
+      "from": "main",
+      "text": "window resize"
+    },
+    {
+      "from": "main",
+      "text": "window move"
+    },
+    {
+      "from": "main",
+      "text": "-- close"
+    },
+    {
+      "from": "main",
+      "text": "window close"
+    },
+    {
+      "from": "main",
+      "text": "window closed"
+    }
+  ],
+  "exitCode": 0
+}

@@ -1,8 +1,12 @@
 use boa_string::StaticJsStrings;
 
 use crate::{
-    Context, JsResult, JsValue, js_string,
-    object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
+    Context, JsResult, JsValue,
+    builtins::typed_array::object::{
+        typed_array_element_get_shortcut, typed_array_length_guard, typed_array_length_read,
+    },
+    js_string,
+    object::internal_methods::InternalMethodPropertyContext,
     property::PropertyKey,
     vm::opcode::{IndexOperand, Operation, RegisterOperand, nullish_base_error},
 };
@@ -26,6 +30,12 @@ fn get_by_name<const LENGTH: bool>(
                 .vm
                 .set_register(dst.into(), (string.len() as u32).into());
             return Ok(());
+        } else if let Some(object) = object.as_object()
+            && typed_array_length_guard(&object)
+            && let Some(value) = typed_array_length_read(&object)
+        {
+            context.vm.set_register(dst.into(), value);
+            return Ok(());
         }
     }
 
@@ -45,15 +55,9 @@ fn get_by_name<const LENGTH: bool>(
 
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
     let object_borrowed = object.borrow();
-    if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
-        let mut result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let prototype = shape.prototype().expect("prototype should have value");
-            let prototype = prototype.borrow();
-            prototype.properties().storage[slot.index as usize].clone()
-        } else {
-            object_borrowed.properties().storage[slot.index as usize].clone()
-        };
-
+    if let Some((slot, mut result)) =
+        ic.get(object_borrowed.shape(), object_borrowed.properties(), false)
+    {
         drop(object_borrowed);
         if slot.attributes.has_get() && result.is_object() {
             result =
@@ -121,6 +125,14 @@ fn get_by_value<const PUSH_KEY: bool>(
                     context.vm.set_register(dst.into(), element);
                     return Ok(());
                 }
+            } else if let Some(value) = typed_array_element_get_shortcut(&object, index.get()) {
+                #[cfg(feature = "jit")]
+                context.vm.frame().code_block.jit.note_typed_element();
+                if PUSH_KEY {
+                    context.vm.set_register(key.into(), key_value.into());
+                }
+                context.vm.set_register(dst.into(), value);
+                return Ok(());
             } else if let Some(string) = base.as_string() {
                 let value = string
                     .code_unit_at(index.get() as usize)

@@ -10,6 +10,7 @@ use crate::{
     environments::EnvironmentStack,
     error::RuntimeLimitError,
     object::JsFunction,
+    object::shape::{WeakShape, slot::Slot},
     realm::Realm,
     script::Script,
     vm::opcode::{OPCODE_HANDLERS, OPCODE_HANDLERS_BUDGET},
@@ -42,6 +43,7 @@ pub use {
     source_info::{NativeSourceInfo, SourcePath},
 };
 
+pub(crate) use call_frame::Lent;
 pub(crate) use code_block::GlobalFunctionBinding;
 
 mod call_frame;
@@ -56,7 +58,7 @@ pub(crate) mod shadow_stack;
 #[cfg(feature = "jit")]
 pub(crate) mod jit;
 #[cfg(feature = "jit")]
-pub use jit::{JitOptions, JitStats, JitUnavailable, jit_unavailable};
+pub use jit::{JitOptions, JitStats, JitUnavailable, jit_unavailable, object_layout_checked};
 pub(crate) mod source_info;
 
 #[cfg(feature = "flowgraph")]
@@ -103,6 +105,10 @@ pub struct Vm {
     /// [`JsObject::call`](crate::object::JsObject::call) and
     /// [`JsObject::construct`](crate::object::JsObject::construct).
     pub(crate) host_call_depth: usize,
+
+    /// Where `prototype` is in the last shared shape of a constructor that `function_construct`
+    /// read it from: the shape (weakly held) and the slot of the data property.
+    pub(crate) construct_prototype_slot: Option<(WeakShape, Slot)>,
 
     /// How many runs of the interpreter are nested on the native stack.
     pub(crate) run_depth: usize,
@@ -301,6 +307,14 @@ impl Stack {
         self.stack.extend_from_slice(values);
     }
 
+    /// The value `n` places below the top of the stack (0 is the top).
+    pub(crate) fn nth_from_top(&self, n: usize) -> Option<&JsValue> {
+        self.stack
+            .len()
+            .checked_sub(n + 1)
+            .and_then(|i| self.stack.get(i))
+    }
+
     /// Get the function object at the top of the stack according to the calling convention.
     #[track_caller]
     pub(crate) fn calling_convention_get_function(&self, argument_count: usize) -> &JsValue {
@@ -486,6 +500,7 @@ impl Vm {
             interrupt: None,
             native_active_function: None,
             host_call_depth: 0,
+            construct_prototype_slot: None,
             run_depth: 0,
             native_stack_base: 0,
             shadow_stack: ShadowStack::default(),
@@ -678,12 +693,14 @@ impl Vm {
         // yields.
         if frame.active_runnable.is_none() {
             let current = self.frame();
-            frame.active_runnable.clone_from(&current.active_runnable);
+            frame.active_runnable = Lent::owned((*current.active_runnable).clone());
         }
 
         let current_pc = self.frame().pc;
-        self.shadow_stack
-            .push_bytecode(current_pc, frame.code_block().source_info.clone());
+        // SAFETY: the frame, which keeps its code block alive (it owns it, or the callee on the
+        // stack does), is pushed below and popped together with this entry by `pop_frame`.
+        let source_info = unsafe { Lent::lend(&frame.code_block().source_info) };
+        self.shadow_stack.push_bytecode(current_pc, source_info);
 
         self.frames.push(frame);
 
@@ -1154,6 +1171,8 @@ impl Context {
     }
 
     /// The error for a call past the recursion or stack limits, as V8 words it.
+    #[cold]
+    #[inline(never)]
     fn stack_overflow() -> JsError {
         JsNativeError::range()
             .with_message("Maximum call stack size exceeded")
@@ -1161,8 +1180,19 @@ impl Context {
     }
 
     /// Checks if we haven't exceeded the defined runtime limits.
+    #[inline]
     pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
         self.check_interrupt()?;
+        if self.runtime_limits_exceeded() {
+            return Err(Self::stack_overflow());
+        }
+        Ok(())
+    }
+
+    /// Whether a call now would pass the recursion, native stack or stack size limit, which
+    /// `check_runtime_limits` throws a `RangeError` for.
+    #[inline]
+    pub(crate) fn runtime_limits_exceeded(&self) -> bool {
         // Must throw if the number of recursive calls exceeds the defined limit.
         //
         // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking
@@ -1174,7 +1204,7 @@ impl Context {
         // safe all the same, since only the host calls nest on it.
         let recursion_depth = (self.vm.frames.len() - 1).saturating_add(self.vm.host_call_depth);
         if self.vm.runtime_limits.recursion_limit() <= recursion_depth {
-            return Err(Self::stack_overflow());
+            return true;
         }
         // Must throw if nested runs of the interpreter have taken too much native stack.
         if self.vm.run_depth > 1
@@ -1184,14 +1214,14 @@ impl Context {
                 .saturating_sub(native_stack_position())
                 > self.vm.runtime_limits.native_stack_limit()
         {
-            return Err(Self::stack_overflow());
+            return true;
         }
         // Must throw if the stack size exceeds the defined maximum length.
         if self.vm.runtime_limits.stack_size_limit() <= self.vm.stack.stack.len() {
-            return Err(Self::stack_overflow());
+            return true;
         }
 
-        Ok(())
+        false
     }
 }
 

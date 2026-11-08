@@ -24,6 +24,7 @@ use std::{cell::Cell, cell::OnceCell, mem::offset_of, ptr};
 
 use thin_vec::ThinVec;
 
+use super::typed_elements::{self, TypedLayout};
 use crate::{
     JsObject, JsValue,
     object::{
@@ -54,6 +55,8 @@ pub(crate) struct ObjectLayout {
     pub(crate) thin_data: i32,
     /// This thread's count of garbage collections (`boa_gc::raw::collections`).
     pub(crate) collections: *const Cell<u64>,
+    /// Where the elements of typed arrays are, if that checked out too.
+    pub(crate) typed: Option<TypedLayout>,
 }
 
 thread_local! {
@@ -148,8 +151,15 @@ fn compute() -> Option<ObjectLayout> {
         thin_len: offset(thin_len)?,
         thin_data: offset(thin_data)?,
         collections: boa_gc::raw::collections(),
+        typed: None,
     };
-    check(&layout).then_some(layout)
+    if !check(&layout) {
+        return None;
+    }
+    Some(ObjectLayout {
+        typed: typed_elements::compute(&layout),
+        ..layout
+    })
 }
 
 /// Reads a word at `offset` from an object's allocation.
@@ -157,7 +167,7 @@ fn compute() -> Option<ObjectLayout> {
 /// # Safety
 ///
 /// `offset` must be within the object's allocation, at a word-aligned initialized field.
-unsafe fn word(object: &JsObject, offset: i32) -> u64 {
+pub(super) unsafe fn word(object: &JsObject, offset: i32) -> u64 {
     let address = (JsValue::from(object.clone()).raw_bits() & 0x0000_FFFF_FFFF_FFFF) as usize
         + offset as usize;
     // SAFETY: guaranteed by the caller.
@@ -264,6 +274,17 @@ pub(crate) struct SiteCache {
     pub(crate) shape: [Cell<u64>; 2],
     pub(crate) collections: Cell<u64>,
     pub(crate) slot: Cell<u64>,
+    /// For a typed array's `length` (`typed_length.rs`): the shapes of the prototypes down to the
+    /// one with the accessor, how many there are (none while nothing is remembered), and the
+    /// length of the property storage of the receiver and of each of them. The receiver's shape
+    /// and the accessor's slot are the fields above.
+    pub(crate) chain: [[Cell<u64>; 2]; Self::CHAIN],
+    pub(crate) lens: [Cell<u32>; Self::CHAIN + 1],
+    /// The prototypes themselves (addresses of their `GcBox`es) and the bits of the intrinsic
+    /// getter found in the last of them.
+    pub(crate) objects: [Cell<u64>; Self::CHAIN],
+    pub(crate) getter: Cell<u64>,
+    pub(crate) depth: Cell<u32>,
 }
 
 impl SiteCache {
@@ -277,6 +298,11 @@ impl SiteCache {
             // Never a count of collections: matches nothing until filled.
             collections: Cell::new(u64::MAX),
             slot: Cell::new(0),
+            chain: std::array::from_fn(|_| [Cell::new(0), Cell::new(0)]),
+            lens: std::array::from_fn(|_| Cell::new(0)),
+            objects: std::array::from_fn(|_| Cell::new(0)),
+            getter: Cell::new(0),
+            depth: Cell::new(0),
         }
     }
 

@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+mod common;
+
 use verve::Runtime;
 
 /// A folder of its own for one test, with `files` written in it.
@@ -22,21 +24,7 @@ fn run_in(rt: &mut Runtime, dir: &Path, body: &str) -> Vec<String> {
     let exports = rt
         .load_module(&dir.join("main.js"), body)
         .unwrap_or_else(|e| panic!("{e}"));
-    let json = rt.eval("JSON.stringify").unwrap();
-    let text = rt
-        .call(&json, &boa_engine::JsValue::undefined(), &[exports])
-        .unwrap_or_else(|e| panic!("{e}"));
-    let parsed: serde_json::Value = serde_json::from_str(&verve::print(&text)).unwrap();
-    parsed["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| v.to_string())
-        })
-        .collect()
+    common::result_of(rt, exports)
 }
 
 #[test]
@@ -52,7 +40,11 @@ fn built_ins_answer_to_both_names_and_to_a_trailing_slash() {
             require('node:process') === process,
             require('process') === globalThis.process,
             require('node:events') === require('events'),
-            require('original-fs') === require('fs'),
+            // Electron's `original-fs`: the same `fs` implementation, never reading through an
+            // overlay — so an object of its own, not another name for `fs`'s.
+            require('original-fs') !== require('fs'),
+            typeof require('original-fs').readFileSync,
+            require('node:original-fs') === require('original-fs'),
             require('module').isBuiltin('node:fs'),
             require('module').isBuiltin('left-pad'),
             require.resolve('node:fs'),
@@ -68,6 +60,8 @@ fn built_ins_answer_to_both_names_and_to_a_trailing_slash() {
             "true",
             "true",
             "true",
+            "true",
+            "function",
             "true",
             "true",
             "false",
@@ -150,6 +144,41 @@ fn a_plugins_own_files_folders_packages_and_json() {
             "true", "string", "true"
         ]
     );
+}
+
+/// A package whose `main` is written `./x.js` is the file `pkg/x.js`, as in Node: the path a
+/// `main` names is made absolute and cleaned, so `require.resolve`, `module.id`, `__filename`
+/// and the `require.cache` key all name the same string, with no `./` in it. Before this,
+/// `require.resolve` answered `pkg/./x.js`, which the cache had no entry for.
+#[test]
+fn a_package_main_is_cleaned_the_way_node_cleans_it() {
+    let dir = folder(
+        "main",
+        &[
+            ("lib/dotted/package.json", "{ \"main\": \"./x.js\" }"),
+            (
+                "lib/dotted/x.js",
+                "exports.id = module.id; exports.file = __filename;",
+            ),
+        ],
+    );
+    let mut rt = Runtime::new();
+    let result = run_in(
+        &mut rt,
+        &dir,
+        r#"
+        const path = require('path');
+        const x = require('./lib/dotted');
+        const key = require.resolve('./lib/dotted');
+        exports.result = [
+            path.basename(x.id),
+            path.basename(x.file),
+            String(require.cache[key] !== undefined),
+            /(^|[\/])\.([\/]|$)/.test(x.file) ? 'dot segment' : 'clean',
+        ];
+    "#,
+    );
+    assert_eq!(result, ["x.js", "x.js", "true", "clean"]);
 }
 
 /// A native addon is refused the way Node refuses one under `--no-addons`, by
@@ -336,9 +365,9 @@ fn the_host_requires_natively_and_gives_scripts_a_window_require() {
     let mut rt = Runtime::new();
     let electron = rt.eval("({ remote: 'stub' })").unwrap();
     rt.define_builtin("electron", electron);
-    let fs = rt.require("node:original-fs").unwrap();
-    let again = rt.require("fs").unwrap();
-    assert!(fs == again);
+    let original = rt.require("node:original-fs").unwrap();
+    assert!(rt.require("node:original-fs").unwrap() == original);
+    assert!(rt.require("fs").unwrap() != original);
     assert!(
         rt.require("nope")
             .unwrap_err()

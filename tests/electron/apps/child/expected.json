@@ -1,0 +1,29 @@
+{
+  "electron": "39.8.10",
+  "events": [
+    "app will-finish-launching",
+    "app ready",
+    "app before-quit",
+    "app will-quit",
+    "process exit"
+  ],
+  "console": [
+    {
+      "from": "main",
+      "text": "spawn 0 spawned"
+    },
+    {
+      "from": "main",
+      "text": "execFile 0 2"
+    },
+    {
+      "from": "main",
+      "text": "fork {\"argv\":[\"ping\"]}"
+    },
+    {
+      "from": "main",
+      "text": "fork exit 0"
+    }
+  ],
+  "exitCode": 0
+}

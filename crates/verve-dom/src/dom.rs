@@ -13,6 +13,22 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::field::Draft;
+use crate::input::LastInput;
+
+mod edit;
+mod marks;
+mod names;
+mod ranges;
+mod reclaim;
+mod shadow;
+
+pub(crate) use edit::Edit;
+pub use names::{camel_name, css_name, parse_style};
+pub(crate) use ranges::{Contents, Ranges, utf16_len};
+pub use ranges::{Direction, RangeData, RangeError};
+use shadow::Shadows;
+pub(crate) use shadow::is_custom_element_name;
+pub use shadow::{Shadow, ShadowMode, SlotAssignment};
 
 /// 节点编号保持 32 位：低 24 位是槽位，高 8 位是代数；代数耗尽的槽位不再复用。
 pub type NodeId = u32;
@@ -178,7 +194,7 @@ const INDEX_MASK: u32 = (1 << INDEX_BITS) - 1;
 const MAX_GENERATION: u32 = u8::MAX as u32;
 
 fn split(id: NodeId) -> (usize, u32) {
-    ((id & INDEX_MASK) as usize, (id >> INDEX_BITS) as u32)
+    ((id & INDEX_MASK) as usize, id >> INDEX_BITS)
 }
 
 fn join(index: usize, generation: u32) -> NodeId {
@@ -187,6 +203,15 @@ fn join(index: usize, generation: u32) -> NodeId {
 
 /// How many nodes an arena holds at most, unless told otherwise ([`Dom::max_nodes`]).
 pub const DEFAULT_MAX_NODES: usize = 1 << 24;
+
+/// An attribute that changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AttrChange {
+    pub node: NodeId,
+    pub name: String,
+    pub old: Option<String>,
+    pub new: Option<String>,
+}
 
 /// What a script's change was, as a `MutationObserver` hears it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,11 +260,19 @@ pub struct Dom {
     free: Vec<u32>,
     live: usize,
     pub document: NodeId,
+    /// The `<script>`s that have run or never will: see `marks.rs`.
+    started: HashSet<NodeId>,
+    /// The `<link>`s the page's own parser made.
+    parser_made: HashSet<NodeId>,
     pub html: NodeId,
     pub head: NodeId,
     pub body: NodeId,
     /// The element with the keyboard, if any.
     pub focused: Option<NodeId>,
+    /// Whether the focus ring shows on the focused element: `:focus-visible`.
+    pub focus_visible: bool,
+    /// What the person did last, which says whether a focus the page asks for shows its ring.
+    pub(crate) last_input: LastInput,
     /// The elements the pointer is over, innermost first; see [`Dom::set_hovered`].
     hovered: Vec<NodeId>,
     /// The element a button is held down on: `:active`.
@@ -259,14 +292,27 @@ pub struct Dom {
     mutations: Vec<(Mutation, Vec<NodeId>)>,
     /// Whether to keep [`Mutation`]s: while a `MutationObserver` watches.
     pub record_mutations: bool,
+    /// Attribute changes since the bindings last looked, kept while [`Dom::watch_attrs`] says:
+    /// what `attributeChangedCallback` is told.
+    attr_log: Vec<AttrChange>,
+    /// Whether to keep the attribute log: once a custom element observes attributes.
+    pub(crate) watch_attrs: bool,
     /// Trees in no tree: candidates for reclaiming.
     roots: HashSet<NodeId>,
     /// Nodes the host itself holds — the document, the places it puts things — never reclaimed.
     pinned: HashSet<NodeId>,
     /// Nodes whose subtrees are drawn as views of their own; see [`Dom::partition_of`].
     partitions: HashSet<NodeId>,
+    /// The live ranges and the selection: see `ranges.rs`.
+    pub(crate) ranges: Ranges,
+    /// `document.designMode = "on"`: the whole document is editable.
+    pub design_mode: bool,
     /// Every `<style>` element made: the ones in the document are stylesheets.
     styles: HashSet<NodeId>,
+    /// The shadow roots and what is assigned to their slots.
+    shadows: Shadows,
+    /// Whether something that decides a slot's assignment changed since it was last asked.
+    slot_dirty: bool,
     /// Moves when what a `<style>` holds, or which are in the document, may have changed.
     styles_revision: u64,
     /// Where the last child looked up was among its parent's children: walking siblings one
@@ -296,10 +342,14 @@ impl Dom {
             free: Vec::new(),
             live: 0,
             document: 0,
+            started: HashSet::new(),
+            parser_made: HashSet::new(),
             html: 0,
             head: 0,
             body: 0,
             focused: None,
+            focus_visible: false,
+            last_input: LastInput::default(),
             hovered: Vec::new(),
             active: None,
             revision: 0,
@@ -307,13 +357,19 @@ impl Dom {
             changed_set: HashSet::new(),
             media_changed: HashSet::new(),
             moved: Vec::new(),
+            attr_log: Vec::new(),
+            watch_attrs: false,
             relinked: Vec::new(),
             mutations: Vec::new(),
             record_mutations: false,
             roots: HashSet::new(),
             pinned: HashSet::new(),
             partitions: HashSet::new(),
+            ranges: Ranges::default(),
+            design_mode: false,
             styles: HashSet::new(),
+            shadows: Shadows::default(),
+            slot_dirty: false,
             styles_revision: 0,
             sibling_hint: Default::default(),
             max_nodes: DEFAULT_MAX_NODES,
@@ -435,6 +491,11 @@ impl Dom {
     /// Subtrees that joined (`true`) or left (`false`) the document since this was last asked.
     pub fn take_moved(&mut self) -> Vec<(NodeId, bool)> {
         std::mem::take(&mut self.moved)
+    }
+
+    /// The attribute changes since this was last asked, while [`Dom::watch_attrs`] is on.
+    pub(crate) fn take_attr_changes(&mut self) -> Vec<AttrChange> {
+        std::mem::take(&mut self.attr_log)
     }
 
     pub(crate) fn take_relinked(&mut self) -> Vec<NodeId> {
@@ -690,7 +751,8 @@ impl Dom {
 
     /// Whether the element with the keyboard is `id` or inside it: `:focus-within`.
     pub fn focus_within(&self, id: NodeId) -> bool {
-        self.focused.is_some_and(|f| self.contains(id, f))
+        self.focused
+            .is_some_and(|f| self.shadow_including_contains(id, f))
     }
 
     /// The root of the tree `id` is in.
@@ -735,6 +797,7 @@ impl Dom {
             if let Some(node) = &slot.node {
                 style |= node.tag() == Some("style");
                 stack.extend(node.children.iter().copied());
+                stack.extend(self.shadows.root_of_host(at));
                 if node.namespace == Namespace::Html
                     && matches!(node.tag(), Some("video" | "audio"))
                 {
@@ -745,32 +808,6 @@ impl Dom {
         if style {
             self.styles_revision = self.styles_revision.wrapping_add(1);
         }
-    }
-
-    /// The host holds `id` itself: it is never reclaimed.
-    pub fn pin(&mut self, id: NodeId) {
-        self.pinned.insert(id);
-    }
-
-    pub fn unpin(&mut self, id: NodeId) {
-        self.pinned.remove(&id);
-    }
-
-    pub fn is_pinned(&self, id: NodeId) -> bool {
-        self.pinned.contains(&id)
-    }
-
-    /// Draws `id`'s subtree as a view of its own, redrawn only when something in it changes.
-    pub fn set_partition(&mut self, id: NodeId, on: bool) {
-        if on {
-            self.partitions.insert(id);
-        } else {
-            self.partitions.remove(&id);
-        }
-    }
-
-    pub fn is_partition(&self, id: NodeId) -> bool {
-        self.partitions.contains(&id)
     }
 
     /// The nearest partition `id` is in, itself included; the root of its tree when there is
@@ -805,9 +842,11 @@ impl Dom {
         } else {
             (None, None)
         };
+        self.ranges_removing(id, parent, at);
         if let Some(node) = self.node_mut(parent) {
             node.children.remove(at);
         }
+        self.note_slot_input(None);
         self.unlink(id);
         self.mark(parent);
         self.record(Mutation::ChildList {
@@ -823,6 +862,10 @@ impl Dom {
     pub(crate) fn detach_many(&mut self, ids: &[NodeId]) {
         let selected: HashSet<NodeId> = ids.iter().copied().collect();
         let parents: HashSet<NodeId> = ids.iter().filter_map(|id| self.parent(*id)).collect();
+        if !self.ranges_unaffected(&selected, &parents) {
+            ids.iter().for_each(|id| self.detach(*id));
+            return;
+        }
         let mut links = std::collections::HashMap::new();
         for parent in &parents {
             let children = self.children(*parent);
@@ -957,6 +1000,7 @@ impl Dom {
         }
         let nodes = if matches!(self.get(child).map(|n| &n.kind), Some(NodeKind::Fragment)) {
             // A fragment gives up all its children at once, heard as one change of each list.
+            self.ranges_emptying(child);
             let moved = match self.node_mut(child) {
                 Some(fragment) => std::mem::take(&mut fragment.children),
                 None => Vec::new(),
@@ -994,6 +1038,7 @@ impl Dom {
 
     /// Puts `nodes`, in no tree now, in `parent` before `before` (or last), as one change.
     fn place(&mut self, parent: NodeId, nodes: Vec<NodeId>, before: Option<NodeId>) -> bool {
+        self.note_slot_input(None);
         let connected = self.is_connected(parent);
         let at = before
             .and_then(|before| self.index_of(parent, before))
@@ -1002,6 +1047,7 @@ impl Dom {
             return false;
         };
         node.children.splice(at..at, nodes.iter().copied());
+        self.ranges_inserted(parent, at, nodes.len());
         let (previous, next) = if self.record_mutations {
             let children = self.children(parent);
             (
@@ -1041,6 +1087,8 @@ impl Dom {
             Some(node) if !node.children.is_empty() => std::mem::take(&mut node.children),
             _ => return,
         };
+        self.note_slot_input(None);
+        self.ranges_emptying(id);
         for (at, child) in children.iter().enumerate() {
             self.unlink(*child);
             if self.record_mutations {
@@ -1091,6 +1139,9 @@ impl Dom {
             if old == text {
                 return;
             }
+            if !self.ranges.quiet && !self.ranges.is_empty() {
+                self.ranges_data_replaced(id, 0, utf16_len(&old), utf16_len(text));
+            }
             if let Some(Node {
                 kind: NodeKind::Text(own) | NodeKind::Comment(own),
                 ..
@@ -1133,7 +1184,7 @@ impl Dom {
         } else {
             name.to_owned()
         };
-        let old = if self.record_mutations {
+        let old = if self.record_mutations || self.watch_attrs {
             self.get_attr(id, &name)
         } else {
             None
@@ -1168,12 +1219,26 @@ impl Dom {
             }
             _ => upsert(&mut node.attrs, &name, value),
         }
+        self.note_slot_input(Some(&name));
         self.mark(id);
+        self.log_attr(id, &name, old.clone(), Some(value.to_owned()));
         self.record(Mutation::Attributes {
             target: id,
             name,
             old,
         });
+    }
+
+    fn log_attr(&mut self, id: NodeId, name: &str, old: Option<String>, new: Option<String>) {
+        if self.watch_attrs {
+            let name = name.to_owned();
+            self.attr_log.push(AttrChange {
+                node: id,
+                name,
+                old,
+                new,
+            });
+        }
     }
 
     pub fn remove_attr(&mut self, id: NodeId, name: &str) {
@@ -1201,6 +1266,8 @@ impl Dom {
             node.attrs.retain(|(key, _)| *key != name);
             self.mark(id);
         }
+        self.note_slot_input(Some(&name));
+        self.log_attr(id, &name, old.clone(), None);
         self.record(Mutation::Attributes {
             target: id,
             name,
@@ -1399,6 +1466,25 @@ impl Dom {
         out
     }
 
+    /// The options a list shows: all of them but the ones with the `hidden` attribute.
+    pub fn listed_options(&self, select: NodeId) -> Vec<NodeId> {
+        let mut options = self.options(select);
+        options.retain(|option| {
+            self.get(*option)
+                .is_some_and(|n| n.attr("hidden").is_none())
+        });
+        options
+    }
+
+    /// Whether an option cannot be chosen: it is disabled, or its `<optgroup>` is.
+    pub fn option_disabled(&self, option: NodeId) -> bool {
+        let has = |id: NodeId| self.get(id).is_some_and(|n| n.attr("disabled").is_some());
+        has(option)
+            || self.parent(option).is_some_and(|parent| {
+                self.get(parent).and_then(Node::tag) == Some("optgroup") && has(parent)
+            })
+    }
+
     /// An option's value: its `value` attribute, or its text.
     pub fn option_value(&self, option: NodeId) -> String {
         self.get(option).and_then(|n| n.attr("value")).map_or_else(
@@ -1525,11 +1611,16 @@ impl Dom {
         if style {
             self.styles.insert(copy);
         }
+        // A script that has run has run: so does its copy (HTML's "already started").
+        if self.started.contains(&id) {
+            self.started.insert(copy);
+        }
         Some(copy)
     }
 
     /// Whether the node is drawn: in the document, and neither it nor anything it is in hidden
-    /// by its own inline style or the `hidden` attribute.
+    /// by its own inline style or the `hidden` attribute. Taken along the flat tree, so a
+    /// slotted node is hidden when what it is slotted into is.
     pub fn is_shown(&self, id: NodeId) -> bool {
         let mut at = Some(id);
         while let Some(node) = at {
@@ -1538,73 +1629,13 @@ impl Dom {
             }) {
                 return false;
             }
-            at = self.parent(node);
+            at = self.flat_parent(node);
+            // A host's child that no slot takes is not drawn.
+            if at.is_none() && self.parent(node).is_some() {
+                return false;
+            }
         }
         self.is_connected(id)
-    }
-
-    /// The roots of detached trees, the candidates for [`Dom::free`].
-    pub fn detached_roots(&self) -> Vec<NodeId> {
-        self.roots
-            .iter()
-            .copied()
-            .filter(|id| *id != self.document && !self.pinned.contains(id))
-            .collect()
-    }
-
-    /// Forgets the node and everything in it. Only for what no handle can reach any more:
-    /// answers the ids freed, so whoever kept something against them can let it go.
-    pub fn free(&mut self, id: NodeId) -> Vec<NodeId> {
-        self.detach(id);
-        let mut freed = Vec::new();
-        let mut stack = vec![id];
-        while let Some(at) = stack.pop() {
-            let (index, generation) = split(at);
-            let Some(slot) = self.slots.get_mut(index) else {
-                continue;
-            };
-            if slot.generation != generation {
-                continue;
-            }
-            if let Some(node) = slot.node.take() {
-                match Arc::try_unwrap(node) {
-                    Ok(node) => stack.extend(node.children),
-                    Err(shared) => stack.extend(shared.children.iter().copied()),
-                }
-                slot.connected = false;
-                // A place whose generations ran out is retired: no id is ever given twice.
-                if slot.generation < MAX_GENERATION {
-                    slot.generation += 1;
-                    self.free.push(index as u32);
-                }
-                self.live -= 1;
-                self.roots.remove(&at);
-                self.partitions.remove(&at);
-                self.styles.remove(&at);
-                self.pinned.remove(&at);
-                freed.push(at);
-            }
-        }
-        let gone: HashSet<NodeId> = freed.iter().copied().collect();
-        self.hovered.retain(|h| !gone.contains(h));
-        if self.focused.is_some_and(|f| gone.contains(&f)) {
-            self.focused = None;
-        }
-        if self.active.is_some_and(|a| gone.contains(&a)) {
-            self.active = None;
-        }
-        let mut was_changed = false;
-        for id in &freed {
-            was_changed |= self.changed_set.remove(id);
-        }
-        if was_changed {
-            self.changed.retain(|c| !gone.contains(c));
-        }
-        self.relinked.retain(|r| !gone.contains(r));
-        self.moved.retain(|(id, _)| !gone.contains(id));
-        self.mutations.retain(|(m, _)| !gone.contains(&m.target()));
-        self.revision = self.revision.wrapping_add(1);
-        freed
     }
 
     /// How many nodes are alive.
@@ -1637,71 +1668,6 @@ fn style_text(node: &Node) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// `color: red; padding: 4px !important` as pairs, and the names declared `!important`.
-pub fn parse_style(text: &str) -> (Vec<(String, String)>, Vec<String>) {
-    let mut important = Vec::new();
-    let pairs = crate::css::declarations(text)
-        .into_iter()
-        .map(|d| {
-            if d.important {
-                important.push(d.name.clone());
-            }
-            (d.name, d.value)
-        })
-        .collect();
-    (pairs, important)
-}
-
-/// `fontSize` as `font-size`, `cssFloat` as `float`, `webkitTransform` as `-webkit-transform`; a
-/// custom property is left alone.
-pub fn css_name(camel: &str) -> String {
-    if camel.starts_with("--") {
-        return camel.to_owned();
-    }
-    if camel == "cssFloat" {
-        return "float".to_owned();
-    }
-    let mut out = String::with_capacity(camel.len() + 4);
-    for c in camel.chars() {
-        if c.is_ascii_uppercase() {
-            out.push('-');
-            out.push(c.to_ascii_lowercase());
-        } else {
-            out.push(c);
-        }
-    }
-    for prefix in ["webkit-", "moz-", "ms-"] {
-        if out.starts_with(prefix) {
-            return format!("-{out}");
-        }
-    }
-    out
-}
-
-/// `font-size` as `fontSize`.
-pub fn camel_name(css: &str) -> String {
-    if css.starts_with("--") {
-        return css.to_owned();
-    }
-    if css == "float" {
-        return "cssFloat".to_owned();
-    }
-    let css = css.strip_prefix('-').unwrap_or(css);
-    let mut out = String::with_capacity(css.len());
-    let mut upper = false;
-    for c in css.chars() {
-        if c == '-' {
-            upper = true;
-        } else if upper {
-            out.push(c.to_ascii_uppercase());
-            upper = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 #[cfg(test)]

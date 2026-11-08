@@ -1,0 +1,71 @@
+[package]
+name = "verve-gpui"
+version = "0.1.0"
+edition = "2024"
+description = "The shell of Verve's Electron: GPUI windows that draw what each page's isolate publishes, and nothing else."
+publish = false
+
+# The OS thread, and only it: windows, what they draw, and the wake from the Hub that tells it
+# there is something new. No JavaScript runs here, and nothing here waits on a thread that runs it.
+
+[[bin]]
+name = "electron"
+path = "src/bin/electron.rs"
+
+[dependencies]
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+# A wake from any thread, turned into a task on the OS thread by the shell's pump.
+async-channel = "2"
+verve-electron = { path = "../verve-electron" }
+# The document a window draws.
+verve-dom = { path = "../verve-dom" }
+# The boxes of a page and the display list a window draws; the software painter's picture is
+# tiny-skia's, the one `verve-dom` already links.
+verve-layout = { path = "../verve-layout" }
+# `href`s are resolved against the page for the status of a link under the pointer.
+url = "2.5"
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+# The pictures GPUI paints (a rasterised gradient is one): the version GPUI itself uses.
+image = { workspace = true }
+# The system's handle of a GPUI window, for the parts of a window GPUI does not do.
+raw-window-handle = "0.6"
+# `file://` addresses are decoded the way the rest of the app does.
+verve = { path = "../..", default-features = false }
+
+# The Win32 calls GPUI does not make for a window: frame, limits, owner, taskbar, displays (`platform/windows.rs`).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+
+# Native menu bars and popup menus, tray icons, and global hotkeys (`menu.rs`, `tray.rs`,
+# `shortcut.rs`). Linux has none of them: `muda` and `tray-icon` need GTK there (Linux builds
+# would link it), so those arms are no-ops answered the way Electron answers a missing feature.
+# `global-hotkey` pulls in `windows-sys` 0.59, a third copy beside the two already in the graph.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+muda = { version = "0.21", default-features = false }
+tray-icon = { version = "0.26", default-features = false }
+global-hotkey = "0.9"
+
+# What macOS has of a window that GPUI does not give: `NSWindow`, as `gpui_macos` has it, so
+# cargo resolves one copy of each.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSButton", "NSControl", "NSGraphics", "NSResponder", "NSView", "NSWindow", "objc2-core-foundation"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSGeometry", "NSObject", "NSString", "objc2-core-foundation", "std"] }
+
+[features]
+# The `electron` binary with Boa's JIT in its isolates (`crates/verve-electron`'s `jit`); see
+# `docs/jit.md`. Off by default.
+jit = ["verve-electron/jit"]
+
+[lints]
+workspace = true

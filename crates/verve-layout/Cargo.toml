@@ -1,0 +1,32 @@
+[package]
+name = "verve-layout"
+version = "0.1.0"
+edition = "2024"
+description = "Box layout for Verve's pages: a document's snapshot laid out by taffy on the renderer's own thread, and the display list that draws it."
+publish = false
+
+# Layout runs where the page's script runs, so a script that changes the document and reads its
+# geometry in the next line is answered from the new layout. Nothing here knows GPUI: text is
+# measured through `TextMeasurer`, and whoever draws replays the `DisplayList`.
+
+[dependencies]
+verve-dom = { path = "../verve-dom", default-features = false }
+# The layout algorithms: the same copy and the same features as GPUI's own (`=0.13.0`), plus
+# nothing — block flow with floats, flexbox and grid.
+taffy = { version = "=0.13.0", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "float_layout", "content_size"] }
+
+# Inline SVG: parsed and drawn by the copy of resvg and usvg that GPUI links, with the same
+# features, so the graph holds one of each.
+resvg = { version = "0.46.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+
+# UAX #14, where a line may break. cosmic-text uses it too on Linux and macOS, so there is no second copy of the tables
+# there; on Windows (DirectWrite) it is new code in electron.exe, about 21 KB.
+unicode-linebreak = "0.1"
+
+[dev-dependencies]
+# The tests lay out real pages: a runtime with a document, on a thread with room for Boa's stack.
+verve = { path = "../..", default-features = false }
+serde_json = "1"
+
+[lints]
+workspace = true

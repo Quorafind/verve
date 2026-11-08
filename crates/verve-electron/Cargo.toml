@@ -1,0 +1,75 @@
+[package]
+name = "verve-electron"
+version = "0.1.0"
+edition = "2024"
+description = "Electron on Verve: the processes, the shell and the messages between them, with every API a native Rust function on Boa."
+publish = false
+
+# The logic half of the `electron` binary: the Hub that routes between threads, the main
+# process's isolate, and one isolate per rendered page. Nothing here draws or knows GPUI —
+# `crates/verve-gpui` is the shell, and headless tests build this crate alone.
+
+[dependencies]
+# The feature set docs/electron/size.md settled on for the Electron build: no defaults, WebAssembly.
+verve = { path = "../..", default-features = false, features = ["wasm"] }
+verve-dom = { path = "../verve-dom" }
+# The boxes of a page: laid out on its own thread, and the display list the shell draws.
+verve-layout = { path = "../verve-layout" }
+boa_engine = { version = "=0.22.0", default-features = false, features = ["annex-b"] }
+# The collector's `Trace`, for the native state IPC keeps in the engine's objects.
+boa_gc = "=0.22.0"
+# The address `loadURL` is given, read as the kernel's `data:` processor reads it.
+url = "2.5"
+# An app's `package.json`: its name, version and `main`.
+serde_json = "1"
+# The app's `app.asar`, which every isolate reads through.
+verve-asar = { path = "../verve-asar" }
+# `nativeImage`: the pictures it reads and writes, the codecs `verve-dom` already links.
+image = { workspace = true }
+# The nonce and the key `safeStorage` makes: the system's randomness, already in the graph.
+getrandom = "0.3"
+# The single-instance lock's key: a digest of the profile directory.
+sha2 = "0.10"
+# `Set-Cookie` lines read as RFC 6265 says; the jar that stores them is this crate's own.
+cookie = { version = "0.18", default-features = false }
+
+# The Windows API the app object answers from: known folders, the registry, the single-instance
+# mutex and pipe, memory and CPU figures, the user's languages.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_Power",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+# The fixtures' recordings from real Electron are JSON.
+serde_json = "1"
+
+[features]
+# Boa's JIT in every isolate (see `docs/jit.md`); `VERVE_JIT=0` switches it off at run time.
+jit = ["verve/jit"]
+
+[lints]
+workspace = true

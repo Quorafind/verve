@@ -92,7 +92,7 @@ pub(crate) fn strip_types(
     Ok(match map {
         Some(map) => format!(
             "{code}\n\n//# sourceMappingURL=data:application/json;base64,{}",
-            base64(map.as_bytes())
+            crate::encoding::base64(map.as_bytes(), false)
         ),
         None if !url.is_empty() => format!("{code}\n\n//# sourceURL={url}"),
         None => code,
@@ -167,25 +167,6 @@ fn place(source: &str, url: &str, offset: u32) -> String {
         format!("{url}:")
     };
     format!("{url}{line}:{column}")
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
 }
 
 // ─── Strip mode ──────────────────────────────────────────────────────────────────────────────
@@ -723,7 +704,7 @@ fn utf8_len(first: u8) -> usize {
 
 /// `stripTypeScriptTypes(code[, options])`, as a function of its own: it warns once, as Node's
 /// does, that it is experimental.
-pub(crate) fn function(context: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn strip_function(context: &mut Context) -> JsResult<JsValue> {
     let state = object(context);
     Ok(closure(context, "stripTypeScriptTypes", 1, call, state).into())
 }
@@ -751,11 +732,11 @@ fn call(
     }
     let code = arg(args, 0);
     let Some(code) = code.as_string().map(|s| s.to_std_string_escaped()) else {
-        return Err(type_error(context, "code", "string", &code));
+        return Err(bad_option(context, "code", "string", &code));
     };
     let options = arg(args, 1);
     if !options.is_undefined() && !options.is_object() {
-        return Err(type_error(context, "options", "object", &options));
+        return Err(bad_option(context, "options", "object", &options));
     }
     let mode = match get(&options, "mode", context)? {
         m if m.is_undefined() => Mode::Strip,
@@ -764,7 +745,7 @@ fn call(
         m => {
             let message = format!(
                 "The property 'options.mode' must be one of: 'strip', 'transform'. Received {}",
-                shown(&m)
+                crate::native::received(&m, context)
             );
             return Err(coded(
                 context,
@@ -778,7 +759,7 @@ fn call(
         m if m.is_undefined() => false,
         m => match m.as_boolean() {
             Some(b) => b,
-            None => return Err(type_error(context, "options.sourceMap", "boolean", &m)),
+            None => return Err(bad_option(context, "options.sourceMap", "boolean", &m)),
         },
     };
     if source_map && mode == Mode::Strip {
@@ -795,7 +776,7 @@ fn call(
         u if u.is_undefined() => String::new(),
         u => match u.as_string() {
             Some(s) => s.to_std_string_escaped(),
-            None => return Err(type_error(context, "options.sourceUrl", "string", &u)),
+            None => return Err(bad_option(context, "options.sourceUrl", "string", &u)),
         },
     };
     match strip_types(&code, mode, source_map, &url) {
@@ -821,32 +802,6 @@ fn coded(context: &mut Context, kind: JsNativeError, message: &str, code: &str) 
     JsError::from_opaque(error.into())
 }
 
-fn type_error(context: &mut Context, name: &str, expected: &str, value: &JsValue) -> JsError {
-    let kind = if name.contains('.') {
-        "property"
-    } else {
-        "argument"
-    };
-    let message = format!(
-        "The \"{name}\" {kind} must be of type {expected}. Received {}",
-        shown(value)
-    );
-    coded(
-        context,
-        JsNativeError::typ(),
-        &message,
-        "ERR_INVALID_ARG_TYPE",
-    )
-}
-
-fn shown(value: &JsValue) -> String {
-    if value.is_undefined() || value.is_null() {
-        crate::print(value)
-    } else if value.is_object() {
-        "an instance of Object".into()
-    } else if value.is_string() {
-        format!("type string ('{}')", crate::print(value))
-    } else {
-        format!("type {} ({})", value.type_of(), crate::print(value))
-    }
+fn bad_option(context: &mut Context, name: &str, expected: &str, value: &JsValue) -> JsError {
+    crate::native::invalid_arg_type(context, name, &format!("of type {expected}"), value)
 }

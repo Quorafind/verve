@@ -177,6 +177,7 @@ fn dns_lookup_promises_uses_system_pool() {
         r#"[{"address":"127.0.0.1","family":4}]"#
     );
 }
+#[cfg(feature = "dns-records")]
 #[test]
 fn dns_record_shapes_and_ttl_match_node() {
     assert_eq!(
@@ -324,12 +325,16 @@ fn tls_client_server_ca_alpn_identity_and_duplex() {
         server.listen(0,'127.0.0.1',()=>{
             const s=tls.connect({host:'127.0.0.1',port:server.address().port,servername:'localhost',ca:cert,ALPNProtocols:['http/1.1'],checkServerIdentity:(name,cert)=>{checked=name==='localhost'||name==='127.0.0.1';if(!cert.raw)throw Error('no certificate')}},()=>{});
             let body='';s.setEncoding('utf8');s.on('data',b=>body+=b);
-            s.on('end',()=>{globalThis.result=[s instanceof Duplex,s.authorized,s.alpnProtocol,body,checked,s.getPeerCertificate().subject.CN];s.end();server.close()});
+            s.on('end',()=>{globalThis.result=[s instanceof Duplex,s.authorized,s.alpnProtocol,body,checked,(s.getPeerCertificate().subject||{}).CN];s.end();server.close()});
         });
     "#,
             granted()
         ),
-        r#"[true,true,"http/1.1","secure",true,"localhost"]"#
+        if cfg!(feature = "x509") {
+            r#"[true,true,"http/1.1","secure",true,"localhost"]"#
+        } else {
+            r#"[true,true,"http/1.1","secure",true,null]"#
+        }
     );
 }
 
@@ -751,4 +756,29 @@ fn a_waker_replaces_the_millisecond_poll() {
         .unwrap()
         .join()
         .unwrap();
+}
+#[test]
+fn tcp_options_set_while_connecting_do_not_fail() {
+    // Many sockets at once, so that some are still connecting when the options reach the reactor:
+    // Windows refuses a socket option on such a socket with `WSAEINVAL`, which surfaced as `EIO`.
+    assert_eq!(
+        run(
+            r#"
+        const net=require('net');const server=net.createServer(s=>s.on('error',()=>{}));
+        const N=300;let done=0;const errors=[];
+        server.listen(0,'127.0.0.1',()=>{
+            for(let i=0;i<N;i++){
+                const s=net.connect(server.address().port,'127.0.0.1');
+                s.setNoDelay(true);s.setKeepAlive(true,1000);
+                let counted=false;const finish=()=>{if(!counted){counted=true;if(++done===N)setTimeout(()=>{globalThis.result=errors;server.close()},50)}};
+                s.on('error',e=>{errors.push(e.code);finish()});
+                s.on('connect',()=>s.destroy());
+                s.on('close',finish);
+            }
+        });
+    "#,
+            granted()
+        ),
+        "[]"
+    );
 }

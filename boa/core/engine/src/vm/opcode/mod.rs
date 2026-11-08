@@ -2335,8 +2335,17 @@ generate_opcodes! {
     Reserved57 => Reserved,
     /// Reserved [`Opcode`].
     Reserved58 => Reserved,
-    /// Reserved [`Opcode`].
-    Reserved59 => Reserved,
+    /// Gets the current value of the iterator record for a `[key, value]` pattern of two plain
+    /// names, without the array when the record's step is an entry and destructuring that array
+    /// cannot be observed.
+    ///
+    /// Sets `fast` to `true` and `key` and `value` to the two halves of the entry; otherwise sets
+    /// `fast` to `false` and `key` to what `IteratorValue` would have gotten.
+    ///
+    /// - Registers:
+    ///   - Output: key, value, fast
+    /// - Iterator Stack: `iterator` **=>** `iterator`
+    IteratorEntry { key: RegisterOperand, value: RegisterOperand, fast: RegisterOperand },
     /// Declare `var` type variable during eval declaration instantiation.
     ///
     /// - Operands:

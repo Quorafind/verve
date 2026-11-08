@@ -295,6 +295,7 @@ fn redirects_follow_return_or_refuse() {
     );
 }
 
+#[cfg(feature = "brotli")]
 #[test]
 fn compressed_bodies_are_decoded() {
     let body = format!(

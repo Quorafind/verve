@@ -18,7 +18,16 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use boa_ast::scope::BindingLocatorScope;
 
 use crate::{
-    Context, JsObject, JsValue, environments::Environment, object::shape::slot::SlotAttributes,
+    Context, JsObject, JsValue,
+    builtins::{
+        Array,
+        iterable::{Step, entry_destructuring_is_unobservable},
+        typed_array::object::{
+            TypedArray, typed_array_element_get_shortcut, typed_array_element_set_shortcut,
+        },
+    },
+    environments::Environment,
+    object::shape::slot::SlotAttributes,
     vm::CodeBlock,
 };
 
@@ -256,22 +265,16 @@ fn cached_data_property(
     let ic = code_block.ic.get(ic as usize)?;
     object.with_object(|object| {
         let borrowed = object.try_borrow().ok()?;
-        let slot = ic.slot_for(borrowed.shape())?;
+        let (slot, value) = ic.slot_for(borrowed.shape(), borrowed.properties(), false)?;
         if slot.attributes.is_accessor_descriptor() {
             return None;
         }
-        let index = slot.index as usize;
-        if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let prototype = borrowed.shape().prototype()?;
-            let prototype = prototype.try_borrow().ok()?;
-            prototype.properties().storage.get(index).cloned()
-        } else {
-            let value = borrowed.properties().storage.get(index).cloned()?;
-            if let Some(site) = site {
-                fill(site, object, slot.index);
-            }
-            Some(value)
+        if let Some(site) = site
+            && !slot.attributes.contains(SlotAttributes::PROTOTYPE)
+        {
+            fill(site, object, slot.index);
         }
+        Some(value)
     })?
 }
 
@@ -291,12 +294,14 @@ pub(crate) unsafe extern "C" fn jit_get_property(
     })
 }
 
-/// `GetLengthProperty`: of an array, a string, or as `GetPropertyByName`.
+/// `GetLengthProperty`: of an array, a string, a typed array (through the site's cache of the
+/// guard), or as `GetPropertyByName`.
 pub(crate) unsafe extern "C" fn jit_get_length(
     state: *mut JitState,
     dst: u32,
     object: u32,
     ic: u32,
+    site: *const SiteCache,
 ) -> u32 {
     guarded(state, |context, code_block, rp| {
         let base = register(context, rp, object);
@@ -312,6 +317,15 @@ pub(crate) unsafe extern "C" fn jit_get_length(
             })??
         } else if let Some(string) = base.as_string() {
             JsValue::from(string.len() as u32)
+        } else if let Some(length) = base
+            .with_object(|object| {
+                // SAFETY: compiled code passes one of its own sites, which it keeps alive.
+                let site = unsafe { &*site };
+                site.typed_array_length(object)
+            })
+            .flatten()
+        {
+            length
         } else {
             cached_data_property(base, code_block, ic, None)?
         };
@@ -333,7 +347,10 @@ pub(crate) unsafe extern "C" fn jit_set_property(
         let value = register(context, rp, value).clone();
         register(context, rp, object).with_object(|object| {
             let mut borrowed = object.try_borrow_mut().ok()?;
-            let slot = ic.slot_for(borrowed.shape())?;
+            let Some((slot, _)) = ic.slot_for(borrowed.shape(), borrowed.properties(), true) else {
+                drop(borrowed);
+                return ic.adds.add(object, &value).then_some(());
+            };
             if slot.attributes.is_accessor_descriptor()
                 || slot.attributes.contains(SlotAttributes::PROTOTYPE)
             {
@@ -347,6 +364,88 @@ pub(crate) unsafe extern "C" fn jit_set_property(
             fill(site, object, slot.index);
             Some(())
         })?
+    })
+}
+
+/// `IteratorNext` of a built-in iterator that can be stepped without running JavaScript.
+pub(crate) unsafe extern "C" fn jit_iterator_next(
+    state: *mut JitState,
+    _: u32,
+    _: u32,
+    _: u32,
+) -> u32 {
+    guarded(state, |context, _, _| {
+        // Stepped where it sits, as the interpreter's handler does: a quiet step runs no
+        // JavaScript, so nothing can reach this frame's iterator stack meanwhile.
+        let record = context.vm.frame().iterators.last()?;
+        let stepper = record.stepper()?;
+        let iterator = record.iterator().clone();
+        let mut second = None;
+        let step = stepper
+            .advance_quietly(&iterator, context, &mut second)
+            .ok()?;
+        let record = context.vm.frame_mut().iterators.last_mut()?;
+        record
+            .finish_unboxed_step(Ok(step), second)
+            .ok()
+            .map(|_| ())
+    })
+}
+
+/// `IteratorDone`: the `done` of the current iterator record.
+pub(crate) unsafe extern "C" fn jit_iterator_done(
+    state: *mut JitState,
+    dst: u32,
+    _: u32,
+    _: u32,
+) -> u32 {
+    guarded(state, |context, _, rp| {
+        let done = context.vm.frame().iterators.last()?.done();
+        set_register(context, rp, dst, done.into());
+        Some(())
+    })
+}
+
+/// `IteratorValue` of a record whose last step was made without a result object.
+pub(crate) unsafe extern "C" fn jit_iterator_value(
+    state: *mut JitState,
+    dst: u32,
+    _: u32,
+    _: u32,
+) -> u32 {
+    guarded(state, |context, _, rp| {
+        let record = context.vm.frame().iterators.last()?;
+        let value = if let Some(value) = record.unboxed_value() {
+            value.clone()
+        } else {
+            record.unboxed_step()?.into_value(context)
+        };
+        set_register(context, rp, dst, value);
+        Some(())
+    })
+}
+
+/// `IteratorEntry` of an entry whose array destructuring cannot be observed; any other case is
+/// the interpreter's.
+pub(crate) unsafe extern "C" fn jit_iterator_entry(
+    state: *mut JitState,
+    key: u32,
+    value: u32,
+    fast: u32,
+) -> u32 {
+    guarded(state, |context, _, rp| {
+        let Step::Entry(entry_key, entry_value) =
+            context.vm.frame().iterators.last()?.unboxed_step()?
+        else {
+            return None;
+        };
+        if !entry_destructuring_is_unobservable(context) {
+            return None;
+        }
+        set_register(context, rp, key, entry_key);
+        set_register(context, rp, value, entry_value);
+        set_register(context, rp, fast, true.into());
+        Some(())
     })
 }
 
@@ -366,7 +465,7 @@ pub(crate) unsafe extern "C" fn jit_get_element(
         let index = index_key(register(context, rp, key))?;
         let value = register(context, rp, object).with_object(|object| {
             if !object.is_array() {
-                return None;
+                return typed_array_element_get_shortcut(object, index);
             }
             object
                 .try_borrow()
@@ -379,7 +478,9 @@ pub(crate) unsafe extern "C" fn jit_get_element(
     })
 }
 
-/// `SetPropertyByValue`: an element of a dense, extensible array, by an `int32` index.
+/// `SetPropertyByValue`: an element of a dense, extensible array, by an `int32` index, or one
+/// appended to a plain dense array, or one of a typed array (as the interpreter's shortcut
+/// has it). The receiver is the object: compiled code leaves other stores to the interpreter.
 pub(crate) unsafe extern "C" fn jit_set_element(
     state: *mut JitState,
     value: u32,
@@ -388,19 +489,44 @@ pub(crate) unsafe extern "C" fn jit_set_element(
 ) -> u32 {
     guarded(state, |context, _, rp| {
         let index = index_key(register(context, rp, key))?;
-        let value = register(context, rp, value);
-        register(context, rp, object).with_object(|object| {
-            if !object.is_array() {
-                return None;
-            }
+        let value = register(context, rp, value).clone();
+        let object = register(context, rp, object).as_object()?.clone();
+        if object.is::<TypedArray>() {
+            return typed_array_element_set_shortcut(&object, index, &value, context)?.ok();
+        }
+        if !object.is_array() {
+            return None;
+        }
+        {
             let mut borrowed = object.try_borrow_mut().ok()?;
             if !borrowed.extensible {
                 return None;
             }
-            borrowed
-                .properties_mut()
-                .set_dense_property(index, value)
-                .then_some(())
-        })?
+            if borrowed.properties_mut().set_dense_property(index, &value) {
+                return Some(());
+            }
+        }
+        append_element(context, &object, index, &value)
     })
+}
+
+/// `Set` of the element just past a plain dense array's elements: no element is on the
+/// prototype chain, so the element is defined there, and `length` grows to cover it if it does
+/// not already (`Array`'s `[[DefineOwnProperty]]`; the array shape has a writable `length`).
+/// Changes nothing and answers `None` for any other array, index or `length`.
+fn append_element(context: &Context, object: &JsObject, index: u32, value: &JsValue) -> Option<()> {
+    let (mut borrowed, len, elements) = Array::plain_dense_array(object, context)?;
+    // `length` is an array index, so `index + 1` is a valid one.
+    if index as usize != elements || len < elements as f64 || index == u32::MAX {
+        return None;
+    }
+    let properties = borrowed.properties_mut();
+    if !properties.indexed_properties.push_dense(value) {
+        return None;
+    }
+    if len.to_bits() == f64::from(index).to_bits() {
+        // NOTE: The "length" property is the first slot.
+        properties.storage[0] = JsValue::new(u64::from(index) + 1);
+    }
+    Some(())
 }

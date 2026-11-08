@@ -27,7 +27,7 @@ use std::{
 
 use crate::{
     Context, JsValue,
-    vm::{CallFrame, CodeBlock, CompletionRecord, Vm, opcode::OPCODE_HANDLERS},
+    vm::{CallFrame, CodeBlock, CompletionRecord, Opcode, Vm, opcode::OPCODE_HANDLERS},
 };
 
 use super::JitCode;
@@ -52,12 +52,14 @@ pub(crate) struct JitState {
     /// `RuntimeLimits::loop_iteration_limit`.
     loop_limit: u64,
     pub(super) context: *mut Context,
+    /// The VM stack's `Vec`, whose fields compiled code reads and writes to push and pop.
+    stack: *mut Vec<JsValue>,
     code: *const JitCode,
     pub(super) code_block: *const CodeBlock,
-    frames_len: usize,
+    pub(super) frames_len: usize,
     pub(super) rp: u32,
     /// How to go on once compiled code returns; `None` is to go on interpreting.
-    outcome: Option<ControlFlow<CompletionRecord>>,
+    pub(super) outcome: Option<ControlFlow<CompletionRecord>>,
     pub(super) panic: Option<Box<dyn Any + Send + 'static>>,
 }
 
@@ -67,6 +69,11 @@ pub(crate) const FRAME_OFFSET: i32 = offset_of!(JitState, frame) as i32;
 pub(crate) const INTERRUPT_OFFSET: i32 = offset_of!(JitState, interrupt) as i32;
 pub(crate) const LOOP_LIMIT_OFFSET: i32 = offset_of!(JitState, loop_limit) as i32;
 pub(crate) const LOOP_COUNT_OFFSET: i32 = offset_of!(CallFrame, loop_iteration_count) as i32;
+pub(crate) const STACK_OFFSET: i32 = offset_of!(JitState, stack) as i32;
+pub(crate) const RP_OFFSET: i32 = offset_of!(JitState, rp) as i32;
+pub(crate) const FP_OFFSET: i32 = offset_of!(CallFrame, fp) as i32;
+pub(crate) const ARGUMENT_COUNT_OFFSET: i32 = offset_of!(CallFrame, argument_count) as i32;
+pub(crate) const FLAGS_OFFSET: i32 = offset_of!(CallFrame, flags) as i32;
 const _: () = assert!(size_of::<u64>() == size_of::<*const ()>());
 // Compiled code reads and writes registers as the 64-bit words of NaN-boxed values.
 const _: () = assert!(size_of::<JsValue>() == 8);
@@ -91,6 +98,7 @@ pub(crate) fn execute(
         interrupt,
         loop_limit,
         context: &raw mut *context,
+        stack: &raw mut context.vm.stack.stack,
         code: &raw const *code,
         code_block,
         frames_len,
@@ -130,6 +138,33 @@ pub(crate) unsafe extern "C" fn jit_step<const OP: usize>(state: *mut JitState, 
     }
 }
 
+/// `Return` in compiled code (every compiled `Return` is this one, whether the frame was entered
+/// by a call from compiled code, by the interpreter's loop or by OSR): pops the frame and leaves
+/// the compiled code, which is what [`jit_step`] answers for it, without the `catch_unwind` and
+/// the look at the frames [`finish`] takes afterwards (a frame popped is always one fewer than the
+/// code was entered with). A frame that exits early, to native code, takes the general path.
+pub(crate) unsafe extern "C" fn jit_return(state: *mut JitState, pc: u32) -> u32 {
+    // SAFETY: compiled code passes the state `execute` made, which outlives it.
+    let state_ref = unsafe { &mut *state };
+    if state_ref.panic.is_some() {
+        return EXIT;
+    }
+    // SAFETY: the context outlives compiled code, which uses it only through helpers.
+    let context = unsafe { &mut *state_ref.context };
+    if context.vm.frame().exit_early() {
+        // SAFETY: as above.
+        return unsafe { jit_step::<{ Opcode::Return as usize }>(state, pc) };
+    }
+    // Nothing here runs JavaScript or can panic: the stack is truncated, the value moved, the
+    // frame dropped.
+    let flow = context.handle_return();
+    debug_assert!(
+        flow.is_continue(),
+        "a frame that does not exit early continues"
+    );
+    EXIT
+}
+
 macro_rules! steps {
     ($($op:literal)*) => { [$(jit_step::<$op>),*] };
 }
@@ -149,6 +184,29 @@ pub(crate) static STEPS: [StepFn; 256] = steps!(
     248 249 250 251 252 253 254 255
 );
 
+/// Whether compiled code may run one more frame nested on the native stack: under the nesting
+/// cap, and within a quarter of the native stack limit.
+pub(super) fn may_run_nested(vm: &Vm) -> bool {
+    vm.jit.nested < MAX_NESTED
+        && vm
+            .native_stack_base
+            .saturating_sub(crate::vm::native_stack_position())
+            <= vm.runtime_limits.native_stack_limit() / 4
+}
+
+/// Whether compiled code may run at all now: the JIT is on, and nothing counts instructions
+/// (fuzzing) or shows them (tracing), which compiled code does not.
+pub(super) fn may_enter(vm: &Vm) -> bool {
+    if cfg!(feature = "fuzz") {
+        return false;
+    }
+    #[cfg(feature = "trace")]
+    if vm.trace {
+        return false;
+    }
+    vm.jit.options.enabled
+}
+
 /// How deep compiled functions may nest on the native stack, calling one another without
 /// returning to the interpreter's loop. Past it a call returns to the loop, as in phase 1.
 pub(crate) const MAX_NESTED: u32 = 64;
@@ -166,7 +224,21 @@ fn step(
 ) -> u32 {
     // SAFETY: the context outlives compiled code, which uses it only through helpers.
     let context = unsafe { &mut *state.context };
-    if let ControlFlow::Break(record) = handler(context, pc as usize) {
+    let flow = handler(context, pc as usize);
+    finish(state, flow)
+}
+
+/// What follows an instruction run with the interpreter's handler, whose result is `flow`:
+/// runs the frames it pushed, if they can be, and answers the `pc` to go on at, or [`EXIT`].
+#[allow(
+    clippy::inline_always,
+    reason = "inlined into each jit_step instance, as the body of step was"
+)]
+#[inline(always)]
+pub(super) fn finish(state: &mut JitState, flow: ControlFlow<CompletionRecord>) -> u32 {
+    // SAFETY: as in `step`.
+    let context = unsafe { &mut *state.context };
+    if let ControlFlow::Break(record) = flow {
         state.outcome = Some(ControlFlow::Break(record));
         return EXIT;
     }
@@ -201,13 +273,7 @@ fn run_callees(state: &mut JitState, context: &mut Context) -> bool {
         if frames <= state.frames_len {
             return frames == state.frames_len;
         }
-        let vm = &context.vm;
-        if vm.jit.nested >= MAX_NESTED
-            || vm
-                .native_stack_base
-                .saturating_sub(crate::vm::native_stack_position())
-                > vm.runtime_limits.native_stack_limit() / 4
-        {
+        if !may_run_nested(&context.vm) {
             return false;
         }
         let Some((code, block)) = super::prepare(context) else {
@@ -226,10 +292,10 @@ fn run_callees(state: &mut JitState, context: &mut Context) -> bool {
 }
 
 /// Counts one level of nesting while it lives, panics included.
-struct Nesting(*mut u32);
+pub(super) struct Nesting(*mut u32);
 
 impl Nesting {
-    fn enter(nested: *mut u32) -> Self {
+    pub(super) fn enter(nested: *mut u32) -> Self {
         // SAFETY: `nested` is the VM's counter, which outlives the call it counts.
         unsafe { *nested += 1 };
         Self(nested)
