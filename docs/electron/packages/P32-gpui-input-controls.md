@@ -187,13 +187,15 @@ pub enum ControlKind {
   pub enum ControlKind {
       TextField { caret: Option<Rect>, marked: Vec<Rect>, multiline: bool, focused: bool },
       Checkbox { checked: bool, indeterminate: bool }, Radio { checked: bool },
-      Select { options: Arc<[SelectOption]>, multiple: bool },
+      Select { options: Arc<[SelectOption]>, multiple: bool, list: Option<f32> /* 列表框：行距；下拉框为 None */ },
       Range { min: f64, max: f64, value: f64 },
       Progress { value: Option<f64> }, Meter { value: f64, min: f64, max: f64, low: f64, high: f64, optimum: f64 },
       Color { value: Rgba }, Date { kind: DateKind }, File { multiple: bool },
   }
   pub struct SelectOption { pub value: String, pub label: String, pub selected: bool, pub disabled: bool, pub group: Option<String> }
   ```
+  列表框（`multiple` 或 `size>1`）把选项当作生成文字一行一项地排在框里（行距 = 行高 + 2，框 `overflow: clip`），`list` 就是这个行距；
+  其 `SelectOption.selected` 标出每个被选中的选项（多选可以有几个，没有选择时一个都没有，下拉框则总是显示第一项）。
   `SelectOption` 不含 `hidden` 的选项；`<optgroup disabled>` 里的选项算 `disabled`。`PaintItem::Control` 另带 `look: ControlLook { accent, color, disabled }`（`accent-color`、文字色、是否禁用；矩形都在盒子的框架里）。
   `<button>` 和 `<input type=button|submit|reset>` 不是 `Control`：它们是带 UA 边框和背景的普通盒子，内容是普通行内文字（`value` 当作生成文字）。
   `disabled`、`:hover`、`:active` 由壳按 `Hitbox` 和 `Control` 的节点画；`disabled` 在 `look` 里，不进 `ControlKind`（壳画勾、滑块时要降低对比；文字和边框的颜色取自 UA 样式表的 `:disabled`）。
