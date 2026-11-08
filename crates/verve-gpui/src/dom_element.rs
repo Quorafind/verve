@@ -35,6 +35,14 @@ impl DomElement {
     /// keyboard, the platform's text input.
     fn listen(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let origin = bounds.origin;
+        self.state.borrow_mut().input.origin = origin;
+        let state = Rc::clone(&self.state);
+        window.on_mouse_event(move |event: &gpui::FileDropEvent, phase, window, _| {
+            if phase.bubble() && matches!(event, gpui::FileDropEvent::Exited) {
+                crate::drop::left(&mut state.borrow_mut());
+                window.refresh();
+            }
+        });
         let state = Rc::clone(&self.state);
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, _| {
             if phase.bubble() {
@@ -48,15 +56,15 @@ impl DomElement {
             }
         });
         let state = Rc::clone(&self.state);
-        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, _| {
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
             if phase.bubble() {
-                input::mouse_up(&state, event, origin);
+                input::mouse_up(&state, event, origin, cx);
             }
         });
         let state = Rc::clone(&self.state);
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, _| {
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
             if phase.bubble() {
-                input::mouse_move(&state, event, origin, window);
+                input::mouse_move(&state, event, origin, (window, cx));
             }
         });
         let state = Rc::clone(&self.state);

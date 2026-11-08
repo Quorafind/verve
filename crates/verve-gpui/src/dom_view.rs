@@ -22,6 +22,7 @@ use verve_layout::{Cursor, DisplayList, ImageTable};
 
 use crate::app_region::{self, AppRegion};
 use crate::dom_element::DomElement;
+use crate::drop;
 use crate::frame_stats::FrameStats;
 use crate::ime::{self, ImeBridge};
 use crate::input::{self, Input};
@@ -366,6 +367,16 @@ impl Render for DomView {
                     input::modifiers_changed(&this.state, event);
                 }));
         }
+        page = page
+            .on_drag_move(cx.listener(
+                |this, event: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                    let files = event.drag(cx).paths().to_vec();
+                    drop::moved(&mut this.state.borrow_mut(), event.event.position, &files);
+                },
+            ))
+            .on_drop(cx.listener(|this, _: &gpui::ExternalPaths, window, _| {
+                drop::dropped(&mut this.state.borrow_mut(), window.mouse_position());
+            }));
         if let Some(background) = self.background {
             page = page.bg(background);
         }

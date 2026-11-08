@@ -43,6 +43,10 @@ pub(crate) struct Input {
     area_press: bool,
     /// A press went to the pop-up of a drop-down: the page hears neither it nor its release.
     popup_press: bool,
+    /// Where the page's top left corner is in the window.
+    pub origin: Point<Pixels>,
+    /// Files dragged in from the system are over the window, and the page has been told so.
+    pub file_drag: bool,
     /// The pointer is in a drag area, where the page has been told it left.
     in_area: bool,
     /// The characters keys typed that the system will send again as text, oldest first: they are
@@ -340,10 +344,17 @@ pub(crate) fn mouse_down(
     tell(&state, press(event, origin, target, buttons));
 }
 
-/// A button came up over the page, or outside the window it was pressed in.
-pub(crate) fn mouse_up(state: &Rc<RefCell<DomState>>, event: &MouseUpEvent, origin: Point<Pixels>) {
+/// A button came up over the page, or outside the window it was pressed in. A file dragged in
+/// from the system is let go as a release of the left button (GPUI turns the drag into mouse
+/// events), which is the drag's, not the page's: [`crate::drop`] tells the page its `drop`.
+pub(crate) fn mouse_up(
+    state: &Rc<RefCell<DomState>>,
+    event: &MouseUpEvent,
+    origin: Point<Pixels>,
+    cx: &App,
+) {
     let mut state = state.borrow_mut();
-    if state.picking {
+    if state.picking || cx.has_active_drag() {
         return;
     }
     let (x, y) = local(event.position, origin);
@@ -366,10 +377,11 @@ pub(crate) fn mouse_move(
     state: &Rc<RefCell<DomState>>,
     event: &MouseMoveEvent,
     origin: Point<Pixels>,
-    window: &mut Window,
+    (window, cx): (&mut Window, &App),
 ) {
     let mut state = state.borrow_mut();
-    if state.picking {
+    // The moves of a file dragged in from the system are the drag's: the page hears `dragover`.
+    if state.picking || cx.has_active_drag() {
         return;
     }
     state.input.buttons = event.pressed_button.map_or(0, button_mask);

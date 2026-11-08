@@ -18,6 +18,7 @@ mod cursor;
 mod dialog;
 mod dom_element;
 mod dom_view;
+mod drop;
 mod font_name;
 mod frame_stats;
 mod ime;
