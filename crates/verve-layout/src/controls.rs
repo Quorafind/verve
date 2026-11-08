@@ -70,6 +70,9 @@ pub enum ControlKind {
     Select {
         options: Arc<[SelectOption]>,
         multiple: bool,
+        /// A list box shows its options in the box itself, one row each, this far apart; a
+        /// drop-down (`None`) shows the chosen one and a chevron.
+        list: Option<f32>,
     },
     Range {
         min: f64,
@@ -252,6 +255,15 @@ pub(crate) fn shown_text(snapshot: &Snapshot, node: NodeId) -> Option<(String, A
             (shown, found.attr("placeholder"))
         }
         Sort::Textarea => (dom.value(node), found.attr("placeholder")),
+        Sort::Select if is_list(snapshot, node) => {
+            // One line to an option, each a pixel of padding above and below its text.
+            let row = list_row(snapshot, node);
+            base.insert("line-height".into(), format!("{row}px"));
+            let labels: Vec<String> = (dom.listed_options(node).into_iter())
+                .map(|option| option_label(snapshot, option))
+                .collect();
+            return Some((labels.join("\n"), Arc::new(base)));
+        }
         Sort::Select => (
             dom.selected_option(node)
                 .map(|option| option_label(snapshot, option))
@@ -465,6 +477,11 @@ fn date_height(kind: DateKind, size: f32) -> f32 {
     }
 }
 
+/// The distance between the rows of a list box: a line of its font and 2px.
+fn list_row(snapshot: &Snapshot, node: NodeId) -> f32 {
+    line_height(snapshot, node, font_size(snapshot, node)) + 2.
+}
+
 /// The line the text of `node` stands on: its `line-height`, or the font's normal one.
 fn line_height(snapshot: &Snapshot, node: NodeId, size: f32) -> f32 {
     let units = Units::new(size, 16., snapshot.viewport);
@@ -603,6 +620,7 @@ pub(crate) fn kind_of(
         Sort::Select => ControlKind::Select {
             options: options_of(snapshot, node),
             multiple: found.attr("multiple").is_some(),
+            list: is_list(snapshot, node).then(|| list_row(snapshot, node)),
         },
         Sort::Range => {
             let (min, max) = (number("min").unwrap_or(0.), number("max").unwrap_or(100.));
@@ -650,7 +668,13 @@ pub(crate) fn kind_of(
 
 fn options_of(snapshot: &Snapshot, select: NodeId) -> Arc<[SelectOption]> {
     let dom = &snapshot.dom;
-    let chosen = dom.selected_option(select);
+    // A list box has no choice until a person or a `selected` attribute makes one, where a
+    // drop-down shows its first option (Chromium's list box shades no row by default).
+    let unchosen = is_list(snapshot, select)
+        && dom.get(select).is_some_and(|n| n.selected.is_none())
+        && dom
+            .get(select)
+            .is_some_and(|n| n.attr("multiple").is_none());
     dom.listed_options(select)
         .into_iter()
         .map(|option| {
@@ -661,7 +685,11 @@ fn options_of(snapshot: &Snapshot, select: NodeId) -> Arc<[SelectOption]> {
             SelectOption {
                 value: dom.option_value(option),
                 label: option_label(snapshot, option),
-                selected: Some(option) == chosen,
+                selected: dom.option_chosen(option)
+                    && (!unchosen
+                        || dom
+                            .get(option)
+                            .is_some_and(|n| n.attr("selected").is_some())),
                 disabled: dom.option_disabled(option),
                 group,
             }

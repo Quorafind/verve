@@ -597,6 +597,7 @@ input[type=file] { padding: 0; border: 0 none; background-color: transparent }
 input[type=button], input[type=submit], input[type=reset], button { box-sizing: border-box; padding: 1px 6px; border: 2px outset #767676; background-color: #f0f0f0; text-align: center; white-space: pre }
 textarea { padding: 2px; border: 1px solid #767676; background-color: #fff; font-family: monospace; overflow: auto }
 select { box-sizing: border-box; padding: 0; border: 1px solid #767676; background-color: #fff; white-space: pre }
+select[multiple], select[size] { overflow: clip }
 progress { box-sizing: border-box; width: 10em; height: 1em; vertical-align: -0.2em }
 meter { box-sizing: border-box; width: 5em; height: 1em; vertical-align: -0.2em }
 input:disabled, textarea:disabled, select:disabled { color: rgb(84, 84, 84); cursor: default }

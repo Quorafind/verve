@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use verve_dom::Rect;
-use verve_layout::{ControlKind, ControlLook, PaintItem, Placed, Rgba};
+use verve_layout::{ControlKind, ControlLook, PaintItem, Placed, Rgba, SelectOption};
 
 use crate::plan::{Command, Paint, Shape};
 
@@ -68,6 +68,11 @@ pub(crate) fn lower(placed: &Placed, out: &mut Vec<Command>) {
         }
         ControlKind::Checkbox { checked, .. } => checkbox(at, *checked, look, &mut shapes),
         ControlKind::Radio { checked } => radio(at, *checked, look, &mut shapes),
+        ControlKind::Select {
+            options,
+            list: Some(row),
+            ..
+        } => list_rows(at, (options, *row), look, &mut shapes),
         ControlKind::Select { .. } => arrow(at, look, &mut shapes),
         ControlKind::Range { min, max, value } => {
             range(at, (*min, *max, *value), look, &mut shapes)
@@ -218,6 +223,26 @@ fn radio(at: Rect, checked: bool, look: &ControlLook, out: &mut Vec<Shape>) {
     } else {
         out.push(fill(at, round, dimmed(WHITE, look)));
         out.push(ring(at, round, 1., dimmed(EDGE, look)));
+    }
+}
+
+/// The rows of a list box that are chosen, shaded over their text (1px of border above).
+fn list_rows(
+    at: Rect,
+    (options, row): (&[SelectOption], f32),
+    look: &ControlLook,
+    out: &mut Vec<Shape>,
+) {
+    let shade: Rgba = [0., 0.46, 1., if look.disabled { 0.12 } else { 0.28 }];
+    for (index, _) in options.iter().enumerate().filter(|(_, o)| o.selected) {
+        let top = at.y + 1. + index as f32 * row;
+        if top + row <= at.y + at.height {
+            out.push(fill(
+                Rect::new(at.x + 1., top, (at.width - 2.).max(0.), row),
+                0.,
+                shade,
+            ));
+        }
     }
 }
 

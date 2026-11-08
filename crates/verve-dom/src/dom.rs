@@ -1506,6 +1506,11 @@ impl Dom {
         }
     }
 
+    /// Whether `option` is chosen, as a `multiple` select or a drop-down holds it.
+    pub fn option_chosen(&self, option: NodeId) -> bool {
+        crate::bind::element::option_selected(self, option)
+    }
+
     /// Chooses the `index`th option of a `<select>`.
     pub fn select_index(&mut self, select: NodeId, index: Option<usize>) {
         if let Some(node) = self.node_mut(select) {
